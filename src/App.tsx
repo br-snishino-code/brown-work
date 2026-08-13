@@ -495,6 +495,8 @@ export default function AttendanceApp() {
   }, []);
 
   // 個々のミューテーションの後、DBの最新状態を再取得してUIへ反映する。
+  // （旧app_state方式のように巨大JSONを毎回書き戻すのではなく、
+  //   テーブル単位の差分更新＋再読み込みに変更）
   const refreshData = async () => {
     try {
       const fresh = await fetchAllData();
@@ -747,7 +749,7 @@ export default function AttendanceApp() {
     );
     await refreshData();
     setLeaveModalOpen(false);
-        show('休暇申請を送信しました。管理者に通知しました', 'success');
+    show('休暇申請を送信しました。管理者に通知しました', 'success');
   };
 
   const decideLeaveRequest = async (id, decision) => {
@@ -1263,7 +1265,7 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, onBreakStart, o
               <div className="min-w-0">
                 <div className="flex items-center gap-2"><span className="text-[13px] font-bold text-slate-800">{dateLabel(dateKey)}</span>{dayStatus.tone === 'danger' && <span className="text-[10px] font-bold text-rose-600">未退勤</span>}{pendingForDay && <span className="text-[10px] font-bold text-amber-600">申請中</span>}</div>
                 <div className="mt-1 font-mono text-[12px] text-slate-500">{r?.clockIn ? hhmm(new Date(r.clockIn)) : '--:--'} — {r?.clockOut ? hhmm(new Date(r.clockOut)) : '--:--'}{metrics && <span className="ml-2 text-slate-400">実働 {minutesToHHMM(metrics.workedMin)} / 休憩 {metrics.breakMin}分</span>}</div>
-                                {metrics && (metrics.lateMin > 0 || metrics.earlyLeaveMin > 0 || metrics.overtimeMin > 0) && <div className="mt-1 text-[10.5px] font-medium"><span className="text-rose-500">{metrics.lateMin > 0 ? `遅刻 ${metrics.lateMin}分 ` : ''}{metrics.earlyLeaveMin > 0 ? `早退 ${metrics.earlyLeaveMin}分` : ''}</span>{metrics.overtimeMin > 0 && <span className="ml-2 text-amber-600">残業 {minutesToHHMM(metrics.overtimeMin)}</span>}</div>}
+                {metrics && (metrics.lateMin > 0 || metrics.earlyLeaveMin > 0 || metrics.overtimeMin > 0) && <div className="mt-1 text-[10.5px] font-medium"><span className="text-rose-500">{metrics.lateMin > 0 ? `遅刻 ${metrics.lateMin}分 ` : ''}{metrics.earlyLeaveMin > 0 ? `早退 ${metrics.earlyLeaveMin}分` : ''}</span>{metrics.overtimeMin > 0 && <span className="ml-2 text-amber-600">残業 {minutesToHHMM(metrics.overtimeMin)}</span>}</div>}
               </div>
               <button onClick={() => onOpenCorrection(dateKey)} className="shrink-0 rounded-xl border border-slate-200 p-2.5 text-slate-500 hover:bg-white"><FileEdit size={15}/></button>
             </div>
@@ -1276,6 +1278,7 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, onBreakStart, o
   if (isDesktop) return <div className="grid grid-cols-[420px_1fr] gap-6 items-start">{clockSection}{historySection}</div>;
   return <div className="space-y-5">{clockSection}{historySection}</div>;
 }
+
 function SummaryTile({ label, value, icon }) {
   return <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"><div className="flex items-center gap-1.5 text-[10.5px] font-bold text-slate-400">{icon}{label}</div><div className="mt-2 font-mono text-[20px] font-bold tracking-tight text-slate-900">{value}</div></div>;
 }
@@ -2276,7 +2279,8 @@ function ShiftAdminTab({ employeeAccounts, shiftPending, shiftConfirmed, onDecid
 
   const confirmedCard = (
     <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-      <div className="px-5 py-3.5 border-b border-slate-        <h2 className="font-bold text-[13.5px]">確定シフト（直近）</h2>
+      <div className="px-5 py-3.5 border-b border-slate-100">
+        <h2 className="font-bold text-[13.5px]">確定シフト（直近）</h2>
       </div>
       {shiftConfirmed.length === 0 ? (
         <div className="px-5 py-8 text-center text-[12.5px] text-slate-300">確定しているシフトはありません</div>
@@ -2768,6 +2772,3 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, isDe
     </div>
   );
 }
-
-
-    
