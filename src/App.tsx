@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { Clock, MapPin, CheckCircle2, XCircle, AlertTriangle, LogIn, LogOut, FileEdit, Users, Bell, Calendar, Mail, LogOut as LogoutIcon, UserPlus, Lock, User, Monitor, Smartphone, Palmtree, Plus, Pencil, CalendarDays, ListChecks, ClipboardList, MessageSquare, Coffee, BarChart3, Home, Download, ChevronRight, LayoutGrid, Wallet, Briefcase, UserCog, Construction, Megaphone, Paperclip, FileText, Pin, Trash2, Key, ShieldCheck } from 'lucide-react';
 import { supabase, CLOUD_ENABLED, usernameToEmail } from './supabaseClient';
 
@@ -4919,7 +4920,7 @@ function ResetPasswordModal({ account, onClose, onConfirm }) {
     setSaving(false);
   };
 
-  return (
+  return createPortal(
     <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-50 p-0 sm:p-4">
       <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-sm max-h-[92vh] overflow-y-auto">
         <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center gap-2">
@@ -4942,7 +4943,8 @@ function ResetPasswordModal({ account, onClose, onConfirm }) {
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -4957,7 +4959,7 @@ function DeleteAccountModal({ account, onClose, onConfirm }) {
     setDeleting(false);
   };
 
-  return (
+  return createPortal(
     <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-50 p-0 sm:p-4">
       <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-sm max-h-[92vh] overflow-y-auto">
         <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center gap-2">
@@ -4983,7 +4985,8 @@ function DeleteAccountModal({ account, onClose, onConfirm }) {
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -5034,7 +5037,7 @@ function CsvImportModal({ onClose, onAddAccount }) {
     setRunning(false);
   };
 
-  return (
+  return createPortal(
     <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-40 p-0 sm:p-4">
       <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg max-h-[92vh] overflow-y-auto">
         <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white">
@@ -5097,7 +5100,8 @@ function CsvImportModal({ onClose, onAddAccount }) {
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -5216,7 +5220,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
 
   const tabs = isMasterAdmin ? [...PROFILE_MODAL_TABS, { key: 'mynumber', label: 'マイナンバー' }] : PROFILE_MODAL_TABS;
 
-  return (
+  return createPortal(
     <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-40 p-0 sm:p-4">
       <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg max-h-[92vh] overflow-y-auto">
         <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white z-10">
@@ -5554,7 +5558,8 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
           </div>
         )}
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
