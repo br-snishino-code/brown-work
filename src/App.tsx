@@ -89,22 +89,8 @@ function computeProportionalLeaveDays(hireDateStr, weeklyDays, asOf = new Date()
   return granted;
 }
 
-// グループ別の月次休暇規定日数（当年1月からその月までの累計、入職月より前は含めない）
-function computeGroupScheduleLeaveDays(hireDateStr, groupName, monthlyDaysByMonth, asOf = new Date()) {
-  if (!groupName || !monthlyDaysByMonth) return null;
-  const currentMonth = asOf.getMonth() + 1;
-  const currentYear = asOf.getFullYear();
-  const hire = hireDateStr ? new Date(hireDateStr + 'T00:00:00') : null;
-  let total = 0;
-  for (let m = 1; m <= currentMonth; m++) {
-    if (hire && hire.getFullYear() === currentYear && hire.getMonth() + 1 > m) continue;
-    if (hire && hire.getFullYear() > currentYear) continue;
-    total += Number(monthlyDaysByMonth[m] || 0);
-  }
-  return total;
-}
-
-// 社員1人分の有休付与日数（優先順位：パート/アルバイトは比例付与 → グループ規定 → 法定自動計算）＋手動調整
+// 社員1人分の有休付与日数（優先順位：パート/アルバイトは比例付与 → 法定自動計算）＋手動調整
+// ※グループ別の月次規定日数は「出勤規定日数」（給与計算用）に用途変更されたため、有休計算では使用しない
 function computeLeaveTotal(employee, now, groupLeaveSchedules) {
   if (!employee) return 0;
   const isPartTime = employee.staffType === 'パート' || employee.staffType === 'アルバイト';
@@ -114,11 +100,23 @@ function computeLeaveTotal(employee, now, groupLeaveSchedules) {
       ? computeProportionalLeaveDays(employee.hireDate, employee.scheduledWeeklyDays, now)
       : computeStatutoryPaidLeaveDays(employee.hireDate, now);
   } else {
-    const groupSchedule = employee.mainGroup ? groupLeaveSchedules?.[employee.mainGroup] : null;
-    const groupTotal = groupSchedule ? computeGroupScheduleLeaveDays(employee.hireDate, employee.mainGroup, groupSchedule, now) : null;
-    base = groupTotal != null ? groupTotal : computeStatutoryPaidLeaveDays(employee.hireDate, now);
+    base = computeStatutoryPaidLeaveDays(employee.hireDate, now);
   }
   return Math.max(0, base + (Number(employee.leaveAdjustment) || 0));
+}
+
+// グループ別または個人別の「出勤規定日数」を、指定した月について取得する
+// 優先順位：社員にメイングループが設定されていればグループ規定 → 未設定なら個人別の月次設定
+function getPrescribedAttendanceDays(employee, month, groupAttendanceSchedules, employeeAttendanceSchedules) {
+  if (!employee) return null;
+  if (employee.mainGroup) {
+    const schedule = groupAttendanceSchedules?.[employee.mainGroup];
+    const v = schedule ? schedule[month] : null;
+    return v != null && v !== '' ? Number(v) : null;
+  }
+  const personal = employeeAttendanceSchedules?.[employee.id];
+  const v = personal ? personal[month] : null;
+  return v != null && v !== '' ? Number(v) : null;
 }
 
 function tenureLabel(hireDateStr, asOf = new Date()) {
@@ -331,7 +329,7 @@ function ToastView({ toast }) {
 // 以降のコンポーネント（LoginScreenなど）は一切変更していません。
 // ============================================================
 
-const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, shiftRequests: [], performanceReports: [], payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, announcements: [] };
+const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, shiftRequests: [], performanceReports: [], payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, employeeAttendanceSchedules: {}, announcements: [] };
 
 // ---- row(snake_case) → app(camelCase) 変換 ----
 const rowToAccount = (row) => ({
@@ -571,6 +569,7 @@ async function fetchAllData() {
     auditRes,
     profileReqRes,
     groupLeaveRes,
+    employeeAttendanceRes,
     announcementsRes,
   ] = await Promise.all([
     supabase.from('employees').select('*'),
@@ -583,11 +582,12 @@ async function fetchAllData() {
     supabase.from('payroll_records').select('*, employees(name)'),
     supabase.from('audit_logs').select('*').order('created_at', { ascending: false }).limit(100),
     supabase.from('profile_update_requests').select('*, employees(name)').order('submitted_at', { ascending: false }),
-    supabase.from('group_leave_schedules').select('*'),
+    supabase.from('group_attendance_schedules').select('*'),
+    supabase.from('employee_attendance_schedules').select('*'),
     supabase.from('announcements').select('*').order('is_pinned', { ascending: false }).order('created_at', { ascending: false }),
   ]);
 
-  for (const res of [employeesRes, recordsRes, correctionsRes, leaveRes, shiftRes, perfRes, notifRes, payrollRes, auditRes, profileReqRes, groupLeaveRes, announcementsRes]) {
+  for (const res of [employeesRes, recordsRes, correctionsRes, leaveRes, shiftRes, perfRes, notifRes, payrollRes, auditRes, profileReqRes, groupLeaveRes, employeeAttendanceRes, announcementsRes]) {
     if (res.error) throw res.error;
   }
 
@@ -597,10 +597,18 @@ async function fetchAllData() {
     records[row.employee_id][row.date] = rowToRecord(row);
   });
 
+  // グループ別「出勤規定日数」（月ごと・1〜12月）
   const groupLeaveSchedules = {};
   (groupLeaveRes.data || []).forEach((row) => {
     groupLeaveSchedules[row.group_name] = groupLeaveSchedules[row.group_name] || {};
     groupLeaveSchedules[row.group_name][row.month] = Number(row.days);
+  });
+
+  // 個人別「出勤規定日数」（グループ未設定の社員が対象・月ごと）
+  const employeeAttendanceSchedules = {};
+  (employeeAttendanceRes.data || []).forEach((row) => {
+    employeeAttendanceSchedules[row.employee_id] = employeeAttendanceSchedules[row.employee_id] || {};
+    employeeAttendanceSchedules[row.employee_id][row.month] = Number(row.days);
   });
 
   return {
@@ -616,6 +624,7 @@ async function fetchAllData() {
     auditLogs: (auditRes.data || []).map(rowToAudit),
     profileUpdateRequests: (profileReqRes.data || []).map(rowToProfileRequest),
     groupLeaveSchedules,
+    employeeAttendanceSchedules,
     announcements: (announcementsRes.data || []).map(rowToAnnouncement),
   };
 }
@@ -1283,14 +1292,32 @@ export default function AttendanceApp() {
       month: Number(month),
       days: Number(days) || 0,
     }));
-    const { error } = await supabase.from('group_leave_schedules').upsert(rows, { onConflict: 'group_name,month' });
+    const { error } = await supabase.from('group_attendance_schedules').upsert(rows, { onConflict: 'group_name,month' });
     if (error) {
-      show('グループ休暇設定の保存に失敗しました', 'warn');
+      show('グループの出勤規定日数の保存に失敗しました', 'warn');
       return;
     }
     await refreshData();
-    await logAudit(session, 'グループ休暇規定日数を更新', groupName);
-    show(`「${groupName}」の休暇規定日数を保存しました`, 'success');
+    await logAudit(session, 'グループ別出勤規定日数を更新', groupName);
+    show(`「${groupName}」の出勤規定日数を保存しました`, 'success');
+  };
+
+  // グループ未設定の社員向け：個人別の出勤規定日数（月ごと）を保存
+  const saveEmployeeAttendanceSchedule = async (employeeId, monthlyDays) => {
+    const rows = Object.entries(monthlyDays).map(([month, days]) => ({
+      employee_id: employeeId,
+      month: Number(month),
+      days: Number(days) || 0,
+    }));
+    const { error } = await supabase.from('employee_attendance_schedules').upsert(rows, { onConflict: 'employee_id,month' });
+    if (error) {
+      show('個人別の出勤規定日数の保存に失敗しました', 'warn');
+      return;
+    }
+    await refreshData();
+    const target = data.accounts.find((a) => a.id === employeeId);
+    await logAudit(session, '個人別出勤規定日数を更新', target?.name || '', employeeId, target?.name || '');
+    show('出勤規定日数を保存しました', 'success');
   };
 
   const submitAnnouncement = async ({ title, category, body, file, isPinned }) => {
@@ -1627,6 +1654,8 @@ export default function AttendanceApp() {
               employeeAccounts={employeeAccounts}
               records={data.records}
               payrollRecords={data.payrollRecords}
+              groupAttendanceSchedules={data.groupLeaveSchedules}
+              employeeAttendanceSchedules={data.employeeAttendanceSchedules}
               onSaveDraft={savePayrollDraft}
               onPublish={publishPayroll}
               onUpdateWage={updateEmployeeProfile}
@@ -1706,6 +1735,7 @@ export default function AttendanceApp() {
             onUpdateDates={updateEmployeeDates}
             onUpdateAdminAccess={updateAdminAccess}
             onSaveGroupLeave={saveGroupLeaveSchedule}
+            onSaveEmployeeAttendance={saveEmployeeAttendanceSchedule}
             isDesktop={isDesktop}
           />
         ))}
@@ -2965,23 +2995,31 @@ function AdminDashboardTab({ missingCount, correctionCount, leaveCount, shiftCou
 const MONTHLY_STANDARD_HOURS = 160; // 月給制の残業単価を出すための簡易換算（週40h×概ね4週）
 const OVERTIME_MULTIPLIER = 1.25;
 
-function computePayrollPreview({ wageType, hourlyWage, monthlySalary, workedMinutes, overtimeMinutes, commuteAllowance = 0 }) {
+function computePayrollPreview({ wageType, hourlyWage, monthlySalary, workedMinutes, overtimeMinutes, commuteAllowance = 0, attendanceDays = null, actualDays = 0 }) {
   const regularMinutes = Math.max(0, workedMinutes - overtimeMinutes);
   let baseAmount = 0;
   let overtimeAmount = 0;
   let wageRate = 0;
+  let prorated = false;
   if (wageType === 'hourly') {
     wageRate = Number(hourlyWage) || 0;
     baseAmount = Math.round((regularMinutes / 60) * wageRate);
     overtimeAmount = Math.round((overtimeMinutes / 60) * wageRate * OVERTIME_MULTIPLIER);
   } else {
     wageRate = Number(monthlySalary) || 0;
-    baseAmount = Math.round(wageRate);
+    if (attendanceDays && attendanceDays > 0) {
+      // 出勤規定日数に対する実出勤日数の割合で月給を日割り計算（規定日数を超えて働いた分は満額まで）
+      const dailyWage = wageRate / attendanceDays;
+      baseAmount = Math.round(dailyWage * Math.min(Number(actualDays) || 0, attendanceDays));
+      prorated = true;
+    } else {
+      baseAmount = Math.round(wageRate);
+    }
     const hourlyEquivalent = wageRate / MONTHLY_STANDARD_HOURS;
     overtimeAmount = Math.round((overtimeMinutes / 60) * hourlyEquivalent * OVERTIME_MULTIPLIER);
   }
   const allowanceAmount = Math.round(Number(commuteAllowance) || 0);
-  return { wageRate, regularMinutes, baseAmount, overtimeAmount, allowanceAmount, totalAmount: baseAmount + overtimeAmount + allowanceAmount };
+  return { wageRate, regularMinutes, baseAmount, overtimeAmount, allowanceAmount, totalAmount: baseAmount + overtimeAmount + allowanceAmount, prorated };
 }
 
 const formatYen = (n) => `¥${Math.round(n || 0).toLocaleString('ja-JP')}`;
@@ -3075,7 +3113,7 @@ function Row({ label, value }) {
   );
 }
 
-function PayrollAdminTab({ employeeAccounts, records, payrollRecords, onSaveDraft, onPublish, onUpdateWage, isDesktop }) {
+function PayrollAdminTab({ employeeAccounts, records, payrollRecords, groupAttendanceSchedules = {}, employeeAttendanceSchedules = {}, onSaveDraft, onPublish, onUpdateWage, isDesktop }) {
   const now = new Date();
   const [employeeId, setEmployeeId] = useState(employeeAccounts[0]?.id || '');
   const [year, setYear] = useState(now.getFullYear());
@@ -3098,6 +3136,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, onSaveDraf
   }
 
   const monthly = computeMonthlySummary(records[employeeId] || {}, new Date(year, month - 1, 1));
+  const attendanceDays = getPrescribedAttendanceDays(employee, month, groupAttendanceSchedules, employeeAttendanceSchedules);
   const preview = computePayrollPreview({
     wageType,
     hourlyWage,
@@ -3105,6 +3144,8 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, onSaveDraf
     workedMinutes: monthly.workedMin,
     overtimeMinutes: monthly.overtimeMin,
     commuteAllowance: employee.commuteAllowance || 0,
+    attendanceDays,
+    actualDays: monthly.days,
   });
 
   const existing = payrollRecords.find((p) => p.employeeId === employeeId && p.year === year && p.month === month);
@@ -3130,7 +3171,10 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, onSaveDraf
       baseAmount: preview.baseAmount + preview.allowanceAmount,
       overtimeAmount: preview.overtimeAmount,
       totalAmount: preview.totalAmount,
-      notes: preview.allowanceAmount > 0 ? `交通費 ${formatYen(preview.allowanceAmount)} を基本給に含む` : null,
+      notes: [
+        preview.allowanceAmount > 0 ? `交通費 ${formatYen(preview.allowanceAmount)} を基本給に含む` : null,
+        preview.prorated ? `出勤規定日数 ${attendanceDays}日に対し実出勤 ${monthly.days}日で日割り計算` : null,
+      ].filter(Boolean).join('／') || null,
     });
   };
 
@@ -3177,6 +3221,20 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, onSaveDraf
           )}
           <button onClick={saveWageSettings} className="text-[11.5px] font-bold text-amber-600">この給与形態を社員情報に保存</button>
         </div>
+
+        {wageType === 'monthly' && (
+          <div className="grid grid-cols-2 gap-3">
+            <PayrollMetric label={`${month}月の出勤規定日数`} value={attendanceDays != null ? `${attendanceDays}日` : '未設定'} />
+            <PayrollMetric label="実出勤日数" value={`${monthly.days}日`} />
+          </div>
+        )}
+        {wageType === 'monthly' && attendanceDays == null && (
+          <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-[11.5px] text-amber-800">
+            {employee.mainGroup
+              ? `「${employee.mainGroup}」の${month}月の出勤規定日数が未設定のため、月給を満額（日割りなし）で計算しています。出勤規定日数設定タブから設定してください。`
+              : `${employee.name}さんの出勤規定日数が未設定のため、月給を満額（日割りなし）で計算しています。社員アカウント編集画面の「グループ」タブから設定してください。`}
+          </div>
+        )}
 
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <PayrollMetric label="実働" value={minutesToHHMM(monthly.workedMin)} />
@@ -3268,26 +3326,27 @@ function AdminTopNav({ tab, setTab, correctionCount, leaveCount, shiftCount, per
     {
       key: 'leave-group',
       label: '休暇・申請管理',
-      tabs: ['leave', 'shift', 'performance', 'groupleave'],
+      tabs: ['leave', 'shift', 'performance'],
       items: [
         { tab: 'leave', label: '休暇申請', sub: '承認・却下', badge: leaveCount },
         { tab: 'shift', label: 'シフト希望', sub: '確定・却下', badge: shiftCount },
         { tab: 'performance', label: '実績報告', sub: '承認・却下', badge: performanceCount },
-        { tab: 'groupleave', label: 'グループ休暇設定', sub: '月別規定日数' },
       ],
     },
     {
       key: 'staff-group',
       label: 'スタッフ管理',
-      tabs: isMasterAdmin ? ['accounts', 'auditlog', 'adminperms'] : ['accounts', 'auditlog'],
+      tabs: isMasterAdmin ? ['accounts', 'groupleave', 'auditlog', 'adminperms'] : ['accounts', 'groupleave', 'auditlog'],
       items: isMasterAdmin
         ? [
             { tab: 'accounts', label: '社員一覧・登録', sub: '入退職日・有休管理' },
+            { tab: 'groupleave', label: '出勤規定日数設定', sub: 'グループ別・月別日数' },
             { tab: 'auditlog', label: '監査ログ', sub: '承認・操作の履歴' },
             { tab: 'adminperms', label: '管理者権限', sub: '管理者アカウント・権限設定' },
           ]
         : [
             { tab: 'accounts', label: '社員一覧・登録', sub: '入退職日・有休管理' },
+            { tab: 'groupleave', label: '出勤規定日数設定', sub: 'グループ別・月別日数' },
             { tab: 'auditlog', label: '監査ログ', sub: '承認・操作の履歴' },
           ],
     },
@@ -3354,7 +3413,7 @@ function AdminTopNav({ tab, setTab, correctionCount, leaveCount, shiftCount, per
   );
 }
 
-function AdminView({ data, employeeAccounts, session, onDecide, onDecideLeave, onDecideShift, onDecideShiftBatch, onAddShift, onDecidePerformance, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveGroupLeave, isDesktop }) {
+function AdminView({ data, employeeAccounts, session, onDecide, onDecideLeave, onDecideShift, onDecideShiftBatch, onAddShift, onDecidePerformance, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveGroupLeave, onSaveEmployeeAttendance, isDesktop }) {
   const [tab, setTab] = useState('dashboard'); // dashboard | attendance | requests | leave | shift | performance | accounts
   const pending = data.corrections.filter((c) => c.status === 'pending');
   const decided = data.corrections.filter((c) => c.status !== 'pending').slice(0, 8);
@@ -3435,7 +3494,7 @@ function AdminView({ data, employeeAccounts, session, onDecide, onDecideLeave, o
             社員管理
           </button>
           <button onClick={() => setTab('groupleave')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'groupleave' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
-            休暇設定
+            出勤規定日数設定
           </button>
           <button onClick={() => setTab('auditlog')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'auditlog' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
             監査ログ
@@ -3489,6 +3548,8 @@ function AdminView({ data, employeeAccounts, session, onDecide, onDecideLeave, o
           onFetchMyNumber={onFetchMyNumber}
           onSaveMyNumber={onSaveMyNumber}
           groupLeaveSchedules={data.groupLeaveSchedules}
+          employeeAttendanceSchedules={data.employeeAttendanceSchedules}
+          onSaveEmployeeAttendance={onSaveEmployeeAttendance}
           session={session}
           isDesktop={isDesktop}
         />
@@ -4323,7 +4384,7 @@ function GroupLeaveScheduleTab({ employeeAccounts, groupLeaveSchedules, onSave, 
   return (
     <div className="space-y-5">
       <div className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 text-[11.5px] text-blue-800">
-        メイングループごとに、月ごとの休暇付与日数を設定できます（1月〜12月の累計で当年分を計算）。対象は社員・契約社員のみで、パート・アルバイトには適用されません（比例付与が優先されます）。設定が無いグループは、これまで通り法定の自動計算が使われます。
+        メイングループごとに、月ごとの「出勤規定日数」（所定労働日数）を設定できます。ここで設定した日数は、そのグループに所属する社員の月給日割り計算（給与タブ）に使われます。グループを設定していない社員は、社員アカウント編集画面の「グループ」タブで個人別に出勤規定日数を入力してください。
       </div>
 
       <div className={isDesktop ? 'grid grid-cols-[240px_1fr] gap-5 items-start' : 'space-y-4'}>
@@ -4351,7 +4412,7 @@ function GroupLeaveScheduleTab({ employeeAccounts, groupLeaveSchedules, onSave, 
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
             <div className="px-5 py-3.5 border-b border-slate-100">
               <h2 className="font-bold text-[14px] text-slate-800">{selectedGroup}</h2>
-              <p className="text-[11px] text-slate-400 mt-0.5">月ごとの付与日数（累計 {total}日／年）</p>
+              <p className="text-[11px] text-slate-400 mt-0.5">月ごとの出勤規定日数（年間合計 {total}日）</p>
             </div>
             <div className="p-5 grid grid-cols-3 sm:grid-cols-4 gap-3">
               {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
@@ -4535,7 +4596,8 @@ const ADMIN_TAB_OPTIONS = [
   { key: 'payroll', label: '給与' },
 ];
 
-function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, groupLeaveSchedules, session, isDesktop }) {
+function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, groupLeaveSchedules, employeeAttendanceSchedules, onSaveEmployeeAttendance, session, isDesktop }) {
+  const knownGroups = Array.from(new Set([...employeeAccounts.map((a) => a.mainGroup).filter(Boolean), ...Object.keys(groupLeaveSchedules || {})]));
   const [name, setName] = useState('');
   const [furigana, setFurigana] = useState('');
   const [username, setUsername] = useState('');
@@ -4810,6 +4872,10 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
           onFetchMyNumber={onFetchMyNumber}
           onSaveMyNumber={onSaveMyNumber}
           isMasterAdmin={isMasterAdmin}
+          knownGroups={knownGroups}
+          groupAttendanceSchedules={groupLeaveSchedules}
+          employeeAttendanceSchedule={employeeAttendanceSchedules?.[profileModalAccount.id] || {}}
+          onSaveEmployeeAttendance={onSaveEmployeeAttendance}
         />
       )}
       {csvModalOpen && (
@@ -5037,6 +5103,7 @@ function CsvImportModal({ onClose, onAddAccount }) {
 
 const PROFILE_MODAL_TABS = [
   { key: 'basic', label: '基本' },
+  { key: 'group', label: 'グループ' },
   { key: 'work', label: '業務・契約' },
   { key: 'pay', label: '給与・口座' },
   { key: 'insurance', label: '社会保険' },
@@ -5044,8 +5111,20 @@ const PROFILE_MODAL_TABS = [
   { key: 'tax', label: '住民税・税区分' },
 ];
 
-function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSaveMyNumber, isMasterAdmin }) {
+function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSaveMyNumber, isMasterAdmin, knownGroups = [], groupAttendanceSchedules = {}, employeeAttendanceSchedule = {}, onSaveEmployeeAttendance }) {
   const [activeTab, setActiveTab] = useState('basic');
+  const [personalMonths, setPersonalMonths] = useState(() => {
+    const initial = {};
+    for (let m = 1; m <= 12; m++) initial[m] = String(employeeAttendanceSchedule[m] || 0);
+    return initial;
+  });
+  const [savingAttendance, setSavingAttendance] = useState(false);
+  const setPersonalMonth = (m) => (e) => setPersonalMonths((prev) => ({ ...prev, [m]: e.target.value }));
+  const savePersonalAttendance = async () => {
+    setSavingAttendance(true);
+    await onSaveEmployeeAttendance(account.id, personalMonths);
+    setSavingAttendance(false);
+  };
   const [form, setForm] = useState({
     furigana: account.furigana || '',
     contactEmail: account.contactEmail || '',
@@ -5186,14 +5265,6 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                   </select>
                 </Field>
               )}
-              <div className="grid grid-cols-2 gap-3">
-                <Field label="メイングループ">
-                  <input value={form.mainGroup} onChange={set('mainGroup')} placeholder="例）第一営業部" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
-                </Field>
-                <Field label="サブグループ">
-                  <input value={form.subGroup} onChange={set('subGroup')} placeholder="任意" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
-                </Field>
-              </div>
               <div className="text-[11px] font-bold text-slate-400 pt-2">連絡先</div>
               <Field label="連絡用メールアドレス">
                 <input type="email" value={form.contactEmail} onChange={set('contactEmail')} placeholder="example@brown-kyoto.com" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" />
@@ -5221,6 +5292,55 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
               <Field label="スタッフ備考1"><input value={form.staffNote1} onChange={set('staffNote1')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" /></Field>
               <Field label="スタッフ備考2"><input value={form.staffNote2} onChange={set('staffNote2')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" /></Field>
               <Field label="スタッフ備考3"><input value={form.staffNote3} onChange={set('staffNote3')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" /></Field>
+            </>
+          )}
+
+          {activeTab === 'group' && (
+            <>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="メイングループ">
+                  <select value={form.mainGroup} onChange={set('mainGroup')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white">
+                    <option value="">グループなし（個人設定）</option>
+                    {knownGroups.map((g) => <option key={g} value={g}>{g}</option>)}
+                  </select>
+                </Field>
+                <Field label="サブグループ">
+                  <input value={form.subGroup} onChange={set('subGroup')} placeholder="任意" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
+                </Field>
+              </div>
+              <div className="text-[10.5px] text-slate-400 -mt-2">
+                メイングループを選択すると、そのグループに設定された「出勤規定日数」（給与タブ →出勤規定日数設定 で管理）が月給の日割り計算に使われます。一覧に無いグループ名は、先に給与タブの「出勤規定日数設定」で新規追加してください。
+              </div>
+
+              {form.mainGroup ? (
+                <div className="bg-slate-50 rounded-xl p-4 space-y-2">
+                  <div className="text-[12px] font-bold text-slate-600">「{form.mainGroup}」の出勤規定日数（月別・参照のみ）</div>
+                  <div className="grid grid-cols-4 gap-2">
+                    {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
+                      <div key={m} className="bg-white rounded-lg border border-slate-200 px-2 py-1.5 text-center">
+                        <div className="text-[9.5px] text-slate-400">{m}月</div>
+                        <div className="font-mono text-[12.5px] font-bold text-slate-700">{(groupAttendanceSchedules?.[form.mainGroup] || {})[m] || 0}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="text-[10.5px] text-slate-400">日数の変更は「出勤規定日数設定」タブから行ってください。</div>
+                </div>
+              ) : (
+                <div className="bg-slate-50 rounded-xl p-4 space-y-3">
+                  <div className="text-[12px] font-bold text-slate-600">個人別の出勤規定日数（月別）</div>
+                  <div className="text-[10.5px] text-slate-400 -mt-1">グループ未設定のため、月ごとの出勤規定日数をここで入力してください。給与計算（月給制）で日割りの基準として使われます。</div>
+                  <div className="grid grid-cols-3 sm:grid-cols-4 gap-3">
+                    {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
+                      <Field key={m} label={`${m}月`}>
+                        <input type="number" step="0.5" value={personalMonths[m]} onChange={setPersonalMonth(m)} className="w-full border border-slate-200 rounded-lg px-2.5 py-2 font-mono text-[13px] bg-white" />
+                      </Field>
+                    ))}
+                  </div>
+                  <button onClick={savePersonalAttendance} disabled={savingAttendance} className="w-full py-2.5 rounded-lg bg-slate-800 text-white text-[13px] font-bold disabled:opacity-50">
+                    {savingAttendance ? '保存中…' : '出勤規定日数を保存する'}
+                  </button>
+                </div>
+              )}
             </>
           )}
 
