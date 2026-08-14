@@ -4848,23 +4848,8 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
     </div>
   );
 
-  if (isDesktop) {
-    return (
-      <div className="space-y-4">
-        <div className="grid grid-cols-[1fr_320px] gap-5 items-start">
-          {listCard}
-          {formCard}
-        </div>
-        {disclaimer}
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-4">
-      {listCard}
-      {formCard}
-      {disclaimer}
+  const modals = (
+    <>
       {profileModalAccount && (
         <EmployeeProfileModal
           account={profileModalAccount}
@@ -4905,6 +4890,28 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
           }}
         />
       )}
+    </>
+  );
+
+  if (isDesktop) {
+    return (
+      <div className="space-y-4">
+        <div className="grid grid-cols-[1fr_320px] gap-5 items-start">
+          {listCard}
+          {formCard}
+        </div>
+        {disclaimer}
+        {modals}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {listCard}
+      {formCard}
+      {disclaimer}
+      {modals}
     </div>
   );
 }
