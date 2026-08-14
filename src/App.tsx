@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Clock, MapPin, CheckCircle2, XCircle, AlertTriangle, LogIn, LogOut, FileEdit, Users, Bell, Calendar, Mail, LogOut as LogoutIcon, UserPlus, Lock, User, Monitor, Smartphone, Palmtree, Plus, Pencil, CalendarDays, ListChecks, ClipboardList, MessageSquare, Coffee, BarChart3, Home, Download } from 'lucide-react';
+import { Clock, MapPin, CheckCircle2, XCircle, AlertTriangle, LogIn, LogOut, FileEdit, Users, Bell, Calendar, Mail, LogOut as LogoutIcon, UserPlus, Lock, User, Monitor, Smartphone, Palmtree, Plus, Pencil, CalendarDays, ListChecks, ClipboardList, MessageSquare, Coffee, BarChart3, Home, Download, ChevronRight, LayoutGrid } from 'lucide-react';
 import { supabase, CLOUD_ENABLED, usernameToEmail } from './supabaseClient';
 
 // ---- constants ----
@@ -1946,8 +1946,200 @@ function PerformanceModal({ type, onClose, onSubmit }) {
   );
 }
 
+function AdminDashboardTab({ missingCount, correctionCount, leaveCount, shiftCount, performanceCount, employeeCount, onNavigate, isDesktop }) {
+  const alertRows = [
+    { label: '打刻漏れ・打刻間違い', count: missingCount, tab: 'requests', icon: <AlertTriangle size={14} /> },
+  ];
+  const unapprovedRows = [
+    { label: '未承認の勤怠修正申請', count: correctionCount, tab: 'requests', icon: <FileEdit size={14} /> },
+    { label: '未承認の休暇申請', count: leaveCount, tab: 'leave', icon: <Palmtree size={14} /> },
+    { label: '未承認のシフト希望', count: shiftCount, tab: 'shift', icon: <CalendarDays size={14} /> },
+    { label: '未承認の実績報告', count: performanceCount, tab: 'performance', icon: <ClipboardList size={14} /> },
+  ];
+  const quickLinks = [
+    { label: '勤怠一覧', tab: 'attendance', icon: <Clock size={17} /> },
+    { label: '社員管理', tab: 'accounts', icon: <Users size={17} /> },
+    { label: '休暇申請', tab: 'leave', icon: <Palmtree size={17} /> },
+    { label: 'シフト', tab: 'shift', icon: <CalendarDays size={17} /> },
+  ];
+
+  const Row = ({ row }) => (
+    <button
+      onClick={() => onNavigate(row.tab)}
+      className="w-full flex items-center justify-between px-4 py-3 border-b border-slate-100 last:border-0 hover:bg-slate-50 transition-colors text-left"
+    >
+      <span className="flex items-center gap-2 text-[13px] text-slate-700">
+        <span className="text-slate-400">{row.icon}</span>
+        {row.label}
+      </span>
+      <span className="flex items-center gap-1.5">
+        <span className={`text-[13px] font-bold ${row.count > 0 ? 'text-rose-600' : 'text-slate-300'}`}>{row.count}件</span>
+        <ChevronRight size={14} className="text-slate-300" />
+      </span>
+    </button>
+  );
+
+  return (
+    <div className="space-y-5">
+      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+          <LayoutGrid size={15} className="text-slate-400" />
+          <h2 className="font-bold text-[13.5px]">機能リンク</h2>
+        </div>
+        <div className={`p-4 grid gap-3 ${isDesktop ? 'grid-cols-4' : 'grid-cols-2'}`}>
+          {quickLinks.map((q) => (
+            <button
+              key={q.tab}
+              onClick={() => onNavigate(q.tab)}
+              className="flex flex-col items-center gap-2 rounded-xl border border-slate-200 py-4 text-slate-700 hover:border-slate-800 hover:bg-slate-50 transition-colors"
+            >
+              {q.icon}
+              <span className="text-[12px] font-bold">{q.label}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className={isDesktop ? 'grid grid-cols-2 gap-5 items-start' : 'space-y-5'}>
+        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+          <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+            <AlertTriangle size={15} className="text-slate-400" />
+            <h2 className="font-bold text-[13.5px]">アラート一覧</h2>
+          </div>
+          <div>
+            {alertRows.map((row) => <Row key={row.label} row={row} />)}
+          </div>
+        </div>
+
+        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+          <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+            <ListChecks size={15} className="text-slate-400" />
+            <h2 className="font-bold text-[13.5px]">未承認一覧</h2>
+          </div>
+          <div>
+            {unapprovedRows.map((row) => <Row key={row.label} row={row} />)}
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden px-5 py-4 flex items-center gap-3">
+        <div className="w-10 h-10 rounded-xl bg-slate-100 flex items-center justify-center shrink-0">
+          <Users size={18} className="text-slate-500" />
+        </div>
+        <div>
+          <div className="text-[11px] text-slate-400">在籍社員数</div>
+          <div className="font-mono text-[18px] font-bold text-slate-800">{employeeCount}名</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AdminTopNav({ tab, setTab, correctionCount, leaveCount, shiftCount, performanceCount }) {
+  const [open, setOpen] = useState(null);
+  const wrapRef = useRef(null);
+
+  useEffect(() => {
+    const onClickOutside = (e) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(null);
+    };
+    document.addEventListener('mousedown', onClickOutside);
+    return () => document.removeEventListener('mousedown', onClickOutside);
+  }, []);
+
+  const categories = [
+    {
+      key: 'attendance-group',
+      label: '出勤管理',
+      tabs: ['attendance', 'requests'],
+      items: [
+        { tab: 'attendance', label: '勤怠一覧', sub: '月次一覧・CSV出力' },
+        { tab: 'requests', label: '勤怠修正申請', sub: '承認・却下', badge: correctionCount },
+      ],
+    },
+    {
+      key: 'leave-group',
+      label: '休暇・申請管理',
+      tabs: ['leave', 'shift', 'performance'],
+      items: [
+        { tab: 'leave', label: '休暇申請', sub: '承認・却下', badge: leaveCount },
+        { tab: 'shift', label: 'シフト希望', sub: '確定・却下', badge: shiftCount },
+        { tab: 'performance', label: '実績報告', sub: '承認・却下', badge: performanceCount },
+      ],
+    },
+    {
+      key: 'staff-group',
+      label: 'スタッフ管理',
+      tabs: ['accounts'],
+      items: [
+        { tab: 'accounts', label: '社員一覧・登録', sub: '入退職日・有休管理' },
+      ],
+    },
+  ];
+
+  const totalBadge = correctionCount + leaveCount + shiftCount + performanceCount;
+
+  return (
+    <div ref={wrapRef} className="relative bg-white rounded-2xl border border-slate-200 shadow-sm">
+      <div className="flex items-center px-2">
+        <button
+          onClick={() => { setTab('dashboard'); setOpen(null); }}
+          className={`flex items-center gap-1.5 px-4 py-3 text-[13px] font-bold rounded-lg transition-colors ${tab === 'dashboard' ? 'text-slate-900' : 'text-slate-400 hover:text-slate-700'}`}
+        >
+          <LayoutGrid size={15} />
+          ダッシュボード
+        </button>
+        {categories.map((cat) => {
+          const catBadge = cat.items.reduce((s, i) => s + (i.badge || 0), 0);
+          const isActiveGroup = cat.tabs.includes(tab);
+          return (
+            <button
+              key={cat.key}
+              onClick={() => setOpen(open === cat.key ? null : cat.key)}
+              className={`relative px-4 py-3 text-[13px] font-bold rounded-lg transition-colors ${isActiveGroup || open === cat.key ? 'text-slate-900' : 'text-slate-400 hover:text-slate-700'}`}
+            >
+              {cat.label}
+              {catBadge > 0 && (
+                <span className="absolute top-1.5 -right-0.5 w-4 h-4 bg-amber-600 rounded-full text-[9px] flex items-center justify-center text-white font-bold">
+                  {catBadge}
+                </span>
+              )}
+            </button>
+          );
+        })}
+        {totalBadge > 0 && (
+          <span className="ml-auto mr-3 text-[11px] font-bold text-rose-600">未承認 合計 {totalBadge}件</span>
+        )}
+      </div>
+      <div className={`h-0.5 transition-all ${tab === 'dashboard' ? 'bg-transparent' : 'bg-slate-800'}`} />
+
+      {open && (
+        <div className="absolute left-0 right-0 top-full mt-1 bg-white border border-slate-200 rounded-xl shadow-lg z-20 p-4">
+          <div className="grid grid-cols-3 gap-3">
+            {categories.find((c) => c.key === open).items.map((item) => (
+              <button
+                key={item.tab}
+                onClick={() => { setTab(item.tab); setOpen(null); }}
+                className="text-left rounded-lg px-3 py-3 hover:bg-slate-50 border border-transparent hover:border-slate-200 transition-colors"
+              >
+                <div className="flex items-center gap-1.5 text-[13px] font-bold text-slate-800">
+                  {item.label}
+                  {item.badge > 0 && (
+                    <span className="text-[10px] bg-amber-600 text-white rounded-full px-1.5 py-0.5 font-bold">{item.badge}</span>
+                  )}
+                </div>
+                <div className="text-[11px] text-slate-400 mt-0.5">{item.sub}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AdminView({ data, employeeAccounts, onDecide, onDecideLeave, onDecideShift, onDecideShiftBatch, onAddShift, onDecidePerformance, onAddAccount, onUpdateDates, isDesktop }) {
-  const [tab, setTab] = useState('attendance'); // attendance | requests | leave | shift | performance | accounts
+  const [tab, setTab] = useState('dashboard'); // dashboard | attendance | requests | leave | shift | performance | accounts
   const pending = data.corrections.filter((c) => c.status === 'pending');
   const decided = data.corrections.filter((c) => c.status !== 'pending').slice(0, 8);
   const leavePending = data.leaveRequests.filter((l) => l.status === 'pending');
@@ -1970,41 +2162,55 @@ function AdminView({ data, employeeAccounts, onDecide, onDecideLeave, onDecideSh
 
   return (
     <div className="space-y-5">
-      <div className={`flex items-center bg-white rounded-xl border border-slate-200 p-1 text-[11.5px] font-medium overflow-x-auto ${isDesktop ? 'max-w-2xl' : ''}`}>
-        <button onClick={() => setTab('attendance')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'attendance' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
-          勤怠一覧
-        </button>
-        <button onClick={() => setTab('requests')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'requests' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
-          勤怠修正
-        </button>
-        <button onClick={() => setTab('leave')} className={`relative flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'leave' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
-          休暇申請
-          {leavePending.length > 0 && tab !== 'leave' && (
-            <span className="absolute -top-1 -right-0.5 w-4 h-4 bg-amber-600 rounded-full text-[9px] flex items-center justify-center text-white font-bold">
-              {leavePending.length}
-            </span>
-          )}
-        </button>
-        <button onClick={() => setTab('shift')} className={`relative flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'shift' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
-          シフト
-          {shiftPending.length > 0 && tab !== 'shift' && (
-            <span className="absolute -top-1 -right-0.5 w-4 h-4 bg-amber-600 rounded-full text-[9px] flex items-center justify-center text-white font-bold">
-              {shiftPending.length}
-            </span>
-          )}
-        </button>
-        <button onClick={() => setTab('performance')} className={`relative flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'performance' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
-          実績
-          {performancePending.length > 0 && tab !== 'performance' && (
-            <span className="absolute -top-1 -right-0.5 w-4 h-4 bg-amber-600 rounded-full text-[9px] flex items-center justify-center text-white font-bold">
-              {performancePending.length}
-            </span>
-          )}
-        </button>
-        <button onClick={() => setTab('accounts')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'accounts' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
-          社員管理
-        </button>
-      </div>
+      {isDesktop ? (
+        <AdminTopNav
+          tab={tab}
+          setTab={setTab}
+          correctionCount={pending.length}
+          leaveCount={leavePending.length}
+          shiftCount={shiftPending.length}
+          performanceCount={performancePending.length}
+        />
+      ) : (
+        <div className="flex items-center bg-white rounded-xl border border-slate-200 p-1 text-[11.5px] font-medium overflow-x-auto">
+          <button onClick={() => setTab('dashboard')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'dashboard' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
+            ホーム
+          </button>
+          <button onClick={() => setTab('attendance')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'attendance' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
+            勤怠一覧
+          </button>
+          <button onClick={() => setTab('requests')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'requests' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
+            勤怠修正
+          </button>
+          <button onClick={() => setTab('leave')} className={`relative flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'leave' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
+            休暇申請
+            {leavePending.length > 0 && tab !== 'leave' && (
+              <span className="absolute -top-1 -right-0.5 w-4 h-4 bg-amber-600 rounded-full text-[9px] flex items-center justify-center text-white font-bold">
+                {leavePending.length}
+              </span>
+            )}
+          </button>
+          <button onClick={() => setTab('shift')} className={`relative flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'shift' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
+            シフト
+            {shiftPending.length > 0 && tab !== 'shift' && (
+              <span className="absolute -top-1 -right-0.5 w-4 h-4 bg-amber-600 rounded-full text-[9px] flex items-center justify-center text-white font-bold">
+                {shiftPending.length}
+              </span>
+            )}
+          </button>
+          <button onClick={() => setTab('performance')} className={`relative flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'performance' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
+            実績
+            {performancePending.length > 0 && tab !== 'performance' && (
+              <span className="absolute -top-1 -right-0.5 w-4 h-4 bg-amber-600 rounded-full text-[9px] flex items-center justify-center text-white font-bold">
+                {performancePending.length}
+              </span>
+            )}
+          </button>
+          <button onClick={() => setTab('accounts')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'accounts' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
+            社員管理
+          </button>
+        </div>
+      )}
 
       {missing.length > 0 && tab === 'requests' && (
         <div className="bg-rose-50 border border-rose-200 rounded-xl px-4 py-3 flex items-start gap-2.5">
@@ -2016,6 +2222,19 @@ function AdminView({ data, employeeAccounts, onDecide, onDecideLeave, onDecideSh
             ))}
           </div>
         </div>
+      )}
+
+      {tab === 'dashboard' && (
+        <AdminDashboardTab
+          missingCount={missing.length}
+          correctionCount={pending.length}
+          leaveCount={leavePending.length}
+          shiftCount={shiftPending.length}
+          performanceCount={performancePending.length}
+          employeeCount={employeeAccounts.length}
+          onNavigate={setTab}
+          isDesktop={isDesktop}
+        />
       )}
 
       {tab === 'attendance' && (
