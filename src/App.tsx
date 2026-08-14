@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Clock, MapPin, CheckCircle2, XCircle, AlertTriangle, LogIn, LogOut, FileEdit, Users, Bell, Calendar, Mail, LogOut as LogoutIcon, UserPlus, Lock, User, Monitor, Smartphone, Palmtree, Plus, Pencil, CalendarDays, ListChecks, ClipboardList, MessageSquare, Coffee, BarChart3, Home, Download, ChevronRight, LayoutGrid, Wallet, Briefcase, UserCog, Construction } from 'lucide-react';
+import { Clock, MapPin, CheckCircle2, XCircle, AlertTriangle, LogIn, LogOut, FileEdit, Users, Bell, Calendar, Mail, LogOut as LogoutIcon, UserPlus, Lock, User, Monitor, Smartphone, Palmtree, Plus, Pencil, CalendarDays, ListChecks, ClipboardList, MessageSquare, Coffee, BarChart3, Home, Download, ChevronRight, LayoutGrid, Wallet, Briefcase, UserCog, Construction, Megaphone, Paperclip, FileText, Pin, Trash2 } from 'lucide-react';
 import { supabase, CLOUD_ENABLED, usernameToEmail } from './supabaseClient';
 
 // ---- constants ----
@@ -65,6 +65,60 @@ function computeStatutoryPaidLeaveDays(hireDateStr, asOf = new Date()) {
     if (tenureMonths >= tier.months) granted = tier.days;
   }
   return granted;
+}
+
+// 労働基準法：週の所定労働日数が少ないパート・アルバイト向けの比例付与表
+const PROPORTIONAL_LEAVE_TABLE = {
+  4: [7, 8, 9, 10, 12, 13, 15],
+  3: [5, 6, 6, 8, 9, 10, 11],
+  2: [3, 4, 4, 5, 6, 6, 7],
+  1: [1, 2, 2, 2, 3, 3, 3],
+};
+
+function computeProportionalLeaveDays(hireDateStr, weeklyDays, asOf = new Date()) {
+  if (!hireDateStr) return 0;
+  const table = PROPORTIONAL_LEAVE_TABLE[weeklyDays];
+  if (!table) return computeStatutoryPaidLeaveDays(hireDateStr, asOf);
+  const hire = new Date(hireDateStr + 'T00:00:00');
+  if (isNaN(hire.getTime()) || hire > asOf) return 0;
+  const tenureMonths = monthsBetween(hire, asOf);
+  let granted = 0;
+  STATUTORY_LEAVE_SCHEDULE.forEach((tier, i) => {
+    if (tenureMonths >= tier.months) granted = table[i];
+  });
+  return granted;
+}
+
+// グループ別の月次休暇規定日数（当年1月からその月までの累計、入職月より前は含めない）
+function computeGroupScheduleLeaveDays(hireDateStr, groupName, monthlyDaysByMonth, asOf = new Date()) {
+  if (!groupName || !monthlyDaysByMonth) return null;
+  const currentMonth = asOf.getMonth() + 1;
+  const currentYear = asOf.getFullYear();
+  const hire = hireDateStr ? new Date(hireDateStr + 'T00:00:00') : null;
+  let total = 0;
+  for (let m = 1; m <= currentMonth; m++) {
+    if (hire && hire.getFullYear() === currentYear && hire.getMonth() + 1 > m) continue;
+    if (hire && hire.getFullYear() > currentYear) continue;
+    total += Number(monthlyDaysByMonth[m] || 0);
+  }
+  return total;
+}
+
+// 社員1人分の有休付与日数（優先順位：パート/アルバイトは比例付与 → グループ規定 → 法定自動計算）＋手動調整
+function computeLeaveTotal(employee, now, groupLeaveSchedules) {
+  if (!employee) return 0;
+  const isPartTime = employee.staffType === 'パート' || employee.staffType === 'アルバイト';
+  let base;
+  if (isPartTime) {
+    base = employee.scheduledWeeklyDays
+      ? computeProportionalLeaveDays(employee.hireDate, employee.scheduledWeeklyDays, now)
+      : computeStatutoryPaidLeaveDays(employee.hireDate, now);
+  } else {
+    const groupSchedule = employee.mainGroup ? groupLeaveSchedules?.[employee.mainGroup] : null;
+    const groupTotal = groupSchedule ? computeGroupScheduleLeaveDays(employee.hireDate, employee.mainGroup, groupSchedule, now) : null;
+    base = groupTotal != null ? groupTotal : computeStatutoryPaidLeaveDays(employee.hireDate, now);
+  }
+  return Math.max(0, base + (Number(employee.leaveAdjustment) || 0));
 }
 
 function tenureLabel(hireDateStr, asOf = new Date()) {
@@ -134,6 +188,28 @@ function computeDayStatus(record) {
     return { label: '勤務中', tone: 'active' };
   }
   return { label: '退勤済み', tone: 'done' };
+}
+
+// 位置情報が記録されていない打刻が何回連続しているか（直近から遡って計算）
+function computeConsecutiveMissingLocation(employeeRecords) {
+  const dates = Object.keys(employeeRecords || {}).sort((a, b) => (a < b ? 1 : -1));
+  let count = 0;
+  for (const d of dates) {
+    const r = employeeRecords[d];
+    if (!r?.clockIn) continue;
+    if (!r.clockInLocation) {
+      count += 1;
+    } else {
+      break;
+    }
+  }
+  return count;
+}
+
+function computeGpsAlertEmployees(employeeAccounts, records, threshold = 5) {
+  return employeeAccounts
+    .map((acc) => ({ employeeId: acc.id, employeeName: acc.name, consecutiveCount: computeConsecutiveMissingLocation(records[acc.id] || {}) }))
+    .filter((x) => x.consecutiveCount >= threshold);
 }
 
 function getRecordedBreakMinutes(record, asOf = new Date()) {
@@ -255,7 +331,7 @@ function ToastView({ toast }) {
 // 以降のコンポーネント（LoginScreenなど）は一切変更していません。
 // ============================================================
 
-const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, shiftRequests: [], performanceReports: [], payrollRecords: [] };
+const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, shiftRequests: [], performanceReports: [], payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, announcements: [] };
 
 // ---- row(snake_case) → app(camelCase) 変換 ----
 const rowToAccount = (row) => ({
@@ -283,6 +359,8 @@ const rowToAccount = (row) => ({
   staffNote1: row.staff_note1 || '',
   staffNote2: row.staff_note2 || '',
   staffNote3: row.staff_note3 || '',
+  leaveAdjustment: row.leave_adjustment != null ? Number(row.leave_adjustment) : 0,
+  scheduledWeeklyDays: row.scheduled_weekly_days != null ? Number(row.scheduled_weekly_days) : null,
 });
 
 const rowToPayroll = (row) => ({
@@ -390,6 +468,54 @@ const rowToNotif = (row) => ({
   body: row.body,
   sentAt: row.sent_at,
   relatedId: row.related_id,
+  isRead: !!row.is_read,
+});
+
+const rowToAudit = (row) => ({
+  id: row.id,
+  actorId: row.actor_id,
+  actorName: row.actor_name,
+  action: row.action,
+  targetEmployeeId: row.target_employee_id,
+  targetEmployeeName: row.target_employee_name || '',
+  detail: row.detail,
+  createdAt: row.created_at,
+});
+
+const PROFILE_EDITABLE_FIELDS = [
+  { key: 'contactEmail', label: '連絡用メールアドレス' },
+  { key: 'address', label: '住所' },
+  { key: 'nearestStation', label: '最寄り駅' },
+  { key: 'phone', label: '電話番号' },
+  { key: 'emergencyContactName', label: '緊急連絡先（氏名）' },
+  { key: 'emergencyContactPhone', label: '緊急連絡先（電話）' },
+];
+
+const rowToProfileRequest = (row) => ({
+  id: row.id,
+  employeeId: row.employee_id,
+  employeeName: row.employees?.name || '',
+  requestedChanges: row.requested_changes || {},
+  originalValues: row.original_values || {},
+  reason: row.reason,
+  status: row.status,
+  adminMemo: row.admin_memo,
+  submittedAt: row.submitted_at,
+  decidedAt: row.decided_at,
+});
+
+const ANNOUNCEMENT_CATEGORIES = ['お知らせ', '制度・インセンティブ', '資料・料金表', 'キャンペーン', 'その他'];
+
+const rowToAnnouncement = (row) => ({
+  id: row.id,
+  title: row.title,
+  category: row.category || 'お知らせ',
+  body: row.body || '',
+  filePath: row.file_path || '',
+  fileName: row.file_name || '',
+  createdByName: row.created_by_name || '',
+  isPinned: !!row.is_pinned,
+  createdAt: row.created_at,
 });
 
 // ---- 現在ログイン中のユーザーが見える範囲のデータを全テーブルから取得 ----
@@ -404,6 +530,10 @@ async function fetchAllData() {
     perfRes,
     notifRes,
     payrollRes,
+    auditRes,
+    profileReqRes,
+    groupLeaveRes,
+    announcementsRes,
   ] = await Promise.all([
     supabase.from('employees').select('*'),
     supabase.from('attendance_records').select('*'),
@@ -413,9 +543,13 @@ async function fetchAllData() {
     supabase.from('performance_reports').select('*, employees(name)'),
     supabase.from('notifications').select('*').order('sent_at', { ascending: false }).limit(50),
     supabase.from('payroll_records').select('*, employees(name)'),
+    supabase.from('audit_logs').select('*').order('created_at', { ascending: false }).limit(100),
+    supabase.from('profile_update_requests').select('*, employees(name)').order('submitted_at', { ascending: false }),
+    supabase.from('group_leave_schedules').select('*'),
+    supabase.from('announcements').select('*').order('is_pinned', { ascending: false }).order('created_at', { ascending: false }),
   ]);
 
-  for (const res of [employeesRes, recordsRes, correctionsRes, leaveRes, shiftRes, perfRes, notifRes, payrollRes]) {
+  for (const res of [employeesRes, recordsRes, correctionsRes, leaveRes, shiftRes, perfRes, notifRes, payrollRes, auditRes, profileReqRes, groupLeaveRes, announcementsRes]) {
     if (res.error) throw res.error;
   }
 
@@ -423,6 +557,12 @@ async function fetchAllData() {
   (recordsRes.data || []).forEach((row) => {
     records[row.employee_id] = records[row.employee_id] || {};
     records[row.employee_id][row.date] = rowToRecord(row);
+  });
+
+  const groupLeaveSchedules = {};
+  (groupLeaveRes.data || []).forEach((row) => {
+    groupLeaveSchedules[row.group_name] = groupLeaveSchedules[row.group_name] || {};
+    groupLeaveSchedules[row.group_name][row.month] = Number(row.days);
   });
 
   return {
@@ -435,6 +575,10 @@ async function fetchAllData() {
     shiftRequests: (shiftRes.data || []).map(rowToShift),
     performanceReports: (perfRes.data || []).map(rowToPerf),
     notifications: (notifRes.data || []).map(rowToNotif),
+    auditLogs: (auditRes.data || []).map(rowToAudit),
+    profileUpdateRequests: (profileReqRes.data || []).map(rowToProfileRequest),
+    groupLeaveSchedules,
+    announcements: (announcementsRes.data || []).map(rowToAnnouncement),
   };
 }
 
@@ -450,6 +594,44 @@ async function notify(subject, body, relatedId, toEmployeeId = null, toRole = 'a
     });
   } catch (e) {
     console.error('通知の記録に失敗しました', e);
+  }
+}
+
+// 実メール送信（Resend未設定の場合は何もしない。失敗してもアプリ本体は止めない）
+async function sendEmailBestEffort(toEmail, subject, text) {
+  if (!toEmail) return;
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    const accessToken = sessionData?.session?.access_token;
+    await supabase.functions.invoke('send-email', {
+      body: { to: toEmail, subject, text },
+      headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
+    });
+  } catch (e) {
+    console.error('メール送信に失敗しました（アプリの動作には影響ありません）', e);
+  }
+}
+
+async function markNotificationRead(id) {
+  try {
+    await supabase.from('notifications').update({ is_read: true }).eq('id', id);
+  } catch (e) {
+    console.error('既読処理に失敗しました', e);
+  }
+}
+
+async function logAudit(actor, action, detail, targetEmployeeId = null, targetEmployeeName = '') {
+  try {
+    await supabase.from('audit_logs').insert({
+      actor_id: actor?.id || null,
+      actor_name: actor?.name || '',
+      action,
+      target_employee_id: targetEmployeeId,
+      target_employee_name: targetEmployeeName,
+      detail,
+    });
+  } catch (e) {
+    console.error('監査ログの記録に失敗しました', e);
   }
 }
 
@@ -503,6 +685,16 @@ export default function AttendanceApp() {
         setCloudStatus('cloud');
         return;
       }
+      if (empRow.resignation_date && empRow.resignation_date <= todayKey()) {
+        // 退職日を過ぎているアカウントはログインさせない
+        await supabase.auth.signOut();
+        setSession(null);
+        setData(EMPTY_DATA);
+        setLoaded(true);
+        setCloudStatus('cloud');
+        show('退職日を過ぎているため、このアカウントではログインできません', 'warn');
+        return;
+      }
       setSession(rowToAccount(empRow));
       const fresh = await fetchAllData();
       setData(fresh);
@@ -551,6 +743,20 @@ export default function AttendanceApp() {
     }
   };
 
+  // 管理者への通知（アプリ内通知＋実メール、メールはResend設定済みの場合のみ実際に届く）
+  const notifyAdmin = async (subject, body, relatedId) => {
+    await notify(subject, body, relatedId, null, 'admin');
+    const admin = data.accounts.find((a) => a.role === 'admin' && a.contactEmail);
+    if (admin) await sendEmailBestEffort(admin.contactEmail, subject, body);
+  };
+
+  // 特定社員への通知（アプリ内通知＋実メール）
+  const notifyEmployeeUser = async (targetEmployeeId, subject, body, relatedId) => {
+    await notify(subject, body, relatedId, targetEmployeeId, 'employee');
+    const emp = data.accounts.find((a) => a.id === targetEmployeeId);
+    if (emp?.contactEmail) await sendEmailBestEffort(emp.contactEmail, subject, body);
+  };
+
   const handleLogin = async (username, password) => {
     try {
       const { error } = await supabase.auth.signInWithPassword({
@@ -589,6 +795,7 @@ export default function AttendanceApp() {
         return false;
       }
       await refreshData();
+      await logAudit(session, '社員アカウントを作成', `username: ${payload.username}`, fnData?.id || null, payload.name);
       show(`${payload.name}さんのアカウントを作成しました`, 'success');
       return true;
     } catch (e) {
@@ -712,12 +919,10 @@ export default function AttendanceApp() {
       show('修正申請の送信に失敗しました', 'warn');
       return;
     }
-    await notify(
+    await notifyAdmin(
       `【勤怠修正申請】${session.name} - ${dateLabel(payload.date)}`,
       `${session.name}さんより ${dateLabel(payload.date)} の勤怠修正申請が届きました。内容をご確認のうえ承認してください。`,
-      inserted?.id,
-      null,
-      'admin'
+      inserted?.id
     );
     await refreshData();
     setCorrectionModal(null);
@@ -758,6 +963,7 @@ export default function AttendanceApp() {
       );
     }
     await refreshData();
+    await logAudit(session, decision === 'approved' ? '勤怠修正申請を承認' : '勤怠修正申請を却下', `${dateLabel(correction.date)}分の勤怠修正申請`, correction.employeeId, correction.employeeName);
     show(decision === 'approved' ? '修正申請を承認しました' : '修正申請を却下しました', decision === 'approved' ? 'success' : 'warn');
   };
 
@@ -783,12 +989,10 @@ export default function AttendanceApp() {
     }
     const rangeLabel = payload.startDate === payload.endDate ? dateLabel(payload.startDate) : `${dateLabel(payload.startDate)}〜${dateLabel(payload.endDate)}`;
     const typeLabel = payload.halfDay ? `${payload.type}（半休）` : payload.type;
-    await notify(
+    await notifyAdmin(
       `【休暇申請】${session.name} - ${typeLabel}（${rangeLabel}）`,
       `${session.name}さんより ${typeLabel} の休暇申請（${rangeLabel}／${days}日間）が届きました。内容をご確認のうえ承認してください。`,
-      inserted?.id,
-      null,
-      'admin'
+      inserted?.id
     );
     await refreshData();
     setLeaveModalOpen(false);
@@ -796,6 +1000,7 @@ export default function AttendanceApp() {
   };
 
   const decideLeaveRequest = async (id, decision) => {
+    const leave = data.leaveRequests.find((l) => l.id === id);
     const { error } = await supabase
       .from('leave_requests')
       .update({ status: decision, decided_at: new Date().toISOString() })
@@ -805,6 +1010,7 @@ export default function AttendanceApp() {
       return;
     }
     await refreshData();
+    if (leave) await logAudit(session, decision === 'approved' ? '休暇申請を承認' : '休暇申請を却下', `${leave.type}（${dateLabel(leave.startDate)}〜${dateLabel(leave.endDate)}）`, leave.employeeId, leave.employeeName);
     show(decision === 'approved' ? '休暇申請を承認しました' : '休暇申請を却下しました', decision === 'approved' ? 'success' : 'warn');
   };
 
@@ -830,6 +1036,8 @@ export default function AttendanceApp() {
       staffNote1: 'staff_note1',
       staffNote2: 'staff_note2',
       staffNote3: 'staff_note3',
+      leaveAdjustment: 'leave_adjustment',
+      scheduledWeeklyDays: 'scheduled_weekly_days',
     };
     const dbPatch = {};
     Object.entries(patch).forEach(([key, value]) => {
@@ -849,6 +1057,130 @@ export default function AttendanceApp() {
   };
   // 過去の呼び出し名との互換用エイリアス
   const updateEmployeeDates = updateEmployeeProfile;
+
+  const submitProfileUpdateRequest = async (changes, reason) => {
+    const originalValues = {};
+    PROFILE_EDITABLE_FIELDS.forEach(({ key }) => { originalValues[key] = session[key] || ''; });
+    const { data: inserted, error } = await supabase
+      .from('profile_update_requests')
+      .insert({
+        employee_id: employeeId,
+        requested_changes: changes,
+        original_values: originalValues,
+        reason: reason || null,
+        status: 'pending',
+      })
+      .select()
+      .single();
+    if (error) {
+      show('変更申請の送信に失敗しました', 'warn');
+      return;
+    }
+    const changedLabels = Object.keys(changes).map((k) => PROFILE_EDITABLE_FIELDS.find((f) => f.key === k)?.label || k).join('、');
+    await notifyAdmin(
+      `【個人情報変更申請】${session.name}`,
+      `${session.name}さんより個人情報の変更申請（${changedLabels}）が届きました。内容をご確認のうえ承認してください。`,
+      inserted?.id
+    );
+    await refreshData();
+    show('変更を申請しました。管理者に通知しました', 'success');
+  };
+
+  const decideProfileUpdateRequest = async (id, decision, memo) => {
+    const request = data.profileUpdateRequests.find((r) => r.id === id);
+    if (!request) return;
+    const { error } = await supabase
+      .from('profile_update_requests')
+      .update({ status: decision, admin_memo: memo || '', decided_at: new Date().toISOString() })
+      .eq('id', id);
+    if (error) {
+      show('処理に失敗しました', 'warn');
+      return;
+    }
+    if (decision === 'approved') {
+      await updateEmployeeProfile(request.employeeId, request.requestedChanges);
+    }
+    await notifyEmployeeUser(
+      request.employeeId,
+      `【個人情報変更${decision === 'approved' ? '承認' : '却下'}】`,
+      `個人情報の変更申請が${decision === 'approved' ? '承認され、反映されました' : '却下されました'}。${memo ? `管理者コメント：${memo}` : ''}`,
+      id
+    );
+    await refreshData();
+    await logAudit(session, decision === 'approved' ? '個人情報変更を承認' : '個人情報変更を却下', Object.keys(request.requestedChanges).join('、'), request.employeeId, request.employeeName);
+    show(decision === 'approved' ? '変更申請を承認しました' : '変更申請を却下しました', decision === 'approved' ? 'success' : 'warn');
+  };
+
+  const saveGroupLeaveSchedule = async (groupName, monthlyDays) => {
+    const rows = Object.entries(monthlyDays).map(([month, days]) => ({
+      group_name: groupName,
+      month: Number(month),
+      days: Number(days) || 0,
+    }));
+    const { error } = await supabase.from('group_leave_schedules').upsert(rows, { onConflict: 'group_name,month' });
+    if (error) {
+      show('グループ休暇設定の保存に失敗しました', 'warn');
+      return;
+    }
+    await refreshData();
+    await logAudit(session, 'グループ休暇規定日数を更新', groupName);
+    show(`「${groupName}」の休暇規定日数を保存しました`, 'success');
+  };
+
+  const submitAnnouncement = async ({ title, category, body, file, isPinned }) => {
+    let filePath = null;
+    let fileName = null;
+    if (file) {
+      const safeName = file.name.replace(/[^\w.\-ぁ-んァ-ヶ一-龠]/g, '_');
+      filePath = `${Date.now()}_${safeName}`;
+      const { error: uploadError } = await supabase.storage.from('announcements').upload(filePath, file);
+      if (uploadError) {
+        show(`ファイルのアップロードに失敗しました: ${uploadError.message}`, 'warn');
+        return false;
+      }
+      fileName = file.name;
+    }
+    const { error } = await supabase.from('announcements').insert({
+      title,
+      category,
+      body: body || null,
+      file_path: filePath,
+      file_name: fileName,
+      created_by: session.id,
+      created_by_name: session.name,
+      is_pinned: !!isPinned,
+    });
+    if (error) {
+      show('お知らせの投稿に失敗しました', 'warn');
+      return false;
+    }
+    await refreshData();
+    await logAudit(session, 'お知らせを配信', `${category}：${title}`);
+    show('お知らせを配信しました', 'success');
+    return true;
+  };
+
+  const deleteAnnouncement = async (announcement) => {
+    if (announcement.filePath) {
+      await supabase.storage.from('announcements').remove([announcement.filePath]);
+    }
+    const { error } = await supabase.from('announcements').delete().eq('id', announcement.id);
+    if (error) {
+      show('削除に失敗しました', 'warn');
+      return;
+    }
+    await refreshData();
+    show('お知らせを削除しました', 'success');
+  };
+
+  const getAnnouncementFileUrl = async (filePath) => {
+    const { data: signed, error } = await supabase.storage.from('announcements').createSignedUrl(filePath, 60 * 10);
+    if (error || !signed) {
+      show('ファイルの取得に失敗しました', 'warn');
+      return null;
+    }
+    return signed.signedUrl;
+  };
 
   const savePayrollDraft = async (payload) => {
     const { error } = await supabase.from('payroll_records').upsert(
@@ -884,15 +1216,15 @@ export default function AttendanceApp() {
     }
     const record = data.payrollRecords.find((p) => p.id === id);
     if (record) {
-      await notify(
+      await notifyEmployeeUser(
+        record.employeeId,
         `【給与明細】${record.year}年${record.month}月分`,
         `${record.year}年${record.month}月分の給与明細が公開されました。ご確認ください。`,
-        id,
-        record.employeeId,
-        'employee'
+        id
       );
     }
     await refreshData();
+    await logAudit(session, '給与明細を公開', record ? `${record.year}年${record.month}月分` : '', record?.employeeId, record?.employeeName);
     show('給与明細を公開しました', 'success');
   };
 
@@ -932,12 +1264,10 @@ export default function AttendanceApp() {
       if (leaveError) console.error('有休申請の自動作成に失敗しました', leaveError);
     }
 
-    await notify(
+    await notifyAdmin(
       `【シフト希望】${session.name} - ${monthKeyLabel(payload.targetMonth)}分`,
       `${session.name}さんより ${monthKeyLabel(payload.targetMonth)}分のシフト希望（${shiftRows.length}日分、うち有休${paidLeaveDays.length}日）が届きました。内容をご確認のうえ確定してください。`,
-      batchId,
-      null,
-      'admin'
+      batchId
     );
     await refreshData();
     setShiftModalOpen(false);
@@ -945,6 +1275,7 @@ export default function AttendanceApp() {
   };
 
   const decideShiftRequest = async (id, decision) => {
+    const shift = data.shiftRequests.find((s) => s.id === id);
     const { error } = await supabase
       .from('shift_requests')
       .update({ status: decision, decided_at: new Date().toISOString() })
@@ -954,10 +1285,12 @@ export default function AttendanceApp() {
       return;
     }
     await refreshData();
+    if (shift) await logAudit(session, decision === 'confirmed' ? 'シフトを確定' : 'シフト希望を却下', dateLabel(shift.date), shift.employeeId, shift.employeeName);
     show(decision === 'confirmed' ? 'シフトを確定しました' : 'シフト希望を却下しました', decision === 'confirmed' ? 'success' : 'warn');
   };
 
   const decideShiftBatch = async (batchId, decision) => {
+    const rows = data.shiftRequests.filter((s) => s.batchId === batchId);
     const { error } = await supabase
       .from('shift_requests')
       .update({ status: decision, decided_at: new Date().toISOString() })
@@ -968,6 +1301,7 @@ export default function AttendanceApp() {
       return;
     }
     await refreshData();
+    if (rows[0]) await logAudit(session, decision === 'confirmed' ? 'シフトをまとめて確定' : 'シフト希望をまとめて却下', `${monthKeyLabel(rows[0].targetMonth)}分・${rows.length}日分`, rows[0].employeeId, rows[0].employeeName);
     show(decision === 'confirmed' ? 'まとめて確定しました' : 'まとめて却下しました', decision === 'confirmed' ? 'success' : 'warn');
   };
 
@@ -1018,12 +1352,10 @@ export default function AttendanceApp() {
       show('実績の送信に失敗しました', 'warn');
       return;
     }
-    await notify(
+    await notifyAdmin(
       `【個人実績】${session.name} - ${periodLabel}`,
       `${session.name}さんより ${periodLabel} の実績報告が届きました。内容をご確認のうえ承認してください。`,
-      inserted?.id,
-      null,
-      'admin'
+      inserted?.id
     );
     await refreshData();
     setPerformanceModal(null);
@@ -1041,15 +1373,15 @@ export default function AttendanceApp() {
       return;
     }
     if (report) {
-      await notify(
+      await notifyEmployeeUser(
+        report.employeeId,
         `【実績${decision === 'approved' ? '承認' : '却下'}】${report.periodLabel}`,
         `${report.periodLabel} の実績報告が${decision === 'approved' ? '承認されました' : '却下されました'}。${memo ? `管理者コメント：${memo}` : ''}`,
-        id,
-        report.employeeId,
-        'employee'
+        id
       );
     }
     await refreshData();
+    if (report) await logAudit(session, decision === 'approved' ? '実績報告を承認' : '実績報告を却下', report.periodLabel, report.employeeId, report.employeeName);
     show(decision === 'approved' ? '実績を承認しました' : '実績を却下しました', decision === 'approved' ? 'success' : 'warn');
   };
 
@@ -1068,7 +1400,7 @@ export default function AttendanceApp() {
   const historyDates = Array.from(new Set([...Object.keys(employeeRecords), today])).sort((a, b) => (a < b ? 1 : -1));
   const myCorrections = data.corrections.filter((c) => c.employeeId === employeeId);
   const myLeaveRequests = data.leaveRequests.filter((l) => l.employeeId === employeeId);
-  const myLeaveTotal = computeStatutoryPaidLeaveDays(session.hireDate, now);
+  const myLeaveTotal = computeLeaveTotal(session, now, data.groupLeaveSchedules);
   const myLeaveUsed = myLeaveRequests
     .filter((l) => l.type === '有休' && l.status === 'approved')
     .reduce((sum, l) => sum + l.days, 0);
@@ -1092,11 +1424,34 @@ export default function AttendanceApp() {
       <GlobalTopTabs topTab={topTab} setTopTab={setTopTab} />
       <Header session={session} onLogout={handleLogout} pendingCount={pendingCorrectionCount + pendingLeaveCount + pendingShiftCount + pendingPerformanceCount} missingPunchCount={missingPunchCount} viewMode={viewMode} />
       <main className={isDesktop ? 'max-w-6xl mx-auto px-6 pb-16 pt-8' : 'max-w-3xl mx-auto px-4 pb-24 pt-6'}>
-        {topTab === 'labor' && <ComingSoonPanel title="労務" />}
-        {topTab === 'hr' && <ComingSoonPanel title="人材" />}
+        {topTab === 'labor' && (
+          <AnnouncementsView
+            announcements={data.announcements}
+            isAdmin={session.role === 'admin'}
+            onSubmit={submitAnnouncement}
+            onDelete={deleteAnnouncement}
+            onGetFileUrl={getAnnouncementFileUrl}
+            isDesktop={isDesktop}
+          />
+        )}
+        {topTab === 'hr' && (
+          session.role === 'employee' ? (
+            <ProfileRequestView
+              session={session}
+              requests={data.profileUpdateRequests.filter((r) => r.employeeId === employeeId)}
+              onSubmit={submitProfileUpdateRequest}
+            />
+          ) : (
+            <AdminProfileRequestsTab
+              requests={data.profileUpdateRequests}
+              onDecide={decideProfileUpdateRequest}
+              isDesktop={isDesktop}
+            />
+          )
+        )}
         {topTab === 'payroll' && (
           session.role === 'employee' ? (
-            <PayslipView records={data.payrollRecords.filter((p) => p.employeeId === employeeId && p.status === 'published')} />
+            <PayslipView records={data.payrollRecords.filter((p) => p.employeeId === employeeId && p.status === 'published')} employeeName={session.name} />
           ) : (
             <PayrollAdminTab
               employeeAccounts={employeeAccounts}
@@ -1132,6 +1487,7 @@ export default function AttendanceApp() {
                 corrections={myCorrections}
                 onOpenCorrection={(dateKey) => setCorrectionModal(dateKey)}
                 notifications={data.notifications.filter((n) => n.toEmployeeId === employeeId)}
+                onMarkNotificationRead={async (id) => { await markNotificationRead(id); await refreshData(); }}
                 isDesktop={isDesktop}
               />
             )}
@@ -1173,6 +1529,7 @@ export default function AttendanceApp() {
             onDecidePerformance={decidePerformanceReport}
             onAddAccount={handleAddAccount}
             onUpdateDates={updateEmployeeDates}
+            onSaveGroupLeave={saveGroupLeaveSchedule}
             isDesktop={isDesktop}
           />
         ))}
@@ -1328,6 +1685,163 @@ function ComingSoonPanel({ title }) {
   );
 }
 
+const CATEGORY_COLORS = {
+  'お知らせ': 'bg-slate-100 text-slate-600',
+  '制度・インセンティブ': 'bg-amber-50 text-amber-700',
+  '資料・料金表': 'bg-blue-50 text-blue-700',
+  'キャンペーン': 'bg-rose-50 text-rose-700',
+  'その他': 'bg-slate-100 text-slate-600',
+};
+
+function AnnouncementsView({ announcements, isAdmin, onSubmit, onDelete, onGetFileUrl, isDesktop }) {
+  const [composerOpen, setComposerOpen] = useState(false);
+  const [categoryFilter, setCategoryFilter] = useState('all');
+  const [downloading, setDownloading] = useState(null);
+
+  const filtered = categoryFilter === 'all' ? announcements : announcements.filter((a) => a.category === categoryFilter);
+  const categoriesInUse = Array.from(new Set(announcements.map((a) => a.category)));
+
+  const openFile = async (a) => {
+    setDownloading(a.id);
+    const url = await onGetFileUrl(a.filePath);
+    setDownloading(null);
+    if (url) window.open(url, '_blank');
+  };
+
+  return (
+    <div className="space-y-5">
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2 flex-wrap">
+          <Megaphone size={16} className="text-slate-400" />
+          <h2 className="font-bold text-[14px] text-slate-800">お知らせ</h2>
+          {isAdmin && (
+            <button
+              onClick={() => setComposerOpen(true)}
+              className="ml-auto flex items-center gap-1.5 bg-amber-600 text-white text-[12.5px] font-bold px-3 py-1.5 rounded-lg shadow-sm active:brightness-95"
+            >
+              <Plus size={13} /> 配信する
+            </button>
+          )}
+        </div>
+        {categoriesInUse.length > 0 && (
+          <div className="px-5 py-3 border-b border-slate-100 flex items-center gap-2 flex-wrap">
+            <button
+              onClick={() => setCategoryFilter('all')}
+              className={`text-[11.5px] font-bold px-3 py-1 rounded-full ${categoryFilter === 'all' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-500'}`}
+            >
+              すべて
+            </button>
+            {categoriesInUse.map((c) => (
+              <button
+                key={c}
+                onClick={() => setCategoryFilter(c)}
+                className={`text-[11.5px] font-bold px-3 py-1 rounded-full ${categoryFilter === c ? 'bg-slate-800 text-white' : CATEGORY_COLORS[c] || 'bg-slate-100 text-slate-500'}`}
+              >
+                {c}
+              </button>
+            ))}
+          </div>
+        )}
+        {filtered.length === 0 ? (
+          <div className="px-5 py-14 text-center text-[12.5px] text-slate-300">お知らせはまだありません</div>
+        ) : (
+          <div className="divide-y divide-slate-100">
+            {filtered.map((a) => (
+              <div key={a.id} className="px-5 py-4">
+                <div className="flex items-start justify-between gap-2 mb-1.5">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {a.isPinned && <Pin size={12} className="text-amber-600" />}
+                    <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full ${CATEGORY_COLORS[a.category] || 'bg-slate-100 text-slate-500'}`}>{a.category}</span>
+                    <span className="text-[14px] font-bold text-slate-800">{a.title}</span>
+                  </div>
+                  {isAdmin && (
+                    <button onClick={() => onDelete(a)} className="text-slate-300 hover:text-rose-500 shrink-0">
+                      <Trash2 size={14} />
+                    </button>
+                  )}
+                </div>
+                {a.body && <div className="text-[12.5px] text-slate-600 whitespace-pre-wrap mb-2">{a.body}</div>}
+                {a.filePath && (
+                  <button
+                    onClick={() => openFile(a)}
+                    disabled={downloading === a.id}
+                    className="flex items-center gap-1.5 text-[12px] font-bold text-blue-700 bg-blue-50 rounded-lg px-3 py-1.5 mb-2"
+                  >
+                    <FileText size={13} /> {downloading === a.id ? '開いています…' : a.fileName || '添付ファイルを開く'}
+                  </button>
+                )}
+                <div className="text-[10.5px] text-slate-300">{a.createdByName} ・ {new Date(a.createdAt).toLocaleString('ja-JP')}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {composerOpen && (
+        <AnnouncementComposerModal onClose={() => setComposerOpen(false)} onSubmit={onSubmit} />
+      )}
+    </div>
+  );
+}
+
+function AnnouncementComposerModal({ onClose, onSubmit }) {
+  const [title, setTitle] = useState('');
+  const [category, setCategory] = useState(ANNOUNCEMENT_CATEGORIES[0]);
+  const [body, setBody] = useState('');
+  const [file, setFile] = useState(null);
+  const [isPinned, setIsPinned] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const canSubmit = title.trim().length > 0;
+
+  const submit = async () => {
+    setSaving(true);
+    const ok = await onSubmit({ title: title.trim(), category, body: body.trim(), file, isPinned });
+    setSaving(false);
+    if (ok) onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-40 p-0 sm:p-4">
+      <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-md max-h-[92vh] overflow-y-auto">
+        <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white">
+          <h3 className="font-bold text-[15px]">お知らせを配信</h3>
+          <button onClick={onClose} className="text-slate-400 text-xl leading-none px-1">×</button>
+        </div>
+        <div className="px-5 py-4 space-y-4">
+          <Field label="分類">
+            <select value={category} onChange={(e) => setCategory(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px] bg-white">
+              {ANNOUNCEMENT_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </Field>
+          <Field label="タイトル">
+            <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="例）2026年度アップセルポイント一覧表" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" />
+          </Field>
+          <Field label="本文（任意）">
+            <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={4} placeholder="内容の説明などを入力" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] resize-none" />
+          </Field>
+          <Field label="添付ファイル（PDFなど・任意）">
+            <label className="flex items-center gap-2 border-2 border-dashed border-slate-200 rounded-lg px-3 py-3 cursor-pointer text-[12.5px] text-slate-500">
+              <Paperclip size={14} />
+              {file ? file.name : 'タップしてファイルを選択'}
+              <input type="file" className="hidden" onChange={(e) => setFile(e.target.files?.[0] || null)} />
+            </label>
+          </Field>
+          <label className="flex items-center gap-2 text-[12.5px] text-slate-600">
+            <input type="checkbox" checked={isPinned} onChange={(e) => setIsPinned(e.target.checked)} />
+            上部に固定表示する
+          </label>
+        </div>
+        <div className="px-5 pb-5 pt-1 flex gap-2 sticky bottom-0 bg-white">
+          <button onClick={onClose} className="flex-1 py-2.5 rounded-lg border border-slate-200 text-[13.5px] font-medium text-slate-500">キャンセル</button>
+          <button onClick={submit} disabled={!canSubmit || saving} className="flex-1 py-2.5 rounded-lg bg-amber-600 disabled:bg-slate-200 text-white text-[13.5px] font-bold">
+            {saving ? '配信中…' : '配信する'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Header({ session, onLogout, pendingCount, missingPunchCount, viewMode }) {
   const alertCount = pendingCount + missingPunchCount;
   const isDesktop = viewMode === 'desktop';
@@ -1365,7 +1879,7 @@ function Header({ session, onLogout, pendingCount, missingPunchCount, viewMode }
   );
 }
 
-function EmployeeView({ now, todayRecord, onClockIn, onClockOut, onBreakStart, onBreakEnd, geoStatus, historyDates, records, corrections, onOpenCorrection, notifications, isDesktop }) {
+function EmployeeView({ now, todayRecord, onClockIn, onClockOut, onBreakStart, onBreakEnd, geoStatus, historyDates, records, corrections, onOpenCorrection, notifications, onMarkNotificationRead, isDesktop }) {
   const status = computeDayStatus(todayRecord);
   const canClockIn = !todayRecord?.clockIn;
   const canClockOut = todayRecord?.clockIn && !todayRecord?.clockOut;
@@ -1431,17 +1945,29 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, onBreakStart, o
       </div>
 
       <div className="rounded-2xl bg-white border border-slate-200 shadow-sm overflow-hidden">
-        <div className="px-5 py-3 bg-slate-100 text-[12.5px] font-bold text-slate-500">管理者からのお知らせ</div>
+        <div className="px-5 py-3 bg-slate-100 flex items-center justify-between">
+          <span className="text-[12.5px] font-bold text-slate-500">管理者からのお知らせ</span>
+          {notifications && notifications.some((n) => !n.isRead) && (
+            <span className="text-[10px] font-bold text-white bg-rose-500 rounded-full px-2 py-0.5">未読 {notifications.filter((n) => !n.isRead).length}</span>
+          )}
+        </div>
         {(!notifications || notifications.length === 0) ? (
           <div className="px-5 py-4 text-[12.5px] text-slate-400">管理者からのお知らせはありません</div>
         ) : (
           <div className="divide-y divide-slate-100">
             {notifications.slice(0, 5).map((n) => (
-              <div key={n.id} className="px-5 py-3">
-                <div className="text-[12.5px] font-bold text-slate-700">{n.subject}</div>
+              <button
+                key={n.id}
+                onClick={() => !n.isRead && onMarkNotificationRead(n.id)}
+                className="w-full text-left px-5 py-3 hover:bg-slate-50 transition-colors"
+              >
+                <div className="flex items-center gap-1.5">
+                  {!n.isRead && <span className="w-1.5 h-1.5 rounded-full bg-rose-500 shrink-0" />}
+                  <span className="text-[12.5px] font-bold text-slate-700">{n.subject}</span>
+                </div>
                 <div className="text-[11.5px] text-slate-500 mt-0.5">{n.body}</div>
                 <div className="text-[10px] text-slate-300 mt-1">{new Date(n.sentAt).toLocaleString('ja-JP')}</div>
-              </div>
+              </button>
             ))}
           </div>
         )}
@@ -2153,9 +2679,10 @@ function PerformanceModal({ type, onClose, onSubmit }) {
   );
 }
 
-function AdminDashboardTab({ missingCount, correctionCount, leaveCount, shiftCount, performanceCount, employeeCount, onNavigate, isDesktop }) {
+function AdminDashboardTab({ missingCount, correctionCount, leaveCount, shiftCount, performanceCount, gpsAlertCount, employeeCount, onNavigate, isDesktop }) {
   const alertRows = [
     { label: '打刻漏れ・打刻間違い', count: missingCount, tab: 'requests', icon: <AlertTriangle size={14} /> },
+    { label: '位置情報が5回以上連続で未記録', count: gpsAlertCount, tab: 'attendance', icon: <MapPin size={14} /> },
   ];
   const unapprovedRows = [
     { label: '未承認の勤怠修正申請', count: correctionCount, tab: 'requests', icon: <FileEdit size={14} /> },
@@ -2267,7 +2794,42 @@ function computePayrollPreview({ wageType, hourlyWage, monthlySalary, workedMinu
 
 const formatYen = (n) => `¥${Math.round(n || 0).toLocaleString('ja-JP')}`;
 
-function PayslipView({ records }) {
+function printPayslip(p, employeeName) {
+  const win = window.open('', '_blank', 'width=480,height=700');
+  if (!win) return;
+  const html = `<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><title>給与明細 ${p.year}年${p.month}月分</title>
+<style>
+  body { font-family: -apple-system, "Hiragino Sans", sans-serif; padding: 32px; color: #1e293b; }
+  h1 { font-size: 18px; margin-bottom: 4px; }
+  .sub { color: #64748b; font-size: 12px; margin-bottom: 20px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  td { padding: 8px 0; border-bottom: 1px solid #e2e8f0; }
+  td.label { color: #64748b; }
+  td.value { text-align: right; font-family: monospace; }
+  .total td { font-weight: bold; font-size: 16px; border-top: 2px solid #1e293b; border-bottom: none; padding-top: 12px; }
+  .note { margin-top: 24px; font-size: 10.5px; color: #94a3b8; }
+</style></head>
+<body>
+  <h1>給与明細</h1>
+  <div class="sub">${employeeName} 様　／　${p.year}年${p.month}月分</div>
+  <table>
+    <tr><td class="label">区分</td><td class="value">${p.wageType === 'hourly' ? `時給 ${formatYen(p.wageRate)}` : `月給 ${formatYen(p.wageRate)}`}</td></tr>
+    <tr><td class="label">実働時間</td><td class="value">${minutesToHHMM(p.workedMinutes)}</td></tr>
+    <tr><td class="label">残業時間</td><td class="value">${minutesToHHMM(p.overtimeMinutes)}</td></tr>
+    <tr><td class="label">基本給</td><td class="value">${formatYen(p.baseAmount)}</td></tr>
+    <tr><td class="label">残業手当</td><td class="value">${formatYen(p.overtimeAmount)}</td></tr>
+    <tr class="total"><td>総支給額（概算）</td><td class="value">${formatYen(p.totalAmount)}</td></tr>
+  </table>
+  <div class="note">※税金・社会保険料などの控除は含まれていない、総支給額の概算です。正式な給与額は別途ご確認ください。</div>
+</body></html>`;
+  win.document.write(html);
+  win.document.close();
+  win.focus();
+  setTimeout(() => win.print(), 300);
+}
+
+function PayslipView({ records, employeeName }) {
   const sorted = [...records].sort((a, b) => (a.year !== b.year ? b.year - a.year : b.month - a.month));
   return (
     <div className="space-y-4">
@@ -2296,6 +2858,12 @@ function PayslipView({ records }) {
                   <span className="text-[12.5px] font-bold text-slate-700">総支給額（概算）</span>
                   <span className="font-mono text-[18px] font-bold text-slate-900">{formatYen(p.totalAmount)}</span>
                 </div>
+                <button
+                  onClick={() => printPayslip(p, employeeName)}
+                  className="w-full mt-2 py-2 rounded-lg border border-slate-200 text-[12px] font-bold text-slate-600 flex items-center justify-center gap-1.5"
+                >
+                  <Download size={13} /> 印刷・PDF保存
+                </button>
               </div>
             </div>
           ))}
@@ -2508,19 +3076,21 @@ function AdminTopNav({ tab, setTab, correctionCount, leaveCount, shiftCount, per
     {
       key: 'leave-group',
       label: '休暇・申請管理',
-      tabs: ['leave', 'shift', 'performance'],
+      tabs: ['leave', 'shift', 'performance', 'groupleave'],
       items: [
         { tab: 'leave', label: '休暇申請', sub: '承認・却下', badge: leaveCount },
         { tab: 'shift', label: 'シフト希望', sub: '確定・却下', badge: shiftCount },
         { tab: 'performance', label: '実績報告', sub: '承認・却下', badge: performanceCount },
+        { tab: 'groupleave', label: 'グループ休暇設定', sub: '月別規定日数' },
       ],
     },
     {
       key: 'staff-group',
       label: 'スタッフ管理',
-      tabs: ['accounts'],
+      tabs: ['accounts', 'auditlog'],
       items: [
         { tab: 'accounts', label: '社員一覧・登録', sub: '入退職日・有休管理' },
+        { tab: 'auditlog', label: '監査ログ', sub: '承認・操作の履歴' },
       ],
     },
   ];
@@ -2586,7 +3156,7 @@ function AdminTopNav({ tab, setTab, correctionCount, leaveCount, shiftCount, per
   );
 }
 
-function AdminView({ data, employeeAccounts, onDecide, onDecideLeave, onDecideShift, onDecideShiftBatch, onAddShift, onDecidePerformance, onAddAccount, onUpdateDates, isDesktop }) {
+function AdminView({ data, employeeAccounts, onDecide, onDecideLeave, onDecideShift, onDecideShiftBatch, onAddShift, onDecidePerformance, onAddAccount, onUpdateDates, onSaveGroupLeave, isDesktop }) {
   const [tab, setTab] = useState('dashboard'); // dashboard | attendance | requests | leave | shift | performance | accounts
   const pending = data.corrections.filter((c) => c.status === 'pending');
   const decided = data.corrections.filter((c) => c.status !== 'pending').slice(0, 8);
@@ -2605,6 +3175,8 @@ function AdminView({ data, employeeAccounts, onDecide, onDecideLeave, onDecideSh
       if (r.date !== today && r.clockIn && !r.clockOut) missing.push({ ...r, employeeName: acc.name });
     });
   });
+
+  const gpsAlerts = computeGpsAlertEmployees(employeeAccounts, data.records);
 
   const notifications = (data.notifications || []).slice(0, 6);
 
@@ -2657,6 +3229,12 @@ function AdminView({ data, employeeAccounts, onDecide, onDecideLeave, onDecideSh
           <button onClick={() => setTab('accounts')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'accounts' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
             社員管理
           </button>
+          <button onClick={() => setTab('groupleave')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'groupleave' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
+            休暇設定
+          </button>
+          <button onClick={() => setTab('auditlog')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'auditlog' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
+            監査ログ
+          </button>
         </div>
       )}
 
@@ -2679,6 +3257,7 @@ function AdminView({ data, employeeAccounts, onDecide, onDecideLeave, onDecideSh
           leaveCount={leavePending.length}
           shiftCount={shiftPending.length}
           performanceCount={performancePending.length}
+          gpsAlertCount={gpsAlerts.length}
           employeeCount={employeeAccounts.length}
           onNavigate={setTab}
           isDesktop={isDesktop}
@@ -2686,11 +3265,24 @@ function AdminView({ data, employeeAccounts, onDecide, onDecideLeave, onDecideSh
       )}
 
       {tab === 'attendance' && (
-        <AttendanceAdminTab data={data} employeeAccounts={employeeAccounts} isDesktop={isDesktop} />
+        <AttendanceAdminTab data={data} employeeAccounts={employeeAccounts} gpsAlerts={gpsAlerts} isDesktop={isDesktop} />
       )}
 
       {tab === 'accounts' && (
-        <AccountManagement employeeAccounts={employeeAccounts} onAddAccount={onAddAccount} onUpdateDates={onUpdateDates} isDesktop={isDesktop} />
+        <AccountManagement employeeAccounts={employeeAccounts} onAddAccount={onAddAccount} onUpdateDates={onUpdateDates} groupLeaveSchedules={data.groupLeaveSchedules} isDesktop={isDesktop} />
+      )}
+
+      {tab === 'auditlog' && (
+        <AdminAuditLogTab logs={data.auditLogs} isDesktop={isDesktop} />
+      )}
+
+      {tab === 'groupleave' && (
+        <GroupLeaveScheduleTab
+          employeeAccounts={employeeAccounts}
+          groupLeaveSchedules={data.groupLeaveSchedules}
+          onSave={onSaveGroupLeave}
+          isDesktop={isDesktop}
+        />
       )}
 
       {tab === 'performance' && (
@@ -3108,14 +3700,22 @@ function PerformanceAdminTab({ pending, decided, onDecide, isDesktop }) {
 }
 
 
-function AttendanceAdminTab({ data, employeeAccounts, isDesktop }) {
+function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], isDesktop }) {
   const now = new Date();
   const [month, setMonth] = useState(`${now.getFullYear()}-${pad(now.getMonth() + 1)}`);
   const [employeeFilter, setEmployeeFilter] = useState('all');
+  const [groupFilter, setGroupFilter] = useState('all');
+  const gpsAlertIds = new Set(gpsAlerts.map((g) => g.employeeId));
+  const groups = Array.from(new Set(employeeAccounts.map((a) => a.mainGroup).filter(Boolean)));
+
+  const filteredAccounts = employeeAccounts.filter((acc) => {
+    if (groupFilter !== 'all' && acc.mainGroup !== groupFilter) return false;
+    if (employeeFilter !== 'all' && acc.id !== employeeFilter) return false;
+    return true;
+  });
 
   const rows = [];
-  employeeAccounts.forEach((acc) => {
-    if (employeeFilter !== 'all' && acc.id !== employeeFilter) return;
+  filteredAccounts.forEach((acc) => {
     const recs = data.records[acc.id] || {};
     Object.values(recs).forEach((record) => {
       if (!record?.date || !record.date.startsWith(month)) return;
@@ -3137,8 +3737,7 @@ function AttendanceAdminTab({ data, employeeAccounts, isDesktop }) {
   });
   rows.sort((a, b) => a.date === b.date ? a.employeeName.localeCompare(b.employeeName, 'ja') : (a.date < b.date ? 1 : -1));
 
-  const summaryByEmployee = employeeAccounts
-    .filter((acc) => employeeFilter === 'all' || acc.id === employeeFilter)
+  const summaryByEmployee = filteredAccounts
     .map((acc) => {
       const mine = rows.filter((r) => r.employeeId === acc.id);
       return {
@@ -3149,6 +3748,7 @@ function AttendanceAdminTab({ data, employeeAccounts, isDesktop }) {
         overtimeMin: mine.reduce((sum, r) => sum + r.overtimeMin, 0),
         lateEarlyCount: mine.filter((r) => r.lateMin > 0 || r.earlyLeaveMin > 0).length,
         missingCount: mine.filter((r) => r.clockIn && !r.clockOut).length,
+        gpsAlert: gpsAlertIds.has(acc.id),
       };
     });
 
@@ -3170,10 +3770,28 @@ function AttendanceAdminTab({ data, employeeAccounts, isDesktop }) {
 
   return (
     <div className="space-y-5">
+      {gpsAlerts.length > 0 && (
+        <div className="bg-rose-50 border border-rose-200 rounded-xl px-4 py-3 flex items-start gap-2.5">
+          <MapPin size={16} className="text-rose-500 mt-0.5 shrink-0" />
+          <div className="text-[12.5px] text-rose-700">
+            <div className="font-bold mb-0.5">位置情報が5回以上連続で記録されていないスタッフがいます</div>
+            {gpsAlerts.map((g) => <div key={g.employeeId}>{g.employeeName}（{g.consecutiveCount}回連続）</div>)}
+          </div>
+        </div>
+      )}
+
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 flex flex-wrap items-end gap-3">
         <Field label="対象月">
           <input type="month" value={month} onChange={(e) => setMonth(e.target.value)} className="border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px] bg-white" />
         </Field>
+        {groups.length > 0 && (
+          <Field label="グループ">
+            <select value={groupFilter} onChange={(e) => setGroupFilter(e.target.value)} className="border border-slate-200 rounded-lg px-3 py-2 text-[13px] bg-white min-w-[140px]">
+              <option value="all">全グループ</option>
+              {groups.map((g) => <option key={g} value={g}>{g}</option>)}
+            </select>
+          </Field>
+        )}
         <Field label="社員">
           <select value={employeeFilter} onChange={(e) => setEmployeeFilter(e.target.value)} className="border border-slate-200 rounded-lg px-3 py-2 text-[13px] bg-white min-w-[180px]">
             <option value="all">全社員</option>
@@ -3223,7 +3841,7 @@ function AttendanceAdminTab({ data, employeeAccounts, isDesktop }) {
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
         <div className="px-5 py-3.5 border-b border-slate-100 font-bold text-[13.5px]">社員別集計</div>
         <div className="divide-y divide-slate-100">{summaryByEmployee.map((s) => <div key={s.id} className="px-5 py-3 flex items-center justify-between gap-3 text-[12px]">
-          <span className="font-semibold text-slate-800">{s.name}</span><span className="text-slate-500 text-right">{s.days}日 / 実働 <b className="font-mono text-slate-800">{minutesToHHMM(s.workedMin)}</b> / 残業 <b className="font-mono text-slate-800">{minutesToHHMM(s.overtimeMin)}</b>{s.missingCount > 0 ? ` / 未退勤 ${s.missingCount}件` : ''}</span>
+          <span className="font-semibold text-slate-800 flex items-center gap-1.5">{s.name}{s.gpsAlert && <MapPin size={12} className="text-rose-500" />}</span><span className="text-slate-500 text-right">{s.days}日 / 実働 <b className="font-mono text-slate-800">{minutesToHHMM(s.workedMin)}</b> / 残業 <b className="font-mono text-slate-800">{minutesToHHMM(s.overtimeMin)}</b>{s.missingCount > 0 ? ` / 未退勤 ${s.missingCount}件` : ''}</span>
         </div>)}</div>
       </div>
     </div>
@@ -3237,7 +3855,347 @@ function MiniValue({ label, value }) {
   return <div><div className="text-[9.5px] text-slate-400">{label}</div><div className="font-mono text-[12.5px] font-semibold text-slate-700">{value}</div></div>;
 }
 
-function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, isDesktop }) {
+function ProfileRequestView({ session, requests, onSubmit }) {
+  const [modalOpen, setModalOpen] = useState(false);
+  const pending = requests.filter((r) => r.status === 'pending');
+
+  return (
+    <div className="space-y-5">
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+          <UserCog size={16} className="text-slate-400" />
+          <h2 className="font-bold text-[14px] text-slate-800">個人情報</h2>
+          <button
+            onClick={() => setModalOpen(true)}
+            className="ml-auto flex items-center gap-1.5 bg-amber-600 text-white text-[12.5px] font-bold px-3 py-1.5 rounded-lg shadow-sm active:brightness-95"
+          >
+            <Pencil size={13} /> 変更を申請
+          </button>
+        </div>
+        <div className="divide-y divide-slate-100">
+          {PROFILE_EDITABLE_FIELDS.map(({ key, label }) => (
+            <div key={key} className="px-5 py-3 flex items-center justify-between text-[13px]">
+              <span className="text-slate-400">{label}</span>
+              <span className="font-medium text-slate-700">{session[key] || '未設定'}</span>
+            </div>
+          ))}
+        </div>
+        <div className="px-5 py-2.5 bg-slate-50 text-[10.5px] text-slate-400 border-t border-slate-100">
+          変更は管理者の承認後に反映されます。氏名・入職日・スタッフ種別などの変更はご相談ください。
+        </div>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+          <ListChecks size={15} className="text-slate-400" />
+          <h2 className="font-bold text-[13.5px]">申請履歴</h2>
+          {pending.length > 0 && <span className="ml-auto text-[11px] bg-amber-600 text-white rounded-full px-2 py-0.5 font-bold">{pending.length}</span>}
+        </div>
+        {requests.length === 0 ? (
+          <div className="px-5 py-10 text-center text-[12.5px] text-slate-300">まだ申請はありません</div>
+        ) : (
+          <div className="divide-y divide-slate-100">
+            {requests.map((r) => (
+              <div key={r.id} className="px-5 py-3.5">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-[11.5px] text-slate-400">{new Date(r.submittedAt).toLocaleDateString('ja-JP')}</span>
+                  <LeaveStatusBadge status={r.status === 'approved' ? 'approved' : r.status} />
+                </div>
+                <div className="text-[12.5px] text-slate-700 space-y-0.5">
+                  {Object.entries(r.requestedChanges).map(([key, value]) => (
+                    <div key={key}>{PROFILE_EDITABLE_FIELDS.find((f) => f.key === key)?.label || key}：{r.originalValues?.[key] || '未設定'} → <b>{value || '未設定'}</b></div>
+                  ))}
+                </div>
+                {r.adminMemo && (
+                  <div className="mt-2 flex items-start gap-1.5 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2 text-[11.5px] text-amber-800">
+                    <MessageSquare size={12} className="mt-0.5 shrink-0" />
+                    <span>管理者コメント：{r.adminMemo}</span>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {modalOpen && (
+        <ProfileRequestModal session={session} onClose={() => setModalOpen(false)} onSubmit={onSubmit} />
+      )}
+    </div>
+  );
+}
+
+function ProfileRequestModal({ session, onClose, onSubmit }) {
+  const [form, setForm] = useState(() => {
+    const f = {};
+    PROFILE_EDITABLE_FIELDS.forEach(({ key }) => { f[key] = session[key] || ''; });
+    return f;
+  });
+  const [reason, setReason] = useState('');
+  const [saving, setSaving] = useState(false);
+  const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
+
+  const changedFields = PROFILE_EDITABLE_FIELDS.filter(({ key }) => form[key] !== (session[key] || ''));
+  const canSubmit = changedFields.length > 0;
+
+  const submit = async () => {
+    setSaving(true);
+    const changes = {};
+    changedFields.forEach(({ key }) => { changes[key] = form[key]; });
+    await onSubmit(changes, reason);
+    setSaving(false);
+    onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-40 p-0 sm:p-4">
+      <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-md max-h-[92vh] overflow-y-auto">
+        <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white">
+          <h3 className="font-bold text-[15px]">個人情報の変更申請</h3>
+          <button onClick={onClose} className="text-slate-400 text-xl leading-none px-1">×</button>
+        </div>
+        <div className="px-5 py-4 space-y-4">
+          {PROFILE_EDITABLE_FIELDS.map(({ key, label }) => (
+            <Field key={key} label={label}>
+              <input value={form[key]} onChange={set(key)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" />
+            </Field>
+          ))}
+          <Field label="変更理由（任意）">
+            <textarea value={reason} onChange={(e) => setReason(e.target.value)} rows={2} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] resize-none" />
+          </Field>
+          <div className="flex items-start gap-2 bg-slate-50 rounded-lg p-3 text-[11.5px] text-slate-500">
+            <Mail size={13} className="mt-0.5 shrink-0" />
+            <span>申請すると管理者に通知が送信されます。承認されるまで反映されません</span>
+          </div>
+        </div>
+        <div className="px-5 pb-5 pt-1 flex gap-2 sticky bottom-0 bg-white">
+          <button onClick={onClose} className="flex-1 py-2.5 rounded-lg border border-slate-200 text-[13.5px] font-medium text-slate-500">キャンセル</button>
+          <button onClick={submit} disabled={!canSubmit || saving} className="flex-1 py-2.5 rounded-lg bg-amber-600 disabled:bg-slate-200 text-white text-[13.5px] font-bold">
+            {saving ? '送信中…' : '申請する'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AdminProfileRequestsTab({ requests, onDecide, isDesktop }) {
+  const [memos, setMemos] = useState({});
+  const setMemo = (id, v) => setMemos((m) => ({ ...m, [id]: v }));
+  const pending = requests.filter((r) => r.status === 'pending');
+  const decided = requests.filter((r) => r.status !== 'pending').slice(0, 10);
+
+  const pendingCard = (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+      <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+        <UserCog size={15} className="text-slate-400" />
+        <h2 className="font-bold text-[13.5px]">個人情報の変更申請</h2>
+        {pending.length > 0 && <span className="ml-auto text-[11px] bg-amber-600 text-white rounded-full px-2 py-0.5 font-bold">{pending.length}</span>}
+      </div>
+      {pending.length === 0 ? (
+        <div className="px-5 py-8 text-center text-[12.5px] text-slate-300">承認待ちの申請はありません</div>
+      ) : (
+        <div className="divide-y divide-slate-100">
+          {pending.map((r) => (
+            <div key={r.id} className="px-5 py-4">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-[13px] font-semibold text-slate-800">{r.employeeName}</span>
+                <span className="text-[10.5px] text-slate-400">{new Date(r.submittedAt).toLocaleString('ja-JP')}</span>
+              </div>
+              <div className="font-mono text-[12px] text-slate-600 bg-slate-50 rounded-lg px-3 py-2 mb-2 space-y-0.5">
+                {Object.entries(r.requestedChanges).map(([key, value]) => (
+                  <div key={key}>{PROFILE_EDITABLE_FIELDS.find((f) => f.key === key)?.label || key}：{r.originalValues?.[key] || '未設定'} → <b className="text-slate-800">{value || '未設定'}</b></div>
+                ))}
+              </div>
+              {r.reason && <div className="text-[12px] text-slate-500 mb-2">理由：{r.reason}</div>}
+              <textarea
+                value={memos[r.id] ?? ''}
+                onChange={(e) => setMemo(r.id, e.target.value)}
+                rows={2}
+                placeholder="社員に送るコメント（任意）"
+                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[12.5px] resize-none mb-2"
+              />
+              <div className="flex gap-2">
+                <button onClick={() => onDecide(r.id, 'rejected', memos[r.id] || '')} className="flex-1 flex items-center justify-center gap-1 py-2 rounded-lg border border-slate-200 text-[12.5px] font-medium text-slate-500">
+                  <XCircle size={13} /> 却下
+                </button>
+                <button onClick={() => onDecide(r.id, 'approved', memos[r.id] || '')} className="flex-1 flex items-center justify-center gap-1 py-2 rounded-lg bg-emerald-600 text-white text-[12.5px] font-bold">
+                  <CheckCircle2 size={13} /> 承認して反映
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+
+  const decidedCard = decided.length > 0 && (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden h-fit">
+      <div className="px-5 py-3.5 border-b border-slate-100">
+        <h2 className="font-bold text-[13.5px]">処理済み</h2>
+      </div>
+      <div className="divide-y divide-slate-100">
+        {decided.map((r) => (
+          <div key={r.id} className="px-5 py-2.5 text-[12.5px] flex items-center justify-between">
+            <span>{r.employeeName}</span>
+            <span className={`font-medium ${r.status === 'approved' ? 'text-emerald-600' : 'text-slate-400'}`}>
+              {r.status === 'approved' ? '承認済み' : '却下'}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+
+  if (isDesktop) {
+    return <div className="grid grid-cols-2 gap-5 items-start">{pendingCard}{decidedCard}</div>;
+  }
+  return <div className="space-y-5">{pendingCard}{decidedCard}</div>;
+}
+
+function GroupLeaveScheduleTab({ employeeAccounts, groupLeaveSchedules, onSave, isDesktop }) {
+  const existingGroups = Array.from(new Set(employeeAccounts.map((a) => a.mainGroup).filter(Boolean)));
+  const knownGroups = Array.from(new Set([...existingGroups, ...Object.keys(groupLeaveSchedules || {})]));
+  const [selectedGroup, setSelectedGroup] = useState(knownGroups[0] || '');
+  const [newGroupName, setNewGroupName] = useState('');
+  const [months, setMonths] = useState(() => {
+    const initial = {};
+    for (let m = 1; m <= 12; m++) initial[m] = String((groupLeaveSchedules?.[knownGroups[0]] || {})[m] || 0);
+    return initial;
+  });
+
+  const loadGroup = (groupName) => {
+    setSelectedGroup(groupName);
+    const m = {};
+    for (let i = 1; i <= 12; i++) m[i] = String((groupLeaveSchedules?.[groupName] || {})[i] || 0);
+    setMonths(m);
+  };
+
+  const setMonth = (m) => (e) => setMonths((prev) => ({ ...prev, [m]: e.target.value }));
+
+  const addNewGroup = () => {
+    const name = newGroupName.trim();
+    if (!name) return;
+    setNewGroupName('');
+    loadGroup(name);
+  };
+
+  const total = Object.values(months).reduce((sum, v) => sum + (Number(v) || 0), 0);
+
+  const save = () => {
+    if (!selectedGroup) return;
+    onSave(selectedGroup, months);
+  };
+
+  return (
+    <div className="space-y-5">
+      <div className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 text-[11.5px] text-blue-800">
+        メイングループごとに、月ごとの休暇付与日数を設定できます（1月〜12月の累計で当年分を計算）。対象は社員・契約社員のみで、パート・アルバイトには適用されません（比例付与が優先されます）。設定が無いグループは、これまで通り法定の自動計算が使われます。
+      </div>
+
+      <div className={isDesktop ? 'grid grid-cols-[240px_1fr] gap-5 items-start' : 'space-y-4'}>
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="px-4 py-3 border-b border-slate-100 text-[12px] font-bold text-slate-500">グループ一覧</div>
+          <div className="divide-y divide-slate-100 max-h-64 overflow-y-auto">
+            {knownGroups.length === 0 && <div className="px-4 py-6 text-center text-[12px] text-slate-300">グループがまだありません</div>}
+            {knownGroups.map((g) => (
+              <button
+                key={g}
+                onClick={() => loadGroup(g)}
+                className={`w-full text-left px-4 py-2.5 text-[13px] ${selectedGroup === g ? 'bg-slate-800 text-white font-bold' : 'text-slate-700 hover:bg-slate-50'}`}
+              >
+                {g}
+              </button>
+            ))}
+          </div>
+          <div className="p-3 border-t border-slate-100 flex gap-2">
+            <input value={newGroupName} onChange={(e) => setNewGroupName(e.target.value)} placeholder="新しいグループ名" className="flex-1 border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px]" />
+            <button onClick={addNewGroup} className="text-[12px] font-bold text-amber-600 shrink-0">追加</button>
+          </div>
+        </div>
+
+        {selectedGroup ? (
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="px-5 py-3.5 border-b border-slate-100">
+              <h2 className="font-bold text-[14px] text-slate-800">{selectedGroup}</h2>
+              <p className="text-[11px] text-slate-400 mt-0.5">月ごとの付与日数（累計 {total}日／年）</p>
+            </div>
+            <div className="p-5 grid grid-cols-3 sm:grid-cols-4 gap-3">
+              {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
+                <Field key={m} label={`${m}月`}>
+                  <input type="number" step="0.5" value={months[m]} onChange={setMonth(m)} className="w-full border border-slate-200 rounded-lg px-2.5 py-2 font-mono text-[13px]" />
+                </Field>
+              ))}
+            </div>
+            <div className="px-5 pb-5">
+              <button onClick={save} className="w-full py-2.5 rounded-lg bg-slate-800 text-white text-[13px] font-bold">この内容で保存する</button>
+            </div>
+          </div>
+        ) : (
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-6 py-14 text-center text-[12.5px] text-slate-300">
+            左のリストからグループを選ぶか、新しいグループ名を追加してください
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AdminAuditLogTab({ logs, isDesktop }) {
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+      <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+        <ListChecks size={15} className="text-slate-400" />
+        <h2 className="font-bold text-[13.5px]">監査ログ</h2>
+        <span className="text-[11px] text-slate-400">直近{logs.length}件</span>
+      </div>
+      {logs.length === 0 ? (
+        <div className="px-5 py-14 text-center text-[12.5px] text-slate-300">まだ記録がありません</div>
+      ) : isDesktop ? (
+        <table className="w-full text-[12.5px]">
+          <thead>
+            <tr className="text-left text-[10.5px] text-slate-400 border-b border-slate-100">
+              <th className="px-5 py-2 font-medium">日時</th>
+              <th className="px-5 py-2 font-medium">操作者</th>
+              <th className="px-5 py-2 font-medium">操作内容</th>
+              <th className="px-5 py-2 font-medium">対象社員</th>
+              <th className="px-5 py-2 font-medium">詳細</th>
+            </tr>
+          </thead>
+          <tbody>
+            {logs.map((l) => (
+              <tr key={l.id} className="border-b border-slate-100 last:border-0">
+                <td className="px-5 py-2.5 font-mono text-slate-500 whitespace-nowrap">{new Date(l.createdAt).toLocaleString('ja-JP')}</td>
+                <td className="px-5 py-2.5 font-semibold text-slate-700 whitespace-nowrap">{l.actorName || '—'}</td>
+                <td className="px-5 py-2.5 whitespace-nowrap">{l.action}</td>
+                <td className="px-5 py-2.5 whitespace-nowrap">{l.targetEmployeeName || '—'}</td>
+                <td className="px-5 py-2.5 text-slate-500">{l.detail || ''}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        <div className="divide-y divide-slate-100">
+          {logs.map((l) => (
+            <div key={l.id} className="px-5 py-3">
+              <div className="flex items-center justify-between">
+                <span className="text-[12.5px] font-bold text-slate-800">{l.action}</span>
+                <span className="text-[10px] text-slate-300 font-mono">{new Date(l.createdAt).toLocaleString('ja-JP')}</span>
+              </div>
+              <div className="text-[11.5px] text-slate-500 mt-0.5">
+                {l.actorName || '—'}{l.targetEmployeeName ? ` → ${l.targetEmployeeName}` : ''}
+              </div>
+              {l.detail && <div className="text-[11px] text-slate-400 mt-0.5">{l.detail}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, groupLeaveSchedules, isDesktop }) {
   const [name, setName] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -3247,6 +4205,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, isDe
   const [editHire, setEditHire] = useState('');
   const [editResign, setEditResign] = useState('');
   const [profileModalAccount, setProfileModalAccount] = useState(null);
+  const [csvModalOpen, setCsvModalOpen] = useState(false);
 
   const canSubmit = name.trim() && username.trim() && password.trim().length >= 4 && hireDate;
 
@@ -3276,7 +4235,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, isDe
 
   const employeeRow = (acc) => {
     const isEditing = editingId === acc.id;
-    const granted = computeStatutoryPaidLeaveDays(acc.hireDate);
+    const granted = computeLeaveTotal(acc, new Date(), groupLeaveSchedules);
     const retired = acc.resignationDate && acc.resignationDate <= todayKey();
     return { acc, isEditing, granted, retired };
   };
@@ -3287,8 +4246,11 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, isDe
         <Users size={15} className="text-slate-400" />
         <h2 className="font-bold text-[13.5px]">社員一覧</h2>
         <span className="text-[11px] text-slate-400">{employeeAccounts.length}名</span>
+        <button onClick={() => setCsvModalOpen(true)} className="ml-auto flex items-center gap-1 text-[12px] font-bold text-slate-500 border border-slate-200 rounded-lg px-2.5 py-1.5">
+          <Download size={13} className="rotate-180" /> CSV一括登録
+        </button>
         {!isDesktop && (
-          <button onClick={() => setShowForm((v) => !v)} className="ml-auto flex items-center gap-1 text-[12px] font-bold text-amber-600">
+          <button onClick={() => setShowForm((v) => !v)} className="flex items-center gap-1 text-[12px] font-bold text-amber-600">
             <UserPlus size={14} /> 追加
           </button>
         )}
@@ -3450,6 +4412,126 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, isDe
           onSave={onUpdateDates}
         />
       )}
+      {csvModalOpen && (
+        <CsvImportModal
+          onClose={() => setCsvModalOpen(false)}
+          onAddAccount={onAddAccount}
+        />
+      )}
+    </div>
+  );
+}
+
+function CsvImportModal({ onClose, onAddAccount }) {
+  const [csvText, setCsvText] = useState('name,username,password,hireDate\n田中 花子,tanaka,pass1234,2026-08-01');
+  const [rows, setRows] = useState([]);
+  const [running, setRunning] = useState(false);
+  const [results, setResults] = useState([]);
+
+  const parse = () => {
+    const lines = csvText.trim().split('\n').filter((l) => l.trim());
+    if (lines.length < 2) {
+      setRows([]);
+      return;
+    }
+    const header = lines[0].split(',').map((h) => h.trim());
+    const idx = {
+      name: header.indexOf('name'),
+      username: header.indexOf('username'),
+      password: header.indexOf('password'),
+      hireDate: header.indexOf('hireDate'),
+    };
+    if (idx.name < 0 || idx.username < 0 || idx.password < 0) {
+      setRows([]);
+      return;
+    }
+    const parsed = lines.slice(1).map((line) => {
+      const cols = line.split(',').map((c) => c.trim());
+      return {
+        name: cols[idx.name] || '',
+        username: cols[idx.username] || '',
+        password: cols[idx.password] || '',
+        hireDate: idx.hireDate >= 0 ? cols[idx.hireDate] || todayKey() : todayKey(),
+      };
+    }).filter((r) => r.name && r.username && r.password);
+    setRows(parsed);
+    setResults([]);
+  };
+
+  const runImport = async () => {
+    setRunning(true);
+    const nextResults = [];
+    for (const row of rows) {
+      const ok = await onAddAccount(row);
+      nextResults.push({ ...row, ok });
+    }
+    setResults(nextResults);
+    setRunning(false);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-40 p-0 sm:p-4">
+      <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg max-h-[92vh] overflow-y-auto">
+        <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white">
+          <h3 className="font-bold text-[15px]">CSVで社員を一括登録</h3>
+          <button onClick={onClose} className="text-slate-400 text-xl leading-none px-1">×</button>
+        </div>
+        <div className="px-5 py-4 space-y-3">
+          <div className="text-[11.5px] text-slate-500 bg-slate-50 rounded-lg p-3">
+            1行目は見出し（<code className="font-mono">name,username,password,hireDate</code>）にしてください。<br />
+            2行目以降に1人ずつ、カンマ区切りで入力します。<code className="font-mono">hireDate</code>は省略可（形式：YYYY-MM-DD）。パスワードは4文字以上にしてください。
+          </div>
+          <textarea
+            value={csvText}
+            onChange={(e) => { setCsvText(e.target.value); setRows([]); setResults([]); }}
+            rows={8}
+            className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[12.5px] resize-none"
+          />
+          <button onClick={parse} className="text-[12px] font-bold text-slate-600 border border-slate-200 rounded-lg px-3 py-1.5">
+            内容を確認する
+          </button>
+
+          {rows.length > 0 && results.length === 0 && (
+            <div className="border border-slate-200 rounded-lg overflow-hidden">
+              <div className="px-3 py-2 bg-slate-50 text-[11.5px] font-bold text-slate-600">{rows.length}名を登録します</div>
+              <div className="divide-y divide-slate-100 max-h-48 overflow-y-auto">
+                {rows.map((r, i) => (
+                  <div key={i} className="px-3 py-1.5 text-[12px] flex items-center justify-between">
+                    <span>{r.name}</span>
+                    <span className="font-mono text-slate-400">{r.username}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {results.length > 0 && (
+            <div className="border border-slate-200 rounded-lg overflow-hidden">
+              <div className="px-3 py-2 bg-slate-50 text-[11.5px] font-bold text-slate-600">
+                結果：成功 {results.filter((r) => r.ok).length}件 ／ 失敗 {results.filter((r) => !r.ok).length}件
+              </div>
+              <div className="divide-y divide-slate-100 max-h-48 overflow-y-auto">
+                {results.map((r, i) => (
+                  <div key={i} className="px-3 py-1.5 text-[12px] flex items-center justify-between">
+                    <span>{r.name}（{r.username}）</span>
+                    <span className={`font-bold ${r.ok ? 'text-emerald-600' : 'text-rose-600'}`}>{r.ok ? '成功' : '失敗'}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="px-5 pb-5 pt-1 flex gap-2 sticky bottom-0 bg-white">
+          <button onClick={onClose} className="flex-1 py-2.5 rounded-lg border border-slate-200 text-[13.5px] font-medium text-slate-500">閉じる</button>
+          <button
+            onClick={runImport}
+            disabled={rows.length === 0 || running}
+            className="flex-1 py-2.5 rounded-lg bg-slate-800 disabled:bg-slate-300 text-white text-[13.5px] font-bold"
+          >
+            {running ? '登録中…' : `${rows.length || ''}名を登録する`}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -3471,13 +4553,20 @@ function EmployeeProfileModal({ account, onClose, onSave }) {
     staffNote1: account.staffNote1 || '',
     staffNote2: account.staffNote2 || '',
     staffNote3: account.staffNote3 || '',
+    leaveAdjustment: String(account.leaveAdjustment || 0),
+    scheduledWeeklyDays: account.scheduledWeeklyDays != null ? String(account.scheduledWeeklyDays) : '',
   });
   const [saving, setSaving] = useState(false);
   const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
 
   const save = async () => {
     setSaving(true);
-    await onSave(account.id, { ...form, commuteAllowance: Number(form.commuteAllowance) || 0 });
+    await onSave(account.id, {
+      ...form,
+      commuteAllowance: Number(form.commuteAllowance) || 0,
+      leaveAdjustment: Number(form.leaveAdjustment) || 0,
+      scheduledWeeklyDays: form.scheduledWeeklyDays === '' ? null : Number(form.scheduledWeeklyDays),
+    });
     setSaving(false);
     onClose();
   };
@@ -3508,6 +4597,17 @@ function EmployeeProfileModal({ account, onClose, onSave }) {
                 </select>
               </Field>
             </div>
+            {(form.staffType === 'パート' || form.staffType === 'アルバイト') && (
+              <Field label="週の所定労働日数（比例付与の計算に使用）">
+                <select value={form.scheduledWeeklyDays} onChange={set('scheduledWeeklyDays')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white">
+                  <option value="">未設定（通常の法定計算を使用）</option>
+                  <option value="4">週4日</option>
+                  <option value="3">週3日</option>
+                  <option value="2">週2日</option>
+                  <option value="1">週1日</option>
+                </select>
+              </Field>
+            )}
             <div className="grid grid-cols-2 gap-3">
               <Field label="メイングループ">
                 <input value={form.mainGroup} onChange={set('mainGroup')} placeholder="例）第一営業部" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
@@ -3550,6 +4650,10 @@ function EmployeeProfileModal({ account, onClose, onSave }) {
             <Field label="交通費（月額・円）">
               <input type="number" value={form.commuteAllowance} onChange={set('commuteAllowance')} placeholder="0" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
             </Field>
+            <Field label="有休の手動調整（日・マイナス可）">
+              <input type="number" value={form.leaveAdjustment} onChange={set('leaveAdjustment')} placeholder="0" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
+            </Field>
+            <div className="text-[10.5px] text-slate-400 -mt-2">自動計算された有休日数に、この日数を加算（マイナスなら減算）します。特別な事情での付与・調整に使用してください。</div>
             <Field label="スタッフ備考1">
               <input value={form.staffNote1} onChange={set('staffNote1')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
             </Field>
