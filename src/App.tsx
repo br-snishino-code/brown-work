@@ -1131,8 +1131,12 @@ export default function AttendanceApp() {
     let filePath = null;
     let fileName = null;
     if (file) {
-      const safeName = file.name.replace(/[^\w.\-ぁ-んァ-ヶ一-龠]/g, '_');
-      filePath = `${Date.now()}_${safeName}`;
+      // ストレージのキーは日本語や記号を含められないため、拡張子だけ残してASCIIのみのキーにする
+      // （画面に表示する元のファイル名は fileName 側にそのまま保持）
+      const extMatch = file.name.match(/\.[a-zA-Z0-9]+$/);
+      const ext = extMatch ? extMatch[0] : '';
+      const randomPart = Math.random().toString(36).slice(2, 8);
+      filePath = `${Date.now()}_${randomPart}${ext}`;
       const { error: uploadError } = await supabase.storage.from('announcements').upload(filePath, file);
       if (uploadError) {
         show(`ファイルのアップロードに失敗しました: ${uploadError.message}`, 'warn');
