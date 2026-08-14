@@ -5195,8 +5195,13 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
 
   const save = async () => {
     setSaving(true);
+    // 日付項目は空欄のままだと DB が "" を日付として受け付けずエラーになるため、null に変換する
+    const DATE_FIELDS = ['birthDate', 'contractStart', 'contractEnd', 'healthInsuranceAcquiredDate', 'healthInsuranceLostDate', 'pensionAcquiredDate', 'pensionLostDate', 'employmentInsuranceAcquiredDate', 'employmentInsuranceLostDate'];
+    const normalizedDates = {};
+    DATE_FIELDS.forEach((k) => { normalizedDates[k] = form[k] === '' ? null : form[k]; });
     await onSave(account.id, {
       ...form,
+      ...normalizedDates,
       commuteAllowance: Number(form.commuteAllowance) || 0,
       leaveAdjustment: Number(form.leaveAdjustment) || 0,
       scheduledWeeklyDays: form.scheduledWeeklyDays === '' ? null : Number(form.scheduledWeeklyDays),
