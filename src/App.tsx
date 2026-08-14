@@ -804,6 +804,28 @@ export default function AttendanceApp() {
     }
   };
 
+  const handleDeleteAccount = async (account) => {
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const accessToken = sessionData?.session?.access_token;
+      const { data: fnData, error } = await supabase.functions.invoke('delete-employee', {
+        body: { employeeId: account.id },
+        headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
+      });
+      if (error || fnData?.error) {
+        show(fnData?.error || '削除に失敗しました', 'warn');
+        return false;
+      }
+      await refreshData();
+      await logAudit(session, '社員アカウントを削除', `username: ${account.username}`, null, account.name);
+      show(`${account.name}さんのアカウントを削除しました`, 'success');
+      return true;
+    } catch (e) {
+      show('削除に失敗しました', 'warn');
+      return false;
+    }
+  };
+
   const today = todayKey();
   const employeeId = session?.id;
   const employeeRecords = (employeeId && data.records[employeeId]) || {};
@@ -1532,6 +1554,7 @@ export default function AttendanceApp() {
             onAddShift={addShiftDirect}
             onDecidePerformance={decidePerformanceReport}
             onAddAccount={handleAddAccount}
+            onDeleteAccount={handleDeleteAccount}
             onUpdateDates={updateEmployeeDates}
             onSaveGroupLeave={saveGroupLeaveSchedule}
             isDesktop={isDesktop}
@@ -3160,7 +3183,7 @@ function AdminTopNav({ tab, setTab, correctionCount, leaveCount, shiftCount, per
   );
 }
 
-function AdminView({ data, employeeAccounts, onDecide, onDecideLeave, onDecideShift, onDecideShiftBatch, onAddShift, onDecidePerformance, onAddAccount, onUpdateDates, onSaveGroupLeave, isDesktop }) {
+function AdminView({ data, employeeAccounts, onDecide, onDecideLeave, onDecideShift, onDecideShiftBatch, onAddShift, onDecidePerformance, onAddAccount, onDeleteAccount, onUpdateDates, onSaveGroupLeave, isDesktop }) {
   const [tab, setTab] = useState('dashboard'); // dashboard | attendance | requests | leave | shift | performance | accounts
   const pending = data.corrections.filter((c) => c.status === 'pending');
   const decided = data.corrections.filter((c) => c.status !== 'pending').slice(0, 8);
@@ -3273,7 +3296,7 @@ function AdminView({ data, employeeAccounts, onDecide, onDecideLeave, onDecideSh
       )}
 
       {tab === 'accounts' && (
-        <AccountManagement employeeAccounts={employeeAccounts} onAddAccount={onAddAccount} onUpdateDates={onUpdateDates} groupLeaveSchedules={data.groupLeaveSchedules} isDesktop={isDesktop} />
+        <AccountManagement employeeAccounts={employeeAccounts} onAddAccount={onAddAccount} onUpdateDates={onUpdateDates} onDeleteAccount={onDeleteAccount} groupLeaveSchedules={data.groupLeaveSchedules} isDesktop={isDesktop} />
       )}
 
       {tab === 'auditlog' && (
@@ -4199,7 +4222,7 @@ function AdminAuditLogTab({ logs, isDesktop }) {
   );
 }
 
-function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, groupLeaveSchedules, isDesktop }) {
+function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDeleteAccount, groupLeaveSchedules, isDesktop }) {
   const [name, setName] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -4210,6 +4233,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, grou
   const [editResign, setEditResign] = useState('');
   const [profileModalAccount, setProfileModalAccount] = useState(null);
   const [csvModalOpen, setCsvModalOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState(null);
 
   const canSubmit = name.trim() && username.trim() && password.trim().length >= 4 && hireDate;
 
@@ -4270,6 +4294,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, grou
               <th className="px-5 py-2 font-medium">法定有休（自動計算）</th>
               <th className="px-5 py-2 font-medium"></th>
               <th className="px-5 py-2 font-medium"></th>
+              <th className="px-5 py-2 font-medium"></th>
             </tr>
           </thead>
           <tbody>
@@ -4289,6 +4314,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, grou
                       <td className="px-5 py-2.5 font-mono text-slate-400">{computeStatutoryPaidLeaveDays(editHire)}日</td>
                       <td className="px-5 py-2.5"><button onClick={() => saveEdit(acc.id)} className="text-[11px] font-bold text-amber-600">保存</button></td>
                       <td className="px-5 py-2.5"></td>
+                      <td className="px-5 py-2.5"></td>
                     </>
                   ) : (
                     <>
@@ -4297,13 +4323,14 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, grou
                       <td className="px-5 py-2.5 font-mono font-semibold text-slate-800">{granted}日</td>
                       <td className="px-5 py-2.5"><button onClick={() => startEdit(acc)} className="text-slate-400"><Pencil size={13} /></button></td>
                       <td className="px-5 py-2.5"><button onClick={() => setProfileModalAccount(acc)} className="text-[11px] font-bold text-slate-500 border border-slate-200 rounded-md px-2 py-1">詳細</button></td>
+                      <td className="px-5 py-2.5"><button onClick={() => setDeleteTarget(acc)} className="text-slate-300 hover:text-rose-500"><Trash2 size={14} /></button></td>
                     </>
                   )}
                 </tr>
               );
             })}
             {employeeAccounts.length === 0 && (
-              <tr><td colSpan={7} className="px-5 py-8 text-center text-[12.5px] text-slate-300">社員アカウントがありません</td></tr>
+              <tr><td colSpan={8} className="px-5 py-8 text-center text-[12.5px] text-slate-300">社員アカウントがありません</td></tr>
             )}
           </tbody>
         </table>
@@ -4326,6 +4353,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, grou
                     {!isEditing && (
                       <button onClick={() => startEdit(acc)} className="text-slate-400 p-1"><Pencil size={13} /></button>
                     )}
+                    <button onClick={() => setDeleteTarget(acc)} className="text-slate-300 hover:text-rose-500 p-1"><Trash2 size={14} /></button>
                   </div>
                 </div>
                 {isEditing ? (
@@ -4422,6 +4450,57 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, grou
           onAddAccount={onAddAccount}
         />
       )}
+      {deleteTarget && (
+        <DeleteAccountModal
+          account={deleteTarget}
+          onClose={() => setDeleteTarget(null)}
+          onConfirm={async () => {
+            const ok = await onDeleteAccount(deleteTarget);
+            if (ok) setDeleteTarget(null);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function DeleteAccountModal({ account, onClose, onConfirm }) {
+  const [confirmText, setConfirmText] = useState('');
+  const [deleting, setDeleting] = useState(false);
+  const canDelete = confirmText === account.name;
+
+  const run = async () => {
+    setDeleting(true);
+    await onConfirm();
+    setDeleting(false);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-50 p-0 sm:p-4">
+      <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-sm max-h-[92vh] overflow-y-auto">
+        <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center gap-2">
+          <div className="w-9 h-9 rounded-xl bg-rose-50 flex items-center justify-center shrink-0">
+            <Trash2 size={16} className="text-rose-600" />
+          </div>
+          <h3 className="font-bold text-[15px]">アカウントを削除しますか？</h3>
+        </div>
+        <div className="px-5 py-4 space-y-3">
+          <div className="bg-rose-50 border border-rose-200 rounded-lg px-3 py-3 text-[12.5px] text-rose-700">
+            <p className="font-bold mb-1">{account.name}（ID: {account.username}）を削除します。</p>
+            <p>この操作は元に戻せません。この社員の勤怠記録・申請・給与明細などのデータもすべて削除されます。</p>
+          </div>
+          <Field label={`確認のため「${account.name}」と入力してください`}>
+            <input value={confirmText} onChange={(e) => setConfirmText(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" />
+          </Field>
+          <div className="text-[11px] text-slate-400">データを残したまま利用停止にしたい場合は、削除ではなく「詳細」から退職日を設定することもできます。</div>
+        </div>
+        <div className="px-5 pb-5 pt-1 flex gap-2">
+          <button onClick={onClose} className="flex-1 py-2.5 rounded-lg border border-slate-200 text-[13.5px] font-medium text-slate-500">キャンセル</button>
+          <button onClick={run} disabled={!canDelete || deleting} className="flex-1 py-2.5 rounded-lg bg-rose-600 disabled:bg-slate-200 text-white text-[13.5px] font-bold">
+            {deleting ? '削除中…' : '完全に削除する'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
