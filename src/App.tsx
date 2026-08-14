@@ -363,6 +363,42 @@ const rowToAccount = (row) => ({
   staffNote3: row.staff_note3 || '',
   leaveAdjustment: row.leave_adjustment != null ? Number(row.leave_adjustment) : 0,
   scheduledWeeklyDays: row.scheduled_weekly_days != null ? Number(row.scheduled_weekly_days) : null,
+  jobTitle: row.job_title || '',
+  contractStart: row.contract_start || '',
+  contractEnd: row.contract_end || '',
+  bankCode: row.bank_code || '',
+  bankName: row.bank_name || '',
+  branchCode: row.branch_code || '',
+  branchName: row.branch_name || '',
+  accountType: row.account_type || '普通',
+  accountHolder: row.account_holder || '',
+  accountNumber: row.account_number || '',
+  standardRemunerationHealth: row.standard_remuneration_health != null ? Number(row.standard_remuneration_health) : null,
+  standardRemunerationPension: row.standard_remuneration_pension != null ? Number(row.standard_remuneration_pension) : null,
+  healthInsuranceStatus: row.health_insurance_status || '未加入',
+  healthInsuranceNumber: row.health_insurance_number || '',
+  healthInsuranceAcquiredDate: row.health_insurance_acquired_date || '',
+  healthInsuranceLostDate: row.health_insurance_lost_date || '',
+  pensionStatus: row.pension_status || '未加入',
+  pensionBasicNumber: row.pension_basic_number || '',
+  pensionAcquiredDate: row.pension_acquired_date || '',
+  pensionLostDate: row.pension_lost_date || '',
+  employmentInsuranceStatus: row.employment_insurance_status || '未加入',
+  employmentInsuranceNumber: row.employment_insurance_number || '',
+  employmentInsuranceAcquiredDate: row.employment_insurance_acquired_date || '',
+  employmentInsuranceLostDate: row.employment_insurance_lost_date || '',
+  spouseStatus: row.spouse_status || '無',
+  spouseAnnualIncome: row.spouse_annual_income != null ? Number(row.spouse_annual_income) : null,
+  spouseMonthlyIncome: row.spouse_monthly_income != null ? Number(row.spouse_monthly_income) : null,
+  familyMembers: Array.isArray(row.family_members) ? row.family_members : [],
+  residentTaxMunicipalityCode: row.resident_tax_municipality_code || '',
+  residentTaxMunicipality: row.resident_tax_municipality || '',
+  residentTaxCollectionMethod: row.resident_tax_collection_method || '特別徴収',
+  taxTableType: row.tax_table_type || '甲欄',
+  isNonResident: !!row.is_non_resident,
+  disabilityClassification: row.disability_classification || '対象外',
+  isWorkingStudent: !!row.is_working_student,
+  singleParentClassification: row.single_parent_classification || '対象外',
 });
 
 const rowToPayroll = (row) => ({
@@ -855,6 +891,46 @@ export default function AttendanceApp() {
     return ok;
   };
 
+  // マイナンバーは別テーブル・マスター管理者のみアクセス可。
+  // 一覧に含めず、開いたときだけ都度取得する（不要な露出を減らすため）。
+  const fetchMyNumber = async (targetEmployeeId) => {
+    try {
+      const { data: row, error } = await supabase
+        .from('employee_my_numbers')
+        .select('*')
+        .eq('employee_id', targetEmployeeId)
+        .maybeSingle();
+      if (error) throw error;
+      await logAudit(session, 'マイナンバーを閲覧', '', targetEmployeeId);
+      return row ? { number: row.my_number_encrypted, purposes: row.purposes || [] } : { number: '', purposes: [] };
+    } catch (e) {
+      show('マイナンバーの取得に失敗しました', 'warn');
+      return null;
+    }
+  };
+
+  const saveMyNumber = async (targetEmployeeId, { number, purposes }) => {
+    try {
+      const { error } = await supabase.from('employee_my_numbers').upsert(
+        {
+          employee_id: targetEmployeeId,
+          my_number_encrypted: number,
+          purposes,
+          updated_by: session.id,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'employee_id' }
+      );
+      if (error) throw error;
+      await logAudit(session, 'マイナンバーを更新', `利用目的: ${purposes.join('、')}`, targetEmployeeId);
+      show('マイナンバーを保存しました', 'success');
+      return true;
+    } catch (e) {
+      show('マイナンバーの保存に失敗しました', 'warn');
+      return false;
+    }
+  };
+
   const today = todayKey();
   const employeeId = session?.id;
   const employeeRecords = (employeeId && data.records[employeeId]) || {};
@@ -1092,6 +1168,42 @@ export default function AttendanceApp() {
       staffNote3: 'staff_note3',
       leaveAdjustment: 'leave_adjustment',
       scheduledWeeklyDays: 'scheduled_weekly_days',
+      jobTitle: 'job_title',
+      contractStart: 'contract_start',
+      contractEnd: 'contract_end',
+      bankCode: 'bank_code',
+      bankName: 'bank_name',
+      branchCode: 'branch_code',
+      branchName: 'branch_name',
+      accountType: 'account_type',
+      accountHolder: 'account_holder',
+      accountNumber: 'account_number',
+      standardRemunerationHealth: 'standard_remuneration_health',
+      standardRemunerationPension: 'standard_remuneration_pension',
+      healthInsuranceStatus: 'health_insurance_status',
+      healthInsuranceNumber: 'health_insurance_number',
+      healthInsuranceAcquiredDate: 'health_insurance_acquired_date',
+      healthInsuranceLostDate: 'health_insurance_lost_date',
+      pensionStatus: 'pension_status',
+      pensionBasicNumber: 'pension_basic_number',
+      pensionAcquiredDate: 'pension_acquired_date',
+      pensionLostDate: 'pension_lost_date',
+      employmentInsuranceStatus: 'employment_insurance_status',
+      employmentInsuranceNumber: 'employment_insurance_number',
+      employmentInsuranceAcquiredDate: 'employment_insurance_acquired_date',
+      employmentInsuranceLostDate: 'employment_insurance_lost_date',
+      spouseStatus: 'spouse_status',
+      spouseAnnualIncome: 'spouse_annual_income',
+      spouseMonthlyIncome: 'spouse_monthly_income',
+      familyMembers: 'family_members',
+      residentTaxMunicipalityCode: 'resident_tax_municipality_code',
+      residentTaxMunicipality: 'resident_tax_municipality',
+      residentTaxCollectionMethod: 'resident_tax_collection_method',
+      taxTableType: 'tax_table_type',
+      isNonResident: 'is_non_resident',
+      disabilityClassification: 'disability_classification',
+      isWorkingStudent: 'is_working_student',
+      singleParentClassification: 'single_parent_classification',
     };
     const dbPatch = {};
     Object.entries(patch).forEach(([key, value]) => {
@@ -1589,6 +1701,8 @@ export default function AttendanceApp() {
             onAddAccount={handleAddAccount}
             onDeleteAccount={handleDeleteAccount}
             onResetPassword={handleResetPassword}
+            onFetchMyNumber={fetchMyNumber}
+            onSaveMyNumber={saveMyNumber}
             onUpdateDates={updateEmployeeDates}
             onUpdateAdminAccess={updateAdminAccess}
             onSaveGroupLeave={saveGroupLeaveSchedule}
@@ -2756,10 +2870,11 @@ function PerformanceModal({ type, onClose, onSubmit }) {
   );
 }
 
-function AdminDashboardTab({ missingCount, correctionCount, leaveCount, shiftCount, performanceCount, gpsAlertCount, employeeCount, onNavigate, isDesktop }) {
+function AdminDashboardTab({ missingCount, correctionCount, leaveCount, shiftCount, performanceCount, gpsAlertCount, contractAlertCount, employeeCount, onNavigate, isDesktop }) {
   const alertRows = [
     { label: '打刻漏れ・打刻間違い', count: missingCount, tab: 'requests', icon: <AlertTriangle size={14} /> },
     { label: '位置情報が5回以上連続で未記録', count: gpsAlertCount, tab: 'attendance', icon: <MapPin size={14} /> },
+    { label: '契約更新が必要な社員がいます', count: contractAlertCount, tab: 'accounts', icon: <FileText size={14} /> },
   ];
   const unapprovedRows = [
     { label: '未承認の勤怠修正申請', count: correctionCount, tab: 'requests', icon: <FileEdit size={14} /> },
@@ -3239,7 +3354,7 @@ function AdminTopNav({ tab, setTab, correctionCount, leaveCount, shiftCount, per
   );
 }
 
-function AdminView({ data, employeeAccounts, session, onDecide, onDecideLeave, onDecideShift, onDecideShiftBatch, onAddShift, onDecidePerformance, onAddAccount, onDeleteAccount, onResetPassword, onUpdateDates, onUpdateAdminAccess, onSaveGroupLeave, isDesktop }) {
+function AdminView({ data, employeeAccounts, session, onDecide, onDecideLeave, onDecideShift, onDecideShiftBatch, onAddShift, onDecidePerformance, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveGroupLeave, isDesktop }) {
   const [tab, setTab] = useState('dashboard'); // dashboard | attendance | requests | leave | shift | performance | accounts
   const pending = data.corrections.filter((c) => c.status === 'pending');
   const decided = data.corrections.filter((c) => c.status !== 'pending').slice(0, 8);
@@ -3260,6 +3375,10 @@ function AdminView({ data, employeeAccounts, session, onDecide, onDecideLeave, o
   });
 
   const gpsAlerts = computeGpsAlertEmployees(employeeAccounts, data.records);
+  const contractAlertDate = new Date();
+  contractAlertDate.setDate(contractAlertDate.getDate() + 30);
+  const contractAlertKey = todayKey(contractAlertDate);
+  const contractAlerts = employeeAccounts.filter((acc) => acc.contractEnd && acc.contractEnd <= contractAlertKey);
 
   const notifications = (data.notifications || []).slice(0, 6);
   const isMasterAdmin = session?.role === 'master_admin';
@@ -3349,6 +3468,7 @@ function AdminView({ data, employeeAccounts, session, onDecide, onDecideLeave, o
           shiftCount={shiftPending.length}
           performanceCount={performancePending.length}
           gpsAlertCount={gpsAlerts.length}
+          contractAlertCount={contractAlerts.length}
           employeeCount={employeeAccounts.length}
           onNavigate={setTab}
           isDesktop={isDesktop}
@@ -3366,6 +3486,8 @@ function AdminView({ data, employeeAccounts, session, onDecide, onDecideLeave, o
           onUpdateDates={onUpdateDates}
           onDeleteAccount={onDeleteAccount}
           onResetPassword={onResetPassword}
+          onFetchMyNumber={onFetchMyNumber}
+          onSaveMyNumber={onSaveMyNumber}
           groupLeaveSchedules={data.groupLeaveSchedules}
           session={session}
           isDesktop={isDesktop}
@@ -4413,7 +4535,7 @@ const ADMIN_TAB_OPTIONS = [
   { key: 'payroll', label: '給与' },
 ];
 
-function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDeleteAccount, onResetPassword, groupLeaveSchedules, session, isDesktop }) {
+function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, groupLeaveSchedules, session, isDesktop }) {
   const [name, setName] = useState('');
   const [furigana, setFurigana] = useState('');
   const [username, setUsername] = useState('');
@@ -4685,6 +4807,9 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
           account={profileModalAccount}
           onClose={() => setProfileModalAccount(null)}
           onSave={onUpdateDates}
+          onFetchMyNumber={onFetchMyNumber}
+          onSaveMyNumber={onSaveMyNumber}
+          isMasterAdmin={isMasterAdmin}
         />
       )}
       {csvModalOpen && (
@@ -4910,7 +5035,17 @@ function CsvImportModal({ onClose, onAddAccount }) {
   );
 }
 
-function EmployeeProfileModal({ account, onClose, onSave }) {
+const PROFILE_MODAL_TABS = [
+  { key: 'basic', label: '基本' },
+  { key: 'work', label: '業務・契約' },
+  { key: 'pay', label: '給与・口座' },
+  { key: 'insurance', label: '社会保険' },
+  { key: 'family', label: '家族・配偶者' },
+  { key: 'tax', label: '住民税・税区分' },
+];
+
+function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSaveMyNumber, isMasterAdmin }) {
+  const [activeTab, setActiveTab] = useState('basic');
   const [form, setForm] = useState({
     furigana: account.furigana || '',
     contactEmail: account.contactEmail || '',
@@ -4930,9 +5065,54 @@ function EmployeeProfileModal({ account, onClose, onSave }) {
     staffNote3: account.staffNote3 || '',
     leaveAdjustment: String(account.leaveAdjustment || 0),
     scheduledWeeklyDays: account.scheduledWeeklyDays != null ? String(account.scheduledWeeklyDays) : '',
+    jobTitle: account.jobTitle || '',
+    contractStart: account.contractStart || '',
+    contractEnd: account.contractEnd || '',
+    bankCode: account.bankCode || '',
+    bankName: account.bankName || '',
+    branchCode: account.branchCode || '',
+    branchName: account.branchName || '',
+    accountType: account.accountType || '普通',
+    accountHolder: account.accountHolder || '',
+    accountNumber: account.accountNumber || '',
+    standardRemunerationHealth: account.standardRemunerationHealth != null ? String(account.standardRemunerationHealth) : '',
+    standardRemunerationPension: account.standardRemunerationPension != null ? String(account.standardRemunerationPension) : '',
+    healthInsuranceStatus: account.healthInsuranceStatus || '未加入',
+    healthInsuranceNumber: account.healthInsuranceNumber || '',
+    healthInsuranceAcquiredDate: account.healthInsuranceAcquiredDate || '',
+    healthInsuranceLostDate: account.healthInsuranceLostDate || '',
+    pensionStatus: account.pensionStatus || '未加入',
+    pensionBasicNumber: account.pensionBasicNumber || '',
+    pensionAcquiredDate: account.pensionAcquiredDate || '',
+    pensionLostDate: account.pensionLostDate || '',
+    employmentInsuranceStatus: account.employmentInsuranceStatus || '未加入',
+    employmentInsuranceNumber: account.employmentInsuranceNumber || '',
+    employmentInsuranceAcquiredDate: account.employmentInsuranceAcquiredDate || '',
+    employmentInsuranceLostDate: account.employmentInsuranceLostDate || '',
+    spouseStatus: account.spouseStatus || '無',
+    spouseAnnualIncome: account.spouseAnnualIncome != null ? String(account.spouseAnnualIncome) : '',
+    spouseMonthlyIncome: account.spouseMonthlyIncome != null ? String(account.spouseMonthlyIncome) : '',
+    familyMembers: account.familyMembers || [],
+    residentTaxMunicipalityCode: account.residentTaxMunicipalityCode || '',
+    residentTaxMunicipality: account.residentTaxMunicipality || '',
+    residentTaxCollectionMethod: account.residentTaxCollectionMethod || '特別徴収',
+    taxTableType: account.taxTableType || '甲欄',
+    isNonResident: !!account.isNonResident,
+    disabilityClassification: account.disabilityClassification || '対象外',
+    isWorkingStudent: !!account.isWorkingStudent,
+    singleParentClassification: account.singleParentClassification || '対象外',
   });
   const [saving, setSaving] = useState(false);
   const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
+  const setCheck = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.checked }));
+
+  const addFamilyMember = () => setForm((f) => ({ ...f, familyMembers: [...f.familyMembers, { name: '', relation: '', birthDate: '' }] }));
+  const updateFamilyMember = (i, key, value) => setForm((f) => {
+    const next = [...f.familyMembers];
+    next[i] = { ...next[i], [key]: value };
+    return { ...f, familyMembers: next };
+  });
+  const removeFamilyMember = (i) => setForm((f) => ({ ...f, familyMembers: f.familyMembers.filter((_, idx) => idx !== i) }));
 
   const save = async () => {
     setSaving(true);
@@ -4941,117 +5121,390 @@ function EmployeeProfileModal({ account, onClose, onSave }) {
       commuteAllowance: Number(form.commuteAllowance) || 0,
       leaveAdjustment: Number(form.leaveAdjustment) || 0,
       scheduledWeeklyDays: form.scheduledWeeklyDays === '' ? null : Number(form.scheduledWeeklyDays),
+      standardRemunerationHealth: form.standardRemunerationHealth === '' ? null : Number(form.standardRemunerationHealth),
+      standardRemunerationPension: form.standardRemunerationPension === '' ? null : Number(form.standardRemunerationPension),
+      spouseAnnualIncome: form.spouseAnnualIncome === '' ? null : Number(form.spouseAnnualIncome),
+      spouseMonthlyIncome: form.spouseMonthlyIncome === '' ? null : Number(form.spouseMonthlyIncome),
     });
     setSaving(false);
     onClose();
   };
 
+  const tabs = isMasterAdmin ? [...PROFILE_MODAL_TABS, { key: 'mynumber', label: 'マイナンバー' }] : PROFILE_MODAL_TABS;
+
   return (
     <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-40 p-0 sm:p-4">
-      <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-md max-h-[92vh] overflow-y-auto">
-        <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white">
+      <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg max-h-[92vh] overflow-y-auto">
+        <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white z-10">
           <div>
             <div className="text-[11px] text-slate-400 font-medium">{account.name}</div>
             <h3 className="font-bold text-[15px]">アカウント詳細情報</h3>
           </div>
           <button onClick={onClose} className="text-slate-400 text-xl leading-none px-1">×</button>
         </div>
-        <div className="px-5 py-4 space-y-5">
-          <div className="space-y-3">
-            <div className="text-[11px] font-bold text-slate-400">基本情報</div>
-            <Field label="フリガナ">
-              <input value={form.furigana} onChange={set('furigana')} placeholder="例）タナカ ハナコ" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
-            </Field>
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="生年月日">
-                <input type="date" value={form.birthDate} onChange={set('birthDate')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
+
+        <div className="px-5 pt-3 flex items-center gap-1 flex-wrap sticky top-[57px] bg-white z-10 border-b border-slate-100 pb-2">
+          {tabs.map((t) => (
+            <button
+              key={t.key}
+              onClick={() => setActiveTab(t.key)}
+              className={`text-[11.5px] font-bold px-2.5 py-1.5 rounded-lg transition-colors ${activeTab === t.key ? 'bg-slate-800 text-white' : 'text-slate-500 bg-slate-100'}`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="px-5 py-4 space-y-4">
+          {activeTab === 'basic' && (
+            <>
+              <Field label="フリガナ">
+                <input value={form.furigana} onChange={set('furigana')} placeholder="例）タナカ ハナコ" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
               </Field>
-              <Field label="スタッフ種別">
-                <select value={form.staffType} onChange={set('staffType')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white">
-                  <option value="社員">社員</option>
-                  <option value="契約社員">契約社員</option>
-                  <option value="パート">パート</option>
-                  <option value="アルバイト">アルバイト</option>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="生年月日">
+                  <input type="date" value={form.birthDate} onChange={set('birthDate')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
+                </Field>
+                <Field label="スタッフ種別">
+                  <select value={form.staffType} onChange={set('staffType')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white">
+                    <option value="役員">役員</option>
+                    <option value="社員">社員</option>
+                    <option value="契約社員">契約社員</option>
+                    <option value="パート">パート</option>
+                    <option value="アルバイト">アルバイト</option>
+                  </select>
+                </Field>
+              </div>
+              {(form.staffType === 'パート' || form.staffType === 'アルバイト') && (
+                <Field label="週の所定労働日数（比例付与の計算に使用）">
+                  <select value={form.scheduledWeeklyDays} onChange={set('scheduledWeeklyDays')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white">
+                    <option value="">未設定（通常の法定計算を使用）</option>
+                    <option value="4">週4日</option>
+                    <option value="3">週3日</option>
+                    <option value="2">週2日</option>
+                    <option value="1">週1日</option>
+                  </select>
+                </Field>
+              )}
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="メイングループ">
+                  <input value={form.mainGroup} onChange={set('mainGroup')} placeholder="例）第一営業部" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
+                </Field>
+                <Field label="サブグループ">
+                  <input value={form.subGroup} onChange={set('subGroup')} placeholder="任意" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
+                </Field>
+              </div>
+              <div className="text-[11px] font-bold text-slate-400 pt-2">連絡先</div>
+              <Field label="連絡用メールアドレス">
+                <input type="email" value={form.contactEmail} onChange={set('contactEmail')} placeholder="example@brown-kyoto.com" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" />
+              </Field>
+              <Field label="スタッフナンバー">
+                <input value={form.staffNumber} onChange={set('staffNumber')} placeholder="例）00016" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
+              </Field>
+              <Field label="住所">
+                <input value={form.address} onChange={set('address')} placeholder="例）京都府京都市〇〇区..." className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" />
+              </Field>
+              <Field label="最寄り駅">
+                <input value={form.nearestStation} onChange={set('nearestStation')} placeholder="例）京都駅" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" />
+              </Field>
+              <Field label="電話番号">
+                <input value={form.phone} onChange={set('phone')} placeholder="例）090-1234-5678" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
+              </Field>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="緊急連絡先（氏名）">
+                  <input value={form.emergencyContactName} onChange={set('emergencyContactName')} placeholder="例）田中 一郎" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
+                </Field>
+                <Field label="緊急連絡先（電話）">
+                  <input value={form.emergencyContactPhone} onChange={set('emergencyContactPhone')} placeholder="090-xxxx-xxxx" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
+                </Field>
+              </div>
+              <Field label="スタッフ備考1"><input value={form.staffNote1} onChange={set('staffNote1')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" /></Field>
+              <Field label="スタッフ備考2"><input value={form.staffNote2} onChange={set('staffNote2')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" /></Field>
+              <Field label="スタッフ備考3"><input value={form.staffNote3} onChange={set('staffNote3')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" /></Field>
+            </>
+          )}
+
+          {activeTab === 'work' && (
+            <>
+              <Field label="役職">
+                <input value={form.jobTitle} onChange={set('jobTitle')} placeholder="例）代表取締役" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" />
+              </Field>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="契約期間（開始）">
+                  <input type="date" value={form.contractStart} onChange={set('contractStart')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
+                </Field>
+                <Field label="契約期間（終了・更新確認日）">
+                  <input type="date" value={form.contractEnd} onChange={set('contractEnd')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
+                </Field>
+              </div>
+              <div className="text-[10.5px] text-slate-400">契約社員・パート・アルバイトなど、契約更新が必要な方はここに終了日を入れておくと、期限が近づいた際にダッシュボードでお知らせします。</div>
+              <div className="text-[11px] font-bold text-slate-400 pt-2">勤務条件</div>
+              <Field label="交通費（月額・円）">
+                <input type="number" value={form.commuteAllowance} onChange={set('commuteAllowance')} placeholder="0" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
+              </Field>
+              <Field label="有休の手動調整（日・マイナス可）">
+                <input type="number" value={form.leaveAdjustment} onChange={set('leaveAdjustment')} placeholder="0" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
+              </Field>
+              <div className="text-[10.5px] text-slate-400 -mt-2">自動計算された有休日数に、この日数を加算（マイナスなら減算）します。</div>
+            </>
+          )}
+
+          {activeTab === 'pay' && (
+            <>
+              <div className="text-[11px] font-bold text-slate-400">口座情報（給与振込先）</div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="銀行コード"><input value={form.bankCode} onChange={set('bankCode')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" /></Field>
+                <Field label="銀行名"><input value={form.bankName} onChange={set('bankName')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" /></Field>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="支店コード"><input value={form.branchCode} onChange={set('branchCode')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" /></Field>
+                <Field label="支店名"><input value={form.branchName} onChange={set('branchName')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" /></Field>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="預金種別">
+                  <select value={form.accountType} onChange={set('accountType')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white">
+                    <option value="普通">普通</option>
+                    <option value="当座">当座</option>
+                  </select>
+                </Field>
+                <Field label="口座名義（カナ）"><input value={form.accountHolder} onChange={set('accountHolder')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" /></Field>
+              </div>
+              <Field label="口座番号"><input value={form.accountNumber} onChange={set('accountNumber')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" /></Field>
+
+              <div className="text-[11px] font-bold text-slate-400 pt-2">標準報酬月額</div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="健康保険（円）"><input type="number" value={form.standardRemunerationHealth} onChange={set('standardRemunerationHealth')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" /></Field>
+                <Field label="厚生年金保険（円）"><input type="number" value={form.standardRemunerationPension} onChange={set('standardRemunerationPension')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" /></Field>
+              </div>
+              <div className="text-[10.5px] text-slate-400">実際の時給・月給・給与計算の設定は「給与」タブから行ってください。ここは社会保険の届出に使う標準報酬月額のみです。</div>
+            </>
+          )}
+
+          {activeTab === 'insurance' && (
+            <>
+              <div className="text-[11px] font-bold text-slate-400">健康保険</div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="加入状況">
+                  <select value={form.healthInsuranceStatus} onChange={set('healthInsuranceStatus')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white">
+                    <option value="未加入">未加入</option>
+                    <option value="加入">加入</option>
+                  </select>
+                </Field>
+                <Field label="被保険者整理番号"><input value={form.healthInsuranceNumber} onChange={set('healthInsuranceNumber')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" /></Field>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="資格取得日"><input type="date" value={form.healthInsuranceAcquiredDate} onChange={set('healthInsuranceAcquiredDate')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" /></Field>
+                <Field label="資格喪失日"><input type="date" value={form.healthInsuranceLostDate} onChange={set('healthInsuranceLostDate')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" /></Field>
+              </div>
+
+              <div className="text-[11px] font-bold text-slate-400 pt-2">厚生年金保険</div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="加入状況">
+                  <select value={form.pensionStatus} onChange={set('pensionStatus')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white">
+                    <option value="未加入">未加入</option>
+                    <option value="加入">加入</option>
+                  </select>
+                </Field>
+                <Field label="基礎年金番号"><input value={form.pensionBasicNumber} onChange={set('pensionBasicNumber')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" /></Field>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="資格取得日"><input type="date" value={form.pensionAcquiredDate} onChange={set('pensionAcquiredDate')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" /></Field>
+                <Field label="資格喪失日"><input type="date" value={form.pensionLostDate} onChange={set('pensionLostDate')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" /></Field>
+              </div>
+
+              <div className="text-[11px] font-bold text-slate-400 pt-2">雇用保険</div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="加入状況">
+                  <select value={form.employmentInsuranceStatus} onChange={set('employmentInsuranceStatus')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white">
+                    <option value="未加入">未加入</option>
+                    <option value="加入">加入</option>
+                  </select>
+                </Field>
+                <Field label="被保険者番号"><input value={form.employmentInsuranceNumber} onChange={set('employmentInsuranceNumber')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" /></Field>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="資格取得日"><input type="date" value={form.employmentInsuranceAcquiredDate} onChange={set('employmentInsuranceAcquiredDate')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" /></Field>
+                <Field label="離職等年月日"><input type="date" value={form.employmentInsuranceLostDate} onChange={set('employmentInsuranceLostDate')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" /></Field>
+              </div>
+            </>
+          )}
+
+          {activeTab === 'family' && (
+            <>
+              <div className="text-[11px] font-bold text-slate-400">配偶者情報</div>
+              <Field label="配偶者の有無">
+                <select value={form.spouseStatus} onChange={set('spouseStatus')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white">
+                  <option value="無">無</option>
+                  <option value="有">有</option>
                 </select>
               </Field>
-            </div>
-            {(form.staffType === 'パート' || form.staffType === 'アルバイト') && (
-              <Field label="週の所定労働日数（比例付与の計算に使用）">
-                <select value={form.scheduledWeeklyDays} onChange={set('scheduledWeeklyDays')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white">
-                  <option value="">未設定（通常の法定計算を使用）</option>
-                  <option value="4">週4日</option>
-                  <option value="3">週3日</option>
-                  <option value="2">週2日</option>
-                  <option value="1">週1日</option>
+              {form.spouseStatus === '有' && (
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label="配偶者の年間収入（去年・円）"><input type="number" value={form.spouseAnnualIncome} onChange={set('spouseAnnualIncome')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" /></Field>
+                  <Field label="配偶者の月額収入（現在・円）"><input type="number" value={form.spouseMonthlyIncome} onChange={set('spouseMonthlyIncome')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" /></Field>
+                </div>
+              )}
+
+              <div className="flex items-center justify-between pt-2">
+                <div className="text-[11px] font-bold text-slate-400">家族情報</div>
+                <button onClick={addFamilyMember} className="text-[11px] font-bold text-amber-600 flex items-center gap-1"><Plus size={12} />追加</button>
+              </div>
+              {form.familyMembers.length === 0 ? (
+                <div className="text-[12px] text-slate-300 text-center py-4 bg-slate-50 rounded-lg">家族情報の登録はありません</div>
+              ) : (
+                <div className="space-y-2">
+                  {form.familyMembers.map((m, i) => (
+                    <div key={i} className="border border-slate-200 rounded-lg p-3 space-y-2">
+                      <div className="grid grid-cols-2 gap-2">
+                        <input value={m.name} onChange={(e) => updateFamilyMember(i, 'name', e.target.value)} placeholder="氏名" className="border border-slate-200 rounded-md px-2 py-1.5 text-[12.5px]" />
+                        <input value={m.relation} onChange={(e) => updateFamilyMember(i, 'relation', e.target.value)} placeholder="続柄（例：子）" className="border border-slate-200 rounded-md px-2 py-1.5 text-[12.5px]" />
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <input type="date" value={m.birthDate} onChange={(e) => updateFamilyMember(i, 'birthDate', e.target.value)} className="flex-1 border border-slate-200 rounded-md px-2 py-1.5 font-mono text-[12.5px]" />
+                        <button onClick={() => removeFamilyMember(i)} className="text-slate-300 hover:text-rose-500"><Trash2 size={14} /></button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+
+          {activeTab === 'tax' && (
+            <>
+              <div className="text-[11px] font-bold text-slate-400">住民税</div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="給与支払報告書提出先 市区町村コード"><input value={form.residentTaxMunicipalityCode} onChange={set('residentTaxMunicipalityCode')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" /></Field>
+                <Field label="提出先 市区町村"><input value={form.residentTaxMunicipality} onChange={set('residentTaxMunicipality')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px]" /></Field>
+              </div>
+              <Field label="住民税徴収方法">
+                <select value={form.residentTaxCollectionMethod} onChange={set('residentTaxCollectionMethod')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white">
+                  <option value="特別徴収">特別徴収</option>
+                  <option value="普通徴収">普通徴収</option>
                 </select>
               </Field>
-            )}
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="メイングループ">
-                <input value={form.mainGroup} onChange={set('mainGroup')} placeholder="例）第一営業部" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
-              </Field>
-              <Field label="サブグループ">
-                <input value={form.subGroup} onChange={set('subGroup')} placeholder="任意" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
-              </Field>
-            </div>
-          </div>
 
-          <div className="space-y-3 pt-1 border-t border-slate-100">
-            <div className="text-[11px] font-bold text-slate-400 pt-3">連絡先</div>
-            <Field label="連絡用メールアドレス">
-              <input type="email" value={form.contactEmail} onChange={set('contactEmail')} placeholder="example@brown-kyoto.com" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" />
-            </Field>
-            <Field label="スタッフナンバー">
-              <input value={form.staffNumber} onChange={set('staffNumber')} placeholder="例）00016" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
-            </Field>
-            <Field label="住所">
-              <input value={form.address} onChange={set('address')} placeholder="例）京都府京都市〇〇区..." className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" />
-            </Field>
-            <Field label="最寄り駅">
-              <input value={form.nearestStation} onChange={set('nearestStation')} placeholder="例）京都駅" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" />
-            </Field>
-            <Field label="電話番号">
-              <input value={form.phone} onChange={set('phone')} placeholder="例）090-1234-5678" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
-            </Field>
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="緊急連絡先（氏名）">
-                <input value={form.emergencyContactName} onChange={set('emergencyContactName')} placeholder="例）田中 一郎" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
+              <div className="text-[11px] font-bold text-slate-400 pt-2">税区分情報</div>
+              <Field label="税額表区分">
+                <select value={form.taxTableType} onChange={set('taxTableType')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white">
+                  <option value="甲欄">甲欄</option>
+                  <option value="乙欄">乙欄</option>
+                </select>
               </Field>
-              <Field label="緊急連絡先（電話）">
-                <input value={form.emergencyContactPhone} onChange={set('emergencyContactPhone')} placeholder="090-xxxx-xxxx" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
-              </Field>
-            </div>
-          </div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="障害者区分">
+                  <select value={form.disabilityClassification} onChange={set('disabilityClassification')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px] bg-white">
+                    <option value="対象外">対象外</option>
+                    <option value="一般障害者">一般障害者</option>
+                    <option value="特別障害者">特別障害者</option>
+                  </select>
+                </Field>
+                <Field label="ひとり親・寡婦区分">
+                  <select value={form.singleParentClassification} onChange={set('singleParentClassification')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px] bg-white">
+                    <option value="対象外">対象外</option>
+                    <option value="ひとり親">ひとり親</option>
+                    <option value="寡婦">寡婦</option>
+                  </select>
+                </Field>
+              </div>
+              <label className="flex items-center gap-2 text-[12.5px] text-slate-600"><input type="checkbox" checked={form.isNonResident} onChange={setCheck('isNonResident')} />非居住者</label>
+              <label className="flex items-center gap-2 text-[12.5px] text-slate-600"><input type="checkbox" checked={form.isWorkingStudent} onChange={setCheck('isWorkingStudent')} />勤労学生</label>
+            </>
+          )}
 
-          <div className="space-y-3 pt-1 border-t border-slate-100">
-            <div className="text-[11px] font-bold text-slate-400 pt-3">勤務条件・備考</div>
-            <Field label="交通費（月額・円）">
-              <input type="number" value={form.commuteAllowance} onChange={set('commuteAllowance')} placeholder="0" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
-            </Field>
-            <Field label="有休の手動調整（日・マイナス可）">
-              <input type="number" value={form.leaveAdjustment} onChange={set('leaveAdjustment')} placeholder="0" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
-            </Field>
-            <div className="text-[10.5px] text-slate-400 -mt-2">自動計算された有休日数に、この日数を加算（マイナスなら減算）します。特別な事情での付与・調整に使用してください。</div>
-            <Field label="スタッフ備考1">
-              <input value={form.staffNote1} onChange={set('staffNote1')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
-            </Field>
-            <Field label="スタッフ備考2">
-              <input value={form.staffNote2} onChange={set('staffNote2')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
-            </Field>
-            <Field label="スタッフ備考3">
-              <input value={form.staffNote3} onChange={set('staffNote3')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
-            </Field>
-          </div>
+          {activeTab === 'mynumber' && isMasterAdmin && (
+            <MyNumberSection account={account} onFetch={onFetchMyNumber} onSave={onSaveMyNumber} />
+          )}
 
-          <div className="text-[10.5px] text-slate-400">ログイン用のID・パスワードとは別の情報です。緊急連絡や書類送付、給与計算などに使用してください。</div>
+          {activeTab !== 'mynumber' && (
+            <div className="text-[10.5px] text-slate-400 pt-2">ログイン用のID・パスワードとは別の情報です。緊急連絡や書類送付、給与計算などに使用してください。</div>
+          )}
         </div>
-        <div className="px-5 pb-5 pt-1 flex gap-2 sticky bottom-0 bg-white">
-          <button onClick={onClose} className="flex-1 py-2.5 rounded-lg border border-slate-200 text-[13.5px] font-medium text-slate-500">キャンセル</button>
-          <button onClick={save} disabled={saving} className="flex-1 py-2.5 rounded-lg bg-slate-800 disabled:bg-slate-300 text-white text-[13.5px] font-bold">
-            {saving ? '保存中…' : '保存する'}
-          </button>
-        </div>
+        {activeTab !== 'mynumber' && (
+          <div className="px-5 pb-5 pt-1 flex gap-2 sticky bottom-0 bg-white">
+            <button onClick={onClose} className="flex-1 py-2.5 rounded-lg border border-slate-200 text-[13.5px] font-medium text-slate-500">キャンセル</button>
+            <button onClick={save} disabled={saving} className="flex-1 py-2.5 rounded-lg bg-slate-800 disabled:bg-slate-300 text-white text-[13.5px] font-bold">
+              {saving ? '保存中…' : '保存する'}
+            </button>
+          </div>
+        )}
       </div>
+    </div>
+  );
+}
+
+const MY_NUMBER_PURPOSES = ['源泉徴収票・給与支払報告書の作成', '健康保険・厚生年金保険関係届出', '雇用保険関係届出', '労働者災害補償保険法関係届出'];
+
+function MyNumberSection({ account, onFetch, onSave }) {
+  const [loaded, setLoaded] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [revealed, setRevealed] = useState(false);
+  const [number, setNumber] = useState('');
+  const [purposes, setPurposes] = useState([]);
+  const [saving, setSaving] = useState(false);
+
+  const load = async () => {
+    setLoading(true);
+    const result = await onFetch(account.id);
+    if (result) {
+      setNumber(result.number);
+      setPurposes(result.purposes);
+      setLoaded(true);
+      setRevealed(true);
+    }
+    setLoading(false);
+  };
+
+  const togglePurpose = (p) => setPurposes((prev) => (prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]));
+
+  const save = async () => {
+    setSaving(true);
+    await onSave(account.id, { number, purposes });
+    setSaving(false);
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-start gap-2 bg-rose-50 border border-rose-200 rounded-xl px-4 py-3 text-[11.5px] text-rose-700">
+        <ShieldCheck size={14} className="mt-0.5 shrink-0" />
+        <span>マイナンバーは特定個人情報として、法律で利用目的の限定・アクセス制限が求められています。この画面はマスター管理者のみアクセスでき、閲覧・保存のたびに監査ログへ記録されます。</span>
+      </div>
+
+      {!loaded ? (
+        <button onClick={load} disabled={loading} className="w-full py-2.5 rounded-lg border border-slate-200 text-[13px] font-bold text-slate-600">
+          {loading ? '読み込み中…' : 'マイナンバーを表示する'}
+        </button>
+      ) : (
+        <>
+          <Field label="マイナンバー（12桁）">
+            <div className="flex items-center gap-2">
+              <input
+                type={revealed ? 'text' : 'password'}
+                value={number}
+                onChange={(e) => setNumber(e.target.value.replace(/[^0-9]/g, '').slice(0, 12))}
+                className="flex-1 border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]"
+                placeholder="123456789012"
+              />
+              <button onClick={() => setRevealed((v) => !v)} className="text-[11px] font-bold text-slate-500 border border-slate-200 rounded-lg px-2.5 py-2">
+                {revealed ? '隠す' : '表示'}
+              </button>
+            </div>
+          </Field>
+          <Field label="利用目的（該当するものにチェック）">
+            <div className="space-y-1.5">
+              {MY_NUMBER_PURPOSES.map((p) => (
+                <label key={p} className="flex items-center gap-2 text-[12.5px] text-slate-600 border border-slate-200 rounded-lg px-3 py-2">
+                  <input type="checkbox" checked={purposes.includes(p)} onChange={() => togglePurpose(p)} />
+                  {p}
+                </label>
+              ))}
+            </div>
+          </Field>
+          <button onClick={save} disabled={saving} className="w-full py-2.5 rounded-lg bg-rose-600 disabled:bg-slate-200 text-white text-[13.5px] font-bold">
+            {saving ? '保存中…' : 'マイナンバーを保存する'}
+          </button>
+        </>
+      )}
     </div>
   );
 }
