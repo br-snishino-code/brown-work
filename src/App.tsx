@@ -1624,7 +1624,7 @@ export default function AttendanceApp() {
         {topTab === 'labor' && (
           <AnnouncementsView
             announcements={data.announcements}
-            isAdmin={session.role === 'admin'}
+            isAdmin={session.role === 'admin' || session.role === 'master_admin'}
             onSubmit={submitAnnouncement}
             onDelete={deleteAnnouncement}
             onGetFileUrl={getAnnouncementFileUrl}
@@ -2075,11 +2075,11 @@ function Header({ session, onLogout, pendingCount, missingPunchCount, viewMode }
           </div>
           <div>
             <div className="font-bold text-[15px] leading-tight tracking-tight">勤怠打刻</div>
-            <div className="text-[10.5px] text-slate-400 leading-tight">{session.name}（{session.role === 'admin' ? '管理者' : '社員'}）</div>
+            <div className="text-[10.5px] text-slate-400 leading-tight">{session.name}（{session.role === 'master_admin' ? 'マスター管理者' : session.role === 'admin' ? '管理者' : '社員'}）</div>
           </div>
         </div>
         <div className="flex items-center gap-2">
-          {session.role === 'admin' && alertCount > 0 && (
+          {(session.role === 'admin' || session.role === 'master_admin') && alertCount > 0 && (
             <span className="w-5 h-5 bg-amber-600 rounded-full text-[10px] flex items-center justify-center text-white font-bold">
               {alertCount}
             </span>
