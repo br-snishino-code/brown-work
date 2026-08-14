@@ -274,6 +274,15 @@ const rowToAccount = (row) => ({
   wageType: row.wage_type || 'hourly',
   hourlyWage: row.hourly_wage != null ? Number(row.hourly_wage) : 0,
   monthlySalary: row.monthly_salary != null ? Number(row.monthly_salary) : 0,
+  birthDate: row.birth_date || '',
+  staffType: row.staff_type || '社員',
+  mainGroup: row.main_group || '',
+  subGroup: row.sub_group || '',
+  commuteAllowance: row.commute_allowance != null ? Number(row.commute_allowance) : 0,
+  nearestStation: row.nearest_station || '',
+  staffNote1: row.staff_note1 || '',
+  staffNote2: row.staff_note2 || '',
+  staffNote3: row.staff_note3 || '',
 });
 
 const rowToPayroll = (row) => ({
@@ -812,6 +821,15 @@ export default function AttendanceApp() {
       wageType: 'wage_type',
       hourlyWage: 'hourly_wage',
       monthlySalary: 'monthly_salary',
+      birthDate: 'birth_date',
+      staffType: 'staff_type',
+      mainGroup: 'main_group',
+      subGroup: 'sub_group',
+      commuteAllowance: 'commute_allowance',
+      nearestStation: 'nearest_station',
+      staffNote1: 'staff_note1',
+      staffNote2: 'staff_note2',
+      staffNote3: 'staff_note3',
     };
     const dbPatch = {};
     Object.entries(patch).forEach(([key, value]) => {
@@ -2228,7 +2246,7 @@ function AdminDashboardTab({ missingCount, correctionCount, leaveCount, shiftCou
 const MONTHLY_STANDARD_HOURS = 160; // 月給制の残業単価を出すための簡易換算（週40h×概ね4週）
 const OVERTIME_MULTIPLIER = 1.25;
 
-function computePayrollPreview({ wageType, hourlyWage, monthlySalary, workedMinutes, overtimeMinutes }) {
+function computePayrollPreview({ wageType, hourlyWage, monthlySalary, workedMinutes, overtimeMinutes, commuteAllowance = 0 }) {
   const regularMinutes = Math.max(0, workedMinutes - overtimeMinutes);
   let baseAmount = 0;
   let overtimeAmount = 0;
@@ -2243,7 +2261,8 @@ function computePayrollPreview({ wageType, hourlyWage, monthlySalary, workedMinu
     const hourlyEquivalent = wageRate / MONTHLY_STANDARD_HOURS;
     overtimeAmount = Math.round((overtimeMinutes / 60) * hourlyEquivalent * OVERTIME_MULTIPLIER);
   }
-  return { wageRate, regularMinutes, baseAmount, overtimeAmount, totalAmount: baseAmount + overtimeAmount };
+  const allowanceAmount = Math.round(Number(commuteAllowance) || 0);
+  return { wageRate, regularMinutes, baseAmount, overtimeAmount, allowanceAmount, totalAmount: baseAmount + overtimeAmount + allowanceAmount };
 }
 
 const formatYen = (n) => `¥${Math.round(n || 0).toLocaleString('ja-JP')}`;
@@ -2325,6 +2344,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, onSaveDraf
     monthlySalary,
     workedMinutes: monthly.workedMin,
     overtimeMinutes: monthly.overtimeMin,
+    commuteAllowance: employee.commuteAllowance || 0,
   });
 
   const existing = payrollRecords.find((p) => p.employeeId === employeeId && p.year === year && p.month === month);
@@ -2347,9 +2367,10 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, onSaveDraf
       wageRate: preview.wageRate,
       workedMinutes: monthly.workedMin,
       overtimeMinutes: monthly.overtimeMin,
-      baseAmount: preview.baseAmount,
+      baseAmount: preview.baseAmount + preview.allowanceAmount,
       overtimeAmount: preview.overtimeAmount,
       totalAmount: preview.totalAmount,
+      notes: preview.allowanceAmount > 0 ? `交通費 ${formatYen(preview.allowanceAmount)} を基本給に含む` : null,
     });
   };
 
@@ -2403,6 +2424,12 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, onSaveDraf
           <PayrollMetric label="基本給" value={formatYen(preview.baseAmount)} />
           <PayrollMetric label="残業手当" value={formatYen(preview.overtimeAmount)} />
         </div>
+        {preview.allowanceAmount > 0 && (
+          <div className="text-[11.5px] text-slate-500 flex items-center justify-between px-1">
+            <span>交通費（社員情報の設定額・月額）</span>
+            <span className="font-mono font-bold">{formatYen(preview.allowanceAmount)}</span>
+          </div>
+        )}
         <div className="flex items-center justify-between bg-slate-900 text-white rounded-xl px-5 py-4">
           <span className="text-[12.5px] font-bold">総支給額（概算）</span>
           <span className="font-mono text-[20px] font-bold">{formatYen(preview.totalAmount)}</span>
@@ -3435,13 +3462,22 @@ function EmployeeProfileModal({ account, onClose, onSave }) {
     phone: account.phone || '',
     emergencyContactName: account.emergencyContactName || '',
     emergencyContactPhone: account.emergencyContactPhone || '',
+    birthDate: account.birthDate || '',
+    staffType: account.staffType || '社員',
+    mainGroup: account.mainGroup || '',
+    subGroup: account.subGroup || '',
+    commuteAllowance: String(account.commuteAllowance || 0),
+    nearestStation: account.nearestStation || '',
+    staffNote1: account.staffNote1 || '',
+    staffNote2: account.staffNote2 || '',
+    staffNote3: account.staffNote3 || '',
   });
   const [saving, setSaving] = useState(false);
   const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
 
   const save = async () => {
     setSaving(true);
-    await onSave(account.id, form);
+    await onSave(account.id, { ...form, commuteAllowance: Number(form.commuteAllowance) || 0 });
     setSaving(false);
     onClose();
   };
@@ -3456,28 +3492,76 @@ function EmployeeProfileModal({ account, onClose, onSave }) {
           </div>
           <button onClick={onClose} className="text-slate-400 text-xl leading-none px-1">×</button>
         </div>
-        <div className="px-5 py-4 space-y-4">
-          <Field label="連絡用メールアドレス">
-            <input type="email" value={form.contactEmail} onChange={set('contactEmail')} placeholder="example@brown-kyoto.com" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" />
-          </Field>
-          <Field label="スタッフナンバー">
-            <input value={form.staffNumber} onChange={set('staffNumber')} placeholder="例）00016" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
-          </Field>
-          <Field label="住所">
-            <input value={form.address} onChange={set('address')} placeholder="例）京都府京都市〇〇区..." className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" />
-          </Field>
-          <Field label="電話番号">
-            <input value={form.phone} onChange={set('phone')} placeholder="例）090-1234-5678" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
-          </Field>
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="緊急連絡先（氏名）">
-              <input value={form.emergencyContactName} onChange={set('emergencyContactName')} placeholder="例）田中 一郎" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
+        <div className="px-5 py-4 space-y-5">
+          <div className="space-y-3">
+            <div className="text-[11px] font-bold text-slate-400">基本情報</div>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="生年月日">
+                <input type="date" value={form.birthDate} onChange={set('birthDate')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
+              </Field>
+              <Field label="スタッフ種別">
+                <select value={form.staffType} onChange={set('staffType')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white">
+                  <option value="社員">社員</option>
+                  <option value="契約社員">契約社員</option>
+                  <option value="パート">パート</option>
+                  <option value="アルバイト">アルバイト</option>
+                </select>
+              </Field>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="メイングループ">
+                <input value={form.mainGroup} onChange={set('mainGroup')} placeholder="例）第一営業部" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
+              </Field>
+              <Field label="サブグループ">
+                <input value={form.subGroup} onChange={set('subGroup')} placeholder="任意" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
+              </Field>
+            </div>
+          </div>
+
+          <div className="space-y-3 pt-1 border-t border-slate-100">
+            <div className="text-[11px] font-bold text-slate-400 pt-3">連絡先</div>
+            <Field label="連絡用メールアドレス">
+              <input type="email" value={form.contactEmail} onChange={set('contactEmail')} placeholder="example@brown-kyoto.com" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" />
             </Field>
-            <Field label="緊急連絡先（電話）">
-              <input value={form.emergencyContactPhone} onChange={set('emergencyContactPhone')} placeholder="090-xxxx-xxxx" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
+            <Field label="スタッフナンバー">
+              <input value={form.staffNumber} onChange={set('staffNumber')} placeholder="例）00016" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
+            </Field>
+            <Field label="住所">
+              <input value={form.address} onChange={set('address')} placeholder="例）京都府京都市〇〇区..." className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" />
+            </Field>
+            <Field label="最寄り駅">
+              <input value={form.nearestStation} onChange={set('nearestStation')} placeholder="例）京都駅" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" />
+            </Field>
+            <Field label="電話番号">
+              <input value={form.phone} onChange={set('phone')} placeholder="例）090-1234-5678" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
+            </Field>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="緊急連絡先（氏名）">
+                <input value={form.emergencyContactName} onChange={set('emergencyContactName')} placeholder="例）田中 一郎" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
+              </Field>
+              <Field label="緊急連絡先（電話）">
+                <input value={form.emergencyContactPhone} onChange={set('emergencyContactPhone')} placeholder="090-xxxx-xxxx" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
+              </Field>
+            </div>
+          </div>
+
+          <div className="space-y-3 pt-1 border-t border-slate-100">
+            <div className="text-[11px] font-bold text-slate-400 pt-3">勤務条件・備考</div>
+            <Field label="交通費（月額・円）">
+              <input type="number" value={form.commuteAllowance} onChange={set('commuteAllowance')} placeholder="0" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
+            </Field>
+            <Field label="スタッフ備考1">
+              <input value={form.staffNote1} onChange={set('staffNote1')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
+            </Field>
+            <Field label="スタッフ備考2">
+              <input value={form.staffNote2} onChange={set('staffNote2')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
+            </Field>
+            <Field label="スタッフ備考3">
+              <input value={form.staffNote3} onChange={set('staffNote3')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
             </Field>
           </div>
-          <div className="text-[10.5px] text-slate-400">ログイン用のID・パスワードとは別の情報です。緊急連絡や書類送付などに使用してください。</div>
+
+          <div className="text-[10.5px] text-slate-400">ログイン用のID・パスワードとは別の情報です。緊急連絡や書類送付、給与計算などに使用してください。</div>
         </div>
         <div className="px-5 pb-5 pt-1 flex gap-2 sticky bottom-0 bg-white">
           <button onClick={onClose} className="flex-1 py-2.5 rounded-lg border border-slate-200 text-[13.5px] font-medium text-slate-500">キャンセル</button>
