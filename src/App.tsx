@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Clock, MapPin, CheckCircle2, XCircle, AlertTriangle, LogIn, LogOut, FileEdit, Users, Bell, Calendar, Mail, LogOut as LogoutIcon, UserPlus, Lock, User, Monitor, Smartphone, Palmtree, Plus, Pencil, CalendarDays, ListChecks, ClipboardList, MessageSquare, Coffee, BarChart3, Home, Download, ChevronRight, LayoutGrid } from 'lucide-react';
+import { Clock, MapPin, CheckCircle2, XCircle, AlertTriangle, LogIn, LogOut, FileEdit, Users, Bell, Calendar, Mail, LogOut as LogoutIcon, UserPlus, Lock, User, Monitor, Smartphone, Palmtree, Plus, Pencil, CalendarDays, ListChecks, ClipboardList, MessageSquare, Coffee, BarChart3, Home, Download, ChevronRight, LayoutGrid, Wallet, Briefcase, UserCog, Construction } from 'lucide-react';
 import { supabase, CLOUD_ENABLED, usernameToEmail } from './supabaseClient';
 
 // ---- constants ----
@@ -255,7 +255,7 @@ function ToastView({ toast }) {
 // 以降のコンポーネント（LoginScreenなど）は一切変更していません。
 // ============================================================
 
-const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, shiftRequests: [], performanceReports: [] };
+const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, shiftRequests: [], performanceReports: [], payrollRecords: [] };
 
 // ---- row(snake_case) → app(camelCase) 変換 ----
 const rowToAccount = (row) => ({
@@ -265,6 +265,34 @@ const rowToAccount = (row) => ({
   role: row.role,
   hireDate: row.hire_date,
   resignationDate: row.resignation_date,
+  contactEmail: row.contact_email || '',
+  staffNumber: row.staff_number || '',
+  address: row.address || '',
+  phone: row.phone || '',
+  emergencyContactName: row.emergency_contact_name || '',
+  emergencyContactPhone: row.emergency_contact_phone || '',
+  wageType: row.wage_type || 'hourly',
+  hourlyWage: row.hourly_wage != null ? Number(row.hourly_wage) : 0,
+  monthlySalary: row.monthly_salary != null ? Number(row.monthly_salary) : 0,
+});
+
+const rowToPayroll = (row) => ({
+  id: row.id,
+  employeeId: row.employee_id,
+  employeeName: row.employees?.name || '',
+  year: row.year,
+  month: row.month,
+  wageType: row.wage_type,
+  wageRate: Number(row.wage_rate),
+  workedMinutes: row.worked_minutes,
+  overtimeMinutes: row.overtime_minutes,
+  baseAmount: Number(row.base_amount),
+  overtimeAmount: Number(row.overtime_amount),
+  totalAmount: Number(row.total_amount),
+  status: row.status,
+  notes: row.notes,
+  generatedAt: row.generated_at,
+  publishedAt: row.published_at,
 });
 
 const rowToRecord = (row) => ({
@@ -347,6 +375,8 @@ const rowToPerf = (row) => ({
 const rowToNotif = (row) => ({
   id: row.id,
   to: row.to_role || row.to_employee_id,
+  toEmployeeId: row.to_employee_id,
+  toRole: row.to_role,
   subject: row.subject,
   body: row.body,
   sentAt: row.sent_at,
@@ -364,6 +394,7 @@ async function fetchAllData() {
     shiftRes,
     perfRes,
     notifRes,
+    payrollRes,
   ] = await Promise.all([
     supabase.from('employees').select('*'),
     supabase.from('attendance_records').select('*'),
@@ -372,9 +403,10 @@ async function fetchAllData() {
     supabase.from('shift_requests').select('*, employees(name)'),
     supabase.from('performance_reports').select('*, employees(name)'),
     supabase.from('notifications').select('*').order('sent_at', { ascending: false }).limit(50),
+    supabase.from('payroll_records').select('*, employees(name)'),
   ]);
 
-  for (const res of [employeesRes, recordsRes, correctionsRes, leaveRes, shiftRes, perfRes, notifRes]) {
+  for (const res of [employeesRes, recordsRes, correctionsRes, leaveRes, shiftRes, perfRes, notifRes, payrollRes]) {
     if (res.error) throw res.error;
   }
 
@@ -390,6 +422,7 @@ async function fetchAllData() {
     corrections: (correctionsRes.data || []).map(rowToCorrection),
     leaveRequests: (leaveRes.data || []).map(rowToLeave),
     leaveBalances: {},
+    payrollRecords: (payrollRes.data || []).map(rowToPayroll),
     shiftRequests: (shiftRes.data || []).map(rowToShift),
     performanceReports: (perfRes.data || []).map(rowToPerf),
     notifications: (notifRes.data || []).map(rowToNotif),
@@ -424,6 +457,7 @@ export default function AttendanceApp() {
   const [shiftModalOpen, setShiftModalOpen] = useState(false);
   const [performanceModal, setPerformanceModal] = useState(null);
   const [employeeTab, setEmployeeTab] = useState('attendance');
+  const [topTab, setTopTab] = useState('attendance'); // attendance | labor | hr | payroll
   const [viewMode, setViewMode] = useState(() => (typeof window !== 'undefined' && window.matchMedia('(min-width: 1024px)').matches ? 'desktop' : 'mobile'));
   const now = useNow();
   const geo = useGeolocation();
@@ -765,20 +799,83 @@ export default function AttendanceApp() {
     show(decision === 'approved' ? '休暇申請を承認しました' : '休暇申請を却下しました', decision === 'approved' ? 'success' : 'warn');
   };
 
-  const updateEmployeeDates = async (targetEmployeeId, { hireDate, resignationDate }) => {
-    const patch = /** @type {{ hire_date?: string, resignation_date?: string | null }} */ ({});
-    if (hireDate !== undefined) patch.hire_date = hireDate;
-    if (resignationDate !== undefined) patch.resignation_date = resignationDate;
-    const { error } = await supabase.from('employees').update(patch).eq('id', targetEmployeeId);
+  const updateEmployeeProfile = async (targetEmployeeId, patch) => {
+    const colMap = {
+      hireDate: 'hire_date',
+      resignationDate: 'resignation_date',
+      contactEmail: 'contact_email',
+      staffNumber: 'staff_number',
+      address: 'address',
+      phone: 'phone',
+      emergencyContactName: 'emergency_contact_name',
+      emergencyContactPhone: 'emergency_contact_phone',
+      wageType: 'wage_type',
+      hourlyWage: 'hourly_wage',
+      monthlySalary: 'monthly_salary',
+    };
+    const dbPatch = {};
+    Object.entries(patch).forEach(([key, value]) => {
+      if (value !== undefined && colMap[key]) dbPatch[colMap[key]] = value;
+    });
+    const { error } = await supabase.from('employees').update(dbPatch).eq('id', targetEmployeeId);
     if (error) {
       show('社員情報の更新に失敗しました', 'warn');
-      return;
+      return false;
     }
     await refreshData();
     if (session && session.id === targetEmployeeId) {
-      setSession((prev) => ({ ...prev, hireDate: hireDate ?? prev.hireDate, resignationDate: resignationDate !== undefined ? resignationDate : prev.resignationDate }));
+      setSession((prev) => ({ ...prev, ...patch }));
     }
     show('社員情報を更新しました', 'success');
+    return true;
+  };
+  // 過去の呼び出し名との互換用エイリアス
+  const updateEmployeeDates = updateEmployeeProfile;
+
+  const savePayrollDraft = async (payload) => {
+    const { error } = await supabase.from('payroll_records').upsert(
+      {
+        employee_id: payload.employeeId,
+        year: payload.year,
+        month: payload.month,
+        wage_type: payload.wageType,
+        wage_rate: payload.wageRate,
+        worked_minutes: payload.workedMinutes,
+        overtime_minutes: payload.overtimeMinutes,
+        base_amount: payload.baseAmount,
+        overtime_amount: payload.overtimeAmount,
+        total_amount: payload.totalAmount,
+        status: 'draft',
+        notes: payload.notes || null,
+      },
+      { onConflict: 'employee_id,year,month' }
+    );
+    if (error) {
+      show('給与明細の保存に失敗しました', 'warn');
+      return;
+    }
+    await refreshData();
+    show('給与明細を下書き保存しました', 'success');
+  };
+
+  const publishPayroll = async (id) => {
+    const { error } = await supabase.from('payroll_records').update({ status: 'published', published_at: new Date().toISOString() }).eq('id', id);
+    if (error) {
+      show('公開に失敗しました', 'warn');
+      return;
+    }
+    const record = data.payrollRecords.find((p) => p.id === id);
+    if (record) {
+      await notify(
+        `【給与明細】${record.year}年${record.month}月分`,
+        `${record.year}年${record.month}月分の給与明細が公開されました。ご確認ください。`,
+        id,
+        record.employeeId,
+        'employee'
+      );
+    }
+    await refreshData();
+    show('給与明細を公開しました', 'success');
   };
 
   const submitShiftRequest = async (payload) => {
@@ -974,9 +1071,27 @@ export default function AttendanceApp() {
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-900">
       <div className={`fixed top-3 right-3 z-[60] rounded-full border px-2.5 py-1 text-[11px] font-semibold shadow-sm ${cloudStatusClass}`}>{cloudStatusLabel}</div>
+      <GlobalTopTabs topTab={topTab} setTopTab={setTopTab} />
       <Header session={session} onLogout={handleLogout} pendingCount={pendingCorrectionCount + pendingLeaveCount + pendingShiftCount + pendingPerformanceCount} missingPunchCount={missingPunchCount} viewMode={viewMode} />
       <main className={isDesktop ? 'max-w-6xl mx-auto px-6 pb-16 pt-8' : 'max-w-3xl mx-auto px-4 pb-24 pt-6'}>
-        {session.role === 'employee' ? (
+        {topTab === 'labor' && <ComingSoonPanel title="労務" />}
+        {topTab === 'hr' && <ComingSoonPanel title="人材" />}
+        {topTab === 'payroll' && (
+          session.role === 'employee' ? (
+            <PayslipView records={data.payrollRecords.filter((p) => p.employeeId === employeeId && p.status === 'published')} />
+          ) : (
+            <PayrollAdminTab
+              employeeAccounts={employeeAccounts}
+              records={data.records}
+              payrollRecords={data.payrollRecords}
+              onSaveDraft={savePayrollDraft}
+              onPublish={publishPayroll}
+              onUpdateWage={updateEmployeeProfile}
+              isDesktop={isDesktop}
+            />
+          )
+        )}
+        {topTab === 'attendance' && (session.role === 'employee' ? (
           <div className="space-y-5">
             {isDesktop && (
               <div className="flex items-center bg-white rounded-2xl border border-slate-200 p-1.5 text-[12px] font-bold max-w-2xl shadow-sm">
@@ -998,6 +1113,7 @@ export default function AttendanceApp() {
                 records={employeeRecords}
                 corrections={myCorrections}
                 onOpenCorrection={(dateKey) => setCorrectionModal(dateKey)}
+                notifications={data.notifications.filter((n) => n.toEmployeeId === employeeId)}
                 isDesktop={isDesktop}
               />
             )}
@@ -1041,7 +1157,7 @@ export default function AttendanceApp() {
             onUpdateDates={updateEmployeeDates}
             isDesktop={isDesktop}
           />
-        )}
+        ))}
       </main>
       {correctionModal && (
         <CorrectionModal
@@ -1155,6 +1271,45 @@ function LoginScreen({ onLogin, toast }) {
   );
 }
 
+function GlobalTopTabs({ topTab, setTopTab }) {
+  const tabs = [
+    { key: 'attendance', label: '勤怠', icon: <Clock size={14} /> },
+    { key: 'labor', label: '労務', icon: <Briefcase size={14} /> },
+    { key: 'hr', label: '人材', icon: <UserCog size={14} /> },
+    { key: 'payroll', label: '給与', icon: <Wallet size={14} /> },
+  ];
+  return (
+    <div className="bg-slate-950 text-slate-300">
+      <div className="max-w-6xl mx-auto px-4 flex items-center gap-1">
+        {tabs.map((t) => (
+          <button
+            key={t.key}
+            onClick={() => setTopTab(t.key)}
+            className={`flex items-center gap-1.5 px-4 py-2.5 text-[12.5px] font-bold border-b-2 transition-colors ${
+              topTab === t.key ? 'text-white border-amber-500' : 'text-slate-400 border-transparent hover:text-slate-200'
+            }`}
+          >
+            {t.icon}
+            {t.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ComingSoonPanel({ title }) {
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-6 py-16 flex flex-col items-center text-center">
+      <div className="w-14 h-14 rounded-2xl bg-slate-100 flex items-center justify-center mb-4">
+        <Construction size={24} className="text-slate-400" />
+      </div>
+      <h2 className="font-bold text-[16px] text-slate-800 mb-1.5">{title}機能は準備中です</h2>
+      <p className="text-[12.5px] text-slate-400 max-w-xs">今後追加予定です。必要な機能が決まりましたら教えてください。</p>
+    </div>
+  );
+}
+
 function Header({ session, onLogout, pendingCount, missingPunchCount, viewMode }) {
   const alertCount = pendingCount + missingPunchCount;
   const isDesktop = viewMode === 'desktop';
@@ -1192,7 +1347,7 @@ function Header({ session, onLogout, pendingCount, missingPunchCount, viewMode }
   );
 }
 
-function EmployeeView({ now, todayRecord, onClockIn, onClockOut, onBreakStart, onBreakEnd, geoStatus, historyDates, records, corrections, onOpenCorrection, isDesktop }) {
+function EmployeeView({ now, todayRecord, onClockIn, onClockOut, onBreakStart, onBreakEnd, geoStatus, historyDates, records, corrections, onOpenCorrection, notifications, isDesktop }) {
   const status = computeDayStatus(todayRecord);
   const canClockIn = !todayRecord?.clockIn;
   const canClockOut = todayRecord?.clockIn && !todayRecord?.clockOut;
@@ -1200,44 +1355,78 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, onBreakStart, o
   const doneToday = todayRecord?.clockIn && todayRecord?.clockOut;
   const monthly = computeMonthlySummary(records, now);
   const todayBreak = todayRecord ? getRecordedBreakMinutes(todayRecord, now) : 0;
+  const todayKeyStr = todayKey();
+  const missingCount = historyDates.filter((k) => k !== todayKeyStr && records[k]?.clockIn && !records[k]?.clockOut).length;
+  const primaryLabel = doneToday ? '退勤済み' : canClockIn ? '出勤' : '退勤';
+  const primaryAction = canClockIn ? onClockIn : canClockOut ? onClockOut : undefined;
+  const primaryDisabled = doneToday;
 
   const clockSection = (
     <div className="space-y-4">
-      <div className="relative overflow-hidden rounded-[28px] bg-slate-950 text-white shadow-xl shadow-slate-200">
-        <div className="absolute -right-16 -top-16 h-44 w-44 rounded-full bg-amber-400/20 blur-2xl" />
-        <div className="absolute -left-20 bottom-0 h-36 w-36 rounded-full bg-emerald-400/10 blur-2xl" />
-        <div className="relative px-6 pt-7 pb-6">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <div className="text-[12px] font-medium text-slate-400">
-                {now.getFullYear()}年{now.getMonth() + 1}月{now.getDate()}日（{['日','月','火','水','木','金','土'][now.getDay()]}）
-              </div>
-              <div className="mt-2 font-mono text-[46px] sm:text-[54px] font-bold leading-none tracking-tight tabular-nums">{timeStr(now)}</div>
-            </div>
-            <div className={`rounded-full px-3 py-1.5 text-[11px] font-bold ${isOnBreak ? 'bg-amber-400 text-slate-950' : status.tone === 'active' ? 'bg-emerald-400 text-slate-950' : 'bg-white/10 text-slate-200'}`}>
-              {isOnBreak ? '休憩中' : status.label}
-            </div>
-          </div>
+      <div className="rounded-[22px] bg-white border border-slate-200 shadow-sm overflow-hidden">
+        <div className="px-5 py-3 bg-slate-100 flex items-center justify-between">
+          <span className="text-[12.5px] font-bold text-slate-500">
+            {now.getFullYear()}年{now.getMonth() + 1}月{now.getDate()}日（{['日','月','火','水','木','金','土'][now.getDay()]}）
+          </span>
+          <span className={`rounded-full px-3 py-1 text-[11px] font-bold ${isOnBreak ? 'bg-amber-100 text-amber-700' : status.tone === 'active' ? 'bg-emerald-100 text-emerald-700' : status.tone === 'danger' ? 'bg-rose-100 text-rose-700' : 'bg-slate-200 text-slate-600'}`}>
+            {isOnBreak ? '休憩中' : status.label}
+          </span>
+        </div>
 
-          <div className="mt-6 grid grid-cols-3 gap-2 rounded-2xl bg-white/5 p-3 ring-1 ring-white/10">
-            <div className="text-center"><div className="text-[10px] text-slate-400">出勤</div><div className="mt-1 font-mono text-[15px] font-bold">{todayRecord?.clockIn ? hhmm(new Date(todayRecord.clockIn)) : '--:--'}</div></div>
-            <div className="text-center border-x border-white/10"><div className="text-[10px] text-slate-400">退勤</div><div className="mt-1 font-mono text-[15px] font-bold">{todayRecord?.clockOut ? hhmm(new Date(todayRecord.clockOut)) : '--:--'}</div></div>
-            <div className="text-center"><div className="text-[10px] text-slate-400">休憩</div><div className="mt-1 font-mono text-[15px] font-bold">{todayRecord?.clockIn ? `${todayBreak}分` : '--'}</div></div>
-          </div>
+        <div className="px-6 pt-6 pb-5 text-center">
+          <div className="font-mono text-[46px] sm:text-[52px] font-bold leading-none tracking-tight tabular-nums text-slate-900">{timeStr(now)}</div>
+        </div>
 
-          <div className="mt-4 grid grid-cols-2 gap-3">
-            <button onClick={onClockIn} disabled={!canClockIn} className="rounded-2xl bg-emerald-400 px-4 py-4 text-slate-950 disabled:bg-white/10 disabled:text-slate-500 font-bold flex items-center justify-center gap-2 transition active:scale-[.98]"><LogIn size={20}/>出勤</button>
-            <button onClick={onClockOut} disabled={!canClockOut} className="rounded-2xl bg-white px-4 py-4 text-slate-950 disabled:bg-white/10 disabled:text-slate-500 font-bold flex items-center justify-center gap-2 transition active:scale-[.98]"><LogOut size={20}/>退勤</button>
-          </div>
+        <div className="px-6 pb-5">
+          <button
+            onClick={primaryAction}
+            disabled={primaryDisabled || !primaryAction}
+            className="w-full rounded-xl bg-amber-500 disabled:bg-slate-200 disabled:text-slate-400 text-white py-4 text-[16px] font-bold tracking-wide shadow-sm active:brightness-95 transition"
+          >
+            {primaryLabel}
+          </button>
           <button
             onClick={isOnBreak ? onBreakEnd : onBreakStart}
             disabled={!canClockOut}
-            className={`mt-3 w-full rounded-2xl py-3.5 font-bold flex items-center justify-center gap-2 transition active:scale-[.99] disabled:opacity-30 ${isOnBreak ? 'bg-amber-400 text-slate-950' : 'bg-white/10 text-white ring-1 ring-white/10'}`}
+            className={`mt-2.5 w-full rounded-xl py-3 text-[13px] font-bold flex items-center justify-center gap-2 border-2 transition disabled:opacity-30 ${isOnBreak ? 'border-amber-400 bg-amber-50 text-amber-700' : 'border-slate-200 text-slate-600'}`}
           >
-            <Coffee size={18}/>{isOnBreak ? '休憩を終了' : '休憩を開始'}
+            <Coffee size={16} />{isOnBreak ? '休憩を終了' : '休憩を開始'}
           </button>
-          <div className="mt-4 flex items-center justify-center gap-1.5 text-[10.5px] text-slate-400"><MapPin size={11}/>{geoStatus === 'loading' ? '位置情報を取得中…' : geoStatus === 'denied' ? '位置情報が許可されていません' : '打刻時に位置情報を記録'}</div>
         </div>
+
+        <div className="px-6 pb-4 grid grid-cols-3 gap-2 border-t border-slate-100 pt-4">
+          <div className="text-center"><div className="text-[10px] text-slate-400">出勤</div><div className="mt-1 font-mono text-[14px] font-bold text-slate-800">{todayRecord?.clockIn ? hhmm(new Date(todayRecord.clockIn)) : '--:--'}</div></div>
+          <div className="text-center border-x border-slate-100"><div className="text-[10px] text-slate-400">退勤</div><div className="mt-1 font-mono text-[14px] font-bold text-slate-800">{todayRecord?.clockOut ? hhmm(new Date(todayRecord.clockOut)) : '--:--'}</div></div>
+          <div className="text-center"><div className="text-[10px] text-slate-400">休憩</div><div className="mt-1 font-mono text-[14px] font-bold text-slate-800">{todayRecord?.clockIn ? `${todayBreak}分` : '--'}</div></div>
+        </div>
+        <div className="px-6 pb-4 flex items-center justify-center gap-1.5 text-[10.5px] text-slate-400">
+          <MapPin size={11} />{geoStatus === 'loading' ? '位置情報を取得中…' : geoStatus === 'denied' ? '位置情報が許可されていません' : '打刻時に位置情報を記録'}
+        </div>
+      </div>
+
+      <div className="rounded-2xl bg-white border border-slate-200 shadow-sm overflow-hidden">
+        <div className="px-5 py-3 bg-slate-100 text-[12.5px] font-bold text-slate-500">以下の項目の確認をお願いいたします</div>
+        <button onClick={() => missingCount > 0 && historyDates[0] && onOpenCorrection(historyDates.find((k) => k !== todayKeyStr && records[k]?.clockIn && !records[k]?.clockOut))} className="w-full px-5 py-3 flex items-center justify-between text-[13px] hover:bg-slate-50 transition-colors">
+          <span className="text-slate-600">打刻漏れ・打刻間違い</span>
+          <span className={`font-bold ${missingCount > 0 ? 'text-rose-600 underline' : 'text-slate-300'}`}>{missingCount}件</span>
+        </button>
+      </div>
+
+      <div className="rounded-2xl bg-white border border-slate-200 shadow-sm overflow-hidden">
+        <div className="px-5 py-3 bg-slate-100 text-[12.5px] font-bold text-slate-500">管理者からのお知らせ</div>
+        {(!notifications || notifications.length === 0) ? (
+          <div className="px-5 py-4 text-[12.5px] text-slate-400">管理者からのお知らせはありません</div>
+        ) : (
+          <div className="divide-y divide-slate-100">
+            {notifications.slice(0, 5).map((n) => (
+              <div key={n.id} className="px-5 py-3">
+                <div className="text-[12.5px] font-bold text-slate-700">{n.subject}</div>
+                <div className="text-[11.5px] text-slate-500 mt-0.5">{n.body}</div>
+                <div className="text-[10px] text-slate-300 mt-1">{new Date(n.sentAt).toLocaleString('ja-JP')}</div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -2035,6 +2224,238 @@ function AdminDashboardTab({ missingCount, correctionCount, leaveCount, shiftCou
   );
 }
 
+// ---- 給与計算 ----
+const MONTHLY_STANDARD_HOURS = 160; // 月給制の残業単価を出すための簡易換算（週40h×概ね4週）
+const OVERTIME_MULTIPLIER = 1.25;
+
+function computePayrollPreview({ wageType, hourlyWage, monthlySalary, workedMinutes, overtimeMinutes }) {
+  const regularMinutes = Math.max(0, workedMinutes - overtimeMinutes);
+  let baseAmount = 0;
+  let overtimeAmount = 0;
+  let wageRate = 0;
+  if (wageType === 'hourly') {
+    wageRate = Number(hourlyWage) || 0;
+    baseAmount = Math.round((regularMinutes / 60) * wageRate);
+    overtimeAmount = Math.round((overtimeMinutes / 60) * wageRate * OVERTIME_MULTIPLIER);
+  } else {
+    wageRate = Number(monthlySalary) || 0;
+    baseAmount = Math.round(wageRate);
+    const hourlyEquivalent = wageRate / MONTHLY_STANDARD_HOURS;
+    overtimeAmount = Math.round((overtimeMinutes / 60) * hourlyEquivalent * OVERTIME_MULTIPLIER);
+  }
+  return { wageRate, regularMinutes, baseAmount, overtimeAmount, totalAmount: baseAmount + overtimeAmount };
+}
+
+const formatYen = (n) => `¥${Math.round(n || 0).toLocaleString('ja-JP')}`;
+
+function PayslipView({ records }) {
+  const sorted = [...records].sort((a, b) => (a.year !== b.year ? b.year - a.year : b.month - a.month));
+  return (
+    <div className="space-y-4">
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-5 py-3.5">
+        <h2 className="font-bold text-[14px] text-slate-800 flex items-center gap-2"><Wallet size={16} className="text-slate-400" />給与明細</h2>
+      </div>
+      {sorted.length === 0 ? (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-6 py-14 text-center text-[12.5px] text-slate-300">
+          公開されている給与明細はまだありません
+        </div>
+      ) : (
+        <div className="grid gap-4 sm:grid-cols-2">
+          {sorted.map((p) => (
+            <div key={p.id} className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+              <div className="px-5 py-3.5 border-b border-slate-100 flex items-center justify-between">
+                <span className="font-bold text-[14px] text-slate-800">{p.year}年{p.month}月分</span>
+                <span className="text-[10.5px] font-bold text-emerald-600 bg-emerald-50 px-2 py-1 rounded-full">公開済み</span>
+              </div>
+              <div className="px-5 py-4 space-y-2">
+                <Row label="区分" value={p.wageType === 'hourly' ? `時給 ${formatYen(p.wageRate)}` : `月給 ${formatYen(p.wageRate)}`} />
+                <Row label="実働時間" value={minutesToHHMM(p.workedMinutes)} />
+                <Row label="残業時間" value={minutesToHHMM(p.overtimeMinutes)} />
+                <Row label="基本給" value={formatYen(p.baseAmount)} />
+                <Row label="残業手当" value={formatYen(p.overtimeAmount)} />
+                <div className="flex items-center justify-between pt-2 mt-2 border-t border-slate-100">
+                  <span className="text-[12.5px] font-bold text-slate-700">総支給額（概算）</span>
+                  <span className="font-mono text-[18px] font-bold text-slate-900">{formatYen(p.totalAmount)}</span>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="text-[11px] text-slate-400 px-1">※税金・社会保険料などの控除は含まれていない、総支給額の概算です。正式な給与額は別途ご確認ください。</div>
+    </div>
+  );
+}
+
+function Row({ label, value }) {
+  return (
+    <div className="flex items-center justify-between text-[12.5px]">
+      <span className="text-slate-400">{label}</span>
+      <span className="font-mono font-semibold text-slate-700">{value}</span>
+    </div>
+  );
+}
+
+function PayrollAdminTab({ employeeAccounts, records, payrollRecords, onSaveDraft, onPublish, onUpdateWage, isDesktop }) {
+  const now = new Date();
+  const [employeeId, setEmployeeId] = useState(employeeAccounts[0]?.id || '');
+  const [year, setYear] = useState(now.getFullYear());
+  const [month, setMonth] = useState(now.getMonth() + 1);
+  const [wageType, setWageType] = useState('hourly');
+  const [hourlyWage, setHourlyWage] = useState('0');
+  const [monthlySalary, setMonthlySalary] = useState('0');
+
+  const employee = employeeAccounts.find((a) => a.id === employeeId);
+
+  useEffect(() => {
+    if (!employee) return;
+    setWageType(employee.wageType || 'hourly');
+    setHourlyWage(String(employee.hourlyWage || 0));
+    setMonthlySalary(String(employee.monthlySalary || 0));
+  }, [employeeId]);
+
+  if (!employee) {
+    return <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-6 py-14 text-center text-[12.5px] text-slate-300">社員が登録されていません</div>;
+  }
+
+  const monthly = computeMonthlySummary(records[employeeId] || {}, new Date(year, month - 1, 1));
+  const preview = computePayrollPreview({
+    wageType,
+    hourlyWage,
+    monthlySalary,
+    workedMinutes: monthly.workedMin,
+    overtimeMinutes: monthly.overtimeMin,
+  });
+
+  const existing = payrollRecords.find((p) => p.employeeId === employeeId && p.year === year && p.month === month);
+
+  const saveWageSettings = async () => {
+    await onUpdateWage(employeeId, {
+      wageType,
+      hourlyWage: wageType === 'hourly' ? Number(hourlyWage) : employee.hourlyWage,
+      monthlySalary: wageType === 'monthly' ? Number(monthlySalary) : employee.monthlySalary,
+    });
+  };
+
+  const generate = async () => {
+    await saveWageSettings();
+    await onSaveDraft({
+      employeeId,
+      year,
+      month,
+      wageType,
+      wageRate: preview.wageRate,
+      workedMinutes: monthly.workedMin,
+      overtimeMinutes: monthly.overtimeMin,
+      baseAmount: preview.baseAmount,
+      overtimeAmount: preview.overtimeAmount,
+      totalAmount: preview.totalAmount,
+    });
+  };
+
+  const years = [now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1];
+  const months = Array.from({ length: 12 }, (_, i) => i + 1);
+  const recent = payrollRecords.slice(0, 20);
+
+  return (
+    <div className="space-y-5">
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
+        <h2 className="font-bold text-[14px] text-slate-800 flex items-center gap-2"><Wallet size={16} className="text-slate-400" />給与計算</h2>
+        <div className={`grid gap-3 ${isDesktop ? 'grid-cols-3' : 'grid-cols-1'}`}>
+          <Field label="社員">
+            <select value={employeeId} onChange={(e) => setEmployeeId(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px] bg-white">
+              {employeeAccounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select>
+          </Field>
+          <Field label="年">
+            <select value={year} onChange={(e) => setYear(Number(e.target.value))} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px] bg-white">
+              {years.map((y) => <option key={y} value={y}>{y}年</option>)}
+            </select>
+          </Field>
+          <Field label="月">
+            <select value={month} onChange={(e) => setMonth(Number(e.target.value))} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px] bg-white">
+              {months.map((m) => <option key={m} value={m}>{m}月</option>)}
+            </select>
+          </Field>
+        </div>
+
+        <div className="bg-slate-50 rounded-xl p-4 space-y-3">
+          <div className="text-[12px] font-bold text-slate-600">給与形態（{employee.name}さん）</div>
+          <div className="flex gap-2">
+            <button onClick={() => setWageType('hourly')} className={`flex-1 py-2 rounded-lg text-[12.5px] font-bold border-2 ${wageType === 'hourly' ? 'border-slate-800 bg-white text-slate-800' : 'border-transparent text-slate-400 bg-white'}`}>時給制</button>
+            <button onClick={() => setWageType('monthly')} className={`flex-1 py-2 rounded-lg text-[12.5px] font-bold border-2 ${wageType === 'monthly' ? 'border-slate-800 bg-white text-slate-800' : 'border-transparent text-slate-400 bg-white'}`}>月給制</button>
+          </div>
+          {wageType === 'hourly' ? (
+            <Field label="時給（円）">
+              <input type="number" value={hourlyWage} onChange={(e) => setHourlyWage(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px] bg-white" />
+            </Field>
+          ) : (
+            <Field label="月給（円）">
+              <input type="number" value={monthlySalary} onChange={(e) => setMonthlySalary(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px] bg-white" />
+            </Field>
+          )}
+          <button onClick={saveWageSettings} className="text-[11.5px] font-bold text-amber-600">この給与形態を社員情報に保存</button>
+        </div>
+
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <PayrollMetric label="実働" value={minutesToHHMM(monthly.workedMin)} />
+          <PayrollMetric label="残業" value={minutesToHHMM(monthly.overtimeMin)} />
+          <PayrollMetric label="基本給" value={formatYen(preview.baseAmount)} />
+          <PayrollMetric label="残業手当" value={formatYen(preview.overtimeAmount)} />
+        </div>
+        <div className="flex items-center justify-between bg-slate-900 text-white rounded-xl px-5 py-4">
+          <span className="text-[12.5px] font-bold">総支給額（概算）</span>
+          <span className="font-mono text-[20px] font-bold">{formatYen(preview.totalAmount)}</span>
+        </div>
+
+        <div className="flex gap-2">
+          <button onClick={generate} className="flex-1 py-2.5 rounded-lg bg-slate-800 text-white text-[13px] font-bold">
+            {existing ? 'この内容で再計算・保存' : 'この内容で給与明細を作成'}
+          </button>
+          {existing && existing.status === 'draft' && (
+            <button onClick={() => onPublish(existing.id)} className="flex-1 py-2.5 rounded-lg bg-emerald-600 text-white text-[13px] font-bold">
+              確定して公開する
+            </button>
+          )}
+          {existing && existing.status === 'published' && (
+            <span className="flex-1 flex items-center justify-center rounded-lg bg-emerald-50 text-emerald-600 text-[12.5px] font-bold">公開済みです</span>
+          )}
+        </div>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-100 font-bold text-[13.5px]">作成済み給与明細（直近20件）</div>
+        {recent.length === 0 ? (
+          <div className="px-5 py-8 text-center text-[12.5px] text-slate-300">まだ作成されていません</div>
+        ) : (
+          <div className="divide-y divide-slate-100">
+            {recent.map((p) => (
+              <div key={p.id} className="px-5 py-3 flex items-center justify-between text-[12.5px]">
+                <span>{p.employeeName} — {p.year}年{p.month}月分</span>
+                <span className="flex items-center gap-2">
+                  <span className="font-mono font-bold text-slate-700">{formatYen(p.totalAmount)}</span>
+                  <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full ${p.status === 'published' ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-100 text-slate-400'}`}>
+                    {p.status === 'published' ? '公開済み' : '下書き'}
+                  </span>
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function PayrollMetric({ label, value }) {
+  return (
+    <div className="bg-white rounded-lg border border-slate-200 px-3 py-2.5 text-center">
+      <div className="text-[10px] text-slate-400 font-bold">{label}</div>
+      <div className="font-mono text-[14px] font-bold text-slate-800 mt-0.5">{value}</div>
+    </div>
+  );
+}
+
 function AdminTopNav({ tab, setTab, correctionCount, leaveCount, shiftCount, performanceCount }) {
   const [open, setOpen] = useState(null);
   const wrapRef = useRef(null);
@@ -2798,6 +3219,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, isDe
   const [editingId, setEditingId] = useState(null);
   const [editHire, setEditHire] = useState('');
   const [editResign, setEditResign] = useState('');
+  const [profileModalAccount, setProfileModalAccount] = useState(null);
 
   const canSubmit = name.trim() && username.trim() && password.trim().length >= 4 && hireDate;
 
@@ -2854,6 +3276,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, isDe
               <th className="px-5 py-2 font-medium">退職日</th>
               <th className="px-5 py-2 font-medium">法定有休（自動計算）</th>
               <th className="px-5 py-2 font-medium"></th>
+              <th className="px-5 py-2 font-medium"></th>
             </tr>
           </thead>
           <tbody>
@@ -2872,6 +3295,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, isDe
                       <td className="px-5 py-2.5"><input type="date" value={editResign} onChange={(e) => setEditResign(e.target.value)} className="border border-slate-200 rounded-md px-2 py-1 font-mono text-[12px]" /></td>
                       <td className="px-5 py-2.5 font-mono text-slate-400">{computeStatutoryPaidLeaveDays(editHire)}日</td>
                       <td className="px-5 py-2.5"><button onClick={() => saveEdit(acc.id)} className="text-[11px] font-bold text-amber-600">保存</button></td>
+                      <td className="px-5 py-2.5"></td>
                     </>
                   ) : (
                     <>
@@ -2879,13 +3303,14 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, isDe
                       <td className="px-5 py-2.5 font-mono text-slate-400">{acc.resignationDate || '在籍中'}</td>
                       <td className="px-5 py-2.5 font-mono font-semibold text-slate-800">{granted}日</td>
                       <td className="px-5 py-2.5"><button onClick={() => startEdit(acc)} className="text-slate-400"><Pencil size={13} /></button></td>
+                      <td className="px-5 py-2.5"><button onClick={() => setProfileModalAccount(acc)} className="text-[11px] font-bold text-slate-500 border border-slate-200 rounded-md px-2 py-1">詳細</button></td>
                     </>
                   )}
                 </tr>
               );
             })}
             {employeeAccounts.length === 0 && (
-              <tr><td colSpan={6} className="px-5 py-8 text-center text-[12.5px] text-slate-300">社員アカウントがありません</td></tr>
+              <tr><td colSpan={7} className="px-5 py-8 text-center text-[12.5px] text-slate-300">社員アカウントがありません</td></tr>
             )}
           </tbody>
         </table>
@@ -2903,9 +3328,12 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, isDe
                     </div>
                     <div className="text-[11.5px] text-slate-400 font-mono">ID: {acc.username}</div>
                   </div>
-                  {!isEditing && (
-                    <button onClick={() => startEdit(acc)} className="text-slate-400 p-1"><Pencil size={13} /></button>
-                  )}
+                  <div className="flex items-center gap-1">
+                    <button onClick={() => setProfileModalAccount(acc)} className="text-[11px] font-bold text-slate-500 border border-slate-200 rounded-md px-2 py-1">詳細</button>
+                    {!isEditing && (
+                      <button onClick={() => startEdit(acc)} className="text-slate-400 p-1"><Pencil size={13} /></button>
+                    )}
+                  </div>
                 </div>
                 {isEditing ? (
                   <div className="space-y-2 bg-slate-50 rounded-lg p-3">
@@ -2988,6 +3416,76 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, isDe
       {listCard}
       {formCard}
       {disclaimer}
+      {profileModalAccount && (
+        <EmployeeProfileModal
+          account={profileModalAccount}
+          onClose={() => setProfileModalAccount(null)}
+          onSave={onUpdateDates}
+        />
+      )}
+    </div>
+  );
+}
+
+function EmployeeProfileModal({ account, onClose, onSave }) {
+  const [form, setForm] = useState({
+    contactEmail: account.contactEmail || '',
+    staffNumber: account.staffNumber || '',
+    address: account.address || '',
+    phone: account.phone || '',
+    emergencyContactName: account.emergencyContactName || '',
+    emergencyContactPhone: account.emergencyContactPhone || '',
+  });
+  const [saving, setSaving] = useState(false);
+  const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
+
+  const save = async () => {
+    setSaving(true);
+    await onSave(account.id, form);
+    setSaving(false);
+    onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-40 p-0 sm:p-4">
+      <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-md max-h-[92vh] overflow-y-auto">
+        <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white">
+          <div>
+            <div className="text-[11px] text-slate-400 font-medium">{account.name}</div>
+            <h3 className="font-bold text-[15px]">アカウント詳細情報</h3>
+          </div>
+          <button onClick={onClose} className="text-slate-400 text-xl leading-none px-1">×</button>
+        </div>
+        <div className="px-5 py-4 space-y-4">
+          <Field label="連絡用メールアドレス">
+            <input type="email" value={form.contactEmail} onChange={set('contactEmail')} placeholder="example@brown-kyoto.com" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" />
+          </Field>
+          <Field label="スタッフナンバー">
+            <input value={form.staffNumber} onChange={set('staffNumber')} placeholder="例）00016" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
+          </Field>
+          <Field label="住所">
+            <input value={form.address} onChange={set('address')} placeholder="例）京都府京都市〇〇区..." className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" />
+          </Field>
+          <Field label="電話番号">
+            <input value={form.phone} onChange={set('phone')} placeholder="例）090-1234-5678" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
+          </Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="緊急連絡先（氏名）">
+              <input value={form.emergencyContactName} onChange={set('emergencyContactName')} placeholder="例）田中 一郎" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
+            </Field>
+            <Field label="緊急連絡先（電話）">
+              <input value={form.emergencyContactPhone} onChange={set('emergencyContactPhone')} placeholder="090-xxxx-xxxx" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
+            </Field>
+          </div>
+          <div className="text-[10.5px] text-slate-400">ログイン用のID・パスワードとは別の情報です。緊急連絡や書類送付などに使用してください。</div>
+        </div>
+        <div className="px-5 pb-5 pt-1 flex gap-2 sticky bottom-0 bg-white">
+          <button onClick={onClose} className="flex-1 py-2.5 rounded-lg border border-slate-200 text-[13.5px] font-medium text-slate-500">キャンセル</button>
+          <button onClick={save} disabled={saving} className="flex-1 py-2.5 rounded-lg bg-slate-800 disabled:bg-slate-300 text-white text-[13.5px] font-bold">
+            {saving ? '保存中…' : '保存する'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
