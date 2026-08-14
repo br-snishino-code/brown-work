@@ -139,6 +139,164 @@ const defaultHalfForToday = () => {
   return d.getDate() <= 15 ? 1 : 2;
 };
 
+// ---- eo業務 実績管理（新規実績・既存実績・インセンティブ） ----
+const EO_GROUP_NAME = 'eo業務';
+
+// 新規実績：成約内訳・エンパケ成約内訳・後日成約内訳の共通ポイント表
+const NEW_PERF_POINTS = { net: 5, tvMulti: 2, tvBasic: 1, g10: 2, secpack: 1, mesh: 1 };
+// 新規実績：サービス追加（既存契約への当日追加）のポイント表
+const NEW_PERF_ADD_POINTS = { net: 5, tvMulti: 2, tvBasic: 1, g10: 2 };
+
+const NEW_PERF_CONTRACT_FIELDS = [
+  { key: 'net', label: 'ネット' },
+  { key: 'tvMulti', label: 'テレビ(多ch)' },
+  { key: 'tvBasic', label: 'テレビ(地デジBS)' },
+  { key: 'g10', label: '10G' },
+  { key: 'secpack', label: 'セキュパ' },
+  { key: 'mesh', label: 'メッシュ' },
+];
+const NEW_PERF_ADD_FIELDS = [
+  { key: 'net', label: 'ネット' },
+  { key: 'tvMulti', label: 'テレビ(多ch)' },
+  { key: 'tvBasic', label: 'テレビ(地デジBS)' },
+  { key: 'g10', label: '10G' },
+];
+
+const emptyNewPerfDay = () => ({
+  store: '', targets: '', approaches: '', negotiations: '',
+  contract: { net: '', tvMulti: '', tvBasic: '', g10: '', secpack: '', mesh: '' },
+  empakeCount: '',
+  empake: { net: '', tvMulti: '', tvBasic: '', g10: '', secpack: '', mesh: '' },
+  laterOwnDate: '', laterReceiver: '',
+  later: { net: '', tvMulti: '', tvBasic: '', g10: '', secpack: '', mesh: '' },
+  add: { net: '', tvMulti: '', tvBasic: '', g10: '' },
+});
+
+// 新規実績：1日分のポイントを計算
+function computeNewPerfDayPoints(day) {
+  if (!day) return 0;
+  const sumGroup = (group, table) => Object.entries(table).reduce((s, [k, p]) => s + (Number(group?.[k]) || 0) * p, 0);
+  return (
+    sumGroup(day.contract, NEW_PERF_POINTS) +
+    sumGroup(day.empake, NEW_PERF_POINTS) +
+    sumGroup(day.later, NEW_PERF_POINTS) +
+    sumGroup(day.add, NEW_PERF_ADD_POINTS)
+  );
+}
+
+// 新規実績：月合計ポイント（タブレット不備・キャンセルの減点は含まない生のポイント）
+function computeNewPerfMonthPoints(daily) {
+  return Object.values(daily || {}).reduce((sum, day) => sum + computeNewPerfDayPoints(day), 0);
+}
+
+// 既存実績（アップセルLTV）：項目とポイント表（2026年度アップセルポイント一覧表に準拠）
+const EXISTING_PERF_FIELDS = [
+  { key: 'netAdd', label: 'ネット追加', points: 5 },
+  { key: 'g10', label: '10G', points: 2 },
+  { key: 'phoneAdd', label: '電話追加', points: 40 },
+  { key: 'tvMultiAdd', label: 'テレビ多ch追加', points: 2 },
+  { key: 'tvBasicAdd', label: 'テレビ地デジBS追加', points: 1 },
+  { key: 'choki', label: '長割', points: 15 },
+  { key: 'wirelessRt', label: '無線RT機能', points: 5 },
+  { key: 'extender', label: '無線LAN中継器', points: 10 },
+  { key: 'mesh', label: 'eoメッシュWi-Fi', points: 20 },
+  { key: 'sp', label: 'セキュリティパック', points: 10 },
+  { key: 'remoteSupport', label: 'リモートサポートプラス', points: 10 },
+  { key: 'sagiWall', label: 'ネットサギウォール', points: 1 },
+  { key: 'machineHosho', label: 'おうちの機器補償', points: 1 },
+  { key: 'mailAdd', label: 'メールアドレス追加', points: 15 },
+  { key: 'mailboxAdd', label: 'メールボックス容量追加', points: 5 },
+  { key: 'mailVirus', label: 'メールウイルスチェック', points: 1 },
+  { key: 'phonePaidOpt', label: '電話オプション（有料）', points: 10 },
+  { key: 'anshinPack', label: 'あんしん電話パック', points: 10 },
+  { key: 'phoneFreeOpt', label: '電話オプション（無料）', points: 1 },
+  { key: 'csOpt', label: 'CSオプションch', points: 10 },
+  { key: 'tvGuide', label: 'テレビガイド誌', points: 10 },
+  { key: 'paidStb', label: '有料STB', points: 15 },
+  { key: 'up1g', label: 'ネット100M→1Gコースアップ', points: 5 },
+  { key: 'up5g', label: 'ネット100M/1G→5Gコースアップ', points: 10 },
+  { key: 'up10g', label: 'ネット100M/1G→10Gコースアップ', points: 30 },
+  { key: 'up5to10g', label: 'ネット5G→10Gコースアップ', points: 20 },
+  { key: 'netflix', label: 'Netflixパック追加', points: 10 },
+  { key: 'tvCourseUp', label: 'テレビコースアップ(地デジBS→多ch)', points: 25 },
+  { key: 'teigaku4k', label: '定額4Kテレビ', points: 10 },
+  { key: 'teigakuGame', label: '定額ゲーミングデバイス', points: 5 },
+  { key: 'moving', label: '引越し', points: 25 },
+];
+
+const emptyExistingPerfDay = () => Object.fromEntries(EXISTING_PERF_FIELDS.map((f) => [f.key, '']));
+
+function computeExistingPerfDayPoints(day) {
+  if (!day) return 0;
+  return EXISTING_PERF_FIELDS.reduce((sum, f) => sum + (Number(day[f.key]) || 0) * f.points, 0);
+}
+
+function computeExistingPerfMonthPoints(daily) {
+  return Object.values(daily || {}).reduce((sum, day) => sum + computeExistingPerfDayPoints(day), 0);
+}
+
+// 新規実績：月間エンパケ配布枚数の合計（インセンティブの3枚以上／4枚以上判定に使用）
+function computeMonthEmpakeCount(daily) {
+  return Object.values(daily || {}).reduce((sum, day) => sum + (Number(day?.empakeCount) || 0), 0);
+}
+
+// 新規実績：月間の10G付帯率の目安（10G成約数 ÷ ネット成約数）
+// ※「高速回線対象案件」に限定した正式な率ではなく参考値。正式判定は管理者が上書きできる。
+function computeApproxG10Rate(daily) {
+  let netTotal = 0;
+  let g10Total = 0;
+  Object.values(daily || {}).forEach((day) => {
+    ['contract', 'empake', 'later'].forEach((section) => {
+      netTotal += Number(day?.[section]?.net) || 0;
+      g10Total += Number(day?.[section]?.g10) || 0;
+    });
+  });
+  if (netTotal === 0) return null;
+  return g10Total / netTotal;
+}
+
+// eo業務インセンティブ計算
+// staffMonthData: { newPoints, empakeCount, tabletIssues, cancellations, existingPoints, g10HalfOverride, approxG10Rate }
+// groupFlags: { cancelTargetMet, empakeTargetMet, upsellTargetMet }
+// upsellRank: このスタッフのグループ内アップセルLTV順位（1始まり）。順位対象外はnull
+function computeEoIncentive(staffMonthData, groupFlags, upsellRank) {
+  const { newPoints, empakeCount, tabletIssues, cancellations, existingPoints, g10HalfOverride, approxG10Rate } = staffMonthData;
+  const adjustedNewPoints = newPoints - (Number(tabletIssues) || 0) * 2 - (Number(cancellations) || 0) * 3;
+
+  let newPointsForJudge = adjustedNewPoints;
+  if (groupFlags?.cancelTargetMet) newPointsForJudge += 6;
+  if (groupFlags?.empakeTargetMet && empakeCount >= 4) newPointsForJudge += 5;
+
+  const isHalf = g10HalfOverride != null ? g10HalfOverride : (approxG10Rate != null && approxG10Rate < 0.4);
+
+  let newAcquisitionAmount = 0;
+  const eligible = existingPoints >= 60 && newPointsForJudge >= 80 && empakeCount >= 3;
+  if (eligible) {
+    newAcquisitionAmount = 8000;
+    const over = newPointsForJudge - 80;
+    if (over > 0) newAcquisitionAmount += Math.floor(over / 5) * 2000;
+    if (isHalf) newAcquisitionAmount = Math.round(newAcquisitionAmount / 2);
+  }
+
+  let upsellAmount = 0;
+  if (groupFlags?.upsellTargetMet && existingPoints >= 140) {
+    upsellAmount = 5000;
+    if (upsellRank === 1) upsellAmount += 10000;
+    else if (upsellRank === 2 || upsellRank === 3) upsellAmount += 7000;
+    else if (upsellRank === 4 || upsellRank === 5) upsellAmount += 5000;
+  }
+
+  return {
+    adjustedNewPoints,
+    newPointsForJudge,
+    isHalf,
+    newAcquisitionEligible: eligible,
+    newAcquisitionAmount,
+    upsellAmount,
+    totalAmount: newAcquisitionAmount + upsellAmount,
+  };
+}
+
 // ---- Monthly shift request ----
 const nextMonthKey = (from = new Date()) => {
   const y = from.getFullYear();
@@ -681,6 +839,82 @@ async function logAudit(actor, action, detail, targetEmployeeId = null, targetEm
   } catch (e) {
     console.error('監査ログの記録に失敗しました', e);
   }
+}
+
+// ---- eo業務 実績データの読み書き（対象者が少ないため全体fetchAllDataには含めず個別に取得） ----
+async function fetchNewPerf(employeeId, year, month) {
+  const { data, error } = await supabase
+    .from('staff_new_performance')
+    .select('*')
+    .eq('employee_id', employeeId)
+    .eq('year', year)
+    .eq('month', month)
+    .maybeSingle();
+  if (error) { console.error('新規実績の取得に失敗しました', error); return null; }
+  return data;
+}
+
+async function saveNewPerf(employeeId, year, month, patch) {
+  const { error } = await supabase.from('staff_new_performance').upsert(
+    { employee_id: employeeId, year, month, ...patch, updated_at: new Date().toISOString() },
+    { onConflict: 'employee_id,year,month' }
+  );
+  if (error) { console.error('新規実績の保存に失敗しました', error); return false; }
+  return true;
+}
+
+async function fetchExistingPerf(employeeId, year, month) {
+  const { data, error } = await supabase
+    .from('staff_existing_performance')
+    .select('*')
+    .eq('employee_id', employeeId)
+    .eq('year', year)
+    .eq('month', month)
+    .maybeSingle();
+  if (error) { console.error('既存実績の取得に失敗しました', error); return null; }
+  return data;
+}
+
+async function saveExistingPerf(employeeId, year, month, daily) {
+  const { error } = await supabase.from('staff_existing_performance').upsert(
+    { employee_id: employeeId, year, month, daily, updated_at: new Date().toISOString() },
+    { onConflict: 'employee_id,year,month' }
+  );
+  if (error) { console.error('既存実績の保存に失敗しました', error); return false; }
+  return true;
+}
+
+// 管理者用：グループ全員分のその月の実績をまとめて取得（RLSにより管理者のみ取得可能）
+async function fetchGroupPerfAll(employeeIds, year, month) {
+  if (!employeeIds || employeeIds.length === 0) return { newRows: [], existingRows: [] };
+  const [newRes, existingRes] = await Promise.all([
+    supabase.from('staff_new_performance').select('*').in('employee_id', employeeIds).eq('year', year).eq('month', month),
+    supabase.from('staff_existing_performance').select('*').in('employee_id', employeeIds).eq('year', year).eq('month', month),
+  ]);
+  if (newRes.error) console.error('新規実績一覧の取得に失敗しました', newRes.error);
+  if (existingRes.error) console.error('既存実績一覧の取得に失敗しました', existingRes.error);
+  return { newRows: newRes.data || [], existingRows: existingRes.data || [] };
+}
+
+async function fetchGroupIncentiveFlags(groupName, year, month) {
+  const { data, error } = await supabase
+    .from('group_incentive_flags')
+    .select('*')
+    .eq('group_name', groupName)
+    .eq('year', year)
+    .eq('month', month)
+    .maybeSingle();
+  if (error) { console.error('グループ目標フラグの取得に失敗しました', error); return null; }
+  return data;
+}
+
+async function saveGroupIncentiveFlags(groupName, year, month, flags) {
+  const { error } = await supabase.from('group_incentive_flags').upsert(
+    { group_name: groupName, year, month, ...flags, updated_at: new Date().toISOString() },
+    { onConflict: 'group_name,year,month' }
+  );
+  if (error) { console.error('グループ目標フラグの保存に失敗しました', error); return false; }
+  return true;
 }
 
 // ============================================================
@@ -1710,11 +1944,16 @@ export default function AttendanceApp() {
               />
             )}
             {employeeTab === 'performance' && (
-              <PerformanceView
-                reports={myPerformanceReports}
-                onOpenModal={(type) => setPerformanceModal(type)}
-                isDesktop={isDesktop}
-              />
+              <div className="space-y-5">
+                {session.mainGroup === EO_GROUP_NAME && (
+                  <EoPerformanceSection employeeId={session.id} isDesktop={isDesktop} />
+                )}
+                <PerformanceView
+                  reports={myPerformanceReports}
+                  onOpenModal={(type) => setPerformanceModal(type)}
+                  isDesktop={isDesktop}
+                />
+              </div>
             )}
           </div>
         ) : (
@@ -2901,6 +3140,397 @@ function PerformanceModal({ type, onClose, onSubmit }) {
   );
 }
 
+// ==== eo業務 実績管理（新規実績・既存実績・インセンティブ） ====
+
+const NEW_PERF_BASIC_FIELDS = [
+  { key: 'store', label: '入店店舗', type: 'text' },
+  { key: 'targets', label: '対象者数' },
+  { key: 'approaches', label: 'アプローチ数' },
+  { key: 'negotiations', label: '商談数' },
+];
+const NEW_PERF_LATER_META_FIELDS = [
+  { key: 'laterOwnDate', label: '自身商談日', type: 'date' },
+  { key: 'laterReceiver', label: '受付担当者', type: 'text' },
+];
+
+const NEW_PERF_COLUMN_GROUPS = [
+  { label: '基本', fields: NEW_PERF_BASIC_FIELDS, path: null },
+  { label: '新規ご成約内訳', fields: NEW_PERF_CONTRACT_FIELDS, path: 'contract' },
+  { label: 'エンパケ', fields: [{ key: 'empakeCount', label: '配布枚数' }], path: null },
+  { label: 'エンパケご成約内訳', fields: NEW_PERF_CONTRACT_FIELDS, path: 'empake' },
+  { label: '後日成約', fields: NEW_PERF_LATER_META_FIELDS, path: null },
+  { label: '後日成約内訳', fields: NEW_PERF_CONTRACT_FIELDS, path: 'later' },
+  { label: 'サービス追加', fields: NEW_PERF_ADD_FIELDS, path: 'add' },
+];
+
+function EoNewPerfCell({ value, onChange, type = 'number' }) {
+  if (type === 'text') {
+    return <input value={value} onChange={(e) => onChange(e.target.value)} className="w-16 border border-slate-200 rounded px-1 py-1 text-[11px]" />;
+  }
+  if (type === 'date') {
+    return <input type="date" value={value} onChange={(e) => onChange(e.target.value)} className="w-28 border border-slate-200 rounded px-1 py-1 font-mono text-[10.5px]" />;
+  }
+  return <input type="number" value={value} onChange={(e) => onChange(e.target.value)} className="w-12 border border-slate-200 rounded px-1 py-1 font-mono text-[11px] text-right" />;
+}
+
+function EoNewPerfTable({ year, month, daily, onUpdateDay }) {
+  const days = Array.from({ length: lastDayOfMonth(year, month) }, (_, i) => i + 1);
+  return (
+    <div className="overflow-x-auto border border-slate-200 rounded-xl">
+      <table className="text-[11px] border-collapse">
+        <thead>
+          <tr className="bg-slate-50">
+            <th rowSpan={2} className="sticky left-0 bg-slate-50 border-b border-r border-slate-200 px-2 py-1 z-10">日</th>
+            {NEW_PERF_COLUMN_GROUPS.map((g) => (
+              <th key={g.label} colSpan={g.fields.length} className="border-b border-r border-slate-200 px-2 py-1 text-slate-500 font-bold whitespace-nowrap">{g.label}</th>
+            ))}
+            <th rowSpan={2} className="border-b border-slate-200 px-2 py-1 whitespace-nowrap">Pt</th>
+          </tr>
+          <tr className="bg-slate-50">
+            {NEW_PERF_COLUMN_GROUPS.flatMap((g) => g.fields.map((f) => (
+              <th key={g.label + f.key} className="border-b border-r border-slate-200 px-1 py-1 font-normal text-slate-400 whitespace-nowrap">{f.label}</th>
+            )))}
+          </tr>
+        </thead>
+        <tbody>
+          {days.map((d) => {
+            const day = daily[d] || emptyNewPerfDay();
+            const pt = computeNewPerfDayPoints(day);
+            return (
+              <tr key={d} className="border-b border-slate-100 last:border-0">
+                <td className="sticky left-0 bg-white border-r border-slate-200 px-2 py-1 font-bold text-slate-500 whitespace-nowrap">{d}日</td>
+                {NEW_PERF_COLUMN_GROUPS.flatMap((g) => g.fields.map((f) => {
+                  const value = g.path ? (day[g.path]?.[f.key] ?? '') : (day[f.key] ?? '');
+                  const onChange = (v) => onUpdateDay(d, (cur) => {
+                    if (g.path) return { ...cur, [g.path]: { ...cur[g.path], [f.key]: v } };
+                    return { ...cur, [f.key]: v };
+                  });
+                  return (
+                    <td key={g.label + f.key} className="border-r border-slate-100 px-1 py-1">
+                      <EoNewPerfCell value={value} onChange={onChange} type={f.type} />
+                    </td>
+                  );
+                }))}
+                <td className="px-2 py-1 font-mono font-bold text-slate-700 text-right whitespace-nowrap">{pt}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function EoExistingPerfTable({ year, month, daily, onUpdateDay }) {
+  const days = Array.from({ length: lastDayOfMonth(year, month) }, (_, i) => i + 1);
+  return (
+    <div className="overflow-x-auto border border-slate-200 rounded-xl">
+      <table className="text-[11px] border-collapse">
+        <thead>
+          <tr className="bg-slate-50">
+            <th className="sticky left-0 bg-slate-50 border-b border-r border-slate-200 px-2 py-1 z-10">日</th>
+            {EXISTING_PERF_FIELDS.map((f) => (
+              <th key={f.key} className="border-b border-r border-slate-200 px-1.5 py-1 font-normal text-slate-500 whitespace-nowrap">{f.label}<div className="text-[9.5px] text-slate-300">{f.points}P</div></th>
+            ))}
+            <th className="border-b border-slate-200 px-2 py-1 whitespace-nowrap">Pt</th>
+          </tr>
+        </thead>
+        <tbody>
+          {days.map((d) => {
+            const day = daily[d] || emptyExistingPerfDay();
+            const pt = computeExistingPerfDayPoints(day);
+            return (
+              <tr key={d} className="border-b border-slate-100 last:border-0">
+                <td className="sticky left-0 bg-white border-r border-slate-200 px-2 py-1 font-bold text-slate-500 whitespace-nowrap">{d}日</td>
+                {EXISTING_PERF_FIELDS.map((f) => (
+                  <td key={f.key} className="border-r border-slate-100 px-1 py-1">
+                    <input
+                      type="number"
+                      value={day[f.key] ?? ''}
+                      onChange={(e) => onUpdateDay(d, f.key, e.target.value)}
+                      className="w-11 border border-slate-200 rounded px-1 py-1 font-mono text-[11px] text-right"
+                    />
+                  </td>
+                ))}
+                <td className="px-2 py-1 font-mono font-bold text-slate-700 text-right whitespace-nowrap">{pt}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function EoPerformanceSection({ employeeId, isDesktop }) {
+  const now = new Date();
+  const [year, setYear] = useState(now.getFullYear());
+  const [month, setMonth] = useState(now.getMonth() + 1);
+  const [sheet, setSheet] = useState('new');
+  const [loading, setLoading] = useState(true);
+  const [newDaily, setNewDaily] = useState({});
+  const [tabletIssues, setTabletIssues] = useState('0');
+  const [cancellations, setCancellations] = useState('0');
+  const [existingDaily, setExistingDaily] = useState({});
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    Promise.all([fetchNewPerf(employeeId, year, month), fetchExistingPerf(employeeId, year, month)]).then(([np, ep]) => {
+      if (cancelled) return;
+      setNewDaily(np?.daily || {});
+      setTabletIssues(String(np?.tablet_issues ?? 0));
+      setCancellations(String(np?.cancellations ?? 0));
+      setExistingDaily(ep?.daily || {});
+      setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [employeeId, year, month]);
+
+  const updateNewDay = (d, updater) => {
+    setNewDaily((prev) => ({ ...prev, [d]: updater(prev[d] || emptyNewPerfDay()) }));
+  };
+  const updateExistingDay = (d, key, value) => {
+    setExistingDaily((prev) => ({ ...prev, [d]: { ...(prev[d] || emptyExistingPerfDay()), [key]: value } }));
+  };
+
+  const monthNewPoints = computeNewPerfMonthPoints(newDaily);
+  const monthExistingPoints = computeExistingPerfMonthPoints(existingDaily);
+  const empakeTotal = computeMonthEmpakeCount(newDaily);
+  const approxG10Rate = computeApproxG10Rate(newDaily);
+  const adjustedNewPoints = monthNewPoints - (Number(tabletIssues) || 0) * 2 - (Number(cancellations) || 0) * 3;
+
+  const save = async () => {
+    setSaving(true);
+    if (sheet === 'new') {
+      await saveNewPerf(employeeId, year, month, { daily: newDaily, tablet_issues: Number(tabletIssues) || 0, cancellations: Number(cancellations) || 0 });
+    } else {
+      await saveExistingPerf(employeeId, year, month, existingDaily);
+    }
+    setSaving(false);
+  };
+
+  const years = [now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1];
+  const months = Array.from({ length: 12 }, (_, i) => i + 1);
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+      <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2 flex-wrap">
+        <BarChart3 size={15} className="text-slate-400" />
+        <h2 className="font-bold text-[13.5px]">eo業務 実績入力</h2>
+        <div className="ml-auto flex items-center gap-2">
+          <select value={year} onChange={(e) => setYear(Number(e.target.value))} className="border border-slate-200 rounded-lg px-2 py-1.5 text-[12.5px] bg-white">
+            {years.map((y) => <option key={y} value={y}>{y}年</option>)}
+          </select>
+          <select value={month} onChange={(e) => setMonth(Number(e.target.value))} className="border border-slate-200 rounded-lg px-2 py-1.5 text-[12.5px] bg-white">
+            {months.map((m) => <option key={m} value={m}>{m}月</option>)}
+          </select>
+        </div>
+      </div>
+
+      <div className="px-5 pt-3 flex gap-2">
+        <button onClick={() => setSheet('new')} className={`px-3 py-1.5 rounded-lg text-[12.5px] font-bold ${sheet === 'new' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-500'}`}>新規実績</button>
+        <button onClick={() => setSheet('existing')} className={`px-3 py-1.5 rounded-lg text-[12.5px] font-bold ${sheet === 'existing' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-500'}`}>既存実績（アップセルLTV）</button>
+      </div>
+
+      <div className="p-5 grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <PayrollMetric label="新規獲得Pt(月合計)" value={`${monthNewPoints}P`} />
+        <PayrollMetric label="調整後Pt" value={`${adjustedNewPoints}P`} />
+        <PayrollMetric label="既存(アップセルLTV)Pt" value={`${monthExistingPoints}P`} />
+        <PayrollMetric label="エンパケ配布(月合計)" value={`${empakeTotal}枚`} />
+      </div>
+
+      {sheet === 'new' && (
+        <div className="px-5 pb-3 grid grid-cols-2 gap-3">
+          <Field label="タブレット不備件数（-2P/件）">
+            <input type="number" value={tabletIssues} onChange={(e) => setTabletIssues(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" />
+          </Field>
+          <Field label="キャンセル件数（-3P/件）">
+            <input type="number" value={cancellations} onChange={(e) => setCancellations(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" />
+          </Field>
+        </div>
+      )}
+      {sheet === 'new' && approxG10Rate != null && (
+        <div className="px-5 pb-3 text-[11px] text-slate-400">10G付帯率（参考値・ネット成約数に対する10G成約数の割合）：{Math.round(approxG10Rate * 1000) / 10}%</div>
+      )}
+
+      {loading ? (
+        <div className="px-5 pb-6 text-center text-[12.5px] text-slate-300 py-10">読み込み中…</div>
+      ) : (
+        <div className="px-5 pb-5">
+          {sheet === 'new' ? (
+            <EoNewPerfTable year={year} month={month} daily={newDaily} onUpdateDay={updateNewDay} />
+          ) : (
+            <EoExistingPerfTable year={year} month={month} daily={existingDaily} onUpdateDay={updateExistingDay} />
+          )}
+          <button onClick={save} disabled={saving} className="mt-4 w-full py-2.5 rounded-lg bg-slate-800 disabled:bg-slate-300 text-white text-[13px] font-bold">
+            {saving ? '保存中…' : 'この内容で保存する'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// 管理者用：eo業務グループのインセンティブ集計
+function EoAdminIncentiveTab({ employeeAccounts, isDesktop }) {
+  const now = new Date();
+  const [year, setYear] = useState(now.getFullYear());
+  const [month, setMonth] = useState(now.getMonth() + 1);
+  const [loading, setLoading] = useState(true);
+  const [newRows, setNewRows] = useState([]);
+  const [existingRows, setExistingRows] = useState([]);
+  const [flags, setFlags] = useState({ cancel_target_met: false, empake_target_met: false, upsell_target_met: false });
+  const [savingFlags, setSavingFlags] = useState(false);
+
+  const eoStaff = employeeAccounts.filter((a) => a.mainGroup === EO_GROUP_NAME);
+  const eoIds = eoStaff.map((a) => a.id);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    Promise.all([fetchGroupPerfAll(eoIds, year, month), fetchGroupIncentiveFlags(EO_GROUP_NAME, year, month)]).then(([perf, flagRow]) => {
+      if (cancelled) return;
+      setNewRows(perf.newRows);
+      setExistingRows(perf.existingRows);
+      setFlags({
+        cancel_target_met: !!flagRow?.cancel_target_met,
+        empake_target_met: !!flagRow?.empake_target_met,
+        upsell_target_met: !!flagRow?.upsell_target_met,
+      });
+      setLoading(false);
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [year, month, eoIds.join(',')]);
+
+  const saveFlags = async () => {
+    setSavingFlags(true);
+    await saveGroupIncentiveFlags(EO_GROUP_NAME, year, month, flags);
+    setSavingFlags(false);
+  };
+
+  // 個人別アップセルLTV順位を算出
+  const existingTotals = eoStaff.map((a) => {
+    const row = existingRows.find((r) => r.employee_id === a.id);
+    return { id: a.id, points: computeExistingPerfMonthPoints(row?.daily || {}) };
+  }).sort((a, b) => b.points - a.points);
+  const rankOf = (id) => {
+    const idx = existingTotals.findIndex((x) => x.id === id);
+    if (idx < 0 || existingTotals[idx].points <= 0) return null;
+    return idx + 1;
+  };
+
+  const rows = eoStaff.map((a) => {
+    const newRow = newRows.find((r) => r.employee_id === a.id);
+    const existingRow = existingRows.find((r) => r.employee_id === a.id);
+    const daily = newRow?.daily || {};
+    const existingDaily = existingRow?.daily || {};
+    const newPoints = computeNewPerfMonthPoints(daily);
+    const existingPoints = computeExistingPerfMonthPoints(existingDaily);
+    const empakeCount = computeMonthEmpakeCount(daily);
+    const approxG10Rate = computeApproxG10Rate(daily);
+    const incentive = computeEoIncentive(
+      {
+        newPoints,
+        empakeCount,
+        tabletIssues: newRow?.tablet_issues || 0,
+        cancellations: newRow?.cancellations || 0,
+        existingPoints,
+        g10HalfOverride: newRow?.g10_half_override,
+        approxG10Rate,
+      },
+      { cancelTargetMet: flags.cancel_target_met, empakeTargetMet: flags.empake_target_met, upsellTargetMet: flags.upsell_target_met },
+      rankOf(a.id)
+    );
+    return { account: a, newPoints, existingPoints, empakeCount, rank: rankOf(a.id), incentive };
+  });
+
+  const years = [now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1];
+  const months = Array.from({ length: 12 }, (_, i) => i + 1);
+
+  return (
+    <div className="space-y-5">
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
+        <div className="flex items-center gap-2 flex-wrap">
+          <h2 className="font-bold text-[14px] text-slate-800 flex items-center gap-2"><Wallet size={16} className="text-slate-400" />eo業務 インセンティブ集計</h2>
+          <div className="ml-auto flex items-center gap-2">
+            <select value={year} onChange={(e) => setYear(Number(e.target.value))} className="border border-slate-200 rounded-lg px-2 py-1.5 text-[12.5px] bg-white">
+              {years.map((y) => <option key={y} value={y}>{y}年</option>)}
+            </select>
+            <select value={month} onChange={(e) => setMonth(Number(e.target.value))} className="border border-slate-200 rounded-lg px-2 py-1.5 text-[12.5px] bg-white">
+              {months.map((m) => <option key={m} value={m}>{m}月</option>)}
+            </select>
+          </div>
+        </div>
+
+        <div className="bg-slate-50 rounded-xl p-4 space-y-2">
+          <div className="text-[12px] font-bold text-slate-600">グループ全体の目標達成フラグ（この月・全員に一律で適用）</div>
+          <label className="flex items-center gap-2 text-[12.5px] text-slate-600">
+            <input type="checkbox" checked={flags.cancel_target_met} onChange={(e) => setFlags((f) => ({ ...f, cancel_target_met: e.target.checked }))} />
+            全体キャンセル率目標（10.1%未満）達成 → 新規獲得ポイントに+6P
+          </label>
+          <label className="flex items-center gap-2 text-[12.5px] text-slate-600">
+            <input type="checkbox" checked={flags.empake_target_met} onChange={(e) => setFlags((f) => ({ ...f, empake_target_met: e.target.checked }))} />
+            全体エンパケ配布目標（90枚）達成 → 4枚以上配布のスタッフに+5P
+          </label>
+          <label className="flex items-center gap-2 text-[12.5px] text-slate-600">
+            <input type="checkbox" checked={flags.upsell_target_met} onChange={(e) => setFlags((f) => ({ ...f, upsell_target_met: e.target.checked }))} />
+            アップセル全体LTV目標達成 → LTV140P以上のスタッフにアップセルインセンティブを支給
+          </label>
+          <button onClick={saveFlags} disabled={savingFlags} className="text-[11.5px] font-bold text-amber-600">
+            {savingFlags ? '保存中…' : 'フラグを保存する'}
+          </button>
+        </div>
+
+        <div className="text-[11px] text-slate-400 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
+          10G付帯率（40%未満で半額）は自動では正確に判定できないため、参考値をもとに社員側の画面で表示のみ行っています。個別に上書きが必要な場合は開発者にご相談ください。
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-6 py-14 text-center text-[12.5px] text-slate-300">読み込み中…</div>
+      ) : rows.length === 0 ? (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-6 py-14 text-center text-[12.5px] text-slate-300">eo業務グループの社員が登録されていません</div>
+      ) : (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full text-[12.5px]">
+              <thead>
+                <tr className="text-left text-[11px] text-slate-400 border-b border-slate-100">
+                  <th className="px-4 py-2 font-medium">氏名</th>
+                  <th className="px-4 py-2 font-medium">新規Pt(調整後)</th>
+                  <th className="px-4 py-2 font-medium">既存(LTV)Pt</th>
+                  <th className="px-4 py-2 font-medium">エンパケ</th>
+                  <th className="px-4 py-2 font-medium">順位</th>
+                  <th className="px-4 py-2 font-medium">新規獲得</th>
+                  <th className="px-4 py-2 font-medium">アップセル</th>
+                  <th className="px-4 py-2 font-medium">合計</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.account.id} className="border-b border-slate-100 last:border-0">
+                    <td className="px-4 py-2.5 font-semibold text-slate-800">{r.account.name}</td>
+                    <td className="px-4 py-2.5 font-mono">{r.incentive.newPointsForJudge}P</td>
+                    <td className="px-4 py-2.5 font-mono">{r.existingPoints}P</td>
+                    <td className="px-4 py-2.5 font-mono">{r.empakeCount}枚</td>
+                    <td className="px-4 py-2.5 font-mono">{r.rank ? `${r.rank}位` : '-'}</td>
+                    <td className="px-4 py-2.5 font-mono">{formatYen(r.incentive.newAcquisitionAmount)}</td>
+                    <td className="px-4 py-2.5 font-mono">{formatYen(r.incentive.upsellAmount)}</td>
+                    <td className="px-4 py-2.5 font-mono font-bold text-slate-800">{formatYen(r.incentive.totalAmount)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AdminDashboardTab({ missingCount, correctionCount, leaveCount, shiftCount, performanceCount, gpsAlertCount, contractAlertCount, employeeCount, onNavigate, isDesktop }) {
   const alertRows = [
     { label: '打刻漏れ・打刻間違い', count: missingCount, tab: 'requests', icon: <AlertTriangle size={14} /> },
@@ -3337,17 +3967,19 @@ function AdminTopNav({ tab, setTab, correctionCount, leaveCount, shiftCount, per
     {
       key: 'staff-group',
       label: 'スタッフ管理',
-      tabs: isMasterAdmin ? ['accounts', 'groupleave', 'auditlog', 'adminperms'] : ['accounts', 'groupleave', 'auditlog'],
+      tabs: isMasterAdmin ? ['accounts', 'groupleave', 'eoincentive', 'auditlog', 'adminperms'] : ['accounts', 'groupleave', 'eoincentive', 'auditlog'],
       items: isMasterAdmin
         ? [
             { tab: 'accounts', label: '社員一覧・登録', sub: '入退職日・有休管理' },
             { tab: 'groupleave', label: '出勤規定日数設定', sub: 'グループ別・月別日数' },
+            { tab: 'eoincentive', label: 'eo業務インセンティブ', sub: '新規実績・既存実績・支給額' },
             { tab: 'auditlog', label: '監査ログ', sub: '承認・操作の履歴' },
             { tab: 'adminperms', label: '管理者権限', sub: '管理者アカウント・権限設定' },
           ]
         : [
             { tab: 'accounts', label: '社員一覧・登録', sub: '入退職日・有休管理' },
             { tab: 'groupleave', label: '出勤規定日数設定', sub: 'グループ別・月別日数' },
+            { tab: 'eoincentive', label: 'eo業務インセンティブ', sub: '新規実績・既存実績・支給額' },
             { tab: 'auditlog', label: '監査ログ', sub: '承認・操作の履歴' },
           ],
     },
@@ -3497,6 +4129,9 @@ function AdminView({ data, employeeAccounts, session, onDecide, onDecideLeave, o
           <button onClick={() => setTab('groupleave')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'groupleave' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
             出勤規定日数設定
           </button>
+          <button onClick={() => setTab('eoincentive')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'eoincentive' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
+            eo業務インセンティブ
+          </button>
           <button onClick={() => setTab('auditlog')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'auditlog' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
             監査ログ
           </button>
@@ -3577,6 +4212,10 @@ function AdminView({ data, employeeAccounts, session, onDecide, onDecideLeave, o
           onSave={onSaveGroupLeave}
           isDesktop={isDesktop}
         />
+      )}
+
+      {tab === 'eoincentive' && (
+        <EoAdminIncentiveTab employeeAccounts={employeeAccounts} isDesktop={isDesktop} />
       )}
 
       {tab === 'performance' && (
