@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Clock, MapPin, CheckCircle2, XCircle, AlertTriangle, LogIn, LogOut, FileEdit, Users, Bell, Calendar, Mail, LogOut as LogoutIcon, UserPlus, Lock, User, Monitor, Smartphone, Palmtree, Plus, Pencil, CalendarDays, ListChecks, ClipboardList, MessageSquare, Coffee, BarChart3, Home, Download, ChevronRight, LayoutGrid, Wallet, Briefcase, UserCog, Construction, Megaphone, Paperclip, FileText, Pin, Trash2 } from 'lucide-react';
+import { Clock, MapPin, CheckCircle2, XCircle, AlertTriangle, LogIn, LogOut, FileEdit, Users, Bell, Calendar, Mail, LogOut as LogoutIcon, UserPlus, Lock, User, Monitor, Smartphone, Palmtree, Plus, Pencil, CalendarDays, ListChecks, ClipboardList, MessageSquare, Coffee, BarChart3, Home, Download, ChevronRight, LayoutGrid, Wallet, Briefcase, UserCog, Construction, Megaphone, Paperclip, FileText, Pin, Trash2, Key, ShieldCheck } from 'lucide-react';
 import { supabase, CLOUD_ENABLED, usernameToEmail } from './supabaseClient';
 
 // ---- constants ----
@@ -338,7 +338,9 @@ const rowToAccount = (row) => ({
   id: row.id,
   username: row.username,
   name: row.name,
+  furigana: row.furigana || '',
   role: row.role,
+  adminPermissions: Array.isArray(row.admin_permissions) ? row.admin_permissions : ['attendance', 'labor', 'hr', 'payroll'],
   hireDate: row.hire_date,
   resignationDate: row.resignation_date,
   contactEmail: row.contact_email || '',
@@ -787,7 +789,7 @@ export default function AttendanceApp() {
       const { data: sessionData } = await supabase.auth.getSession();
       const accessToken = sessionData?.session?.access_token;
       const { data: fnData, error } = await supabase.functions.invoke('create-employee', {
-        body: { username: payload.username, password: payload.password, name: payload.name, hireDate: payload.hireDate },
+        body: { username: payload.username, password: payload.password, name: payload.name, furigana: payload.furigana, hireDate: payload.hireDate },
         headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
       });
       if (error || fnData?.error) {
@@ -824,6 +826,33 @@ export default function AttendanceApp() {
       show('削除に失敗しました', 'warn');
       return false;
     }
+  };
+
+  const handleResetPassword = async (account, newPassword) => {
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const accessToken = sessionData?.session?.access_token;
+      const { data: fnData, error } = await supabase.functions.invoke('reset-password', {
+        body: { employeeId: account.id, newPassword },
+        headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
+      });
+      if (error || fnData?.error) {
+        show(fnData?.error || 'パスワードのリセットに失敗しました', 'warn');
+        return false;
+      }
+      await logAudit(session, 'パスワードをリセット', `対象: ${account.username}`, account.id, account.name);
+      show(`${account.name}さんのパスワードをリセットしました`, 'success');
+      return true;
+    } catch (e) {
+      show('パスワードのリセットに失敗しました', 'warn');
+      return false;
+    }
+  };
+
+  const updateAdminAccess = async (targetEmployeeId, patch) => {
+    const ok = await updateEmployeeProfile(targetEmployeeId, patch);
+    if (ok) await logAudit(session, '管理者権限を変更', JSON.stringify(patch), targetEmployeeId);
+    return ok;
   };
 
   const today = todayKey();
@@ -1040,6 +1069,9 @@ export default function AttendanceApp() {
     const colMap = {
       hireDate: 'hire_date',
       resignationDate: 'resignation_date',
+      furigana: 'furigana',
+      role: 'role',
+      adminPermissions: 'admin_permissions',
       contactEmail: 'contact_email',
       staffNumber: 'staff_number',
       address: 'address',
@@ -1447,7 +1479,7 @@ export default function AttendanceApp() {
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-900">
       <div className={`fixed top-3 right-3 z-[60] rounded-full border px-2.5 py-1 text-[11px] font-semibold shadow-sm ${cloudStatusClass}`}>{cloudStatusLabel}</div>
-      <GlobalTopTabs topTab={topTab} setTopTab={setTopTab} />
+      <GlobalTopTabs topTab={topTab} setTopTab={setTopTab} session={session} />
       <Header session={session} onLogout={handleLogout} pendingCount={pendingCorrectionCount + pendingLeaveCount + pendingShiftCount + pendingPerformanceCount} missingPunchCount={missingPunchCount} viewMode={viewMode} />
       <main className={isDesktop ? 'max-w-6xl mx-auto px-6 pb-16 pt-8' : 'max-w-3xl mx-auto px-4 pb-24 pt-6'}>
         {topTab === 'labor' && (
@@ -1547,6 +1579,7 @@ export default function AttendanceApp() {
           <AdminView
             data={data}
             employeeAccounts={employeeAccounts}
+            session={session}
             onDecide={decideCorrection}
             onDecideLeave={decideLeaveRequest}
             onDecideShift={decideShiftRequest}
@@ -1555,7 +1588,9 @@ export default function AttendanceApp() {
             onDecidePerformance={decidePerformanceReport}
             onAddAccount={handleAddAccount}
             onDeleteAccount={handleDeleteAccount}
+            onResetPassword={handleResetPassword}
             onUpdateDates={updateEmployeeDates}
+            onUpdateAdminAccess={updateAdminAccess}
             onSaveGroupLeave={saveGroupLeaveSchedule}
             isDesktop={isDesktop}
           />
@@ -1673,13 +1708,25 @@ function LoginScreen({ onLogin, toast }) {
   );
 }
 
-function GlobalTopTabs({ topTab, setTopTab }) {
-  const tabs = [
+function GlobalTopTabs({ topTab, setTopTab, session }) {
+  const allTabs = [
     { key: 'attendance', label: '勤怠', icon: <Clock size={14} /> },
     { key: 'labor', label: '労務', icon: <Briefcase size={14} /> },
     { key: 'hr', label: '人材', icon: <UserCog size={14} /> },
     { key: 'payroll', label: '給与', icon: <Wallet size={14} /> },
   ];
+  // 権限を制限された管理者は、許可されたタブのみ表示（社員・マスター管理者は全タブ表示）
+  const isRestrictedAdmin = session?.role === 'admin';
+  const tabs = isRestrictedAdmin
+    ? allTabs.filter((t) => (session.adminPermissions || []).includes(t.key))
+    : allTabs;
+
+  useEffect(() => {
+    if (isRestrictedAdmin && tabs.length > 0 && !tabs.some((t) => t.key === topTab)) {
+      setTopTab(tabs[0].key);
+    }
+  }, [isRestrictedAdmin, topTab, tabs.map((t) => t.key).join(',')]);
+
   return (
     <div className="bg-slate-950 text-slate-300">
       <div className="max-w-6xl mx-auto px-4 flex items-center gap-1">
@@ -1695,6 +1742,9 @@ function GlobalTopTabs({ topTab, setTopTab }) {
             {t.label}
           </button>
         ))}
+        {session?.role === 'master_admin' && (
+          <span className="ml-auto text-[10px] font-bold text-amber-500 bg-amber-500/10 px-2 py-1 rounded-full">マスター管理者</span>
+        )}
       </div>
     </div>
   );
@@ -3078,7 +3128,7 @@ function PayrollMetric({ label, value }) {
   );
 }
 
-function AdminTopNav({ tab, setTab, correctionCount, leaveCount, shiftCount, performanceCount }) {
+function AdminTopNav({ tab, setTab, correctionCount, leaveCount, shiftCount, performanceCount, isMasterAdmin }) {
   const [open, setOpen] = useState(null);
   const wrapRef = useRef(null);
 
@@ -3114,11 +3164,17 @@ function AdminTopNav({ tab, setTab, correctionCount, leaveCount, shiftCount, per
     {
       key: 'staff-group',
       label: 'スタッフ管理',
-      tabs: ['accounts', 'auditlog'],
-      items: [
-        { tab: 'accounts', label: '社員一覧・登録', sub: '入退職日・有休管理' },
-        { tab: 'auditlog', label: '監査ログ', sub: '承認・操作の履歴' },
-      ],
+      tabs: isMasterAdmin ? ['accounts', 'auditlog', 'adminperms'] : ['accounts', 'auditlog'],
+      items: isMasterAdmin
+        ? [
+            { tab: 'accounts', label: '社員一覧・登録', sub: '入退職日・有休管理' },
+            { tab: 'auditlog', label: '監査ログ', sub: '承認・操作の履歴' },
+            { tab: 'adminperms', label: '管理者権限', sub: '管理者アカウント・権限設定' },
+          ]
+        : [
+            { tab: 'accounts', label: '社員一覧・登録', sub: '入退職日・有休管理' },
+            { tab: 'auditlog', label: '監査ログ', sub: '承認・操作の履歴' },
+          ],
     },
   ];
 
@@ -3183,7 +3239,7 @@ function AdminTopNav({ tab, setTab, correctionCount, leaveCount, shiftCount, per
   );
 }
 
-function AdminView({ data, employeeAccounts, onDecide, onDecideLeave, onDecideShift, onDecideShiftBatch, onAddShift, onDecidePerformance, onAddAccount, onDeleteAccount, onUpdateDates, onSaveGroupLeave, isDesktop }) {
+function AdminView({ data, employeeAccounts, session, onDecide, onDecideLeave, onDecideShift, onDecideShiftBatch, onAddShift, onDecidePerformance, onAddAccount, onDeleteAccount, onResetPassword, onUpdateDates, onUpdateAdminAccess, onSaveGroupLeave, isDesktop }) {
   const [tab, setTab] = useState('dashboard'); // dashboard | attendance | requests | leave | shift | performance | accounts
   const pending = data.corrections.filter((c) => c.status === 'pending');
   const decided = data.corrections.filter((c) => c.status !== 'pending').slice(0, 8);
@@ -3206,6 +3262,8 @@ function AdminView({ data, employeeAccounts, onDecide, onDecideLeave, onDecideSh
   const gpsAlerts = computeGpsAlertEmployees(employeeAccounts, data.records);
 
   const notifications = (data.notifications || []).slice(0, 6);
+  const isMasterAdmin = session?.role === 'master_admin';
+  const adminAccounts = data.accounts.filter((a) => a.role === 'admin' || a.role === 'master_admin');
 
   return (
     <div className="space-y-5">
@@ -3217,6 +3275,7 @@ function AdminView({ data, employeeAccounts, onDecide, onDecideLeave, onDecideSh
           leaveCount={leavePending.length}
           shiftCount={shiftPending.length}
           performanceCount={performancePending.length}
+          isMasterAdmin={isMasterAdmin}
         />
       ) : (
         <div className="flex items-center bg-white rounded-xl border border-slate-200 p-1 text-[11.5px] font-medium overflow-x-auto">
@@ -3262,6 +3321,11 @@ function AdminView({ data, employeeAccounts, onDecide, onDecideLeave, onDecideSh
           <button onClick={() => setTab('auditlog')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'auditlog' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
             監査ログ
           </button>
+          {isMasterAdmin && (
+            <button onClick={() => setTab('adminperms')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'adminperms' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
+              管理者権限
+            </button>
+          )}
         </div>
       )}
 
@@ -3296,11 +3360,30 @@ function AdminView({ data, employeeAccounts, onDecide, onDecideLeave, onDecideSh
       )}
 
       {tab === 'accounts' && (
-        <AccountManagement employeeAccounts={employeeAccounts} onAddAccount={onAddAccount} onUpdateDates={onUpdateDates} onDeleteAccount={onDeleteAccount} groupLeaveSchedules={data.groupLeaveSchedules} isDesktop={isDesktop} />
+        <AccountManagement
+          employeeAccounts={employeeAccounts}
+          onAddAccount={onAddAccount}
+          onUpdateDates={onUpdateDates}
+          onDeleteAccount={onDeleteAccount}
+          onResetPassword={onResetPassword}
+          groupLeaveSchedules={data.groupLeaveSchedules}
+          session={session}
+          isDesktop={isDesktop}
+        />
       )}
 
       {tab === 'auditlog' && (
         <AdminAuditLogTab logs={data.auditLogs} isDesktop={isDesktop} />
+      )}
+
+      {tab === 'adminperms' && isMasterAdmin && (
+        <AdminPermissionsTab
+          adminAccounts={adminAccounts}
+          currentUserId={session.id}
+          onUpdateAccess={onUpdateAdminAccess}
+          onResetPassword={onResetPassword}
+          isDesktop={isDesktop}
+        />
       )}
 
       {tab === 'groupleave' && (
@@ -4169,6 +4252,107 @@ function GroupLeaveScheduleTab({ employeeAccounts, groupLeaveSchedules, onSave, 
   );
 }
 
+function AdminPermissionsTab({ adminAccounts, currentUserId, onUpdateAccess, onResetPassword, isDesktop }) {
+  const [resetTarget, setResetTarget] = useState(null);
+
+  const roleLabel = (role) => (role === 'master_admin' ? 'マスター管理者' : '管理者');
+
+  const changeRole = (acc, newRole) => {
+    const patch = { role: newRole };
+    if (newRole === 'admin' && (!acc.adminPermissions || acc.adminPermissions.length === 0)) {
+      patch.adminPermissions = ['attendance', 'labor', 'hr', 'payroll'];
+    }
+    onUpdateAccess(acc.id, patch);
+  };
+
+  const togglePermission = (acc, key) => {
+    const current = acc.adminPermissions || [];
+    const next = current.includes(key) ? current.filter((k) => k !== key) : [...current, key];
+    onUpdateAccess(acc.id, { adminPermissions: next });
+  };
+
+  return (
+    <div className="space-y-5">
+      <div className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 text-[11.5px] text-blue-800 flex items-start gap-2">
+        <ShieldCheck size={14} className="mt-0.5 shrink-0" />
+        <span>マスター管理者は常に全タブを利用できます（権限の変更はできません）。「管理者」は、チェックしたタブのみ利用できます。役割・権限の変更はマスター管理者のみ行えます。</span>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+          <UserCog size={15} className="text-slate-400" />
+          <h2 className="font-bold text-[13.5px]">管理者アカウント</h2>
+          <span className="text-[11px] text-slate-400">{adminAccounts.length}名</span>
+        </div>
+        <div className="divide-y divide-slate-100">
+          {adminAccounts.map((acc) => {
+            const isMaster = acc.role === 'master_admin';
+            const isSelf = acc.id === currentUserId;
+            return (
+              <div key={acc.id} className="px-5 py-4">
+                <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+                  <div>
+                    <div className="text-[13px] font-semibold text-slate-800 flex items-center gap-1.5">
+                      {acc.name}
+                      {isSelf && <span className="text-[10px] font-bold text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">自分</span>}
+                    </div>
+                    <div className="text-[11px] text-slate-400 font-mono">ID: {acc.username}</div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={acc.role}
+                      onChange={(e) => changeRole(acc, e.target.value)}
+                      disabled={isSelf}
+                      className={`text-[12px] font-bold border rounded-lg px-2.5 py-1.5 ${isMaster ? 'bg-amber-50 border-amber-200 text-amber-700' : 'bg-slate-50 border-slate-200 text-slate-600'}`}
+                    >
+                      <option value="admin">管理者</option>
+                      <option value="master_admin">マスター管理者</option>
+                    </select>
+                    <button onClick={() => setResetTarget(acc)} className="text-slate-400 hover:text-amber-600 p-1.5 border border-slate-200 rounded-lg"><Key size={14} /></button>
+                  </div>
+                </div>
+                {isMaster ? (
+                  <div className="text-[11.5px] text-amber-700 bg-amber-50 rounded-lg px-3 py-2">全タブ利用可能（制限なし）</div>
+                ) : (
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    {ADMIN_TAB_OPTIONS.map((opt) => (
+                      <label key={opt.key} className="flex items-center gap-2 text-[12.5px] text-slate-600 border border-slate-200 rounded-lg px-3 py-2">
+                        <input
+                          type="checkbox"
+                          checked={(acc.adminPermissions || []).includes(opt.key)}
+                          onChange={() => togglePermission(acc, opt.key)}
+                        />
+                        {opt.label}
+                      </label>
+                    ))}
+                  </div>
+                )}
+                {isSelf && (
+                  <div className="text-[10.5px] text-slate-400 mt-2">自分自身の役割は変更できません（誤って権限を失わないための制限です）。</div>
+                )}
+              </div>
+            );
+          })}
+          {adminAccounts.length === 0 && (
+            <div className="px-5 py-10 text-center text-[12.5px] text-slate-300">管理者アカウントがありません</div>
+          )}
+        </div>
+      </div>
+
+      {resetTarget && (
+        <ResetPasswordModal
+          account={resetTarget}
+          onClose={() => setResetTarget(null)}
+          onConfirm={async (newPassword) => {
+            const ok = await onResetPassword(resetTarget, newPassword);
+            if (ok) setResetTarget(null);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
 function AdminAuditLogTab({ logs, isDesktop }) {
   return (
     <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
@@ -4222,11 +4406,21 @@ function AdminAuditLogTab({ logs, isDesktop }) {
   );
 }
 
-function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDeleteAccount, groupLeaveSchedules, isDesktop }) {
+const ADMIN_TAB_OPTIONS = [
+  { key: 'attendance', label: '勤怠' },
+  { key: 'labor', label: '労務' },
+  { key: 'hr', label: '人材' },
+  { key: 'payroll', label: '給与' },
+];
+
+function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDeleteAccount, onResetPassword, groupLeaveSchedules, session, isDesktop }) {
   const [name, setName] = useState('');
+  const [furigana, setFurigana] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [hireDate, setHireDate] = useState(todayKey());
+  const [role, setRole] = useState('employee');
+  const [adminPermissions, setAdminPermissions] = useState(['attendance', 'labor', 'hr', 'payroll']);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [editHire, setEditHire] = useState('');
@@ -4234,18 +4428,35 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
   const [profileModalAccount, setProfileModalAccount] = useState(null);
   const [csvModalOpen, setCsvModalOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
+  const [resetPasswordTarget, setResetPasswordTarget] = useState(null);
+  const isMasterAdmin = session?.role === 'master_admin';
 
   const canSubmit = name.trim() && username.trim() && password.trim().length >= 4 && hireDate;
+
+  const toggleAdminPermission = (key) => {
+    setAdminPermissions((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
+  };
 
   const submit = async (e) => {
     e.preventDefault();
     if (!canSubmit) return;
-    const ok = await onAddAccount({ name: name.trim(), username: username.trim(), password: password.trim(), hireDate });
+    const ok = await onAddAccount({
+      name: name.trim(),
+      furigana: furigana.trim(),
+      username: username.trim(),
+      password: password.trim(),
+      hireDate,
+      role,
+      adminPermissions: role === 'admin' ? adminPermissions : undefined,
+    });
     if (ok) {
       setName('');
+      setFurigana('');
       setUsername('');
       setPassword('');
       setHireDate(todayKey());
+      setRole('employee');
+      setAdminPermissions(['attendance', 'labor', 'hr', 'payroll']);
       setShowForm(false);
     }
   };
@@ -4295,6 +4506,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
               <th className="px-5 py-2 font-medium"></th>
               <th className="px-5 py-2 font-medium"></th>
               <th className="px-5 py-2 font-medium"></th>
+              <th className="px-5 py-2 font-medium"></th>
             </tr>
           </thead>
           <tbody>
@@ -4305,6 +4517,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
                   <td className="px-5 py-2.5 font-semibold text-slate-800">
                     {acc.name}
                     {retired && <span className="ml-1.5 text-[10px] font-bold text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">退職済み</span>}
+                    {acc.furigana && <div className="text-[10.5px] font-normal text-slate-400">{acc.furigana}</div>}
                   </td>
                   <td className="px-5 py-2.5 font-mono text-slate-500">{acc.username}</td>
                   {isEditing ? (
@@ -4315,6 +4528,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
                       <td className="px-5 py-2.5"><button onClick={() => saveEdit(acc.id)} className="text-[11px] font-bold text-amber-600">保存</button></td>
                       <td className="px-5 py-2.5"></td>
                       <td className="px-5 py-2.5"></td>
+                      <td className="px-5 py-2.5"></td>
                     </>
                   ) : (
                     <>
@@ -4323,6 +4537,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
                       <td className="px-5 py-2.5 font-mono font-semibold text-slate-800">{granted}日</td>
                       <td className="px-5 py-2.5"><button onClick={() => startEdit(acc)} className="text-slate-400"><Pencil size={13} /></button></td>
                       <td className="px-5 py-2.5"><button onClick={() => setProfileModalAccount(acc)} className="text-[11px] font-bold text-slate-500 border border-slate-200 rounded-md px-2 py-1">詳細</button></td>
+                      <td className="px-5 py-2.5"><button onClick={() => setResetPasswordTarget(acc)} className="text-slate-300 hover:text-amber-600" title="パスワードリセット"><Key size={14} /></button></td>
                       <td className="px-5 py-2.5"><button onClick={() => setDeleteTarget(acc)} className="text-slate-300 hover:text-rose-500"><Trash2 size={14} /></button></td>
                     </>
                   )}
@@ -4330,7 +4545,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
               );
             })}
             {employeeAccounts.length === 0 && (
-              <tr><td colSpan={8} className="px-5 py-8 text-center text-[12.5px] text-slate-300">社員アカウントがありません</td></tr>
+              <tr><td colSpan={9} className="px-5 py-8 text-center text-[12.5px] text-slate-300">社員アカウントがありません</td></tr>
             )}
           </tbody>
         </table>
@@ -4346,6 +4561,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
                       {acc.name}
                       {retired && <span className="text-[10px] font-bold text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">退職済み</span>}
                     </div>
+                    {acc.furigana && <div className="text-[10.5px] text-slate-400">{acc.furigana}</div>}
                     <div className="text-[11.5px] text-slate-400 font-mono">ID: {acc.username}</div>
                   </div>
                   <div className="flex items-center gap-1">
@@ -4353,6 +4569,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
                     {!isEditing && (
                       <button onClick={() => startEdit(acc)} className="text-slate-400 p-1"><Pencil size={13} /></button>
                     )}
+                    <button onClick={() => setResetPasswordTarget(acc)} className="text-slate-300 hover:text-amber-600 p-1"><Key size={14} /></button>
                     <button onClick={() => setDeleteTarget(acc)} className="text-slate-300 hover:text-rose-500 p-1"><Trash2 size={14} /></button>
                   </div>
                 </div>
@@ -4392,6 +4609,9 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
       <Field label="氏名">
         <input value={name} onChange={(e) => setName(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" placeholder="例）田中 花子" />
       </Field>
+      <Field label="フリガナ">
+        <input value={furigana} onChange={(e) => setFurigana(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" placeholder="例）タナカ ハナコ" />
+      </Field>
       <Field label="ユーザー名（ログインID）">
         <input value={username} onChange={(e) => setUsername(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" placeholder="tanaka" />
       </Field>
@@ -4401,6 +4621,29 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
       <Field label="入職日">
         <input type="date" value={hireDate} onChange={(e) => setHireDate(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
       </Field>
+      {isMasterAdmin && (
+        <>
+          <Field label="役割">
+            <select value={role} onChange={(e) => setRole(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px] bg-white">
+              <option value="employee">社員</option>
+              <option value="admin">管理者</option>
+              <option value="master_admin">マスター管理者</option>
+            </select>
+          </Field>
+          {role === 'admin' && (
+            <Field label="利用できるタブ（権限）">
+              <div className="grid grid-cols-2 gap-2">
+                {ADMIN_TAB_OPTIONS.map((opt) => (
+                  <label key={opt.key} className="flex items-center gap-2 text-[13px] text-slate-600 border border-slate-200 rounded-lg px-3 py-2">
+                    <input type="checkbox" checked={adminPermissions.includes(opt.key)} onChange={() => toggleAdminPermission(opt.key)} />
+                    {opt.label}
+                  </label>
+                ))}
+              </div>
+            </Field>
+          )}
+        </>
+      )}
       <button type="submit" disabled={!canSubmit} className="w-full py-2.5 rounded-lg bg-slate-800 disabled:bg-slate-200 text-white text-[13.5px] font-bold">
         アカウントを作成
       </button>
@@ -4460,6 +4703,54 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
           }}
         />
       )}
+      {resetPasswordTarget && (
+        <ResetPasswordModal
+          account={resetPasswordTarget}
+          onClose={() => setResetPasswordTarget(null)}
+          onConfirm={async (newPassword) => {
+            const ok = await onResetPassword(resetPasswordTarget, newPassword);
+            if (ok) setResetPasswordTarget(null);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function ResetPasswordModal({ account, onClose, onConfirm }) {
+  const [newPassword, setNewPassword] = useState('');
+  const [saving, setSaving] = useState(false);
+  const canSubmit = newPassword.trim().length >= 6;
+
+  const run = async () => {
+    setSaving(true);
+    await onConfirm(newPassword.trim());
+    setSaving(false);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-50 p-0 sm:p-4">
+      <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-sm max-h-[92vh] overflow-y-auto">
+        <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center gap-2">
+          <div className="w-9 h-9 rounded-xl bg-amber-50 flex items-center justify-center shrink-0">
+            <Key size={16} className="text-amber-600" />
+          </div>
+          <h3 className="font-bold text-[15px]">パスワードをリセット</h3>
+        </div>
+        <div className="px-5 py-4 space-y-3">
+          <div className="text-[12.5px] text-slate-500">{account.name}（ID: {account.username}）の新しいパスワードを設定します。</div>
+          <Field label="新しいパスワード（6文字以上）">
+            <input type="text" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="新しいパスワードを入力" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
+          </Field>
+          <div className="text-[11px] text-slate-400">設定後、このパスワードをご本人に直接お伝えください（画面には再表示されません）。</div>
+        </div>
+        <div className="px-5 pb-5 pt-1 flex gap-2">
+          <button onClick={onClose} className="flex-1 py-2.5 rounded-lg border border-slate-200 text-[13.5px] font-medium text-slate-500">キャンセル</button>
+          <button onClick={run} disabled={!canSubmit || saving} className="flex-1 py-2.5 rounded-lg bg-amber-600 disabled:bg-slate-200 text-white text-[13.5px] font-bold">
+            {saving ? '設定中…' : 'リセットする'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -4621,6 +4912,7 @@ function CsvImportModal({ onClose, onAddAccount }) {
 
 function EmployeeProfileModal({ account, onClose, onSave }) {
   const [form, setForm] = useState({
+    furigana: account.furigana || '',
     contactEmail: account.contactEmail || '',
     staffNumber: account.staffNumber || '',
     address: account.address || '',
@@ -4667,6 +4959,9 @@ function EmployeeProfileModal({ account, onClose, onSave }) {
         <div className="px-5 py-4 space-y-5">
           <div className="space-y-3">
             <div className="text-[11px] font-bold text-slate-400">基本情報</div>
+            <Field label="フリガナ">
+              <input value={form.furigana} onChange={set('furigana')} placeholder="例）タナカ ハナコ" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
+            </Field>
             <div className="grid grid-cols-2 gap-3">
               <Field label="生年月日">
                 <input type="date" value={form.birthDate} onChange={set('birthDate')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
