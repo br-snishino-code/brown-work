@@ -923,6 +923,8 @@ export default function AttendanceApp() {
   const [employeeTab, setEmployeeTab] = useState('attendance');
   const [topTab, setTopTab] = useState('attendance'); // attendance | labor | hr | payroll
   const [viewMode, setViewMode] = useState(() => (typeof window !== 'undefined' && window.matchMedia('(min-width: 1024px)').matches ? 'desktop' : 'mobile'));
+  const [shiftReminderOpen, setShiftReminderOpen] = useState(false);
+  const [shiftReminderChecked, setShiftReminderChecked] = useState(false);
   const now = useNow();
   const geo = useGeolocation();
   const { toast, show } = useToast();
@@ -931,6 +933,15 @@ export default function AttendanceApp() {
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
   }, [topTab, employeeTab]);
+
+  // 翌月分のシフト希望がまだ未提出の場合、月15日の締切前にリマインダーを表示（ログイン後1回）
+  useEffect(() => {
+    if (!session || session.role !== 'employee' || shiftReminderChecked) return;
+    const targetMonth = nextMonthKey();
+    const alreadySubmitted = data.shiftRequests.some((s) => s.employeeId === session.id && s.targetMonth === targetMonth);
+    if (!alreadySubmitted) setShiftReminderOpen(true);
+    setShiftReminderChecked(true);
+  }, [session, data.shiftRequests, shiftReminderChecked]);
 
   const loadSessionAndData = useCallback(async () => {
     if (!CLOUD_ENABLED) {
@@ -1998,6 +2009,12 @@ export default function AttendanceApp() {
           onSubmit={submitShiftRequest}
         />
       )}
+      {shiftReminderOpen && (
+        <ShiftReminderModal
+          onClose={() => setShiftReminderOpen(false)}
+          onOpenShiftModal={() => { setShiftReminderOpen(false); setShiftModalOpen(true); }}
+        />
+      )}
       {performanceModal && (
         <PerformanceModal
           type={performanceModal}
@@ -2834,6 +2851,41 @@ function ShiftView({ confirmedShifts, shiftRequests, onOpenShiftModal, isDesktop
       {upcomingCard}
       {requestsCard}
     </div>
+  );
+}
+
+function ShiftReminderModal({ onClose, onOpenShiftModal }) {
+  const targetMonth = nextMonthKey();
+  const today = new Date();
+  const deadlineDay = 15;
+  const daysLeft = deadlineDay - today.getDate();
+  const overdue = daysLeft < 0;
+
+  return createPortal(
+    <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-40 p-0 sm:p-4">
+      <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-sm max-h-[90vh] overflow-y-auto">
+        <div className="px-5 pt-6 pb-4 text-center">
+          <div className={`w-12 h-12 rounded-full mx-auto flex items-center justify-center ${overdue ? 'bg-rose-50' : 'bg-amber-50'}`}>
+            <CalendarDays size={22} className={overdue ? 'text-rose-500' : 'text-amber-500'} />
+          </div>
+          <h3 className="font-bold text-[16px] mt-3">シフト希望の提出をお忘れなく</h3>
+          <p className="text-[12.5px] text-slate-500 mt-2 leading-relaxed">
+            {monthKeyLabel(targetMonth)}分のシフト希望がまだ提出されていません。<br />
+            提出期限は<b className="text-slate-700">毎月15日</b>です。
+          </p>
+          <p className={`text-[12.5px] font-bold mt-2 ${overdue ? 'text-rose-600' : 'text-amber-600'}`}>
+            {overdue ? '提出期限を過ぎています。お早めにご提出ください' : `締切まであと${daysLeft}日`}
+          </p>
+        </div>
+        <div className="px-5 pb-5 pt-1 flex gap-2">
+          <button onClick={onClose} className="flex-1 py-2.5 rounded-lg border border-slate-200 text-[13.5px] font-medium text-slate-500">後で</button>
+          <button onClick={onOpenShiftModal} className="flex-1 py-2.5 rounded-lg bg-amber-600 text-white text-[13.5px] font-bold">
+            今すぐ申請する
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body
   );
 }
 
