@@ -2855,7 +2855,7 @@ function MonthlyShiftModal({ leaveRemaining, onClose, onSubmit }) {
   const dayList = daysInMonthList(targetMonth);
   const [days, setDays] = useState<Record<string, any>>(() =>
     dayList.reduce((acc, d) => {
-      acc[d.date] = { dayType: 'work', startTime: '09:00', endTime: '18:00' };
+      acc[d.date] = { dayType: 'work', startTime: '10:00', endTime: '19:00' };
       return acc;
     }, {})
   );
@@ -2887,9 +2887,9 @@ function MonthlyShiftModal({ leaveRemaining, onClose, onSubmit }) {
     onSubmit(payload);
   };
 
-  return (
+  return createPortal(
     <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-40 p-0 sm:p-4">
-      <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg max-h-[92vh] overflow-y-auto flex flex-col">
+      <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg max-h-[92vh] overflow-y-auto">
         <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white z-10">
           <div>
             <h3 className="font-bold text-[15px]">{monthKeyLabel(targetMonth)}分のシフト希望</h3>
@@ -2977,7 +2977,8 @@ function MonthlyShiftModal({ leaveRemaining, onClose, onSubmit }) {
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
