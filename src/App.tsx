@@ -371,18 +371,9 @@ function computeGpsAlertEmployees(employeeAccounts, records, threshold = 5) {
 
 function getRecordedBreakMinutes(record, asOf = new Date()) {
   if (!record) return BREAK_MINUTES_DEFAULT;
+  // 休憩は実際の打刻に関わらず、常に固定1時間（管理者による個別の手動修正がある場合のみそれに従う）
   if (record.breakMinutesOverride != null) return Number(record.breakMinutesOverride);
-  if (Array.isArray(record.breakPeriods)) {
-    const completed = record.breakPeriods.reduce((sum, p) => {
-      if (!p?.start || !p?.end) return sum;
-      return sum + Math.max(0, Math.round((new Date(p.end).getTime() - new Date(p.start).getTime()) / 60000));
-    }, 0);
-    const active = record.breakStartedAt
-      ? Math.max(0, Math.round((asOf.getTime() - new Date(record.breakStartedAt).getTime()) / 60000))
-      : 0;
-    return completed + active;
-  }
-  return record.breakMinutes ?? BREAK_MINUTES_DEFAULT;
+  return BREAK_MINUTES_DEFAULT;
 }
 
 function computeMetrics(record) {
@@ -2082,10 +2073,6 @@ function LoginScreen({ onLogin, toast }) {
             ログイン
           </button>
         </form>
-        <div className="mt-5 bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-center text-[11.5px] text-slate-600 leading-relaxed">
-          <div className="font-bold text-slate-800 mb-1">デモ用アカウント</div>
-          社員：yamada / pass123　　管理者：admin / admin123
-        </div>
       </div>
       <ToastView toast={toast} />
     </div>
@@ -2340,11 +2327,10 @@ function Header({ session, onLogout, pendingCount, missingPunchCount, viewMode }
   );
 }
 
-function EmployeeView({ now, todayRecord, onClockIn, onClockOut, onBreakStart, onBreakEnd, geoStatus, historyDates, records, corrections, onOpenCorrection, notifications, onMarkNotificationRead, isDesktop }) {
+function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, historyDates, records, corrections, onOpenCorrection, notifications, onMarkNotificationRead, isDesktop }) {
   const status = computeDayStatus(todayRecord);
   const canClockIn = !todayRecord?.clockIn;
   const canClockOut = todayRecord?.clockIn && !todayRecord?.clockOut;
-  const isOnBreak = !!todayRecord?.breakStartedAt && !todayRecord?.clockOut;
   const doneToday = todayRecord?.clockIn && todayRecord?.clockOut;
   const monthly = computeMonthlySummary(records, now);
   const todayBreak = todayRecord ? getRecordedBreakMinutes(todayRecord, now) : 0;
@@ -2361,8 +2347,8 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, onBreakStart, o
           <span className="text-[12.5px] font-bold text-slate-500">
             {now.getFullYear()}年{now.getMonth() + 1}月{now.getDate()}日（{['日','月','火','水','木','金','土'][now.getDay()]}）
           </span>
-          <span className={`rounded-full px-3 py-1 text-[11px] font-bold ${isOnBreak ? 'bg-amber-100 text-amber-700' : status.tone === 'active' ? 'bg-emerald-100 text-emerald-700' : status.tone === 'danger' ? 'bg-rose-100 text-rose-700' : 'bg-slate-200 text-slate-600'}`}>
-            {isOnBreak ? '休憩中' : status.label}
+          <span className={`rounded-full px-3 py-1 text-[11px] font-bold ${status.tone === 'active' ? 'bg-emerald-100 text-emerald-700' : status.tone === 'danger' ? 'bg-rose-100 text-rose-700' : 'bg-slate-200 text-slate-600'}`}>
+            {status.label}
           </span>
         </div>
 
@@ -2378,19 +2364,12 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, onBreakStart, o
           >
             {primaryLabel}
           </button>
-          <button
-            onClick={isOnBreak ? onBreakEnd : onBreakStart}
-            disabled={!canClockOut}
-            className={`mt-2.5 w-full rounded-xl py-3 text-[13px] font-bold flex items-center justify-center gap-2 border-2 transition disabled:opacity-30 ${isOnBreak ? 'border-amber-400 bg-amber-50 text-amber-700' : 'border-slate-200 text-slate-600'}`}
-          >
-            <Coffee size={16} />{isOnBreak ? '休憩を終了' : '休憩を開始'}
-          </button>
         </div>
 
         <div className="px-6 pb-4 grid grid-cols-3 gap-2 border-t border-slate-100 pt-4">
           <div className="text-center"><div className="text-[10px] text-slate-400">出勤</div><div className="mt-1 font-mono text-[14px] font-bold text-slate-800">{todayRecord?.clockIn ? hhmm(new Date(todayRecord.clockIn)) : '--:--'}</div></div>
           <div className="text-center border-x border-slate-100"><div className="text-[10px] text-slate-400">退勤</div><div className="mt-1 font-mono text-[14px] font-bold text-slate-800">{todayRecord?.clockOut ? hhmm(new Date(todayRecord.clockOut)) : '--:--'}</div></div>
-          <div className="text-center"><div className="text-[10px] text-slate-400">休憩</div><div className="mt-1 font-mono text-[14px] font-bold text-slate-800">{todayRecord?.clockIn ? `${todayBreak}分` : '--'}</div></div>
+          <div className="text-center"><div className="text-[10px] text-slate-400">休憩（自動）</div><div className="mt-1 font-mono text-[14px] font-bold text-slate-800">{todayRecord?.clockIn ? `${todayBreak}分` : '--'}</div></div>
         </div>
         <div className="px-6 pb-4 flex items-center justify-center gap-1.5 text-[10.5px] text-slate-400">
           <MapPin size={11} />{geoStatus === 'loading' ? '位置情報を取得中…' : geoStatus === 'denied' ? '位置情報が許可されていません' : '打刻時に位置情報を記録'}
