@@ -927,6 +927,11 @@ export default function AttendanceApp() {
   const geo = useGeolocation();
   const { toast, show } = useToast();
 
+  // カテゴリー（上部タブ・下部ナビ）を切り替えたら画面を一番上に戻す
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: 'auto' });
+  }, [topTab, employeeTab]);
+
   const loadSessionAndData = useCallback(async () => {
     if (!CLOUD_ENABLED) {
       setLoaded(true);
@@ -2248,7 +2253,7 @@ function AnnouncementComposerModal({ onClose, onSubmit }) {
     if (ok) onClose();
   };
 
-  return (
+  return createPortal(
     <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-40 p-0 sm:p-4">
       <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-md max-h-[92vh] overflow-y-auto">
         <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white">
@@ -2286,7 +2291,8 @@ function AnnouncementComposerModal({ onClose, onSubmit }) {
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -2484,7 +2490,7 @@ function CorrectionModal({ dateKey, record, onClose, onSubmit }) {
   const [reason, setReason] = useState('');
   const canSubmit = reason.trim().length > 0 && (clockIn || clockOut);
 
-  return (
+  return createPortal(
     <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-40 p-0 sm:p-4">
       <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-sm max-h-[90vh] overflow-y-auto">
         <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white">
@@ -2523,7 +2529,8 @@ function CorrectionModal({ dateKey, record, onClose, onSubmit }) {
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -2652,7 +2659,7 @@ function LeaveRequestModal({ leaveRemaining, onClose, onSubmit }) {
     if (v !== startDate) setHalfDay(false);
   };
 
-  return (
+  return createPortal(
     <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-40 p-0 sm:p-4">
       <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-sm max-h-[90vh] overflow-y-auto">
         <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white">
@@ -2728,7 +2735,8 @@ function LeaveRequestModal({ leaveRemaining, onClose, onSubmit }) {
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -3057,7 +3065,7 @@ function PerformanceModal({ type, onClose, onSubmit }) {
   const years = [now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1];
   const months = Array.from({ length: 12 }, (_, i) => i + 1);
 
-  return (
+  return createPortal(
     <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-40 p-0 sm:p-4">
       <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-sm max-h-[90vh] overflow-y-auto">
         <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white">
@@ -3116,7 +3124,8 @@ function PerformanceModal({ type, onClose, onSubmit }) {
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -4028,6 +4037,9 @@ function AdminTopNav({ tab, setTab, correctionCount, leaveCount, shiftCount, per
 
 function AdminView({ data, employeeAccounts, session, onDecide, onDecideLeave, onDecideShift, onDecideShiftBatch, onAddShift, onDecidePerformance, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveGroupLeave, onSaveEmployeeAttendance, isDesktop }) {
   const [tab, setTab] = useState('dashboard'); // dashboard | attendance | requests | leave | shift | performance | accounts
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: 'auto' });
+  }, [tab]);
   const pending = data.corrections.filter((c) => c.status === 'pending');
   const decided = data.corrections.filter((c) => c.status !== 'pending').slice(0, 8);
   const leavePending = data.leaveRequests.filter((l) => l.status === 'pending');
@@ -4860,7 +4872,7 @@ function ProfileRequestModal({ session, onClose, onSubmit }) {
     onClose();
   };
 
-  return (
+  return createPortal(
     <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-40 p-0 sm:p-4">
       <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-md max-h-[92vh] overflow-y-auto">
         <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white">
@@ -4888,7 +4900,8 @@ function ProfileRequestModal({ session, onClose, onSubmit }) {
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
