@@ -300,9 +300,9 @@ function computeEoIncentive(staffMonthData, groupFlags, upsellRank) {
 // ---- Monthly shift request ----
 const nextMonthKey = (from = new Date()) => {
   const y = from.getFullYear();
-  const m = from.getMonth() + 1;
+  const m = from.getMonth() + 2; // 翌月（1始まり）
   const targetYear = m > 12 ? y + 1 : y;
-  const targetMonth = m > 12 ? 1 : m;
+  const targetMonth = m > 12 ? m - 12 : m;
   return `${targetYear}-${pad(targetMonth)}`;
 };
 const monthKeyLabel = (yearMonth) => {
