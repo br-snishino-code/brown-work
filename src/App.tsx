@@ -809,6 +809,21 @@ async function sendEmailBestEffort(toEmail, subject, text) {
   }
 }
 
+// シフト希望が届いたらGoogleスプレッドシートに反映（未設定でも申請処理自体は失敗させない）
+async function syncShiftRequestsToSheet(payload) {
+  if (!payload || !payload.days || payload.days.length === 0) return;
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    const accessToken = sessionData?.session?.access_token;
+    await supabase.functions.invoke('sync-shift-to-sheet', {
+      body: payload,
+      headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
+    });
+  } catch (e) {
+    console.error('スプレッドシートへの反映に失敗しました（アプリの動作には影響ありません）', e);
+  }
+}
+
 async function markNotificationRead(id) {
   try {
     await supabase.from('notifications').update({ is_read: true }).eq('id', id);
@@ -1708,6 +1723,15 @@ export default function AttendanceApp() {
       `${session.name}さんより ${monthKeyLabel(payload.targetMonth)}分のシフト希望（${shiftRows.length}日分、うち有休${paidLeaveDays.length}日）が届きました。内容をご確認のうえ確定してください。`,
       batchId
     );
+
+    // Googleスプレッドシート（フォーム回答タブ）にも反映（未設定・失敗でも申請処理自体は成功扱い）
+    syncShiftRequestsToSheet({
+      targetMonth: payload.targetMonth,
+      employeeName: session.name,
+      days: payload.days.map((d) => ({ day: Number(d.date.split('-')[2]), dayType: d.dayType })),
+      timestamp: new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' }).replace(/\//g, '/'),
+    });
+
     await refreshData();
     setShiftModalOpen(false);
     show(`${monthKeyLabel(payload.targetMonth)}分のシフト希望（${shiftRows.length}日分）を送信しました`, 'success');
