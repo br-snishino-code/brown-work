@@ -1091,7 +1091,16 @@ export default function AttendanceApp() {
       const { data: sessionData } = await supabase.auth.getSession();
       const accessToken = sessionData?.session?.access_token;
       const { data: fnData, error } = await supabase.functions.invoke('create-employee', {
-        body: { username: payload.username, password: payload.password, name: payload.name, furigana: payload.furigana, hireDate: payload.hireDate },
+        body: {
+          username: payload.username,
+          password: payload.password,
+          name: payload.name,
+          furigana: payload.furigana,
+          hireDate: payload.hireDate,
+          role: payload.role,
+          adminPermissions: payload.adminPermissions,
+          contactEmail: payload.contactEmail,
+        },
         headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
       });
       if (error || fnData?.error) {
@@ -5318,8 +5327,10 @@ const ADMIN_TAB_OPTIONS = [
 
 function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, groupLeaveSchedules, employeeAttendanceSchedules, onSaveEmployeeAttendance, session, isDesktop }) {
   const knownGroups = Array.from(new Set([...employeeAccounts.map((a) => a.mainGroup).filter(Boolean), ...Object.keys(groupLeaveSchedules || {})]));
-  const [name, setName] = useState('');
-  const [furigana, setFurigana] = useState('');
+  const [sei, setSei] = useState('');
+  const [mei, setMei] = useState('');
+  const [seiKana, setSeiKana] = useState('');
+  const [meiKana, setMeiKana] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [hireDate, setHireDate] = useState(todayKey());
@@ -5335,7 +5346,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
   const [resetPasswordTarget, setResetPasswordTarget] = useState(null);
   const isMasterAdmin = session?.role === 'master_admin';
 
-  const canSubmit = name.trim() && username.trim() && password.trim().length >= 6 && hireDate;
+  const canSubmit = sei.trim() && mei.trim() && username.trim() && password.trim().length >= 6 && hireDate;
 
   const toggleAdminPermission = (key) => {
     setAdminPermissions((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
@@ -5344,18 +5355,23 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
   const submit = async (e) => {
     e.preventDefault();
     if (!canSubmit) return;
+    const trimmedUsername = username.trim();
     const ok = await onAddAccount({
-      name: name.trim(),
-      furigana: furigana.trim(),
-      username: username.trim(),
+      name: `${sei.trim()} ${mei.trim()}`,
+      furigana: [seiKana.trim(), meiKana.trim()].filter(Boolean).join(' '),
+      username: trimmedUsername,
       password: password.trim(),
       hireDate,
       role,
       adminPermissions: role === 'admin' ? adminPermissions : undefined,
+      // ユーザー名がメールアドレス形式の場合は、連絡用メールアドレスにも自動で反映する
+      contactEmail: trimmedUsername.includes('@') ? trimmedUsername : undefined,
     });
     if (ok) {
-      setName('');
-      setFurigana('');
+      setSei('');
+      setMei('');
+      setSeiKana('');
+      setMeiKana('');
       setUsername('');
       setPassword('');
       setHireDate(todayKey());
@@ -5510,15 +5526,25 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
   const formCard = (showForm || isDesktop) && (
     <form onSubmit={submit} className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 space-y-3.5 h-fit">
       <h3 className="font-bold text-[13.5px] mb-1">新しい社員アカウントを作成</h3>
-      <Field label="氏名">
-        <input value={name} onChange={(e) => setName(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" placeholder="例）田中 花子" />
-      </Field>
-      <Field label="フリガナ">
-        <input value={furigana} onChange={(e) => setFurigana(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" placeholder="例）タナカ ハナコ" />
-      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="姓">
+          <input value={sei} onChange={(e) => setSei(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" placeholder="例）田中" />
+        </Field>
+        <Field label="名">
+          <input value={mei} onChange={(e) => setMei(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" placeholder="例）花子" />
+        </Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="せい（ふりがな）">
+          <input value={seiKana} onChange={(e) => setSeiKana(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" placeholder="例）たなか" />
+        </Field>
+        <Field label="めい（ふりがな）">
+          <input value={meiKana} onChange={(e) => setMeiKana(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" placeholder="例）はなこ" />
+        </Field>
+      </div>
       <Field label="ユーザー名（ログインID・メールアドレス）">
         <input value={username} onChange={(e) => setUsername(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" placeholder="tanaka（または example@ezweb.ne.jp）" />
-        <div className="text-[10.5px] text-slate-400 mt-1">短いID（例：tanaka）でも、実際のメールアドレスでもログイン用に使えます。</div>
+        <div className="text-[10.5px] text-slate-400 mt-1">短いID（例：tanaka）でも、実際のメールアドレスでもログイン用に使えます。メールアドレスの場合、連絡用メールアドレスにも自動で設定されます。</div>
       </Field>
       <Field label="パスワード（6文字以上）">
         <input type="text" value={password} onChange={(e) => setPassword(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" placeholder="仮パスワードを入力" />
@@ -5973,7 +5999,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
         <div className="px-5 py-4 space-y-4">
           {activeTab === 'basic' && (
             <>
-              <Field label="フリガナ">
+              <Field label="ふりがな">
                 <input value={form.furigana} onChange={set('furigana')} placeholder="例）タナカ ハナコ" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
               </Field>
               <div className="grid grid-cols-2 gap-3">
