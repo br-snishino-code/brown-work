@@ -1903,16 +1903,18 @@ export default function AttendanceApp() {
 
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-900">
-      <div
-        className={`fixed right-3 z-[60] rounded-full border px-2.5 py-1 text-[11px] font-semibold shadow-sm ${cloudStatusClass}`}
-        style={{ top: 'max(0.75rem, calc(env(safe-area-inset-top) + 0.5rem))' }}
-      >
-        {cloudStatusLabel}
-      </div>
       <div style={{ paddingTop: 'env(safe-area-inset-top)' }} className="bg-slate-950">
         <GlobalTopTabs topTab={topTab} setTopTab={setTopTab} session={session} />
       </div>
-      <Header session={session} onLogout={handleLogout} pendingCount={pendingCorrectionCount + pendingLeaveCount + pendingShiftCount + pendingPerformanceCount} missingPunchCount={missingPunchCount} viewMode={viewMode} />
+      <Header
+        session={session}
+        onLogout={handleLogout}
+        pendingCount={pendingCorrectionCount + pendingLeaveCount + pendingShiftCount + pendingPerformanceCount}
+        missingPunchCount={missingPunchCount}
+        viewMode={viewMode}
+        cloudStatusLabel={cloudStatusLabel}
+        cloudStatusClass={cloudStatusClass}
+      />
       <main className={isDesktop ? 'max-w-6xl mx-auto px-6 pb-16 pt-8' : 'max-w-3xl mx-auto px-4 pb-24 pt-6'}>
         {topTab === 'labor' && (
           <AnnouncementsView
@@ -2364,7 +2366,7 @@ function AnnouncementComposerModal({ onClose, onSubmit }) {
   );
 }
 
-function Header({ session, onLogout, pendingCount, missingPunchCount, viewMode }) {
+function Header({ session, onLogout, pendingCount, missingPunchCount, viewMode, cloudStatusLabel, cloudStatusClass }) {
   const alertCount = pendingCount + missingPunchCount;
   const isDesktop = viewMode === 'desktop';
   return (
@@ -2385,6 +2387,11 @@ function Header({ session, onLogout, pendingCount, missingPunchCount, viewMode }
               {alertCount}
             </span>
           )}
+          {cloudStatusLabel && (
+            <span className={`hidden sm:inline-flex items-center rounded-full border px-2.5 py-1 text-[10.5px] font-semibold ${cloudStatusClass}`}>
+              {cloudStatusLabel}
+            </span>
+          )}
           <div className="hidden md:flex items-center gap-1.5 rounded-lg bg-white/10 px-2.5 py-1.5 text-[10.5px] font-bold text-slate-300">
             {isDesktop ? <Monitor size={13} /> : <Smartphone size={13} />}
             {isDesktop ? 'PC表示' : 'スマホ表示'}
@@ -2397,6 +2404,13 @@ function Header({ session, onLogout, pendingCount, missingPunchCount, viewMode }
           </button>
         </div>
       </div>
+      {cloudStatusLabel && (
+        <div className="sm:hidden px-4 pb-2 -mt-1">
+          <span className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-[10px] font-semibold ${cloudStatusClass}`}>
+            {cloudStatusLabel}
+          </span>
+        </div>
+      )}
     </header>
   );
 }
