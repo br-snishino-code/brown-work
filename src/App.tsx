@@ -1903,8 +1903,15 @@ export default function AttendanceApp() {
 
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-900">
-      <div className={`fixed top-3 right-3 z-[60] rounded-full border px-2.5 py-1 text-[11px] font-semibold shadow-sm ${cloudStatusClass}`}>{cloudStatusLabel}</div>
-      <GlobalTopTabs topTab={topTab} setTopTab={setTopTab} session={session} />
+      <div
+        className={`fixed right-3 z-[60] rounded-full border px-2.5 py-1 text-[11px] font-semibold shadow-sm ${cloudStatusClass}`}
+        style={{ top: 'max(0.75rem, calc(env(safe-area-inset-top) + 0.5rem))' }}
+      >
+        {cloudStatusLabel}
+      </div>
+      <div style={{ paddingTop: 'env(safe-area-inset-top)' }} className="bg-slate-950">
+        <GlobalTopTabs topTab={topTab} setTopTab={setTopTab} session={session} />
+      </div>
       <Header session={session} onLogout={handleLogout} pendingCount={pendingCorrectionCount + pendingLeaveCount + pendingShiftCount + pendingPerformanceCount} missingPunchCount={missingPunchCount} viewMode={viewMode} />
       <main className={isDesktop ? 'max-w-6xl mx-auto px-6 pb-16 pt-8' : 'max-w-3xl mx-auto px-4 pb-24 pt-6'}>
         {topTab === 'labor' && (
