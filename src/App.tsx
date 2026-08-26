@@ -2094,14 +2094,14 @@ function LoginScreen({ onLogin, toast }) {
         </div>
         <form onSubmit={submit} className="bg-white rounded-2xl p-6 space-y-4 border-2 border-slate-200 shadow-lg">
           <div>
-            <label className="block text-[12.5px] font-bold text-slate-800 mb-1.5">ユーザー名</label>
+            <label className="block text-[12.5px] font-bold text-slate-800 mb-1.5">ユーザー名（メールアドレスでも可）</label>
             <div className="flex items-center border-2 border-slate-200 rounded-xl px-3.5 gap-2 focus-within:border-slate-900 transition-colors">
               <User size={16} className="text-slate-400 shrink-0" />
               <input
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 className="w-full py-3 text-[15px] outline-none bg-transparent text-slate-800"
-                placeholder="ユーザー名を入力"
+                placeholder="ユーザー名またはメールアドレス"
                 autoCapitalize="none"
                 autoFocus
                 required
@@ -5516,8 +5516,9 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
       <Field label="フリガナ">
         <input value={furigana} onChange={(e) => setFurigana(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" placeholder="例）タナカ ハナコ" />
       </Field>
-      <Field label="ユーザー名（ログインID）">
-        <input value={username} onChange={(e) => setUsername(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" placeholder="tanaka" />
+      <Field label="ユーザー名（ログインID・メールアドレス）">
+        <input value={username} onChange={(e) => setUsername(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" placeholder="tanaka（または example@ezweb.ne.jp）" />
+        <div className="text-[10.5px] text-slate-400 mt-1">短いID（例：tanaka）でも、実際のメールアドレスでもログイン用に使えます。</div>
       </Field>
       <Field label="パスワード（6文字以上）">
         <input type="text" value={password} onChange={(e) => setPassword(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" placeholder="仮パスワードを入力" />
