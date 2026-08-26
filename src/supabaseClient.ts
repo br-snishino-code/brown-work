@@ -20,6 +20,12 @@ export const supabase = createClient(
   }
 );
 
-// ユーザー名は社内ログイン用の見た目のIDだが、Supabase Authはメール形式が必要なため
+// ユーザー名は社内ログイン用の見た目のIDだが、Supabase Authはメール形式が必要なため、
 // 内部的には "username@brownwork.local" という擬似メールアドレスに変換して使う。
-export const usernameToEmail = (username: string) => `${username.trim()}@brownwork.local`;
+// ただし、最初から "@" を含む本物のメールアドレスが入力された場合は、
+// そのままメールアドレスとしてSupabase Authに渡す（二重変換を防ぐため）。
+export const usernameToEmail = (username: string) => {
+  const trimmed = username.trim();
+  if (trimmed.includes('@')) return trimmed;
+  return `${trimmed}@brownwork.local`;
+};
