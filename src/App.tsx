@@ -1095,7 +1095,17 @@ export default function AttendanceApp() {
         headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
       });
       if (error || fnData?.error) {
-        show(fnData?.error || 'アカウント作成に失敗しました', 'warn');
+        let detail = fnData?.error;
+        if (!detail && error?.context) {
+          try {
+            const body = await error.context.json();
+            detail = body?.error || body?.message;
+          } catch (_) {
+            try { detail = await error.context.text(); } catch (__) { /* noop */ }
+          }
+        }
+        console.error('アカウント作成エラー詳細:', detail || error);
+        show(detail || 'アカウント作成に失敗しました', 'warn');
         return false;
       }
       await refreshData();
@@ -1103,6 +1113,7 @@ export default function AttendanceApp() {
       show(`${payload.name}さんのアカウントを作成しました`, 'success');
       return true;
     } catch (e) {
+      console.error('アカウント作成エラー:', e);
       show('アカウント作成に失敗しました', 'warn');
       return false;
     }
@@ -5324,7 +5335,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
   const [resetPasswordTarget, setResetPasswordTarget] = useState(null);
   const isMasterAdmin = session?.role === 'master_admin';
 
-  const canSubmit = name.trim() && username.trim() && password.trim().length >= 4 && hireDate;
+  const canSubmit = name.trim() && username.trim() && password.trim().length >= 6 && hireDate;
 
   const toggleAdminPermission = (key) => {
     setAdminPermissions((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
@@ -5508,7 +5519,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
       <Field label="ユーザー名（ログインID）">
         <input value={username} onChange={(e) => setUsername(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" placeholder="tanaka" />
       </Field>
-      <Field label="パスワード（4文字以上）">
+      <Field label="パスワード（6文字以上）">
         <input type="text" value={password} onChange={(e) => setPassword(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" placeholder="仮パスワードを入力" />
       </Field>
       <Field label="入職日">
@@ -5762,7 +5773,7 @@ function CsvImportModal({ onClose, onAddAccount }) {
         <div className="px-5 py-4 space-y-3">
           <div className="text-[11.5px] text-slate-500 bg-slate-50 rounded-lg p-3">
             1行目は見出し（<code className="font-mono">name,username,password,hireDate</code>）にしてください。<br />
-            2行目以降に1人ずつ、カンマ区切りで入力します。<code className="font-mono">hireDate</code>は省略可（形式：YYYY-MM-DD）。パスワードは4文字以上にしてください。
+            2行目以降に1人ずつ、カンマ区切りで入力します。<code className="font-mono">hireDate</code>は省略可（形式：YYYY-MM-DD）。パスワードは6文字以上にしてください。
           </div>
           <textarea
             value={csvText}
