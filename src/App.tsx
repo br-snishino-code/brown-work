@@ -297,36 +297,6 @@ function computeEoIncentive(staffMonthData, groupFlags, upsellRank) {
   };
 }
 
-// ---- Monthly shift request ----
-const nextMonthKey = (from = new Date()) => {
-  const y = from.getFullYear();
-  const m = from.getMonth() + 2; // 翌月（1始まり）
-  const targetYear = m > 12 ? y + 1 : y;
-  const targetMonth = m > 12 ? m - 12 : m;
-  return `${targetYear}-${pad(targetMonth)}`;
-};
-const monthKeyLabel = (yearMonth) => {
-  const [y, m] = yearMonth.split('-').map(Number);
-  return `${y}年${m}月`;
-};
-const daysInMonthList = (yearMonth) => {
-  const [y, m] = yearMonth.split('-').map(Number);
-  const count = lastDayOfMonth(y, m);
-  const weekdays = ['日', '月', '火', '水', '木', '金', '土'];
-  const list = [];
-  for (let d = 1; d <= count; d++) {
-    const dateObj = new Date(y, m - 1, d);
-    list.push({ date: `${y}-${pad(m)}-${pad(d)}`, day: d, weekday: weekdays[dateObj.getDay()], isWeekend: dateObj.getDay() === 0 || dateObj.getDay() === 6 });
-  }
-  return list;
-};
-const DAY_TYPE_META = {
-  work: { label: '○', color: 'emerald' },
-  off: { label: '×', color: 'slate' },
-  paid_leave: { label: '有休', color: 'amber' },
-};
-const isPastShiftDeadline = () => new Date().getDate() > 15;
-
 function useNow() {
   const [now, setNow] = useState(new Date());
   useEffect(() => {
@@ -479,7 +449,7 @@ function ToastView({ toast }) {
 // 以降のコンポーネント（LoginScreenなど）は一切変更していません。
 // ============================================================
 
-const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, shiftRequests: [], performanceReports: [], payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, employeeAttendanceSchedules: {}, announcements: [] };
+const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, performanceReports: [], payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, employeeAttendanceSchedules: {}, announcements: [] };
 
 // ---- row(snake_case) → app(camelCase) 変換 ----
 const rowToAccount = (row) => ({
@@ -609,23 +579,6 @@ const rowToLeave = (row) => ({
   decidedAt: row.decided_at,
 });
 
-const rowToShift = (row) => ({
-  id: row.id,
-  employeeId: row.employee_id,
-  employeeName: row.employees?.name || '',
-  batchId: row.batch_id,
-  targetMonth: row.target_month,
-  date: row.date,
-  dayType: row.day_type,
-  startTime: row.start_time,
-  endTime: row.end_time,
-  note: row.note,
-  status: row.status,
-  source: row.source,
-  submittedAt: row.submitted_at,
-  decidedAt: row.decided_at,
-});
-
 const rowToPerf = (row) => ({
   id: row.id,
   employeeId: row.employee_id,
@@ -712,7 +665,6 @@ async function fetchAllData() {
     recordsRes,
     correctionsRes,
     leaveRes,
-    shiftRes,
     perfRes,
     notifRes,
     payrollRes,
@@ -726,7 +678,6 @@ async function fetchAllData() {
     supabase.from('attendance_records').select('*'),
     supabase.from('corrections').select('*, employees(name)'),
     supabase.from('leave_requests').select('*, employees(name)'),
-    supabase.from('shift_requests').select('*, employees(name)'),
     supabase.from('performance_reports').select('*, employees(name)'),
     supabase.from('notifications').select('*').order('sent_at', { ascending: false }).limit(50),
     supabase.from('payroll_records').select('*, employees(name)'),
@@ -737,7 +688,7 @@ async function fetchAllData() {
     supabase.from('announcements').select('*').order('is_pinned', { ascending: false }).order('created_at', { ascending: false }),
   ]);
 
-  for (const res of [employeesRes, recordsRes, correctionsRes, leaveRes, shiftRes, perfRes, notifRes, payrollRes, auditRes, profileReqRes, groupLeaveRes, employeeAttendanceRes, announcementsRes]) {
+  for (const res of [employeesRes, recordsRes, correctionsRes, leaveRes, perfRes, notifRes, payrollRes, auditRes, profileReqRes, groupLeaveRes, employeeAttendanceRes, announcementsRes]) {
     if (res.error) throw res.error;
   }
 
@@ -768,7 +719,6 @@ async function fetchAllData() {
     leaveRequests: (leaveRes.data || []).map(rowToLeave),
     leaveBalances: {},
     payrollRecords: (payrollRes.data || []).map(rowToPayroll),
-    shiftRequests: (shiftRes.data || []).map(rowToShift),
     performanceReports: (perfRes.data || []).map(rowToPerf),
     notifications: (notifRes.data || []).map(rowToNotif),
     auditLogs: (auditRes.data || []).map(rowToAudit),
@@ -810,20 +760,6 @@ async function sendEmailBestEffort(toEmail, subject, text) {
 }
 
 // シフト希望が届いたらGoogleスプレッドシートに反映（未設定でも申請処理自体は失敗させない）
-async function syncShiftRequestsToSheet(payload) {
-  if (!payload || !payload.days || payload.days.length === 0) return;
-  try {
-    const { data: sessionData } = await supabase.auth.getSession();
-    const accessToken = sessionData?.session?.access_token;
-    await supabase.functions.invoke('sync-shift-to-sheet', {
-      body: payload,
-      headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
-    });
-  } catch (e) {
-    console.error('スプレッドシートへの反映に失敗しました（アプリの動作には影響ありません）', e);
-  }
-}
-
 async function markNotificationRead(id) {
   try {
     await supabase.from('notifications').update({ is_read: true }).eq('id', id);
@@ -933,13 +869,10 @@ export default function AttendanceApp() {
   const [session, setSession] = useState(null); // { id, username, name, role, hireDate, resignationDate }
   const [correctionModal, setCorrectionModal] = useState(null);
   const [leaveModalOpen, setLeaveModalOpen] = useState(false);
-  const [shiftModalOpen, setShiftModalOpen] = useState(false);
   const [performanceModal, setPerformanceModal] = useState(null);
   const [employeeTab, setEmployeeTab] = useState('attendance');
   const [topTab, setTopTab] = useState('attendance'); // attendance | labor | hr | payroll
   const [viewMode, setViewMode] = useState(() => (typeof window !== 'undefined' && window.matchMedia('(min-width: 1024px)').matches ? 'desktop' : 'mobile'));
-  const [shiftReminderOpen, setShiftReminderOpen] = useState(false);
-  const [shiftReminderChecked, setShiftReminderChecked] = useState(false);
   const now = useNow();
   const geo = useGeolocation();
   const { toast, show } = useToast();
@@ -948,15 +881,6 @@ export default function AttendanceApp() {
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
   }, [topTab, employeeTab]);
-
-  // 翌月分のシフト希望がまだ未提出の場合、月15日の締切前にリマインダーを表示（ログイン後1回）
-  useEffect(() => {
-    if (!session || session.role !== 'employee' || shiftReminderChecked) return;
-    const targetMonth = nextMonthKey();
-    const alreadySubmitted = data.shiftRequests.some((s) => s.employeeId === session.id && s.targetMonth === targetMonth);
-    if (!alreadySubmitted) setShiftReminderOpen(true);
-    setShiftReminderChecked(true);
-  }, [session, data.shiftRequests, shiftReminderChecked]);
 
   const loadSessionAndData = useCallback(async () => {
     if (!CLOUD_ENABLED) {
@@ -1702,114 +1626,6 @@ export default function AttendanceApp() {
     show('給与明細を公開しました', 'success');
   };
 
-  const submitShiftRequest = async (payload) => {
-    const batchId = `batch-${Date.now()}`;
-    const shiftRows = payload.days.map((d) => ({
-      employee_id: employeeId,
-      batch_id: batchId,
-      target_month: payload.targetMonth,
-      date: d.date,
-      day_type: d.dayType,
-      start_time: d.dayType === 'work' ? d.startTime : null,
-      end_time: d.dayType === 'work' ? d.endTime : null,
-      note: '',
-      status: 'pending',
-      source: 'employee',
-    }));
-    const { error: shiftError } = await supabase.from('shift_requests').insert(shiftRows);
-    if (shiftError) {
-      show('シフト希望の送信に失敗しました', 'warn');
-      return;
-    }
-
-    const paidLeaveDays = payload.days.filter((d) => d.dayType === 'paid_leave');
-    if (paidLeaveDays.length > 0) {
-      const leaveRows = paidLeaveDays.map((d) => ({
-        employee_id: employeeId,
-        type: '有休',
-        half_day: false,
-        start_date: d.date,
-        end_date: d.date,
-        days: 1,
-        reason: `${monthKeyLabel(payload.targetMonth)}シフト希望による有休申請`,
-        status: 'pending',
-      }));
-      const { error: leaveError } = await supabase.from('leave_requests').insert(leaveRows);
-      if (leaveError) console.error('有休申請の自動作成に失敗しました', leaveError);
-    }
-
-    await notifyAdmin(
-      `【シフト希望】${session.name} - ${monthKeyLabel(payload.targetMonth)}分`,
-      `${session.name}さんより ${monthKeyLabel(payload.targetMonth)}分のシフト希望（${shiftRows.length}日分、うち有休${paidLeaveDays.length}日）が届きました。内容をご確認のうえ確定してください。`,
-      batchId
-    );
-
-    // Googleスプレッドシート（フォーム回答タブ）にも反映（未設定・失敗でも申請処理自体は成功扱い）
-    syncShiftRequestsToSheet({
-      targetMonth: payload.targetMonth,
-      employeeName: session.name,
-      days: payload.days.map((d) => ({ day: Number(d.date.split('-')[2]), dayType: d.dayType })),
-      timestamp: new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' }).replace(/\//g, '/'),
-    });
-
-    await refreshData();
-    setShiftModalOpen(false);
-    show(`${monthKeyLabel(payload.targetMonth)}分のシフト希望（${shiftRows.length}日分）を送信しました`, 'success');
-  };
-
-  const decideShiftRequest = async (id, decision) => {
-    const shift = data.shiftRequests.find((s) => s.id === id);
-    const { error } = await supabase
-      .from('shift_requests')
-      .update({ status: decision, decided_at: new Date().toISOString() })
-      .eq('id', id);
-    if (error) {
-      show('処理に失敗しました', 'warn');
-      return;
-    }
-    await refreshData();
-    if (shift) await logAudit(session, decision === 'confirmed' ? 'シフトを確定' : 'シフト希望を却下', dateLabel(shift.date), shift.employeeId, shift.employeeName);
-    show(decision === 'confirmed' ? 'シフトを確定しました' : 'シフト希望を却下しました', decision === 'confirmed' ? 'success' : 'warn');
-  };
-
-  const decideShiftBatch = async (batchId, decision) => {
-    const rows = data.shiftRequests.filter((s) => s.batchId === batchId);
-    const { error } = await supabase
-      .from('shift_requests')
-      .update({ status: decision, decided_at: new Date().toISOString() })
-      .eq('batch_id', batchId)
-      .eq('status', 'pending');
-    if (error) {
-      show('処理に失敗しました', 'warn');
-      return;
-    }
-    await refreshData();
-    if (rows[0]) await logAudit(session, decision === 'confirmed' ? 'シフトをまとめて確定' : 'シフト希望をまとめて却下', `${monthKeyLabel(rows[0].targetMonth)}分・${rows.length}日分`, rows[0].employeeId, rows[0].employeeName);
-    show(decision === 'confirmed' ? 'まとめて確定しました' : 'まとめて却下しました', decision === 'confirmed' ? 'success' : 'warn');
-  };
-
-  const addShiftDirect = async (payload) => {
-    const targetAccount = data.accounts.find((a) => a.id === payload.employeeId);
-    const { error } = await supabase.from('shift_requests').insert({
-      employee_id: payload.employeeId,
-      batch_id: null,
-      day_type: 'work',
-      date: payload.date,
-      start_time: payload.startTime,
-      end_time: payload.endTime,
-      note: payload.note,
-      status: 'confirmed',
-      source: 'admin',
-      decided_at: new Date().toISOString(),
-    });
-    if (error) {
-      show('シフト登録に失敗しました', 'warn');
-      return;
-    }
-    await refreshData();
-    show(`${targetAccount ? targetAccount.name : ''}さんの${dateLabel(payload.date)}のシフトを登録しました`, 'success');
-  };
-
   const submitPerformanceReport = async (payload) => {
     const periodLabel = payload.type === 'half'
       ? halfPeriodLabel(payload.year, payload.month, payload.half)
@@ -1887,14 +1703,11 @@ export default function AttendanceApp() {
   const myLeaveUsed = myLeaveRequests
     .filter((l) => l.type === '有休' && l.status === 'approved')
     .reduce((sum, l) => sum + l.days, 0);
-  const myShiftRequests = data.shiftRequests.filter((s) => s.employeeId === employeeId);
-  const myConfirmedShifts = myShiftRequests.filter((s) => s.status === 'confirmed' && s.date >= today).sort((a, b) => (a.date > b.date ? 1 : -1));
   const myPerformanceReports = data.performanceReports.filter((r) => r.employeeId === employeeId);
 
   const employeeAccounts = data.accounts.filter((a) => a.role === 'employee');
   const pendingCorrectionCount = data.corrections.filter((c) => c.status === 'pending').length;
   const pendingLeaveCount = data.leaveRequests.filter((l) => l.status === 'pending').length;
-  const pendingShiftCount = data.shiftRequests.filter((s) => s.status === 'pending').length;
   const pendingPerformanceCount = data.performanceReports.filter((r) => r.status === 'pending').length;
   const missingPunchCount = employeeAccounts.reduce((sum, acc) => {
     const recs = data.records[acc.id] || {};
@@ -1909,7 +1722,7 @@ export default function AttendanceApp() {
       <Header
         session={session}
         onLogout={handleLogout}
-        pendingCount={pendingCorrectionCount + pendingLeaveCount + pendingShiftCount + pendingPerformanceCount}
+        pendingCount={pendingCorrectionCount + pendingLeaveCount + pendingPerformanceCount}
         missingPunchCount={missingPunchCount}
         viewMode={viewMode}
         cloudStatusLabel={cloudStatusLabel}
@@ -1963,7 +1776,7 @@ export default function AttendanceApp() {
             {isDesktop && (
               <div className="flex items-center bg-white rounded-2xl border border-slate-200 p-1.5 text-[12px] font-bold max-w-2xl shadow-sm">
                 {[
-                  ['attendance','勤怠'],['leave','休暇申請'],['shift','シフト'],['performance','実績']
+                  ['attendance','勤怠'],['leave','休暇申請'],['performance','実績']
                 ].map(([key,label]) => <button key={key} onClick={() => setEmployeeTab(key)} className={`flex-1 py-2.5 rounded-xl transition-colors ${employeeTab === key ? 'bg-slate-950 text-white' : 'text-slate-500 hover:bg-slate-50'}`}>{label}</button>)}
               </div>
             )}
@@ -1995,14 +1808,6 @@ export default function AttendanceApp() {
                 isDesktop={isDesktop}
               />
             )}
-            {employeeTab === 'shift' && (
-              <ShiftView
-                confirmedShifts={myConfirmedShifts}
-                shiftRequests={myShiftRequests}
-                onOpenShiftModal={() => setShiftModalOpen(true)}
-                isDesktop={isDesktop}
-              />
-            )}
             {employeeTab === 'performance' && (
               <div className="space-y-5">
                 {session.mainGroup === EO_GROUP_NAME && (
@@ -2023,9 +1828,6 @@ export default function AttendanceApp() {
             session={session}
             onDecide={decideCorrection}
             onDecideLeave={decideLeaveRequest}
-            onDecideShift={decideShiftRequest}
-            onDecideShiftBatch={decideShiftBatch}
-            onAddShift={addShiftDirect}
             onDecidePerformance={decidePerformanceReport}
             onAddAccount={handleAddAccount}
             onDeleteAccount={handleDeleteAccount}
@@ -2055,19 +1857,6 @@ export default function AttendanceApp() {
           onSubmit={submitLeaveRequest}
         />
       )}
-      {shiftModalOpen && (
-        <MonthlyShiftModal
-          leaveRemaining={myLeaveTotal - myLeaveUsed}
-          onClose={() => setShiftModalOpen(false)}
-          onSubmit={submitShiftRequest}
-        />
-      )}
-      {shiftReminderOpen && (
-        <ShiftReminderModal
-          onClose={() => setShiftReminderOpen(false)}
-          onOpenShiftModal={() => { setShiftReminderOpen(false); setShiftModalOpen(true); }}
-        />
-      )}
       {performanceModal && (
         <PerformanceModal
           type={performanceModal}
@@ -2079,7 +1868,7 @@ export default function AttendanceApp() {
         <nav className="fixed inset-x-3 bottom-3 z-40 mx-auto max-w-md rounded-[22px] border border-slate-200/80 bg-white/95 p-1.5 shadow-2xl backdrop-blur">
           <div className="grid grid-cols-4 gap-1">
             {[
-              ['attendance','勤怠',Clock],['leave','休暇',Palmtree],['shift','シフト',CalendarDays],['performance','実績',BarChart3]
+              ['attendance','勤怠',Clock],['leave','休暇',Palmtree],['performance','実績',BarChart3]
             ].map(([key,label,Icon]) => <button key={key} onClick={() => setEmployeeTab(key)} className={`flex flex-col items-center gap-1 rounded-2xl py-2 text-[10px] font-bold transition ${employeeTab === key ? 'bg-slate-950 text-white' : 'text-slate-400'}`}><Icon size={17}/>{label}</button>)}
           </div>
         </nav>
@@ -2822,351 +2611,6 @@ function LeaveRequestModal({ leaveRemaining, onClose, onSubmit }) {
   );
 }
 
-function ShiftView({ confirmedShifts, shiftRequests, onOpenShiftModal, isDesktop }) {
-  const pendingRequests = shiftRequests.filter((s) => s.status === 'pending');
-  const batches = Array.from(new Set(shiftRequests.map((s) => s.batchId).filter(Boolean)))
-    .map((batchId) => {
-      const rows = shiftRequests.filter((s) => s.batchId === batchId).sort((a, b) => (a.date > b.date ? 1 : -1));
-      return { batchId, targetMonth: rows[0]?.targetMonth, rows };
-    })
-    .sort((a, b) => (a.targetMonth < b.targetMonth ? 1 : -1));
-
-  const upcomingCard = (
-    <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-      <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
-        <CalendarDays size={15} className="text-slate-400" />
-        <h2 className="font-bold text-[13.5px]">確定シフト</h2>
-        <button
-          onClick={onOpenShiftModal}
-          className="ml-auto flex items-center gap-1.5 bg-amber-600 text-white text-[12.5px] font-bold px-3 py-1.5 rounded-lg shadow-sm active:brightness-95"
-        >
-          <Plus size={13} strokeWidth={2.5} /> 月間シフト希望
-        </button>
-      </div>
-      {confirmedShifts.length === 0 ? (
-        <div className="px-5 py-10 text-center text-[12.5px] text-slate-300">確定しているシフトはまだありません</div>
-      ) : (
-        <div className="divide-y divide-slate-100 max-h-80 overflow-y-auto">
-          {confirmedShifts.map((s) => (
-            <div key={s.id} className="px-5 py-2.5 flex items-center justify-between">
-              <span className="text-[13px] font-semibold text-slate-800">{dateLabel(s.date)}</span>
-              {s.dayType === 'work' ? (
-                <span className="font-mono text-[13px] text-slate-600">{s.startTime} - {s.endTime}</span>
-              ) : (
-                <span className={`text-[12px] font-bold ${s.dayType === 'paid_leave' ? 'text-amber-600' : 'text-slate-400'}`}>
-                  {DAY_TYPE_META[s.dayType]?.label || '×'}
-                </span>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-
-  const requestsCard = (
-    <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-      <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
-        <ListChecks size={15} className="text-slate-400" />
-        <h2 className="font-bold text-[13.5px]">希望シフトの状況</h2>
-        {pendingRequests.length > 0 && <span className="ml-auto text-[11px] bg-amber-600 text-white rounded-full px-2 py-0.5 font-bold">{pendingRequests.length}</span>}
-      </div>
-      {batches.length === 0 ? (
-        <div className="px-5 py-10 text-center text-[12.5px] text-slate-300">まだシフト希望を出していません</div>
-      ) : (
-        <div className="divide-y divide-slate-100">
-          {batches.map((b) => {
-            const confirmedCount = b.rows.filter((r) => r.status === 'confirmed').length;
-            const pendingCount = b.rows.filter((r) => r.status === 'pending').length;
-            const rejectedCount = b.rows.filter((r) => r.status === 'rejected').length;
-            return (
-              <div key={b.batchId} className="px-5 py-3.5">
-                <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-[13px] font-bold text-slate-800">{monthKeyLabel(b.targetMonth)}分（{b.rows.length}日）</span>
-                  {pendingCount > 0 ? (
-                    <LeaveStatusBadge status="pending" />
-                  ) : rejectedCount > 0 && confirmedCount === 0 ? (
-                    <LeaveStatusBadge status="rejected" />
-                  ) : (
-                    <LeaveStatusBadge status="approved" />
-                  )}
-                </div>
-                <div className="text-[11.5px] text-slate-400">
-                  確定 {confirmedCount}日　承認待ち {pendingCount}日{rejectedCount > 0 && `　却下 ${rejectedCount}日`}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-
-  if (isDesktop) {
-    return (
-      <div className="grid grid-cols-2 gap-5 items-start">
-        {upcomingCard}
-        {requestsCard}
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-5">
-      {upcomingCard}
-      {requestsCard}
-    </div>
-  );
-}
-
-function ShiftReminderModal({ onClose, onOpenShiftModal }) {
-  const targetMonth = nextMonthKey();
-  const today = new Date();
-  const deadlineDay = 15;
-  const daysLeft = deadlineDay - today.getDate();
-  const overdue = daysLeft < 0;
-
-  return createPortal(
-    <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-40 p-0 sm:p-4">
-      <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-sm max-h-[90vh] overflow-y-auto">
-        <div className="px-5 pt-6 pb-4 text-center">
-          <div className={`w-12 h-12 rounded-full mx-auto flex items-center justify-center ${overdue ? 'bg-rose-50' : 'bg-amber-50'}`}>
-            <CalendarDays size={22} className={overdue ? 'text-rose-500' : 'text-amber-500'} />
-          </div>
-          <h3 className="font-bold text-[16px] mt-3">シフト希望の提出をお忘れなく</h3>
-          <p className="text-[12.5px] text-slate-500 mt-2 leading-relaxed">
-            {monthKeyLabel(targetMonth)}分のシフト希望がまだ提出されていません。<br />
-            提出期限は<b className="text-slate-700">毎月15日</b>です。
-          </p>
-          <p className={`text-[12.5px] font-bold mt-2 ${overdue ? 'text-rose-600' : 'text-amber-600'}`}>
-            {overdue ? '提出期限を過ぎています。お早めにご提出ください' : `締切まであと${daysLeft}日`}
-          </p>
-        </div>
-        <div className="px-5 pb-5 pt-1 flex gap-2">
-          <button onClick={onClose} className="flex-1 py-2.5 rounded-lg border border-slate-200 text-[13.5px] font-medium text-slate-500">後で</button>
-          <button onClick={onOpenShiftModal} className="flex-1 py-2.5 rounded-lg bg-amber-600 text-white text-[13.5px] font-bold">
-            今すぐ申請する
-          </button>
-        </div>
-      </div>
-    </div>,
-    document.body
-  );
-}
-
-function MonthlyShiftModal({ leaveRemaining, onClose, onSubmit }) {
-  const targetMonth = nextMonthKey();
-  const dayList = daysInMonthList(targetMonth);
-  const [days, setDays] = useState<Record<string, any>>(() =>
-    dayList.reduce((acc, d) => {
-      acc[d.date] = { dayType: 'work', startTime: '10:00', endTime: '19:00' };
-      return acc;
-    }, {})
-  );
-
-  const setDayType = (date, dayType) => {
-    setDays((prev) => ({ ...prev, [date]: { ...prev[date], dayType } }));
-  };
-  const setDayTime = (date, field, value) => {
-    setDays((prev) => ({ ...prev, [date]: { ...prev[date], [field]: value } }));
-  };
-
-  const paidLeaveCount = Object.values(days).filter((d) => d.dayType === 'paid_leave').length;
-  const workCount = Object.values(days).filter((d) => d.dayType === 'work').length;
-  const offCount = Object.values(days).filter((d) => d.dayType === 'off').length;
-  const exceedsLeave = paidLeaveCount > leaveRemaining;
-  const canSubmit = !exceedsLeave;
-
-  const submit = () => {
-    if (!canSubmit) return;
-    const payload = {
-      targetMonth,
-      days: dayList.map((d) => ({
-        date: d.date,
-        dayType: days[d.date].dayType,
-        startTime: days[d.date].startTime,
-        endTime: days[d.date].endTime,
-      })),
-    };
-    onSubmit(payload);
-  };
-
-  return createPortal(
-    <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-40 p-0 sm:p-4">
-      <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg max-h-[92vh] overflow-y-auto">
-        <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white z-10">
-          <div>
-            <h3 className="font-bold text-[15px]">{monthKeyLabel(targetMonth)}分のシフト希望</h3>
-            <p className="text-[11px] text-slate-400 mt-0.5">毎月15日までに翌月分を提出してください</p>
-          </div>
-          <button onClick={onClose} className="text-slate-400 text-xl leading-none px-1">×</button>
-        </div>
-
-        {isPastShiftDeadline() && (
-          <div className="mx-5 mt-3 flex items-start gap-2 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2 text-[11.5px] text-rose-700">
-            <AlertTriangle size={13} className="mt-0.5 shrink-0" />
-            <span>提出期限（毎月15日）を過ぎています。念のため管理者にも直接ご連絡ください。</span>
-          </div>
-        )}
-
-        <div className="px-5 py-3 flex items-center gap-4 text-[11.5px] text-slate-500 border-b border-slate-100">
-          <span>○ 出勤 <b className="text-slate-700">{workCount}日</b></span>
-          <span>× 休み <b className="text-slate-700">{offCount}日</b></span>
-          <span className={exceedsLeave ? 'text-rose-600 font-bold' : ''}>有休 <b>{paidLeaveCount}日</b> / 残{leaveRemaining}日</span>
-        </div>
-        {exceedsLeave && (
-          <div className="mx-5 mt-2 text-[11.5px] text-rose-600 font-medium">有休の残日数を超えています。有休の選択日数を減らしてください</div>
-        )}
-
-        <div className="px-5 py-3 divide-y divide-slate-100">
-          {dayList.map((d) => {
-            const entry = days[d.date];
-            return (
-              <div key={d.date} className="py-2.5 flex items-center gap-2">
-                <div className={`w-14 shrink-0 text-[12.5px] font-mono ${d.isWeekend ? 'text-rose-500' : 'text-slate-600'}`}>
-                  {d.day}日({d.weekday})
-                </div>
-                <div className="flex gap-1 shrink-0">
-                  {['work', 'off', 'paid_leave'].map((t) => (
-                    <button
-                      key={t}
-                      type="button"
-                      onClick={() => setDayType(d.date, t)}
-                      className={`w-9 h-8 rounded-md text-[11px] font-bold border-2 transition-colors ${
-                        entry.dayType === t
-                          ? t === 'work' ? 'border-emerald-500 bg-emerald-50 text-emerald-600'
-                          : t === 'off' ? 'border-slate-400 bg-slate-100 text-slate-600'
-                          : 'border-amber-600 bg-amber-50 text-amber-600'
-                          : 'border-slate-200 text-slate-300'
-                      }`}
-                    >
-                      {DAY_TYPE_META[t].label}
-                    </button>
-                  ))}
-                </div>
-                {entry.dayType === 'work' && (
-                  <div className="flex items-center gap-1 flex-1 min-w-0">
-                    <input
-                      type="time"
-                      value={entry.startTime}
-                      onChange={(e) => setDayTime(d.date, 'startTime', e.target.value)}
-                      className="w-full border border-slate-200 rounded-md px-1.5 py-1 font-mono text-[11.5px] min-w-0"
-                    />
-                    <span className="text-slate-300 text-[11px]">-</span>
-                    <input
-                      type="time"
-                      value={entry.endTime}
-                      onChange={(e) => setDayTime(d.date, 'endTime', e.target.value)}
-                      className="w-full border border-slate-200 rounded-md px-1.5 py-1 font-mono text-[11.5px] min-w-0"
-                    />
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-
-        <div className="px-5 py-3 border-t border-slate-100 flex items-start gap-2 bg-slate-50 text-[11.5px] text-slate-500">
-          <Mail size={13} className="mt-0.5 shrink-0" />
-          <span>提出すると管理者にメール通知が送信されます。有休として選んだ日は、休暇申請としても自動で登録されます</span>
-        </div>
-        <div className="px-5 pb-5 pt-3 flex gap-2 sticky bottom-0 bg-white border-t border-slate-100">
-          <button onClick={onClose} className="flex-1 py-2.5 rounded-lg border border-slate-200 text-[13.5px] font-medium text-slate-500">キャンセル</button>
-          <button
-            onClick={submit}
-            disabled={!canSubmit}
-            className="flex-1 py-2.5 rounded-lg bg-amber-600 disabled:bg-slate-200 text-white text-[13.5px] font-bold"
-          >
-            {monthKeyLabel(targetMonth)}分を提出
-          </button>
-        </div>
-      </div>
-    </div>,
-    document.body
-  );
-}
-
-function PerformanceView({ reports, onOpenModal, isDesktop }) {
-  const actionsCard = (
-    <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-      <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
-        <ClipboardList size={15} className="text-slate-400" />
-        <h2 className="font-bold text-[13.5px]">実績を提出</h2>
-      </div>
-      <div className="p-5 grid grid-cols-2 gap-3">
-        <button
-          onClick={() => onOpenModal('half')}
-          className="py-4 rounded-xl border-2 border-slate-200 hover:border-amber-600 flex flex-col items-center gap-1.5 transition-colors"
-        >
-          <CalendarDays size={18} className="text-amber-600" />
-          <span className="text-[12.5px] font-bold text-slate-800">半月実績</span>
-          <span className="text-[10px] text-slate-400">前半・後半ごと</span>
-        </button>
-        <button
-          onClick={() => onOpenModal('month')}
-          className="py-4 rounded-xl border-2 border-slate-200 hover:border-amber-600 flex flex-col items-center gap-1.5 transition-colors"
-        >
-          <ClipboardList size={18} className="text-amber-600" />
-          <span className="text-[12.5px] font-bold text-slate-800">月末まとめ</span>
-          <span className="text-[10px] text-slate-400">月全体の集計</span>
-        </button>
-      </div>
-    </div>
-  );
-
-  const listCard = (
-    <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-      <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
-        <Calendar size={15} className="text-slate-400" />
-        <h2 className="font-bold text-[13.5px]">提出履歴</h2>
-      </div>
-      {reports.length === 0 ? (
-        <div className="px-5 py-10 text-center text-[12.5px] text-slate-300">まだ実績を提出していません</div>
-      ) : (
-        <div className="divide-y divide-slate-100">
-          {reports.map((r) => (
-            <div key={r.id} className="px-5 py-3.5">
-              <div className="flex items-center justify-between mb-1">
-                <div className="flex items-center gap-2">
-                  <span className="text-[11px] font-bold text-slate-500 bg-slate-100 px-2 py-0.5 rounded-md">{r.type === 'half' ? '半月' : '月末'}</span>
-                  <span className="text-[13px] font-semibold text-slate-800">{r.periodLabel}</span>
-                </div>
-                <LeaveStatusBadge status={r.status === 'approved' ? 'approved' : r.status} />
-              </div>
-              <div className="text-[12px] text-slate-500 whitespace-pre-wrap">{r.summary}</div>
-              {r.numericValue !== null && r.numericValue !== '' && (
-                <div className="text-[11.5px] text-slate-400 mt-1">{r.numericLabel || '実績値'}：<span className="font-mono font-semibold text-slate-600">{r.numericValue}</span></div>
-              )}
-              {r.adminMemo && (
-                <div className="mt-2 flex items-start gap-1.5 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2 text-[11.5px] text-amber-800">
-                  <MessageSquare size={12} className="mt-0.5 shrink-0" />
-                  <span>管理者コメント：{r.adminMemo}</span>
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-
-  if (isDesktop) {
-    return (
-      <div className="grid grid-cols-[300px_1fr] gap-5 items-start">
-        {actionsCard}
-        {listCard}
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-5">
-      {actionsCard}
-      {listCard}
-    </div>
-  );
-}
-
 function PerformanceModal({ type, onClose, onSubmit }) {
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
@@ -3637,7 +3081,7 @@ function EoAdminIncentiveTab({ employeeAccounts, isDesktop }) {
   );
 }
 
-function AdminDashboardTab({ missingCount, correctionCount, leaveCount, shiftCount, performanceCount, gpsAlertCount, contractAlertCount, employeeCount, onNavigate, isDesktop }) {
+function AdminDashboardTab({ missingCount, correctionCount, leaveCount, performanceCount, gpsAlertCount, contractAlertCount, employeeCount, onNavigate, isDesktop }) {
   const alertRows = [
     { label: '打刻漏れ・打刻間違い', count: missingCount, tab: 'requests', icon: <AlertTriangle size={14} /> },
     { label: '位置情報が5回以上連続で未記録', count: gpsAlertCount, tab: 'attendance', icon: <MapPin size={14} /> },
@@ -3646,14 +3090,12 @@ function AdminDashboardTab({ missingCount, correctionCount, leaveCount, shiftCou
   const unapprovedRows = [
     { label: '未承認の勤怠修正申請', count: correctionCount, tab: 'requests', icon: <FileEdit size={14} /> },
     { label: '未承認の休暇申請', count: leaveCount, tab: 'leave', icon: <Palmtree size={14} /> },
-    { label: '未承認のシフト希望', count: shiftCount, tab: 'shift', icon: <CalendarDays size={14} /> },
     { label: '未承認の実績報告', count: performanceCount, tab: 'performance', icon: <ClipboardList size={14} /> },
   ];
   const quickLinks = [
     { label: '勤怠一覧', tab: 'attendance', icon: <Clock size={17} /> },
     { label: '社員管理', tab: 'accounts', icon: <Users size={17} /> },
     { label: '休暇申請', tab: 'leave', icon: <Palmtree size={17} /> },
-    { label: 'シフト', tab: 'shift', icon: <CalendarDays size={17} /> },
   ];
 
   const Row = ({ row }) => (
@@ -4038,7 +3480,7 @@ function PayrollMetric({ label, value }) {
   );
 }
 
-function AdminTopNav({ tab, setTab, correctionCount, leaveCount, shiftCount, performanceCount, isMasterAdmin }) {
+function AdminTopNav({ tab, setTab, correctionCount, leaveCount, performanceCount, isMasterAdmin }) {
   const [open, setOpen] = useState(null);
   const wrapRef = useRef(null);
 
@@ -4063,10 +3505,9 @@ function AdminTopNav({ tab, setTab, correctionCount, leaveCount, shiftCount, per
     {
       key: 'leave-group',
       label: '休暇・申請管理',
-      tabs: ['leave', 'shift', 'performance'],
+      tabs: ['leave', 'performance'],
       items: [
         { tab: 'leave', label: '休暇申請', sub: '承認・却下', badge: leaveCount },
-        { tab: 'shift', label: 'シフト希望', sub: '確定・却下', badge: shiftCount },
         { tab: 'performance', label: '実績報告', sub: '承認・却下', badge: performanceCount },
       ],
     },
@@ -4091,7 +3532,7 @@ function AdminTopNav({ tab, setTab, correctionCount, leaveCount, shiftCount, per
     },
   ];
 
-  const totalBadge = correctionCount + leaveCount + shiftCount + performanceCount;
+  const totalBadge = correctionCount + leaveCount + performanceCount;
 
   return (
     <div ref={wrapRef} className="relative bg-white rounded-2xl border border-slate-200 shadow-sm">
@@ -4152,8 +3593,8 @@ function AdminTopNav({ tab, setTab, correctionCount, leaveCount, shiftCount, per
   );
 }
 
-function AdminView({ data, employeeAccounts, session, onDecide, onDecideLeave, onDecideShift, onDecideShiftBatch, onAddShift, onDecidePerformance, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveGroupLeave, onSaveEmployeeAttendance, isDesktop }) {
-  const [tab, setTab] = useState('dashboard'); // dashboard | attendance | requests | leave | shift | performance | accounts
+function AdminView({ data, employeeAccounts, session, onDecide, onDecideLeave, onDecidePerformance, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveGroupLeave, onSaveEmployeeAttendance, isDesktop }) {
+  const [tab, setTab] = useState('dashboard'); // dashboard | attendance | requests | leave | performance | accounts
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
   }, [tab]);
@@ -4161,8 +3602,6 @@ function AdminView({ data, employeeAccounts, session, onDecide, onDecideLeave, o
   const decided = data.corrections.filter((c) => c.status !== 'pending').slice(0, 8);
   const leavePending = data.leaveRequests.filter((l) => l.status === 'pending');
   const leaveDecided = data.leaveRequests.filter((l) => l.status !== 'pending').slice(0, 8);
-  const shiftPending = data.shiftRequests.filter((s) => s.status === 'pending');
-  const shiftConfirmed = data.shiftRequests.filter((s) => s.status === 'confirmed' && s.date >= todayKey()).sort((a, b) => (a.date > b.date ? 1 : -1)).slice(0, 12);
   const performancePending = data.performanceReports.filter((r) => r.status === 'pending');
   const performanceDecided = data.performanceReports.filter((r) => r.status !== 'pending').slice(0, 8);
   const today = todayKey();
@@ -4193,7 +3632,6 @@ function AdminView({ data, employeeAccounts, session, onDecide, onDecideLeave, o
           setTab={setTab}
           correctionCount={pending.length}
           leaveCount={leavePending.length}
-          shiftCount={shiftPending.length}
           performanceCount={performancePending.length}
           isMasterAdmin={isMasterAdmin}
         />
@@ -4213,14 +3651,6 @@ function AdminView({ data, employeeAccounts, session, onDecide, onDecideLeave, o
             {leavePending.length > 0 && tab !== 'leave' && (
               <span className="absolute -top-1 -right-0.5 w-4 h-4 bg-amber-600 rounded-full text-[9px] flex items-center justify-center text-white font-bold">
                 {leavePending.length}
-              </span>
-            )}
-          </button>
-          <button onClick={() => setTab('shift')} className={`relative flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'shift' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
-            シフト
-            {shiftPending.length > 0 && tab !== 'shift' && (
-              <span className="absolute -top-1 -right-0.5 w-4 h-4 bg-amber-600 rounded-full text-[9px] flex items-center justify-center text-white font-bold">
-                {shiftPending.length}
               </span>
             )}
           </button>
@@ -4269,7 +3699,6 @@ function AdminView({ data, employeeAccounts, session, onDecide, onDecideLeave, o
           missingCount={missing.length}
           correctionCount={pending.length}
           leaveCount={leavePending.length}
-          shiftCount={shiftPending.length}
           performanceCount={performancePending.length}
           gpsAlertCount={gpsAlerts.length}
           contractAlertCount={contractAlerts.length}
@@ -4393,18 +3822,6 @@ function AdminView({ data, employeeAccounts, session, onDecide, onDecideLeave, o
         </div>
       )}
 
-      {tab === 'shift' && (
-        <ShiftAdminTab
-          employeeAccounts={employeeAccounts}
-          shiftPending={shiftPending}
-          shiftConfirmed={shiftConfirmed}
-          onDecideShift={onDecideShift}
-          onDecideShiftBatch={onDecideShiftBatch}
-          onAddShift={onAddShift}
-          isDesktop={isDesktop}
-        />
-      )}
-
       {tab === 'requests' && (
         <div className={isDesktop ? 'grid grid-cols-2 gap-5 items-start' : 'space-y-5'}>
           <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
@@ -4489,165 +3906,6 @@ function AdminView({ data, employeeAccounts, session, onDecide, onDecideLeave, o
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-function ShiftAdminTab({ employeeAccounts, shiftPending, shiftConfirmed, onDecideShift, onDecideShiftBatch, onAddShift, isDesktop }) {
-  const [empId, setEmpId] = useState(employeeAccounts[0]?.id || '');
-  const [date, setDate] = useState(todayKey());
-  const [startTime, setStartTime] = useState('09:00');
-  const [endTime, setEndTime] = useState('18:00');
-  const [note, setNote] = useState('');
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const canSubmit = empId && date && startTime && endTime && startTime < endTime;
-
-  const submit = (e) => {
-    e.preventDefault();
-    if (!canSubmit) return;
-    onAddShift({ employeeId: empId, date, startTime, endTime, note });
-    setNote('');
-  };
-
-  const batchGroups = Array.from(new Set<string>(shiftPending.map((s) => String(s.batchId || s.id)))).map((key) => {
-    const rows = shiftPending.filter((s) => (s.batchId || s.id) === key).sort((a, b) => (a.date > b.date ? 1 : -1));
-    return { key, batchId: rows[0]?.batchId, employeeName: rows[0]?.employeeName, targetMonth: rows[0]?.targetMonth, rows };
-  });
-
-  const pendingCard = (
-    <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-      <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
-        <ListChecks size={15} className="text-slate-400" />
-        <h2 className="font-bold text-[13.5px]">シフト希望</h2>
-        {shiftPending.length > 0 && <span className="ml-auto text-[11px] bg-amber-600 text-white rounded-full px-2 py-0.5 font-bold">{shiftPending.length}</span>}
-      </div>
-      {batchGroups.length === 0 ? (
-        <div className="px-5 py-8 text-center text-[12.5px] text-slate-300">届いている希望はありません</div>
-      ) : (
-        <div className="divide-y divide-slate-100">
-          {batchGroups.map((g) => {
-            const isOpen = expanded[g.key];
-            return (
-              <div key={g.key} className="px-5 py-4">
-                <div className="flex items-center justify-between mb-2">
-                  <button onClick={() => setExpanded((e) => ({ ...e, [g.key]: !e[g.key] }))} className="text-left">
-                    <div className="text-[13px] font-semibold text-slate-800">
-                      {g.employeeName} {g.targetMonth ? `— ${monthKeyLabel(g.targetMonth)}分` : `— ${dateLabel(g.rows[0].date)}`}
-                    </div>
-                    <div className="text-[11px] text-slate-400">{g.rows.length}日分 ・タップで詳細{isOpen ? 'を閉じる' : 'を表示'}</div>
-                  </button>
-                  <div className="text-[10.5px] text-slate-400">{new Date(g.rows[0].submittedAt).toLocaleString('ja-JP')}</div>
-                </div>
-
-                {isOpen && (
-                  <div className="mb-3 max-h-56 overflow-y-auto rounded-lg border border-slate-100 divide-y divide-slate-100">
-                    {g.rows.map((s) => (
-                      <div key={s.id} className="px-3 py-1.5 flex items-center justify-between text-[12px]">
-                        <span className="font-mono text-slate-600">{dateLabel(s.date)}</span>
-                        {s.dayType === 'work' ? (
-                          <span className="font-mono text-slate-500">{s.startTime} - {s.endTime}</span>
-                        ) : (
-                          <span className={`font-bold ${s.dayType === 'paid_leave' ? 'text-amber-600' : 'text-slate-400'}`}>
-                            {DAY_TYPE_META[s.dayType]?.label || '×'}
-                          </span>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => g.batchId ? onDecideShiftBatch(g.batchId, 'rejected') : onDecideShift(g.rows[0].id, 'rejected')}
-                    className="flex-1 flex items-center justify-center gap-1 py-2 rounded-lg border border-slate-200 text-[12.5px] font-medium text-slate-500"
-                  >
-                    <XCircle size={13} /> まとめて却下
-                  </button>
-                  <button
-                    onClick={() => g.batchId ? onDecideShiftBatch(g.batchId, 'confirmed') : onDecideShift(g.rows[0].id, 'confirmed')}
-                    className="flex-1 flex items-center justify-center gap-1 py-2 rounded-lg bg-emerald-600 text-white text-[12.5px] font-bold"
-                  >
-                    <CheckCircle2 size={13} /> まとめて確定
-                  </button>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-
-  const confirmedCard = (
-    <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-      <div className="px-5 py-3.5 border-b border-slate-100">
-        <h2 className="font-bold text-[13.5px]">確定シフト（直近）</h2>
-      </div>
-      {shiftConfirmed.length === 0 ? (
-        <div className="px-5 py-8 text-center text-[12.5px] text-slate-300">確定しているシフトはありません</div>
-      ) : (
-        <div className="divide-y divide-slate-100">
-          {shiftConfirmed.map((s) => (
-            <div key={s.id} className="px-5 py-2.5 flex items-center justify-between text-[12.5px]">
-              <span>{s.employeeName} — {dateLabel(s.date)}</span>
-              {s.dayType === 'work' || !s.dayType ? (
-                <span className="font-mono text-slate-500">{s.startTime} - {s.endTime}</span>
-              ) : (
-                <span className={`font-bold ${s.dayType === 'paid_leave' ? 'text-amber-600' : 'text-slate-400'}`}>
-                  {DAY_TYPE_META[s.dayType]?.label || '×'}
-                </span>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-
-  const formCard = (
-    <form onSubmit={submit} className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 space-y-3.5 h-fit">
-      <h3 className="font-bold text-[13.5px] mb-1">シフトを直接登録</h3>
-      <Field label="社員">
-        <select value={empId} onChange={(e) => setEmpId(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px] bg-white">
-          {employeeAccounts.map((acc) => (
-            <option key={acc.id} value={acc.id}>{acc.name}</option>
-          ))}
-        </select>
-      </Field>
-      <Field label="日付">
-        <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
-      </Field>
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="開始時刻">
-          <input type="time" value={startTime} onChange={(e) => setStartTime(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
-        </Field>
-        <Field label="終了時刻">
-          <input type="time" value={endTime} onChange={(e) => setEndTime(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
-        </Field>
-      </div>
-      <Field label="メモ（任意）">
-        <input value={note} onChange={(e) => setNote(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" placeholder="例）応援シフト" />
-      </Field>
-      <button type="submit" disabled={!canSubmit} className="w-full py-2.5 rounded-lg bg-slate-800 disabled:bg-slate-200 text-white text-[13.5px] font-bold">
-        登録する
-      </button>
-    </form>
-  );
-
-  if (isDesktop) {
-    return (
-      <div className="grid grid-cols-2 gap-5 items-start">
-        <div className="space-y-5">{pendingCard}{confirmedCard}</div>
-        {formCard}
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-5">
-      {pendingCard}
-      {formCard}
-      {confirmedCard}
     </div>
   );
 }
