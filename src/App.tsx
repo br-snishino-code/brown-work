@@ -568,7 +568,7 @@ function ToastView({ toast }) {
 // 以降のコンポーネント（LoginScreenなど）は一切変更していません。
 // ============================================================
 
-const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, performanceReports: [], payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, employeeAttendanceSchedules: {}, announcements: [], yearEndAdjustments: [] };
+const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, performanceReports: [], payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, employeeAttendanceSchedules: {}, announcements: [], yearEndAdjustments: [], commuteExpenseClaims: [] };
 
 // ---- row(snake_case) → app(camelCase) 変換 ----
 const rowToAccount = (row) => ({
@@ -798,6 +798,20 @@ const rowToYearEndAdjustment = (row) => ({
   decidedAt: row.decided_at,
 });
 
+const rowToCommuteClaim = (row) => ({
+  id: row.id,
+  employeeId: row.employee_id,
+  employeeName: row.employees?.name || '',
+  workplace: row.workplace || '',
+  submittedDate: row.submitted_date,
+  items: Array.isArray(row.items) ? row.items : [],
+  totalAmount: Number(row.total_amount) || 0,
+  status: row.status,
+  adminComment: row.admin_comment,
+  createdAt: row.created_at,
+  decidedAt: row.decided_at,
+});
+
 const ANNOUNCEMENT_CATEGORIES = ['お知らせ', '制度・インセンティブ', '資料・料金表', 'キャンペーン', 'その他'];
 
 const rowToAnnouncement = (row) => ({
@@ -829,6 +843,7 @@ async function fetchAllData() {
     employeeAttendanceRes,
     announcementsRes,
     yearEndRes,
+    commuteClaimsRes,
   ] = await Promise.all([
     supabase.from('employees').select('*'),
     supabase.from('attendance_records').select('*'),
@@ -843,9 +858,10 @@ async function fetchAllData() {
     supabase.from('employee_attendance_schedules').select('*'),
     supabase.from('announcements').select('*').order('is_pinned', { ascending: false }).order('created_at', { ascending: false }),
     supabase.from('year_end_adjustments').select('*, employees(name)').order('submitted_at', { ascending: false }),
+    supabase.from('commute_expense_claims').select('*, employees(name)').order('created_at', { ascending: false }),
   ]);
 
-  for (const res of [employeesRes, recordsRes, correctionsRes, leaveRes, perfRes, notifRes, payrollRes, auditRes, profileReqRes, groupLeaveRes, employeeAttendanceRes, announcementsRes, yearEndRes]) {
+  for (const res of [employeesRes, recordsRes, correctionsRes, leaveRes, perfRes, notifRes, payrollRes, auditRes, profileReqRes, groupLeaveRes, employeeAttendanceRes, announcementsRes, yearEndRes, commuteClaimsRes]) {
     if (res.error) throw res.error;
   }
 
@@ -884,6 +900,7 @@ async function fetchAllData() {
     employeeAttendanceSchedules,
     announcements: (announcementsRes.data || []).map(rowToAnnouncement),
     yearEndAdjustments: (yearEndRes.data || []).map(rowToYearEndAdjustment),
+    commuteExpenseClaims: (commuteClaimsRes.data || []).map(rowToCommuteClaim),
   };
 }
 
@@ -2096,6 +2113,56 @@ export default function AttendanceApp() {
     show(decision === 'approved' ? '承認しました' : '差し戻しました', decision === 'approved' ? 'success' : 'warn');
   };
 
+  // 交通費精算書の申請を提出
+  const submitCommuteExpenseClaim = async (payload) => {
+    const { data: inserted, error } = await supabase
+      .from('commute_expense_claims')
+      .insert({
+        employee_id: employeeId,
+        workplace: payload.workplace || null,
+        submitted_date: payload.submittedDate,
+        items: payload.items,
+        total_amount: payload.totalAmount,
+        status: 'pending',
+      })
+      .select()
+      .single();
+    if (error) {
+      show('交通費精算書の提出に失敗しました', 'warn');
+      return false;
+    }
+    await notifyAdmin(
+      `【交通費精算】${session.name} - ${formatYen(payload.totalAmount)}`,
+      `${session.name}さんより交通費精算書（合計 ${formatYen(payload.totalAmount)}・${payload.items.length}件）が届きました。内容をご確認のうえ承認してください。`,
+      inserted?.id
+    );
+    await refreshData();
+    show('交通費精算書を提出しました', 'success');
+    return true;
+  };
+
+  const decideCommuteExpenseClaim = async (id, decision, comment) => {
+    const claim = data.commuteExpenseClaims.find((c) => c.id === id);
+    if (!claim) return;
+    const { error } = await supabase
+      .from('commute_expense_claims')
+      .update({ status: decision, admin_comment: comment || null, decided_at: new Date().toISOString() })
+      .eq('id', id);
+    if (error) {
+      show('処理に失敗しました', 'warn');
+      return;
+    }
+    await notifyEmployeeUser(
+      claim.employeeId,
+      `【交通費精算${decision === 'approved' ? '承認' : '差し戻し'}】`,
+      `交通費精算書（合計 ${formatYen(claim.totalAmount)}）が${decision === 'approved' ? '承認されました' : '差し戻されました'}。${comment ? `管理者コメント：${comment}` : ''}`,
+      id
+    );
+    await refreshData();
+    await logAudit(session, decision === 'approved' ? '交通費精算を承認' : '交通費精算を差し戻し', formatYen(claim.totalAmount), claim.employeeId, claim.employeeName);
+    show(decision === 'approved' ? '承認しました' : '差し戻しました', decision === 'approved' ? 'success' : 'warn');
+  };
+
   const saveGroupLeaveSchedule = async (groupName, monthlyDays) => {
     const rows = Object.entries(monthlyDays).map(([month, days]) => ({
       group_name: groupName,
@@ -2394,19 +2461,33 @@ export default function AttendanceApp() {
         )}
         {topTab === 'payroll' && (
           session.role === 'employee' ? (
-            <PayslipView records={data.payrollRecords.filter((p) => p.employeeId === employeeId && p.status === 'published')} employeeName={session.name} />
+            <div className="space-y-5">
+              <PayslipView records={data.payrollRecords.filter((p) => p.employeeId === employeeId && p.status === 'published')} employeeName={session.name} />
+              <CommuteExpenseClaimSection
+                session={session}
+                claims={data.commuteExpenseClaims.filter((c) => c.employeeId === employeeId)}
+                onSubmit={submitCommuteExpenseClaim}
+              />
+            </div>
           ) : (
-            <PayrollAdminTab
-              employeeAccounts={employeeAccounts}
-              records={data.records}
-              payrollRecords={data.payrollRecords}
-              groupAttendanceSchedules={data.groupLeaveSchedules}
-              employeeAttendanceSchedules={data.employeeAttendanceSchedules}
-              onSaveDraft={savePayrollDraft}
-              onPublish={publishPayroll}
-              onUpdateWage={updateEmployeeProfile}
-              isDesktop={isDesktop}
-            />
+            <div className="space-y-5">
+              <PayrollAdminTab
+                employeeAccounts={employeeAccounts}
+                records={data.records}
+                payrollRecords={data.payrollRecords}
+                groupAttendanceSchedules={data.groupLeaveSchedules}
+                employeeAttendanceSchedules={data.employeeAttendanceSchedules}
+                onSaveDraft={savePayrollDraft}
+                onPublish={publishPayroll}
+                onUpdateWage={updateEmployeeProfile}
+                isDesktop={isDesktop}
+              />
+              <AdminCommuteExpenseClaimsTab
+                claims={data.commuteExpenseClaims}
+                onDecide={decideCommuteExpenseClaim}
+                isDesktop={isDesktop}
+              />
+            </div>
           )
         )}
         {topTab === 'attendance' && (session.role === 'employee' ? (
@@ -6267,6 +6348,192 @@ function AdminYearEndAdjustmentTab({ requests, onDecide, isDesktop }) {
         <div>
           {pending.map((r) => <Card key={r.id} r={r} />)}
           {decided.map((r) => <Card key={r.id} r={r} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---- 交通費精算書 ----
+const emptyCommuteRow = () => ({ date: '', transport: '', fromStation: '', toStation: '', unitPrice: '', roundTrip: true, note: '' });
+const computeCommuteRowSubtotal = (row) => (Number(row.unitPrice) || 0) * (row.roundTrip ? 2 : 1);
+
+function CommuteExpenseClaimSection({ session, claims, onSubmit }) {
+  const [formOpen, setFormOpen] = useState(false);
+  const [workplace, setWorkplace] = useState('');
+  const [submittedDate, setSubmittedDate] = useState(todayKey());
+  const [rows, setRows] = useState(() => Array.from({ length: 5 }, emptyCommuteRow));
+  const [saving, setSaving] = useState(false);
+
+  const updateRow = (i, field, value) => setRows((prev) => prev.map((r, idx) => (idx === i ? { ...r, [field]: value } : r)));
+  const addRow = () => setRows((prev) => [...prev, emptyCommuteRow()]);
+  const removeRow = (i) => setRows((prev) => prev.filter((_, idx) => idx !== i));
+  const total = rows.reduce((sum, r) => sum + computeCommuteRowSubtotal(r), 0);
+
+  const submit = async () => {
+    const items = rows
+      .filter((r) => r.date && r.fromStation && r.toStation && r.unitPrice)
+      .map((r) => ({ ...r, subtotal: computeCommuteRowSubtotal(r) }));
+    if (items.length === 0) return;
+    setSaving(true);
+    const ok = await onSubmit({ workplace, submittedDate, items, totalAmount: items.reduce((s, r) => s + r.subtotal, 0) });
+    setSaving(false);
+    if (ok) {
+      setWorkplace('');
+      setSubmittedDate(todayKey());
+      setRows(Array.from({ length: 5 }, emptyCommuteRow));
+      setFormOpen(false);
+    }
+  };
+
+  const statusLabel = { pending: '承認待ち', approved: '承認済み', rejected: '差し戻し' };
+  const statusClass = { pending: 'bg-amber-50 text-amber-600', approved: 'bg-emerald-50 text-emerald-600', rejected: 'bg-rose-50 text-rose-600' };
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+      <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+        <Wallet size={15} className="text-slate-400" />
+        <h2 className="font-bold text-[13.5px]">交通費精算書</h2>
+        <button onClick={() => setFormOpen((v) => !v)} className="ml-auto text-[11.5px] font-bold text-amber-600 flex items-center gap-1">
+          <Plus size={12} />{formOpen ? '閉じる' : '新規申請'}
+        </button>
+      </div>
+
+      {formOpen && (
+        <div className="px-5 py-4 space-y-3 border-b border-slate-100">
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="勤務先"><input value={workplace} onChange={(e) => setWorkplace(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" /></Field>
+            <Field label="提出日"><input type="date" value={submittedDate} onChange={(e) => setSubmittedDate(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" /></Field>
+          </div>
+          <div className="text-[10.5px] text-slate-400">往復利用の場合は「往復」にチェックを入れてください（小計は単価×2で自動計算されます）。行が足りない場合は下の「行を追加」で増やせます。</div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[720px] text-[12px]">
+              <thead>
+                <tr className="text-left text-[10.5px] text-slate-400 border-b border-slate-100">
+                  {['利用日','乗物','乗駅','降駅','単価','往復','小計','備考',''].map((h) => <th key={h} className="px-2 py-1.5 font-medium">{h}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r, i) => (
+                  <tr key={i} className="border-b border-slate-100 last:border-0">
+                    <td className="px-2 py-1.5"><input type="date" value={r.date} onChange={(e) => updateRow(i, 'date', e.target.value)} className="w-[130px] border border-slate-200 rounded px-1.5 py-1 font-mono text-[11.5px]" /></td>
+                    <td className="px-2 py-1.5"><input value={r.transport} onChange={(e) => updateRow(i, 'transport', e.target.value)} placeholder="阪急" className="w-20 border border-slate-200 rounded px-1.5 py-1 text-[11.5px]" /></td>
+                    <td className="px-2 py-1.5"><input value={r.fromStation} onChange={(e) => updateRow(i, 'fromStation', e.target.value)} placeholder="西向日" className="w-20 border border-slate-200 rounded px-1.5 py-1 text-[11.5px]" /></td>
+                    <td className="px-2 py-1.5"><input value={r.toStation} onChange={(e) => updateRow(i, 'toStation', e.target.value)} placeholder="烏丸" className="w-20 border border-slate-200 rounded px-1.5 py-1 text-[11.5px]" /></td>
+                    <td className="px-2 py-1.5"><input type="number" value={r.unitPrice} onChange={(e) => updateRow(i, 'unitPrice', e.target.value)} className="w-16 border border-slate-200 rounded px-1.5 py-1 font-mono text-[11.5px]" /></td>
+                    <td className="px-2 py-1.5 text-center"><input type="checkbox" checked={r.roundTrip} onChange={(e) => updateRow(i, 'roundTrip', e.target.checked)} /></td>
+                    <td className="px-2 py-1.5 font-mono text-slate-500 whitespace-nowrap">{formatYen(computeCommuteRowSubtotal(r))}</td>
+                    <td className="px-2 py-1.5"><input value={r.note} onChange={(e) => updateRow(i, 'note', e.target.value)} className="w-20 border border-slate-200 rounded px-1.5 py-1 text-[11.5px]" /></td>
+                    <td className="px-2 py-1.5"><button onClick={() => removeRow(i)} className="text-slate-300 hover:text-rose-500"><Trash2 size={13} /></button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <button onClick={addRow} className="text-[11.5px] font-bold text-amber-600 flex items-center gap-1"><Plus size={12} />行を追加</button>
+
+          <div className="flex items-center justify-between bg-slate-900 text-white rounded-xl px-4 py-3">
+            <span className="text-[12.5px] font-bold">合計金額</span>
+            <span className="font-mono text-[18px] font-bold">{formatYen(total)}</span>
+          </div>
+          <button onClick={submit} disabled={saving} className="w-full py-2.5 rounded-lg bg-amber-600 disabled:bg-slate-200 text-white text-[13.5px] font-bold">
+            {saving ? '送信中…' : '申請する'}
+          </button>
+        </div>
+      )}
+
+      <div className="divide-y divide-slate-100">
+        {claims.length === 0 ? (
+          <div className="px-5 py-8 text-center text-[12.5px] text-slate-300">申請はまだありません</div>
+        ) : (
+          claims.map((c) => (
+            <div key={c.id} className="px-5 py-3">
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[13px] font-bold text-slate-800">{dateLabel(c.submittedDate)} 提出 ・ {c.items.length}件</span>
+                <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full ${statusClass[c.status]}`}>{statusLabel[c.status]}</span>
+              </div>
+              <div className="font-mono text-[15px] font-bold text-slate-800">{formatYen(c.totalAmount)}</div>
+              {c.adminComment && <div className="text-[11.5px] text-slate-400 mt-0.5">管理者コメント：{c.adminComment}</div>}
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AdminCommuteExpenseClaimsTab({ claims, onDecide, isDesktop }) {
+  const [comment, setComment] = useState({});
+  const pending = claims.filter((c) => c.status === 'pending');
+  const decided = claims.filter((c) => c.status !== 'pending').slice(0, 20);
+  const statusLabel = { pending: '承認待ち', approved: '承認済み', rejected: '差し戻し' };
+  const statusClass = { pending: 'bg-amber-50 text-amber-600', approved: 'bg-emerald-50 text-emerald-600', rejected: 'bg-rose-50 text-rose-600' };
+
+  const Card = ({ c }) => (
+    <div className="px-5 py-3.5 border-b border-slate-100 last:border-0">
+      <div className="flex items-center justify-between mb-1.5">
+        <span className="font-semibold text-[13px] text-slate-800">{c.employeeName} ・ {dateLabel(c.submittedDate)}提出{c.workplace ? `（${c.workplace}）` : ''}</span>
+        <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full ${statusClass[c.status]}`}>{statusLabel[c.status]}</span>
+      </div>
+      <div className="overflow-x-auto mb-2">
+        <table className="w-full min-w-[600px] text-[11.5px]">
+          <thead>
+            <tr className="text-left text-[10px] text-slate-400 border-b border-slate-100">
+              {['利用日','乗物','区間','単価','往復','小計','備考'].map((h) => <th key={h} className="px-2 py-1 font-medium">{h}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {c.items.map((r, i) => (
+              <tr key={i} className="border-b border-slate-50 last:border-0">
+                <td className="px-2 py-1 font-mono whitespace-nowrap">{r.date}</td>
+                <td className="px-2 py-1">{r.transport}</td>
+                <td className="px-2 py-1 whitespace-nowrap">{r.fromStation}～{r.toStation}</td>
+                <td className="px-2 py-1 font-mono">{formatYen(Number(r.unitPrice) || 0)}</td>
+                <td className="px-2 py-1">{r.roundTrip ? '○' : ''}</td>
+                <td className="px-2 py-1 font-mono font-semibold">{formatYen(r.subtotal)}</td>
+                <td className="px-2 py-1">{r.note}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="flex items-center justify-between font-mono font-bold text-[14px] text-slate-800 mb-2">
+        <span className="font-sans text-[12px] font-bold text-slate-500">合計金額</span>
+        {formatYen(c.totalAmount)}
+      </div>
+      {c.status === 'pending' ? (
+        <div className="space-y-2">
+          <input
+            value={comment[c.id] || ''}
+            onChange={(e) => setComment((prev) => ({ ...prev, [c.id]: e.target.value }))}
+            placeholder="コメント（任意）"
+            className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-[12.5px]"
+          />
+          <div className="flex gap-2">
+            <button onClick={() => onDecide(c.id, 'rejected', comment[c.id])} className="flex-1 py-1.5 rounded-lg border border-slate-200 text-[12px] font-bold text-slate-500">差し戻す</button>
+            <button onClick={() => onDecide(c.id, 'approved', comment[c.id])} className="flex-1 py-1.5 rounded-lg bg-emerald-600 text-white text-[12px] font-bold">承認する</button>
+          </div>
+        </div>
+      ) : (
+        c.adminComment && <div className="text-[11.5px] text-slate-400">管理者コメント：{c.adminComment}</div>
+      )}
+    </div>
+  );
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+      <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+        <Wallet size={15} className="text-slate-400" />
+        <h2 className="font-bold text-[13.5px]">交通費精算書</h2>
+        {pending.length > 0 && <span className="text-[10.5px] font-bold text-white bg-amber-600 rounded-full px-2 py-0.5">{pending.length}件 承認待ち</span>}
+      </div>
+      {claims.length === 0 ? (
+        <div className="px-5 py-10 text-center text-[12.5px] text-slate-300">申請はまだありません</div>
+      ) : (
+        <div>
+          {pending.map((c) => <Card key={c.id} c={c} />)}
+          {decided.map((c) => <Card key={c.id} c={c} />)}
         </div>
       )}
     </div>
