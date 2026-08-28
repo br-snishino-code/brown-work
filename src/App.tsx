@@ -7251,6 +7251,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
         groupAttendanceSchedules={groupLeaveSchedules}
         employeeAttendanceSchedule={employeeAttendanceSchedules?.[profileModalAccount.id] || {}}
         onSaveEmployeeAttendance={onSaveEmployeeAttendance}
+        isDesktop={isDesktop}
       />
     );
   }
@@ -7755,7 +7756,7 @@ const PROFILE_MODAL_TABS = [
   { key: 'tax', label: '住民税・税区分' },
 ];
 
-function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSaveMyNumber, isMasterAdmin, knownGroups = [], groupAttendanceSchedules = {}, employeeAttendanceSchedule = {}, onSaveEmployeeAttendance }) {
+function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSaveMyNumber, isMasterAdmin, knownGroups = [], groupAttendanceSchedules = {}, employeeAttendanceSchedule = {}, onSaveEmployeeAttendance, isDesktop }) {
   const [activeTab, setActiveTab] = useState('basic');
   const containerRef = useRef(null);
   const sectionRefs = useRef({});
@@ -7983,7 +7984,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
   const tabs = isMasterAdmin ? [...PROFILE_MODAL_TABS, { key: 'mynumber', label: 'マイナンバー' }] : PROFILE_MODAL_TABS;
 
   return (
-    <div className="max-w-4xl mx-auto space-y-0">
+    <div className={isDesktop ? 'max-w-[1400px] mx-auto space-y-0' : 'max-w-2xl mx-auto space-y-0'}>
       <div ref={containerRef} onScroll={handleScroll} className="bg-white rounded-2xl border border-slate-200 shadow-sm max-h-[88vh] overflow-y-auto">
         <div className="px-6 pt-6 pb-4 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white z-10">
           <button onClick={onClose} className="text-[13px] font-bold text-slate-500 border border-slate-200 rounded-lg px-3.5 py-2.5 flex items-center gap-1">
