@@ -4667,7 +4667,7 @@ function PerformanceAdminTab({ pending, decided, onDecide, isDesktop }) {
 
 function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, isDesktop }) {
   const now = new Date();
-  const [month, setMonth] = useState(`${now.getFullYear()}-${pad(now.getMonth() + 1)}`);
+  const [dateFilter, setDateFilter] = useState(todayKey());
   const [employeeFilter, setEmployeeFilter] = useState('all');
   const [groupFilter, setGroupFilter] = useState('all');
   const [edits, setEdits] = useState({}); // { 'employeeId|date': { clockIn, clockOut, breakMinutes, approve } }
@@ -4681,7 +4681,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
     return true;
   });
 
-  // 承認待ちの出勤（月・社員フィルターに関係なく、全期間から探す）
+  // 承認待ちの出勤（日付・社員フィルターに関係なく、全期間から探す）
   const [approvingKey, setApprovingKey] = useState(null);
   const pendingApprovals = [];
   employeeAccounts.forEach((acc) => {
@@ -4710,46 +4710,36 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
   };
 
   const rows = [];
-  const todayStr = todayKey();
-  const monthDates = (() => {
-    const [y, m] = month.split('-').map(Number);
-    const count = lastDayOfMonth(y, m);
-    const list = [];
-    for (let d = 1; d <= count; d++) list.push(`${y}-${pad(m)}-${pad(d)}`);
-    return list;
-  })();
+  const dateStr = dateFilter;
   filteredAccounts.forEach((acc) => {
+    if (acc.hireDate && dateStr < acc.hireDate) return; // 入職前
+    if (acc.resignationDate && dateStr > acc.resignationDate) return; // 退職後
     const recs = data.records[acc.id] || {};
-    monthDates.forEach((dateStr) => {
-      if (dateStr > todayStr) return; // 未来日は表示しない
-      if (acc.hireDate && dateStr < acc.hireDate) return; // 入職前
-      if (acc.resignationDate && dateStr > acc.resignationDate) return; // 退職後
-      const record = recs[dateStr] || null;
-      const metrics = computeMetrics(record);
-      rows.push({
-        employeeId: acc.id,
-        employeeName: acc.name,
-        date: dateStr,
-        clockIn: record?.clockIn ? hhmm(new Date(record.clockIn)) : '',
-        clockOut: record?.clockOut ? hhmm(new Date(record.clockOut)) : '',
-        breakMin: record ? getRecordedBreakMinutes(record, record.clockOut ? new Date(record.clockOut) : new Date()) : 0,
-        workedMin: metrics?.workedMin ?? 0,
-        overtimeMin: metrics?.overtimeMin ?? 0,
-        lateMin: metrics?.lateMin ?? 0,
-        earlyLeaveMin: metrics?.earlyLeaveMin ?? 0,
-        status: computeDayStatus(record).label,
-        clockInStatusLabel: record?.clockInStatus ? (CLOCK_IN_STATUS_LABEL[record.clockInStatus] || '') : '',
-        clockInActual: record?.clockInActual && record.clockInActual !== record.clockIn ? hhmm(new Date(record.clockInActual)) : '',
-        clockOutStatusLabel: record?.clockOutStatus ? (CLOCK_OUT_STATUS_LABEL[record.clockOutStatus] || '') : '',
-        clockOutActual: record?.clockOutActual && record.clockOutActual !== record.clockOut ? hhmm(new Date(record.clockOutActual)) : '',
-        needsApproval: record?.clockInApproval === 'pending',
-        breakMinutes: record ? getRecordedBreakMinutes(record, record.clockOut ? new Date(record.clockOut) : new Date()) : null,
-        dateShort: formatAdminDate(dateStr).label,
-        dateBadgeClass: formatAdminDate(dateStr).badgeClass,
-      });
+    const record = recs[dateStr] || null;
+    const metrics = computeMetrics(record);
+    rows.push({
+      employeeId: acc.id,
+      employeeName: acc.name,
+      date: dateStr,
+      clockIn: record?.clockIn ? hhmm(new Date(record.clockIn)) : '',
+      clockOut: record?.clockOut ? hhmm(new Date(record.clockOut)) : '',
+      breakMin: record ? getRecordedBreakMinutes(record, record.clockOut ? new Date(record.clockOut) : new Date()) : 0,
+      workedMin: metrics?.workedMin ?? 0,
+      overtimeMin: metrics?.overtimeMin ?? 0,
+      lateMin: metrics?.lateMin ?? 0,
+      earlyLeaveMin: metrics?.earlyLeaveMin ?? 0,
+      status: computeDayStatus(record).label,
+      clockInStatusLabel: record?.clockInStatus ? (CLOCK_IN_STATUS_LABEL[record.clockInStatus] || '') : '',
+      clockInActual: record?.clockInActual && record.clockInActual !== record.clockIn ? hhmm(new Date(record.clockInActual)) : '',
+      clockOutStatusLabel: record?.clockOutStatus ? (CLOCK_OUT_STATUS_LABEL[record.clockOutStatus] || '') : '',
+      clockOutActual: record?.clockOutActual && record.clockOutActual !== record.clockOut ? hhmm(new Date(record.clockOutActual)) : '',
+      needsApproval: record?.clockInApproval === 'pending',
+      breakMinutes: record ? getRecordedBreakMinutes(record, record.clockOut ? new Date(record.clockOut) : new Date()) : null,
+      dateShort: formatAdminDate(dateStr).label,
+      dateBadgeClass: formatAdminDate(dateStr).badgeClass,
     });
   });
-  rows.sort((a, b) => a.date === b.date ? a.employeeName.localeCompare(b.employeeName, 'ja') : (a.date < b.date ? -1 : 1));
+  rows.sort((a, b) => a.employeeName.localeCompare(b.employeeName, 'ja'));
 
   const summaryByEmployee = filteredAccounts
     .map((acc) => {
@@ -4775,7 +4765,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `brown-work-attendance-${month}${employeeFilter === 'all' ? '-all' : ''}.csv`;
+    a.download = `brown-work-attendance-${dateFilter}${employeeFilter === 'all' ? '-all' : ''}.csv`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -4826,9 +4816,10 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
       )}
 
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 flex flex-wrap items-end gap-3">
-        <Field label="対象月">
-          <input type="month" value={month} onChange={(e) => setMonth(e.target.value)} className="border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px] bg-white" />
+        <Field label="対象日">
+          <input type="date" value={dateFilter} onChange={(e) => setDateFilter(e.target.value)} className="border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px] bg-white" />
         </Field>
+        <button onClick={() => setDateFilter(todayKey())} className="text-[12px] font-bold text-slate-500 border border-slate-200 rounded-lg px-3 py-2 bg-white">今日</button>
         {groups.length > 0 && (
           <Field label="グループ">
             <select value={groupFilter} onChange={(e) => setGroupFilter(e.target.value)} className="border border-slate-200 rounded-lg px-3 py-2 text-[13px] bg-white min-w-[140px]">
@@ -4848,22 +4839,21 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
         </button>
       </div>
 
-      <div className={`grid gap-3 ${isDesktop ? 'grid-cols-4' : 'grid-cols-2'}`}>
+      <div className={`grid gap-3 ${isDesktop ? 'grid-cols-3' : 'grid-cols-3'}`}>
         <StatMini label="対象社員" value={`${summaryByEmployee.length}名`} />
-        <StatMini label="出勤日数" value={`${summaryByEmployee.reduce((s, x) => s + x.days, 0)}日`} />
+        <StatMini label="出勤者数" value={`${summaryByEmployee.reduce((s, x) => s + x.days, 0)}名`} />
         <StatMini label="総実働" value={minutesToHHMM(summaryByEmployee.reduce((s, x) => s + x.workedMin, 0))} />
-        <StatMini label="総残業" value={minutesToHHMM(summaryByEmployee.reduce((s, x) => s + x.overtimeMin, 0))} />
       </div>
 
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
         <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
           <Clock size={15} className="text-slate-400" />
-          <h2 className="font-bold text-[13.5px]">月次勤怠一覧</h2>
+          <h2 className="font-bold text-[13.5px]">{formatAdminDate(dateFilter).label}の勤怠</h2>
           <span className="text-[10.5px] text-slate-400">出勤・退勤・休憩を直接書き換えて、下の「まとめて更新」で保存できます</span>
           <span className="ml-auto text-[11px] text-slate-400">{rows.length}件</span>
         </div>
         {rows.length === 0 ? (
-          <div className="px-5 py-10 text-center text-[12.5px] text-slate-300">対象月の勤怠データはありません</div>
+          <div className="px-5 py-10 text-center text-[12.5px] text-slate-300">対象日の勤怠データはありません</div>
         ) : isDesktop ? (
           <div className="overflow-x-auto">
             <table className="w-full min-w-[980px] text-[12.5px]">
@@ -4965,13 +4955,6 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
             </button>
           </div>
         )}
-      </div>
-
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-        <div className="px-5 py-3.5 border-b border-slate-100 font-bold text-[13.5px]">社員別集計</div>
-        <div className="divide-y divide-slate-100">{summaryByEmployee.map((s) => <div key={s.id} className="px-5 py-3 flex items-center justify-between gap-3 text-[12px]">
-          <span className="font-semibold text-slate-800 flex items-center gap-1.5">{s.name}{s.gpsAlert && <MapPin size={12} className="text-rose-500" />}</span><span className="text-slate-500 text-right">{s.days}日 / 実働 <b className="font-mono text-slate-800">{minutesToHHMM(s.workedMin)}</b> / 残業 <b className="font-mono text-slate-800">{minutesToHHMM(s.overtimeMin)}</b>{s.missingCount > 0 ? ` / 未退勤 ${s.missingCount}件` : ''}</span>
-        </div>)}</div>
       </div>
     </div>
   );
