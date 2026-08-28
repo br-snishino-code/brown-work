@@ -5156,6 +5156,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
   const [savingAll, setSavingAll] = useState(false);
   const [monthlyViewTarget, setMonthlyViewTarget] = useState(null); // { employeeId, employeeName, month }
   const [approvingKey, setApprovingKey] = useState(null);
+  const [deductionState, setDeductionState] = useState({}); // { 'employeeId|date': { deduction: bool, note: string } }
   const gpsAlertIds = new Set(gpsAlerts.map((g) => g.employeeId));
   const groups = Array.from(new Set(employeeAccounts.map((a) => a.mainGroup).filter(Boolean)));
 
@@ -5281,7 +5282,6 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
     URL.revokeObjectURL(url);
   };
 
-  const [deductionState, setDeductionState] = useState({}); // { 'employeeId|date': { deduction: bool, note: string } }
   const setDeductionField = (key, field, value) => setDeductionState((prev) => ({ ...prev, [key]: { ...(prev[key] || { deduction: false, note: '' }), [field]: value } }));
 
   return (
