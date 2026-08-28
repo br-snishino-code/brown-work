@@ -5482,6 +5482,11 @@ const ADMIN_TAB_OPTIONS = [
 
 function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, groupLeaveSchedules, employeeAttendanceSchedules, onSaveEmployeeAttendance, session, isDesktop }) {
   const knownGroups = Array.from(new Set([...employeeAccounts.map((a) => a.mainGroup).filter(Boolean), ...Object.keys(groupLeaveSchedules || {})]));
+  const [listGroupFilter, setListGroupFilter] = useState('all');
+  const [listStaffTypeFilter, setListStaffTypeFilter] = useState('all');
+  const [listNameQuery, setListNameQuery] = useState('');
+  const [listStatusFilter, setListStatusFilter] = useState('active'); // all | active | retired
+  const [listSort, setListSort] = useState('name'); // name | hireDateDesc | hireDateAsc
   const [sei, setSei] = useState('');
   const [mei, setMei] = useState('');
   const [seiKana, setSeiKana] = useState('');
@@ -5502,6 +5507,22 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
   const isMasterAdmin = session?.role === 'master_admin';
 
   const canSubmit = sei.trim() && mei.trim() && username.trim() && password.trim().length >= 6 && hireDate;
+
+  const filteredEmployeeAccounts = employeeAccounts
+    .filter((acc) => {
+      if (listGroupFilter !== 'all' && acc.mainGroup !== listGroupFilter) return false;
+      if (listStaffTypeFilter !== 'all' && acc.staffType !== listStaffTypeFilter) return false;
+      if (listStatusFilter === 'active' && acc.resignationDate) return false;
+      if (listStatusFilter === 'retired' && !acc.resignationDate) return false;
+      const q = listNameQuery.trim();
+      if (q && !((acc.name || '').includes(q) || (acc.furigana || '').includes(q))) return false;
+      return true;
+    })
+    .sort((a, b) => {
+      if (listSort === 'hireDateDesc') return (b.hireDate || '').localeCompare(a.hireDate || '');
+      if (listSort === 'hireDateAsc') return (a.hireDate || '').localeCompare(b.hireDate || '');
+      return (a.name || '').localeCompare(b.name || '', 'ja');
+    });
 
   const toggleAdminPermission = (key) => {
     setAdminPermissions((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
@@ -5556,10 +5577,10 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
 
   const listCard = (
     <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-      <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+      <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2 flex-wrap">
         <Users size={15} className="text-slate-400" />
         <h2 className="font-bold text-[13.5px]">社員一覧</h2>
-        <span className="text-[11px] text-slate-400">{employeeAccounts.length}名</span>
+        <span className="text-[11px] text-slate-400">{filteredEmployeeAccounts.length}名 / 全{employeeAccounts.length}名</span>
         <button onClick={() => setCsvModalOpen(true)} className="ml-auto flex items-center gap-1 text-[12px] font-bold text-slate-500 border border-slate-200 rounded-lg px-2.5 py-1.5">
           <Download size={13} className="rotate-180" /> CSV一括登録
         </button>
@@ -5568,6 +5589,44 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
             <UserPlus size={14} /> 追加
           </button>
         )}
+      </div>
+
+      <div className="px-5 py-3.5 border-b border-slate-100 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2.5">
+        <Field label="氏名で検索">
+          <input value={listNameQuery} onChange={(e) => setListNameQuery(e.target.value)} placeholder="1文字から絞り込み" className="w-full border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px]" />
+        </Field>
+        {knownGroups.length > 0 && (
+          <Field label="所属グループ">
+            <select value={listGroupFilter} onChange={(e) => setListGroupFilter(e.target.value)} className="w-full border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white">
+              <option value="all">全て</option>
+              {knownGroups.map((g) => <option key={g} value={g}>{g}</option>)}
+            </select>
+          </Field>
+        )}
+        <Field label="スタッフ種別">
+          <select value={listStaffTypeFilter} onChange={(e) => setListStaffTypeFilter(e.target.value)} className="w-full border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white">
+            <option value="all">全て</option>
+            <option value="役員">役員</option>
+            <option value="社員">社員</option>
+            <option value="契約社員">契約社員</option>
+            <option value="パート">パート</option>
+            <option value="アルバイト">アルバイト</option>
+          </select>
+        </Field>
+        <Field label="在籍・退職">
+          <select value={listStatusFilter} onChange={(e) => setListStatusFilter(e.target.value)} className="w-full border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white">
+            <option value="active">在籍のみ</option>
+            <option value="retired">退職のみ</option>
+            <option value="all">全て</option>
+          </select>
+        </Field>
+        <Field label="並び順">
+          <select value={listSort} onChange={(e) => setListSort(e.target.value)} className="w-full border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white">
+            <option value="name">氏名順</option>
+            <option value="hireDateDesc">入職日が新しい順</option>
+            <option value="hireDateAsc">入職日が古い順</option>
+          </select>
+        </Field>
       </div>
       {isDesktop ? (
         <table className="w-full text-[13px]">
@@ -5585,7 +5644,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
             </tr>
           </thead>
           <tbody>
-            {employeeAccounts.map((acc) => {
+            {filteredEmployeeAccounts.map((acc) => {
               const { isEditing, granted, retired } = employeeRow(acc);
               return (
                 <tr key={acc.id} className="border-b border-slate-100 last:border-0">
@@ -5619,14 +5678,14 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
                 </tr>
               );
             })}
-            {employeeAccounts.length === 0 && (
-              <tr><td colSpan={9} className="px-5 py-8 text-center text-[12.5px] text-slate-300">社員アカウントがありません</td></tr>
+            {filteredEmployeeAccounts.length === 0 && (
+              <tr><td colSpan={9} className="px-5 py-8 text-center text-[12.5px] text-slate-300">該当する社員がいません</td></tr>
             )}
           </tbody>
         </table>
       ) : (
         <div className="divide-y divide-slate-100">
-          {employeeAccounts.map((acc) => {
+          {filteredEmployeeAccounts.map((acc) => {
             const { isEditing, granted, retired } = employeeRow(acc);
             return (
               <div key={acc.id} className="px-5 py-3.5">
@@ -5670,8 +5729,8 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
               </div>
             );
           })}
-          {employeeAccounts.length === 0 && (
-            <div className="px-5 py-8 text-center text-[12.5px] text-slate-300">社員アカウントがありません</div>
+          {filteredEmployeeAccounts.length === 0 && (
+            <div className="px-5 py-8 text-center text-[12.5px] text-slate-300">該当する社員がいません</div>
           )}
         </div>
       )}
