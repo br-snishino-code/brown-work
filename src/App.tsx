@@ -4401,7 +4401,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
       });
     });
   });
-  rows.sort((a, b) => a.date === b.date ? a.employeeName.localeCompare(b.employeeName, 'ja') : (a.date < b.date ? 1 : -1));
+  rows.sort((a, b) => a.date === b.date ? a.employeeName.localeCompare(b.employeeName, 'ja') : (a.date < b.date ? -1 : 1));
 
   const summaryByEmployee = filteredAccounts
     .map((acc) => {
