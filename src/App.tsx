@@ -561,6 +561,7 @@ const rowToRecord = (row) => ({
   clockInActual: row.clock_in_actual,
   clockInStatus: row.clock_in_status,
   clockInNote: row.clock_in_note,
+  clockInApproval: row.clock_in_approval,
 });
 
 const rowToCorrection = (row) => ({
@@ -1170,6 +1171,7 @@ export default function AttendanceApp() {
         clock_in_actual: actualNow.toISOString(),
         clock_in_status: confirm.status || null,
         clock_in_note: confirm.note || null,
+        clock_in_approval: (confirm.status === 'late' || confirm.status === 'event') ? 'pending' : null,
         clock_out: null,
         break_periods: [],
         break_started_at: null,
@@ -1185,7 +1187,20 @@ export default function AttendanceApp() {
       return;
     }
     await refreshData();
-    show(loc ? '出勤を記録しました（位置情報を取得）' : '出勤を記録しました（位置情報の取得に失敗）', loc ? 'success' : 'warn');
+    const needsApproval = confirm.status === 'late' || confirm.status === 'event';
+    if (needsApproval) {
+      await notifyAdmin(
+        `【出勤確認】${session.name} - ${confirm.status === 'late' ? '遅刻' : 'イベント'}の承認待ち`,
+        `${session.name}さんが${confirm.status === 'late' ? '遅刻' : 'イベント'}として出勤を記録しました（${confirm.note ? `メモ：${confirm.note}` : 'メモなし'}）。内容をご確認のうえ承認してください。`,
+        today
+      );
+    }
+    show(
+      needsApproval
+        ? '出勤を記録しました（管理者の承認待ちです）'
+        : (loc ? '出勤を記録しました（位置情報を取得）' : '出勤を記録しました（位置情報の取得に失敗）'),
+      needsApproval ? 'warn' : (loc ? 'success' : 'warn')
+    );
   };
 
   const handleClockOut = async () => {
@@ -1281,6 +1296,45 @@ export default function AttendanceApp() {
     await refreshData();
     setCorrectionModal(null);
     show('修正申請を送信しました。管理者に通知しました', 'success');
+  };
+
+  // 管理者が勤怠一覧から直接、出退勤時刻を修正する（承認フローを介さず即時反映）
+  const adminUpdateAttendance = async (targetEmployeeId, dateStr, patch) => {
+    const existing = data.records[targetEmployeeId]?.[dateStr] || null;
+    const toIso = (hhmmStr) => {
+      if (!hhmmStr) return null;
+      const [h, m] = hhmmStr.split(':').map(Number);
+      return new Date(`${dateStr}T${pad(h)}:${pad(m)}:00`).toISOString();
+    };
+    const { error } = await supabase.from('attendance_records').upsert(
+      {
+        employee_id: targetEmployeeId,
+        date: dateStr,
+        clock_in: patch.clockIn ? toIso(patch.clockIn) : (patch.clockIn === '' ? null : existing?.clockIn || null),
+        clock_out: patch.clockOut ? toIso(patch.clockOut) : (patch.clockOut === '' ? null : existing?.clockOut || null),
+        break_periods: existing?.breakPeriods || [],
+        break_started_at: existing?.breakStartedAt || null,
+        break_minutes_override: patch.breakMinutes != null ? Number(patch.breakMinutes) : existing?.breakMinutesOverride ?? null,
+        scheduled_start: existing?.scheduledStart || SCHEDULED_START,
+        scheduled_end: existing?.scheduledEnd || SCHEDULED_END,
+        clock_in_location: existing?.clockInLocation || null,
+        clock_out_location: existing?.clockOutLocation || null,
+        clock_in_actual: existing?.clockInActual || null,
+        clock_in_status: existing?.clockInStatus || null,
+        clock_in_note: existing?.clockInNote || null,
+        clock_in_approval: patch.approve ? 'approved' : (existing?.clockInApproval || null),
+      },
+      { onConflict: 'employee_id,date' }
+    );
+    if (error) {
+      show('勤怠の修正に失敗しました', 'warn');
+      return false;
+    }
+    await refreshData();
+    const target = data.accounts.find((a) => a.id === targetEmployeeId);
+    await logAudit(session, '管理者が勤怠を修正', `${dateStr}（${patch.clockIn || '--'} - ${patch.clockOut || '--'}）`, targetEmployeeId, target?.name || '');
+    show('勤怠を修正しました', 'success');
+    return true;
   };
 
   const decideCorrection = async (id, decision) => {
@@ -1855,6 +1909,7 @@ export default function AttendanceApp() {
             onUpdateAdminAccess={updateAdminAccess}
             onSaveGroupLeave={saveGroupLeaveSchedule}
             onSaveEmployeeAttendance={saveEmployeeAttendanceSchedule}
+            onAdminUpdateAttendance={adminUpdateAttendance}
             isDesktop={isDesktop}
           />
         ))}
@@ -3744,7 +3799,7 @@ function AdminTopNav({ tab, setTab, correctionCount, leaveCount, performanceCoun
   );
 }
 
-function AdminView({ data, employeeAccounts, session, onDecide, onDecideLeave, onDecidePerformance, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveGroupLeave, onSaveEmployeeAttendance, isDesktop }) {
+function AdminView({ data, employeeAccounts, session, onDecide, onDecideLeave, onDecidePerformance, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, isDesktop }) {
   const [tab, setTab] = useState('dashboard'); // dashboard | attendance | requests | leave | performance | accounts
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
@@ -3860,7 +3915,7 @@ function AdminView({ data, employeeAccounts, session, onDecide, onDecideLeave, o
       )}
 
       {tab === 'attendance' && (
-        <AttendanceAdminTab data={data} employeeAccounts={employeeAccounts} gpsAlerts={gpsAlerts} isDesktop={isDesktop} />
+        <AttendanceAdminTab data={data} employeeAccounts={employeeAccounts} gpsAlerts={gpsAlerts} onAdminUpdateAttendance={onAdminUpdateAttendance} isDesktop={isDesktop} />
       )}
 
       {tab === 'accounts' && (
@@ -4151,11 +4206,12 @@ function PerformanceAdminTab({ pending, decided, onDecide, isDesktop }) {
 }
 
 
-function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], isDesktop }) {
+function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpdateAttendance, isDesktop }) {
   const now = new Date();
   const [month, setMonth] = useState(`${now.getFullYear()}-${pad(now.getMonth() + 1)}`);
   const [employeeFilter, setEmployeeFilter] = useState('all');
   const [groupFilter, setGroupFilter] = useState('all');
+  const [editTarget, setEditTarget] = useState(null); // { employeeId, employeeName, date, clockIn, clockOut, breakMinutes, needsApproval }
   const gpsAlertIds = new Set(gpsAlerts.map((g) => g.employeeId));
   const groups = Array.from(new Set(employeeAccounts.map((a) => a.mainGroup).filter(Boolean)));
 
@@ -4196,6 +4252,8 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], isDesktop 
         status: computeDayStatus(record).label,
         clockInStatusLabel: record?.clockInStatus ? (CLOCK_IN_STATUS_LABEL[record.clockInStatus] || '') : '',
         clockInActual: record?.clockInActual && record.clockInActual !== record.clockIn ? hhmm(new Date(record.clockInActual)) : '',
+        needsApproval: record?.clockInApproval === 'pending',
+        breakMinutes: record ? getRecordedBreakMinutes(record, record.clockOut ? new Date(record.clockOut) : new Date()) : null,
       });
     });
   });
@@ -4284,24 +4342,75 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], isDesktop 
           <div className="px-5 py-10 text-center text-[12.5px] text-slate-300">対象月の勤怠データはありません</div>
         ) : isDesktop ? (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[900px] text-[12.5px]">
+            <table className="w-full min-w-[960px] text-[12.5px]">
               <thead><tr className="text-left text-[10.5px] text-slate-400 border-b border-slate-100">
-                {['社員','日付','出勤','実打刻','退勤','休憩','実働','残業','遅刻','早退','状態'].map((h) => <th key={h} className="px-4 py-2 font-medium">{h}</th>)}
+                {['社員','日付','出勤','実打刻','退勤','休憩','実働','残業','遅刻','早退','状態',''].map((h) => <th key={h} className="px-4 py-2 font-medium">{h}</th>)}
               </tr></thead>
-              <tbody>{rows.map((r) => <tr key={`${r.employeeId}-${r.date}`} className="border-b border-slate-100 last:border-0">
-                <td className="px-4 py-2.5 font-semibold">{r.employeeName}</td><td className="px-4 py-2.5 font-mono">{r.date}</td><td className="px-4 py-2.5 font-mono">{r.clockIn || '--:--'}</td><td className="px-4 py-2.5 font-mono text-slate-400">{r.clockInActual || ''}{r.clockInStatusLabel && <div className="text-[10px] text-blue-600 font-sans whitespace-nowrap">{r.clockInStatusLabel}</div>}</td><td className="px-4 py-2.5 font-mono">{r.clockOut || '--:--'}</td><td className="px-4 py-2.5">{r.breakMin}分</td><td className="px-4 py-2.5 font-mono font-semibold">{minutesToHHMM(r.workedMin)}</td><td className="px-4 py-2.5 font-mono">{minutesToHHMM(r.overtimeMin)}</td><td className="px-4 py-2.5">{r.lateMin}分</td><td className="px-4 py-2.5">{r.earlyLeaveMin}分</td><td className="px-4 py-2.5">{r.status}</td>
-              </tr>)}</tbody>
+              <tbody>{rows.map((r) => (
+                <tr key={`${r.employeeId}-${r.date}`} className={`border-b border-slate-100 last:border-0 ${r.needsApproval ? 'bg-amber-50/60' : ''}`}>
+                  <td className="px-4 py-2.5 font-semibold">{r.employeeName}</td>
+                  <td className="px-4 py-2.5 font-mono">{r.date}</td>
+                  <td className="px-4 py-2.5 font-mono">{r.clockIn || '--:--'}</td>
+                  <td className="px-4 py-2.5 font-mono text-slate-400">
+                    {r.clockInActual || ''}
+                    {r.clockInStatusLabel && (
+                      <div className={`text-[10px] font-sans whitespace-nowrap ${r.needsApproval ? 'text-amber-600 font-bold' : 'text-blue-600'}`}>
+                        {r.clockInStatusLabel}{r.needsApproval ? '・承認待ち' : ''}
+                      </div>
+                    )}
+                  </td>
+                  <td className="px-4 py-2.5 font-mono">{r.clockOut || '--:--'}</td>
+                  <td className="px-4 py-2.5">{r.breakMin}分</td>
+                  <td className="px-4 py-2.5 font-mono font-semibold">{minutesToHHMM(r.workedMin)}</td>
+                  <td className="px-4 py-2.5 font-mono">{minutesToHHMM(r.overtimeMin)}</td>
+                  <td className="px-4 py-2.5">{r.lateMin}分</td>
+                  <td className="px-4 py-2.5">{r.earlyLeaveMin}分</td>
+                  <td className="px-4 py-2.5">{r.status}</td>
+                  <td className="px-4 py-2.5">
+                    <button
+                      onClick={() => setEditTarget({ employeeId: r.employeeId, employeeName: r.employeeName, date: r.date, clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMinutes, needsApproval: r.needsApproval })}
+                      className="text-[11px] font-bold text-slate-500 border border-slate-200 rounded-md px-2 py-1 hover:bg-slate-50"
+                    >
+                      修正
+                    </button>
+                  </td>
+                </tr>
+              ))}</tbody>
             </table>
           </div>
         ) : (
-          <div className="divide-y divide-slate-100">{rows.map((r) => <div key={`${r.employeeId}-${r.date}`} className="px-4 py-3">
-            <div className="flex items-center justify-between"><div className="font-semibold text-[13px]">{r.employeeName}</div><div className="font-mono text-[11.5px] text-slate-400">{r.date}</div></div>
-            <div className="mt-1.5 grid grid-cols-4 gap-2 text-center"><MiniValue label="出勤" value={r.clockIn || '--:--'} /><MiniValue label="退勤" value={r.clockOut || '--:--'} /><MiniValue label="休憩" value={`${r.breakMin}分`} /><MiniValue label="実働" value={minutesToHHMM(r.workedMin)} /></div>
-            <div className="mt-2 text-[11px] text-slate-400">{r.status}{r.overtimeMin > 0 ? ` ・ 残業 ${minutesToHHMM(r.overtimeMin)}` : ''}{r.lateMin > 0 ? ` ・ 遅刻 ${r.lateMin}分` : ''}{r.earlyLeaveMin > 0 ? ` ・ 早退 ${r.earlyLeaveMin}分` : ''}</div>
-            {r.clockInStatusLabel && <div className="mt-1 text-[11px] text-blue-600 font-medium">{r.clockInStatusLabel}{r.clockInActual ? `（実打刻 ${r.clockInActual}）` : ''}</div>}
-          </div>)}</div>
+          <div className="divide-y divide-slate-100">{rows.map((r) => (
+            <div key={`${r.employeeId}-${r.date}`} className={`px-4 py-3 ${r.needsApproval ? 'bg-amber-50/60' : ''}`}>
+              <div className="flex items-center justify-between">
+                <div className="font-semibold text-[13px]">{r.employeeName}</div>
+                <div className="flex items-center gap-2">
+                  <div className="font-mono text-[11.5px] text-slate-400">{r.date}</div>
+                  <button
+                    onClick={() => setEditTarget({ employeeId: r.employeeId, employeeName: r.employeeName, date: r.date, clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMinutes, needsApproval: r.needsApproval })}
+                    className="text-[10.5px] font-bold text-slate-500 border border-slate-200 rounded-md px-2 py-1"
+                  >
+                    修正
+                  </button>
+                </div>
+              </div>
+              <div className="mt-1.5 grid grid-cols-4 gap-2 text-center"><MiniValue label="出勤" value={r.clockIn || '--:--'} /><MiniValue label="退勤" value={r.clockOut || '--:--'} /><MiniValue label="休憩" value={`${r.breakMin}分`} /><MiniValue label="実働" value={minutesToHHMM(r.workedMin)} /></div>
+              <div className="mt-2 text-[11px] text-slate-400">{r.status}{r.overtimeMin > 0 ? ` ・ 残業 ${minutesToHHMM(r.overtimeMin)}` : ''}{r.lateMin > 0 ? ` ・ 遅刻 ${r.lateMin}分` : ''}{r.earlyLeaveMin > 0 ? ` ・ 早退 ${r.earlyLeaveMin}分` : ''}</div>
+              {r.clockInStatusLabel && <div className={`mt-1 text-[11px] font-medium ${r.needsApproval ? 'text-amber-600' : 'text-blue-600'}`}>{r.clockInStatusLabel}{r.needsApproval ? '・承認待ち' : ''}{r.clockInActual ? `（実打刻 ${r.clockInActual}）` : ''}</div>}
+            </div>
+          ))}</div>
         )}
       </div>
+
+      {editTarget && (
+        <AdminAttendanceEditModal
+          target={editTarget}
+          onClose={() => setEditTarget(null)}
+          onSave={async (patch) => {
+            const ok = await onAdminUpdateAttendance(editTarget.employeeId, editTarget.date, patch);
+            if (ok) setEditTarget(null);
+          }}
+        />
+      )}
 
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
         <div className="px-5 py-3.5 border-b border-slate-100 font-bold text-[13.5px]">社員別集計</div>
@@ -4310,6 +4419,59 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], isDesktop 
         </div>)}</div>
       </div>
     </div>
+  );
+}
+
+function AdminAttendanceEditModal({ target, onClose, onSave }) {
+  const [clockIn, setClockIn] = useState(target.clockIn || '');
+  const [clockOut, setClockOut] = useState(target.clockOut || '');
+  const [breakMinutes, setBreakMinutes] = useState(target.breakMinutes ?? BREAK_MINUTES_DEFAULT);
+  const [approve, setApprove] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const save = async () => {
+    setSaving(true);
+    await onSave({ clockIn, clockOut, breakMinutes, approve });
+    setSaving(false);
+  };
+
+  return createPortal(
+    <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-40 p-0 sm:p-4">
+      <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-sm max-h-[90vh] overflow-y-auto">
+        <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center justify-between">
+          <div>
+            <div className="text-[11px] text-slate-400 font-medium">{target.employeeName} ・ {target.date}</div>
+            <h3 className="font-bold text-[15px]">勤怠を修正</h3>
+          </div>
+          <button onClick={onClose} className="text-slate-400 text-xl leading-none px-1">×</button>
+        </div>
+        <div className="px-5 py-4 space-y-4">
+          <Field label="出勤時刻">
+            <input type="time" value={clockIn} onChange={(e) => setClockIn(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
+          </Field>
+          <Field label="退勤時刻">
+            <input type="time" value={clockOut} onChange={(e) => setClockOut(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
+          </Field>
+          <Field label="休憩時間（分）">
+            <input type="number" min="0" step="5" value={breakMinutes} onChange={(e) => setBreakMinutes(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
+          </Field>
+          {target.needsApproval && (
+            <label className="flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2.5 text-[12.5px] text-amber-700">
+              <input type="checkbox" checked={approve} onChange={(e) => setApprove(e.target.checked)} />
+              遅刻・イベントの出勤を承認する
+            </label>
+          )}
+          <div className="text-[11px] text-slate-400">この修正は承認フローを介さず、即座に反映されます。</div>
+        </div>
+        <div className="px-5 pb-5 pt-1 flex gap-2">
+          <button onClick={onClose} className="flex-1 py-2.5 rounded-lg border border-slate-200 text-[13.5px] font-medium text-slate-500">キャンセル</button>
+          <button onClick={save} disabled={saving} className="flex-1 py-2.5 rounded-lg bg-slate-800 disabled:bg-slate-300 text-white text-[13.5px] font-bold">
+            {saving ? '保存中…' : '保存する'}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body
   );
 }
 
