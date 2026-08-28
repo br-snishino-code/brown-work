@@ -637,6 +637,9 @@ const rowToPayroll = (row) => ({
   notes: row.notes,
   generatedAt: row.generated_at,
   publishedAt: row.published_at,
+  paymentItems: Array.isArray(row.payment_items) ? row.payment_items : null,
+  deductionItems: Array.isArray(row.deduction_items) ? row.deduction_items : null,
+  attendanceExtra: row.attendance_extra || null,
 });
 
 const rowToRecord = (row) => ({
@@ -1876,6 +1879,9 @@ export default function AttendanceApp() {
         total_amount: payload.totalAmount,
         status: 'draft',
         notes: payload.notes || null,
+        payment_items: payload.paymentItems || null,
+        deduction_items: payload.deductionItems || null,
+        attendance_extra: payload.attendanceExtra || null,
       },
       { onConflict: 'employee_id,year,month' }
     );
@@ -3865,16 +3871,23 @@ const formatYen = (n) => `¥${Math.round(n || 0).toLocaleString('ja-JP')}`;
 function printPayslip(p, employeeName) {
   const win = window.open('', '_blank', 'width=480,height=700');
   if (!win) return;
+  const paymentItems = p.paymentItems || [{ label: '基本給', amount: p.baseAmount }, ...(p.overtimeAmount ? [{ label: '残業手当', amount: p.overtimeAmount }] : [])];
+  const deductionItems = p.deductionItems || [];
+  const paymentTotal = sumItems(paymentItems);
+  const deductionTotal = sumItems(deductionItems);
+  const rowsHtml = (items) => items.map((it) => `<tr><td class="label">${it.label || '（項目名なし）'}</td><td class="value">${formatYen(Number(it.amount) || 0)}</td></tr>`).join('');
   const html = `<!doctype html>
 <html lang="ja"><head><meta charset="utf-8"><title>給与明細 ${p.year}年${p.month}月分</title>
 <style>
   body { font-family: -apple-system, "Hiragino Sans", sans-serif; padding: 32px; color: #1e293b; }
   h1 { font-size: 18px; margin-bottom: 4px; }
-  .sub { color: #64748b; font-size: 12px; margin-bottom: 20px; }
+  .sub { color: #64748b; font-size: 12px; margin-bottom: 16px; }
+  h2 { font-size: 12.5px; color: #64748b; margin: 18px 0 4px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  td { padding: 8px 0; border-bottom: 1px solid #e2e8f0; }
-  td.label { color: #64748b; }
+  td { padding: 6px 0; border-bottom: 1px solid #e2e8f0; }
+  td.label { color: #475569; }
   td.value { text-align: right; font-family: monospace; }
+  .subtotal td { font-weight: bold; border-top: 1px solid #94a3b8; }
   .total td { font-weight: bold; font-size: 16px; border-top: 2px solid #1e293b; border-bottom: none; padding-top: 12px; }
   .note { margin-top: 24px; font-size: 10.5px; color: #94a3b8; }
 </style></head>
@@ -3885,11 +3898,23 @@ function printPayslip(p, employeeName) {
     <tr><td class="label">区分</td><td class="value">${p.wageType === 'hourly' ? `時給 ${formatYen(p.wageRate)}` : `月給 ${formatYen(p.wageRate)}`}</td></tr>
     <tr><td class="label">実働時間</td><td class="value">${minutesToHHMM(p.workedMinutes)}</td></tr>
     <tr><td class="label">残業時間</td><td class="value">${minutesToHHMM(p.overtimeMinutes)}</td></tr>
-    <tr><td class="label">基本給</td><td class="value">${formatYen(p.baseAmount)}</td></tr>
-    <tr><td class="label">残業手当</td><td class="value">${formatYen(p.overtimeAmount)}</td></tr>
-    <tr class="total"><td>総支給額（概算）</td><td class="value">${formatYen(p.totalAmount)}</td></tr>
+    ${p.attendanceExtra?.absentDays ? `<tr><td class="label">欠勤日数</td><td class="value">${p.attendanceExtra.absentDays}日</td></tr>` : ''}
+    ${p.attendanceExtra?.paidLeaveDays ? `<tr><td class="label">有休日数</td><td class="value">${p.attendanceExtra.paidLeaveDays}日</td></tr>` : ''}
   </table>
-  <div class="note">※税金・社会保険料などの控除は含まれていない、総支給額の概算です。正式な給与額は別途ご確認ください。</div>
+  <h2>支給</h2>
+  <table>
+    ${rowsHtml(paymentItems)}
+    <tr class="subtotal"><td>支給合計</td><td class="value">${formatYen(paymentTotal)}</td></tr>
+  </table>
+  ${deductionItems.length > 0 ? `<h2>控除</h2>
+  <table>
+    ${rowsHtml(deductionItems)}
+    <tr class="subtotal"><td>控除合計</td><td class="value">${formatYen(deductionTotal)}</td></tr>
+  </table>` : ''}
+  <table>
+    <tr class="total"><td>差引支給額</td><td class="value">${formatYen(p.totalAmount)}</td></tr>
+  </table>
+  <div class="note">※内容に不明点があれば、管理者へお問い合わせください。</div>
 </body></html>`;
   win.document.write(html);
   win.document.close();
@@ -3910,34 +3935,55 @@ function PayslipView({ records, employeeName }) {
         </div>
       ) : (
         <div className="grid gap-4 sm:grid-cols-2">
-          {sorted.map((p) => (
-            <div key={p.id} className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-              <div className="px-5 py-3.5 border-b border-slate-100 flex items-center justify-between">
-                <span className="font-bold text-[14px] text-slate-800">{p.year}年{p.month}月分</span>
-                <span className="text-[10.5px] font-bold text-emerald-600 bg-emerald-50 px-2 py-1 rounded-full">公開済み</span>
-              </div>
-              <div className="px-5 py-4 space-y-2">
-                <Row label="区分" value={p.wageType === 'hourly' ? `時給 ${formatYen(p.wageRate)}` : `月給 ${formatYen(p.wageRate)}`} />
-                <Row label="実働時間" value={minutesToHHMM(p.workedMinutes)} />
-                <Row label="残業時間" value={minutesToHHMM(p.overtimeMinutes)} />
-                <Row label="基本給" value={formatYen(p.baseAmount)} />
-                <Row label="残業手当" value={formatYen(p.overtimeAmount)} />
-                <div className="flex items-center justify-between pt-2 mt-2 border-t border-slate-100">
-                  <span className="text-[12.5px] font-bold text-slate-700">総支給額（概算）</span>
-                  <span className="font-mono text-[18px] font-bold text-slate-900">{formatYen(p.totalAmount)}</span>
+          {sorted.map((p) => {
+            const paymentItems = p.paymentItems || [{ label: '基本給', amount: p.baseAmount }, ...(p.overtimeAmount ? [{ label: '残業手当', amount: p.overtimeAmount }] : [])];
+            const deductionItems = p.deductionItems || [];
+            return (
+              <div key={p.id} className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+                <div className="px-5 py-3.5 border-b border-slate-100 flex items-center justify-between">
+                  <span className="font-bold text-[14px] text-slate-800">{p.year}年{p.month}月分</span>
+                  <span className="text-[10.5px] font-bold text-emerald-600 bg-emerald-50 px-2 py-1 rounded-full">公開済み</span>
                 </div>
-                <button
-                  onClick={() => printPayslip(p, employeeName)}
-                  className="w-full mt-2 py-2 rounded-lg border border-slate-200 text-[12px] font-bold text-slate-600 flex items-center justify-center gap-1.5"
-                >
-                  <Download size={13} /> 印刷・PDF保存
-                </button>
+                <div className="px-5 py-4 space-y-2">
+                  <Row label="区分" value={p.wageType === 'hourly' ? `時給 ${formatYen(p.wageRate)}` : `月給 ${formatYen(p.wageRate)}`} />
+                  <Row label="実働時間" value={minutesToHHMM(p.workedMinutes)} />
+                  <Row label="残業時間" value={minutesToHHMM(p.overtimeMinutes)} />
+
+                  <div className="text-[11px] font-bold text-slate-400 pt-2">支給</div>
+                  {paymentItems.map((it, i) => <Row key={i} label={it.label || '項目'} value={formatYen(Number(it.amount) || 0)} />)}
+                  <div className="flex items-center justify-between pt-1 border-t border-slate-100">
+                    <span className="text-[12px] font-bold text-slate-600">支給合計</span>
+                    <span className="font-mono font-bold text-slate-800">{formatYen(sumItems(paymentItems))}</span>
+                  </div>
+
+                  {deductionItems.length > 0 && (
+                    <>
+                      <div className="text-[11px] font-bold text-slate-400 pt-2">控除</div>
+                      {deductionItems.map((it, i) => <Row key={i} label={it.label || '項目'} value={formatYen(Number(it.amount) || 0)} />)}
+                      <div className="flex items-center justify-between pt-1 border-t border-slate-100">
+                        <span className="text-[12px] font-bold text-slate-600">控除合計</span>
+                        <span className="font-mono font-bold text-slate-800">{formatYen(sumItems(deductionItems))}</span>
+                      </div>
+                    </>
+                  )}
+
+                  <div className="flex items-center justify-between pt-2 mt-2 border-t border-slate-100">
+                    <span className="text-[12.5px] font-bold text-slate-700">差引支給額</span>
+                    <span className="font-mono text-[18px] font-bold text-slate-900">{formatYen(p.totalAmount)}</span>
+                  </div>
+                  <button
+                    onClick={() => printPayslip(p, employeeName)}
+                    className="w-full mt-2 py-2 rounded-lg border border-slate-200 text-[12px] font-bold text-slate-600 flex items-center justify-center gap-1.5"
+                  >
+                    <Download size={13} /> 印刷・PDF保存
+                  </button>
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
-      <div className="text-[11px] text-slate-400 px-1">※税金・社会保険料などの控除は含まれていない、総支給額の概算です。正式な給与額は別途ご確認ください。</div>
+      <div className="text-[11px] text-slate-400 px-1">※内容に不明点があれば、管理者へお問い合わせください。</div>
     </div>
   );
 }
@@ -3951,6 +3997,47 @@ function Row({ label, value }) {
   );
 }
 
+const DEFAULT_DEDUCTION_LABELS = ['健康保険料', '介護保険料', '厚生年金保険料', '雇用保険料', '所得税', '住民税'];
+const sumItems = (items) => (items || []).reduce((s, it) => s + (Number(it.amount) || 0), 0);
+
+function PayrollItemsEditor({ title, items, onChange, addLabel = '項目を追加' }) {
+  const update = (i, field, value) => {
+    const next = items.map((it, idx) => (idx === i ? { ...it, [field]: value } : it));
+    onChange(next);
+  };
+  const remove = (i) => onChange(items.filter((_, idx) => idx !== i));
+  const add = () => onChange([...items, { label: '', amount: 0 }]);
+  const total = sumItems(items);
+  return (
+    <div className="bg-slate-50 rounded-xl p-4 space-y-2">
+      <div className="flex items-center justify-between">
+        <div className="text-[12px] font-bold text-slate-600">{title}</div>
+        <div className="font-mono text-[13px] font-bold text-slate-800">{formatYen(total)}</div>
+      </div>
+      <div className="space-y-1.5">
+        {items.map((it, i) => (
+          <div key={i} className="flex items-center gap-2">
+            <input
+              value={it.label}
+              onChange={(e) => update(i, 'label', e.target.value)}
+              placeholder="項目名"
+              className="flex-1 border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white"
+            />
+            <input
+              type="number"
+              value={it.amount}
+              onChange={(e) => update(i, 'amount', e.target.value)}
+              className="w-28 border border-slate-200 rounded-lg px-2.5 py-1.5 font-mono text-[12.5px] text-right bg-white"
+            />
+            <button onClick={() => remove(i)} className="text-slate-300 hover:text-rose-500 shrink-0"><Trash2 size={14} /></button>
+          </div>
+        ))}
+      </div>
+      <button onClick={add} className="text-[11.5px] font-bold text-amber-600 flex items-center gap-1"><Plus size={12} />{addLabel}</button>
+    </div>
+  );
+}
+
 function PayrollAdminTab({ employeeAccounts, records, payrollRecords, groupAttendanceSchedules = {}, employeeAttendanceSchedules = {}, onSaveDraft, onPublish, onUpdateWage, isDesktop }) {
   const now = new Date();
   const [employeeId, setEmployeeId] = useState(employeeAccounts[0]?.id || '');
@@ -3959,8 +4046,14 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, groupAtten
   const [wageType, setWageType] = useState('hourly');
   const [hourlyWage, setHourlyWage] = useState('0');
   const [monthlySalary, setMonthlySalary] = useState('0');
+  const [paymentItems, setPaymentItems] = useState([]);
+  const [deductionItems, setDeductionItems] = useState([]);
+  const [absentDays, setAbsentDays] = useState('0');
+  const [paidLeaveDays, setPaidLeaveDays] = useState('0');
+  const [paidLeaveHours, setPaidLeaveHours] = useState('0');
 
   const employee = employeeAccounts.find((a) => a.id === employeeId);
+  const existing = payrollRecords.find((p) => p.employeeId === employeeId && p.year === year && p.month === month);
 
   useEffect(() => {
     if (!employee) return;
@@ -3969,13 +4062,9 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, groupAtten
     setMonthlySalary(String(employee.monthlySalary || 0));
   }, [employeeId]);
 
-  if (!employee) {
-    return <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-6 py-14 text-center text-[12.5px] text-slate-300">社員が登録されていません</div>;
-  }
-
   const monthly = computeMonthlySummary(records[employeeId] || {}, new Date(year, month - 1, 1));
-  const attendanceDays = getPrescribedAttendanceDays(employee, month, groupAttendanceSchedules, employeeAttendanceSchedules);
-  const preview = computePayrollPreview({
+  const attendanceDays = employee ? getPrescribedAttendanceDays(employee, month, groupAttendanceSchedules, employeeAttendanceSchedules) : null;
+  const preview = employee ? computePayrollPreview({
     wageType,
     hourlyWage,
     monthlySalary,
@@ -3984,9 +4073,38 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, groupAtten
     commuteAllowance: employee.commuteAllowance || 0,
     attendanceDays,
     actualDays: monthly.days,
-  });
+  }) : null;
 
-  const existing = payrollRecords.find((p) => p.employeeId === employeeId && p.year === year && p.month === month);
+  // 社員・年月・下書きの有無が変わったら、支給・控除項目を初期化する
+  useEffect(() => {
+    if (!employee || !preview) return;
+    if (existing?.paymentItems) {
+      setPaymentItems(existing.paymentItems);
+    } else {
+      setPaymentItems([
+        { label: '基本給', amount: preview.baseAmount },
+        ...(preview.allowanceAmount > 0 ? [{ label: '通勤手当', amount: preview.allowanceAmount }] : []),
+        ...(preview.overtimeAmount > 0 ? [{ label: '残業手当', amount: preview.overtimeAmount }] : []),
+      ]);
+    }
+    if (existing?.deductionItems) {
+      setDeductionItems(existing.deductionItems);
+    } else {
+      setDeductionItems(DEFAULT_DEDUCTION_LABELS.map((label) => ({ label, amount: 0 })));
+    }
+    setAbsentDays(String(existing?.attendanceExtra?.absentDays ?? 0));
+    setPaidLeaveDays(String(existing?.attendanceExtra?.paidLeaveDays ?? 0));
+    setPaidLeaveHours(String(existing?.attendanceExtra?.paidLeaveHours ?? 0));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [employeeId, year, month, existing?.id]);
+
+  if (!employee) {
+    return <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-6 py-14 text-center text-[12.5px] text-slate-300">社員が登録されていません</div>;
+  }
+
+  const paymentTotal = sumItems(paymentItems);
+  const deductionTotal = sumItems(deductionItems);
+  const netAmount = paymentTotal - deductionTotal;
 
   const saveWageSettings = async () => {
     await onUpdateWage(employeeId, {
@@ -4006,13 +4124,17 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, groupAtten
       wageRate: preview.wageRate,
       workedMinutes: monthly.workedMin,
       overtimeMinutes: monthly.overtimeMin,
-      baseAmount: preview.baseAmount + preview.allowanceAmount,
+      baseAmount: paymentTotal,
       overtimeAmount: preview.overtimeAmount,
-      totalAmount: preview.totalAmount,
-      notes: [
-        preview.allowanceAmount > 0 ? `交通費 ${formatYen(preview.allowanceAmount)} を基本給に含む` : null,
-        preview.prorated ? `出勤規定日数 ${attendanceDays}日に対し実出勤 ${monthly.days}日で日割り計算` : null,
-      ].filter(Boolean).join('／') || null,
+      totalAmount: netAmount,
+      paymentItems,
+      deductionItems,
+      attendanceExtra: {
+        absentDays: Number(absentDays) || 0,
+        paidLeaveDays: Number(paidLeaveDays) || 0,
+        paidLeaveHours: Number(paidLeaveHours) || 0,
+      },
+      notes: preview.prorated ? `出勤規定日数 ${attendanceDays}日に対し実出勤 ${monthly.days}日で日割り計算` : null,
     });
   };
 
@@ -4075,18 +4197,37 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, groupAtten
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <PayrollMetric label="実働" value={minutesToHHMM(monthly.workedMin)} />
           <PayrollMetric label="残業" value={minutesToHHMM(monthly.overtimeMin)} />
-          <PayrollMetric label="基本給" value={formatYen(preview.baseAmount)} />
-          <PayrollMetric label="残業手当" value={formatYen(preview.overtimeAmount)} />
+          <PayrollMetric label="遅刻" value={`${monthly.lateMin || 0}分`} />
+          <PayrollMetric label="早退" value={`${monthly.earlyLeaveMin || 0}分`} />
         </div>
-        {preview.allowanceAmount > 0 && (
-          <div className="text-[11.5px] text-slate-500 flex items-center justify-between px-1">
-            <span>交通費（社員情報の設定額・月額）</span>
-            <span className="font-mono font-bold">{formatYen(preview.allowanceAmount)}</span>
+        <div className="grid grid-cols-3 gap-3">
+          <Field label="欠勤日数">
+            <input type="number" step="0.5" value={absentDays} onChange={(e) => setAbsentDays(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px] bg-white" />
+          </Field>
+          <Field label="有休日数">
+            <input type="number" step="0.5" value={paidLeaveDays} onChange={(e) => setPaidLeaveDays(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px] bg-white" />
+          </Field>
+          <Field label="有休時間">
+            <input type="number" step="0.5" value={paidLeaveHours} onChange={(e) => setPaidLeaveHours(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px] bg-white" />
+          </Field>
+        </div>
+
+        <PayrollItemsEditor title="支給項目" items={paymentItems} onChange={setPaymentItems} addLabel="支給項目を追加" />
+        <PayrollItemsEditor title="控除項目" items={deductionItems} onChange={setDeductionItems} addLabel="控除項目を追加" />
+
+        <div className="grid grid-cols-2 gap-3">
+          <div className="bg-slate-100 rounded-xl px-4 py-3 text-center">
+            <div className="text-[10.5px] text-slate-400 font-bold">支給合計</div>
+            <div className="font-mono text-[16px] font-bold text-slate-800">{formatYen(paymentTotal)}</div>
           </div>
-        )}
+          <div className="bg-slate-100 rounded-xl px-4 py-3 text-center">
+            <div className="text-[10.5px] text-slate-400 font-bold">控除合計</div>
+            <div className="font-mono text-[16px] font-bold text-slate-800">{formatYen(deductionTotal)}</div>
+          </div>
+        </div>
         <div className="flex items-center justify-between bg-slate-900 text-white rounded-xl px-5 py-4">
-          <span className="text-[12.5px] font-bold">総支給額（概算）</span>
-          <span className="font-mono text-[20px] font-bold">{formatYen(preview.totalAmount)}</span>
+          <span className="text-[12.5px] font-bold">差引支給額</span>
+          <span className="font-mono text-[20px] font-bold">{formatYen(netAmount)}</span>
         </div>
 
         <div className="flex gap-2">
