@@ -4909,6 +4909,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
   const [edits, setEdits] = useState({}); // { 'employeeId|date': { clockIn, clockOut, breakMinutes, approve } }
   const [savingAll, setSavingAll] = useState(false);
   const [monthlyViewTarget, setMonthlyViewTarget] = useState(null); // { employeeId, employeeName, month }
+  const [approvingKey, setApprovingKey] = useState(null);
   const gpsAlertIds = new Set(gpsAlerts.map((g) => g.employeeId));
   const groups = Array.from(new Set(employeeAccounts.map((a) => a.mainGroup).filter(Boolean)));
 
@@ -4933,7 +4934,6 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
   });
 
   // 承認待ちの出勤（日付・社員フィルターに関係なく、全期間から探す）
-  const [approvingKey, setApprovingKey] = useState(null);
   const pendingApprovals = [];
   employeeAccounts.forEach((acc) => {
     const recs = data.records[acc.id] || {};
