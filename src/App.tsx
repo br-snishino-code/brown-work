@@ -1550,33 +1550,39 @@ export default function AttendanceApp() {
       const [h, m] = hhmmStr.split(':').map(Number);
       return new Date(`${dateStr}T${pad(h)}:${pad(m)}:00`).toISOString();
     };
+    const clockInCleared = patch.clockIn === '';
+    const clockOutCleared = patch.clockOut === '';
     const { error } = await supabase.from('attendance_records').upsert(
       {
         employee_id: targetEmployeeId,
         date: dateStr,
-        clock_in: patch.clockIn ? toIso(patch.clockIn) : (patch.clockIn === '' ? null : existing?.clockIn || null),
-        clock_out: patch.clockOut ? toIso(patch.clockOut) : (patch.clockOut === '' ? null : existing?.clockOut || null),
+        clock_in: patch.clockIn ? toIso(patch.clockIn) : (clockInCleared ? null : existing?.clockIn || null),
+        clock_out: patch.clockOut ? toIso(patch.clockOut) : (clockOutCleared ? null : existing?.clockOut || null),
         break_periods: existing?.breakPeriods || [],
         break_started_at: existing?.breakStartedAt || null,
         break_minutes_override: patch.breakMinutes != null ? Number(patch.breakMinutes) : existing?.breakMinutesOverride ?? null,
         scheduled_start: existing?.scheduledStart || SCHEDULED_START,
         scheduled_end: existing?.scheduledEnd || SCHEDULED_END,
-        clock_in_location: existing?.clockInLocation || null,
-        clock_out_location: existing?.clockOutLocation || null,
-        clock_in_actual: existing?.clockInActual || null,
-        clock_in_status: existing?.clockInStatus || null,
-        clock_in_note: existing?.clockInNote || null,
-        clock_in_approval: (patch.kind ? patch.kind === 'in' : true) && patch.approve != null
-          ? (patch.approve === true ? (existing?.clockInApproval === 'pending' ? 'approved' : existing?.clockInApproval || null) : (existing?.clockInApproval === 'pending' ? 'rejected' : existing?.clockInApproval || null))
-          : (existing?.clockInApproval || null),
-        clock_out_actual: existing?.clockOutActual || null,
-        clock_out_status: existing?.clockOutStatus || null,
-        clock_out_note: existing?.clockOutNote || null,
-        clock_out_approval: (patch.kind ? patch.kind === 'out' : true) && patch.approve != null
-          ? (patch.approve === true ? (existing?.clockOutApproval === 'pending' ? 'approved' : existing?.clockOutApproval || null) : (existing?.clockOutApproval === 'pending' ? 'rejected' : existing?.clockOutApproval || null))
-          : (existing?.clockOutApproval || null),
-        pay_deduction: patch.approve != null ? !!patch.deduction : (existing?.payDeduction ?? null),
-        pay_deduction_note: patch.approve != null ? (patch.deductionNote || null) : (existing?.payDeductionNote || null),
+        clock_in_location: clockInCleared ? null : (existing?.clockInLocation || null),
+        clock_out_location: clockOutCleared ? null : (existing?.clockOutLocation || null),
+        clock_in_actual: clockInCleared ? null : (existing?.clockInActual || null),
+        clock_in_status: clockInCleared ? null : (existing?.clockInStatus || null),
+        clock_in_note: clockInCleared ? null : (existing?.clockInNote || null),
+        clock_in_approval: clockInCleared
+          ? null
+          : ((patch.kind ? patch.kind === 'in' : true) && patch.approve != null
+              ? (patch.approve === true ? (existing?.clockInApproval === 'pending' ? 'approved' : existing?.clockInApproval || null) : (existing?.clockInApproval === 'pending' ? 'rejected' : existing?.clockInApproval || null))
+              : (existing?.clockInApproval || null)),
+        clock_out_actual: clockOutCleared ? null : (existing?.clockOutActual || null),
+        clock_out_status: clockOutCleared ? null : (existing?.clockOutStatus || null),
+        clock_out_note: clockOutCleared ? null : (existing?.clockOutNote || null),
+        clock_out_approval: clockOutCleared
+          ? null
+          : ((patch.kind ? patch.kind === 'out' : true) && patch.approve != null
+              ? (patch.approve === true ? (existing?.clockOutApproval === 'pending' ? 'approved' : existing?.clockOutApproval || null) : (existing?.clockOutApproval === 'pending' ? 'rejected' : existing?.clockOutApproval || null))
+              : (existing?.clockOutApproval || null)),
+        pay_deduction: (clockInCleared && clockOutCleared) ? null : (patch.approve != null ? !!patch.deduction : (existing?.payDeduction ?? null)),
+        pay_deduction_note: (clockInCleared && clockOutCleared) ? null : (patch.approve != null ? (patch.deductionNote || null) : (existing?.payDeductionNote || null)),
       },
       { onConflict: 'employee_id,date' }
     );
