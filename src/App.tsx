@@ -5349,9 +5349,9 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
           <div className="px-5 py-10 text-center text-[12.5px] text-slate-300">対象日の勤怠データはありません</div>
         ) : isDesktop ? (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[980px] text-[12.5px]">
-              <thead><tr className="text-left text-[10.5px] text-slate-400 border-b border-slate-100">
-                {(employeeFilter === 'all' ? ['社員','日付','出勤','実打刻','退勤','実打刻','休憩(分)','実働','残業','遅刻','早退','状態','承認',''] : ['日付','出勤','実打刻','退勤','実打刻','休憩(分)','実働','残業','遅刻','早退','状態','承認','']).map((h, i) => <th key={h + i} className="px-3 py-2 font-medium">{h}</th>)}
+            <table className="w-full text-[12px]">
+              <thead><tr className="text-left text-[10px] text-slate-400 border-b border-slate-100">
+                {(employeeFilter === 'all' ? ['社員','日付','出勤','退勤','休憩(分)','実働','残業','遅刻/早退','状態','承認','月間'] : ['日付','出勤','退勤','休憩(分)','実働','残業','遅刻/早退','状態','承認','月間']).map((h, i) => <th key={h + i} className="px-2 py-2 font-medium">{h}</th>)}
               </tr></thead>
               <tbody>{rows.map((r) => {
                 const key = `${r.employeeId}|${r.date}`;
@@ -5359,46 +5359,45 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
                 const setField = (field, value) => setEdits((prev) => ({ ...prev, [key]: { ...(prev[key] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: undefined }), [field]: value } }));
                 return (
                   <tr key={key} className={`border-b border-slate-100 last:border-0 ${r.needsApproval ? 'bg-amber-50/60' : r.dateBadgeClass}`}>
-                    {employeeFilter === 'all' && <td className="px-3 py-2 font-semibold whitespace-nowrap">{r.employeeName}</td>}
-                    <td className="px-3 py-2 font-mono font-semibold whitespace-nowrap">{r.dateShort}</td>
-                    <td className="px-3 py-2"><input type="time" value={e.clockIn || ''} onChange={(ev) => setField('clockIn', ev.target.value)} className="w-[92px] border border-slate-200 rounded px-1.5 py-1 font-mono text-[12px]" /></td>
-                    <td className="px-3 py-2 font-mono text-slate-400 whitespace-nowrap">
-                      {r.clockInActual || ''}
-                      {r.clockInStatusLabel && (
-                        <div className={`text-[10px] font-sans whitespace-nowrap ${r.needsApproval ? 'text-amber-600 font-bold' : 'text-blue-600'}`}>
-                          {r.clockInStatusLabel}{r.needsApproval ? '・承認待ち' : ''}
+                    {employeeFilter === 'all' && <td className="px-2 py-2 font-semibold whitespace-nowrap">{r.employeeName}</td>}
+                    <td className="px-2 py-2 font-mono font-semibold whitespace-nowrap">{r.dateShort}</td>
+                    <td className="px-2 py-2">
+                      <input type="time" value={e.clockIn || ''} onChange={(ev) => setField('clockIn', ev.target.value)} className="w-[84px] border border-slate-200 rounded px-1 py-1 font-mono text-[11.5px]" />
+                      {(r.clockInActual || r.clockInStatusLabel) && (
+                        <div className={`text-[9.5px] font-sans whitespace-nowrap mt-0.5 ${r.needsApproval ? 'text-amber-600 font-bold' : 'text-blue-600'}`}>
+                          {r.clockInActual ? `実${r.clockInActual}` : ''}{r.clockInStatusLabel ? `・${r.clockInStatusLabel}` : ''}{r.needsApproval ? '・承認待ち' : ''}
                         </div>
                       )}
                     </td>
-                    <td className="px-3 py-2"><input type="time" value={e.clockOut || ''} onChange={(ev) => setField('clockOut', ev.target.value)} className="w-[92px] border border-slate-200 rounded px-1.5 py-1 font-mono text-[12px]" /></td>
-                    <td className="px-3 py-2 font-mono text-slate-400 whitespace-nowrap">
-                      {r.clockOutActual || ''}
-                      {r.clockOutStatusLabel && (
-                        <div className="text-[10px] font-sans whitespace-nowrap text-purple-600">{r.clockOutStatusLabel}</div>
+                    <td className="px-2 py-2">
+                      <input type="time" value={e.clockOut || ''} onChange={(ev) => setField('clockOut', ev.target.value)} className="w-[84px] border border-slate-200 rounded px-1 py-1 font-mono text-[11.5px]" />
+                      {(r.clockOutActual || r.clockOutStatusLabel) && (
+                        <div className="text-[9.5px] font-sans whitespace-nowrap mt-0.5 text-purple-600">
+                          {r.clockOutActual ? `実${r.clockOutActual}` : ''}{r.clockOutStatusLabel ? `・${r.clockOutStatusLabel}` : ''}
+                        </div>
                       )}
                     </td>
-                    <td className="px-3 py-2"><input type="number" min="0" step="5" value={e.breakMinutes ?? ''} onChange={(ev) => setField('breakMinutes', ev.target.value)} className="w-16 border border-slate-200 rounded px-1.5 py-1 font-mono text-[12px]" /></td>
-                    <td className="px-3 py-2 font-mono font-semibold whitespace-nowrap">{minutesToHHMM(r.workedMin)}</td>
-                    <td className="px-3 py-2 font-mono whitespace-nowrap">{minutesToHHMM(r.overtimeMin)}</td>
-                    <td className="px-3 py-2 whitespace-nowrap">{r.lateMin}分</td>
-                    <td className="px-3 py-2 whitespace-nowrap">{r.earlyLeaveMin}分</td>
-                    <td className="px-3 py-2 whitespace-nowrap">{r.status}</td>
-                    <td className="px-3 py-2">
+                    <td className="px-2 py-2"><input type="number" min="0" step="5" value={e.breakMinutes ?? ''} onChange={(ev) => setField('breakMinutes', ev.target.value)} className="w-14 border border-slate-200 rounded px-1 py-1 font-mono text-[11.5px]" /></td>
+                    <td className="px-2 py-2 font-mono font-semibold whitespace-nowrap">{minutesToHHMM(r.workedMin)}</td>
+                    <td className="px-2 py-2 font-mono whitespace-nowrap">{minutesToHHMM(r.overtimeMin)}</td>
+                    <td className="px-2 py-2 whitespace-nowrap">{r.lateMin > 0 || r.earlyLeaveMin > 0 ? `${r.lateMin}分/${r.earlyLeaveMin}分` : '-'}</td>
+                    <td className="px-2 py-2 whitespace-nowrap">{r.status}</td>
+                    <td className="px-2 py-2">
                       {r.needsApproval && (
                         <div className="flex flex-col gap-0.5">
-                          <label className="flex items-center gap-1 text-[10.5px] text-amber-700 whitespace-nowrap">
+                          <label className="flex items-center gap-1 text-[10px] text-amber-700 whitespace-nowrap">
                             <input type="checkbox" checked={!!e.approve} onChange={(ev) => setField('approve', ev.target.checked)} />
                             承認
                           </label>
-                          <label className="flex items-center gap-1 text-[10px] text-rose-600 whitespace-nowrap">
+                          <label className="flex items-center gap-1 text-[9.5px] text-rose-600 whitespace-nowrap">
                             <input type="checkbox" checked={!!e.deduction} onChange={(ev) => setField('deduction', ev.target.checked)} />
                             減給
                           </label>
                         </div>
                       )}
                     </td>
-                    <td className="px-3 py-2">
-                      <button onClick={() => setMonthlyViewTarget({ employeeId: r.employeeId, employeeName: r.employeeName, month: dateFilter.slice(0, 7) })} className="text-[11px] font-bold text-slate-500 border border-slate-200 rounded-md px-2 py-1 whitespace-nowrap">月間</button>
+                    <td className="px-2 py-2">
+                      <button onClick={() => setMonthlyViewTarget({ employeeId: r.employeeId, employeeName: r.employeeName, month: dateFilter.slice(0, 7) })} className="text-[10.5px] font-bold text-slate-500 border border-slate-200 rounded-md px-1.5 py-1 whitespace-nowrap">月間</button>
                     </td>
                   </tr>
                 );
