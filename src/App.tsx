@@ -5255,7 +5255,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
       }
     });
   });
-  pendingApprovals.sort((a, b) => (a.date < b.date ? 1 : -1));
+  pendingApprovals.sort((a, b) => (a.date > b.date ? 1 : a.date < b.date ? -1 : 0));
 
   const decideApproval = async (item, approve, deduction, deductionNote) => {
     setApprovingKey(`${item.employeeId}|${item.date}|${item.kind}`);
