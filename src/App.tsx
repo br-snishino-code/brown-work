@@ -662,6 +662,8 @@ const rowToRecord = (row) => ({
   clockOutStatus: row.clock_out_status,
   clockOutNote: row.clock_out_note,
   clockOutApproval: row.clock_out_approval,
+  payDeduction: row.pay_deduction,
+  payDeductionNote: row.pay_deduction_note,
 });
 
 const rowToCorrection = (row) => ({
@@ -1557,6 +1559,8 @@ export default function AttendanceApp() {
         clock_out_status: existing?.clockOutStatus || null,
         clock_out_note: existing?.clockOutNote || null,
         clock_out_approval: patch.approve === true ? (existing?.clockOutApproval === 'pending' ? 'approved' : existing?.clockOutApproval || null) : (patch.approve === false ? (existing?.clockOutApproval === 'pending' ? null : existing?.clockOutApproval || null) : (existing?.clockOutApproval || null)),
+        pay_deduction: patch.approve != null ? !!patch.deduction : (existing?.payDeduction ?? null),
+        pay_deduction_note: patch.approve != null ? (patch.deductionNote || null) : (existing?.payDeductionNote || null),
       },
       { onConflict: 'employee_id,date' }
     );
@@ -2936,6 +2940,11 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
                   </div>
                 )}
                 {metrics && (metrics.lateMin > 0 || metrics.earlyLeaveMin > 0 || metrics.overtimeMin > 0) && <div className="mt-1 text-[10.5px] font-medium"><span className="text-rose-500">{metrics.lateMin > 0 ? `遅刻 ${metrics.lateMin}分 ` : ''}{metrics.earlyLeaveMin > 0 ? `早退 ${metrics.earlyLeaveMin}分` : ''}</span>{metrics.overtimeMin > 0 && <span className="ml-2 text-amber-600">残業 {minutesToHHMM(metrics.overtimeMin)}</span>}</div>}
+                {r?.payDeduction && (
+                  <div className="mt-0.5 text-[10.5px] font-bold text-rose-600">
+                    減給あり{r.payDeductionNote && <span className="text-slate-400 font-normal">・{r.payDeductionNote}</span>}
+                  </div>
+                )}
               </div>
               <button onClick={() => onOpenCorrection(dateKey)} className="shrink-0 rounded-xl border border-slate-200 p-2.5 text-slate-500 hover:bg-white"><FileEdit size={15}/></button>
             </div>
@@ -5174,9 +5183,9 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
   });
   pendingApprovals.sort((a, b) => (a.date < b.date ? 1 : -1));
 
-  const decideApproval = async (item, approve) => {
+  const decideApproval = async (item, approve, deduction, deductionNote) => {
     setApprovingKey(`${item.employeeId}|${item.date}`);
-    await onAdminUpdateAttendance(item.employeeId, item.date, { approve }, {});
+    await onAdminUpdateAttendance(item.employeeId, item.date, { approve, deduction, deductionNote }, {});
     setApprovingKey(null);
   };
 
@@ -5243,6 +5252,9 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
     URL.revokeObjectURL(url);
   };
 
+  const [deductionState, setDeductionState] = useState({}); // { 'employeeId|date': { deduction: bool, note: string } }
+  const setDeductionField = (key, field, value) => setDeductionState((prev) => ({ ...prev, [key]: { ...(prev[key] || { deduction: false, note: '' }), [field]: value } }));
+
   return (
     <div className="space-y-5">
       {pendingApprovals.length > 0 && (
@@ -5256,8 +5268,9 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
             {pendingApprovals.map((item) => {
               const key = `${item.employeeId}|${item.date}`;
               const busy = approvingKey === key;
+              const d = deductionState[key] || { deduction: false, note: '' };
               return (
-                <div key={key} className="px-5 py-3 flex items-center justify-between gap-3 flex-wrap">
+                <div key={key} className="px-5 py-3 space-y-2">
                   <div>
                     <div className="text-[13px] font-bold text-slate-800">{item.employeeName} ・ {item.dateShort}</div>
                     <div className="text-[11.5px] text-slate-500 mt-0.5">
@@ -5265,9 +5278,21 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
                       {item.note && `・${item.note}`}
                     </div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <button onClick={() => decideApproval(item, false)} disabled={busy} className="text-[12px] font-bold text-slate-500 border border-slate-200 rounded-lg px-3 py-1.5 disabled:opacity-50">却下</button>
-                    <button onClick={() => decideApproval(item, true)} disabled={busy} className="text-[12px] font-bold text-white bg-amber-600 rounded-lg px-3 py-1.5 disabled:opacity-50">{busy ? '処理中…' : '承認する'}</button>
+                  <div className="bg-slate-50 rounded-lg px-3 py-2 space-y-1.5">
+                    <label className="flex items-center gap-2 text-[12px] font-bold text-slate-600">
+                      <input type="checkbox" checked={d.deduction} onChange={(e) => setDeductionField(key, 'deduction', e.target.checked)} />
+                      減給あり
+                    </label>
+                    <input
+                      value={d.note}
+                      onChange={(e) => setDeductionField(key, 'note', e.target.value)}
+                      placeholder="メモ（任意・減給理由など）"
+                      className="w-full border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12px] bg-white"
+                    />
+                  </div>
+                  <div className="flex items-center justify-end gap-2">
+                    <button onClick={() => decideApproval(item, false, d.deduction, d.note)} disabled={busy} className="text-[12px] font-bold text-slate-500 border border-slate-200 rounded-lg px-3 py-1.5 disabled:opacity-50">却下</button>
+                    <button onClick={() => decideApproval(item, true, d.deduction, d.note)} disabled={busy} className="text-[12px] font-bold text-white bg-amber-600 rounded-lg px-3 py-1.5 disabled:opacity-50">{busy ? '処理中…' : '承認する'}</button>
                   </div>
                 </div>
               );
@@ -5360,10 +5385,16 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
                     <td className="px-3 py-2 whitespace-nowrap">{r.status}</td>
                     <td className="px-3 py-2">
                       {r.needsApproval && (
-                        <label className="flex items-center gap-1 text-[10.5px] text-amber-700 whitespace-nowrap">
-                          <input type="checkbox" checked={!!e.approve} onChange={(ev) => setField('approve', ev.target.checked)} />
-                          承認
-                        </label>
+                        <div className="flex flex-col gap-0.5">
+                          <label className="flex items-center gap-1 text-[10.5px] text-amber-700 whitespace-nowrap">
+                            <input type="checkbox" checked={!!e.approve} onChange={(ev) => setField('approve', ev.target.checked)} />
+                            承認
+                          </label>
+                          <label className="flex items-center gap-1 text-[10px] text-rose-600 whitespace-nowrap">
+                            <input type="checkbox" checked={!!e.deduction} onChange={(ev) => setField('deduction', ev.target.checked)} />
+                            減給
+                          </label>
+                        </div>
                       )}
                     </td>
                     <td className="px-3 py-2">
@@ -5397,10 +5428,16 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
                 {r.clockInStatusLabel && <div className={`mt-1 text-[11px] font-medium ${r.needsApproval ? 'text-amber-600' : 'text-blue-600'}`}>{r.clockInStatusLabel}{r.needsApproval ? '・承認待ち' : ''}{r.clockInActual ? `（実打刻 ${r.clockInActual}）` : ''}</div>}
                 {r.clockOutStatusLabel && <div className="mt-1 text-[11px] font-medium text-purple-600">{r.clockOutStatusLabel}{r.clockOutActual ? `（実打刻 ${r.clockOutActual}）` : ''}</div>}
                 {r.needsApproval && (
-                  <label className="mt-1.5 flex items-center gap-1.5 text-[11.5px] text-amber-700">
-                    <input type="checkbox" checked={!!e.approve} onChange={(ev) => setField('approve', ev.target.checked)} />
-                    この記録を承認する
-                  </label>
+                  <div className="mt-1.5 space-y-1">
+                    <label className="flex items-center gap-1.5 text-[11.5px] text-amber-700">
+                      <input type="checkbox" checked={!!e.approve} onChange={(ev) => setField('approve', ev.target.checked)} />
+                      この記録を承認する
+                    </label>
+                    <label className="flex items-center gap-1.5 text-[11px] text-rose-600">
+                      <input type="checkbox" checked={!!e.deduction} onChange={(ev) => setField('deduction', ev.target.checked)} />
+                      減給あり
+                    </label>
+                  </div>
                 )}
               </div>
             );
@@ -5523,10 +5560,16 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
                       <td className="px-3 py-2 whitespace-nowrap">{r.status}</td>
                       <td className="px-3 py-2">
                         {r.needsApproval && (
-                          <label className="flex items-center gap-1 text-[10.5px] text-amber-700 whitespace-nowrap">
-                            <input type="checkbox" checked={!!e.approve} onChange={(ev) => setField('approve', ev.target.checked)} />
-                            承認
-                          </label>
+                          <div className="flex flex-col gap-0.5">
+                            <label className="flex items-center gap-1 text-[10.5px] text-amber-700 whitespace-nowrap">
+                              <input type="checkbox" checked={!!e.approve} onChange={(ev) => setField('approve', ev.target.checked)} />
+                              承認
+                            </label>
+                            <label className="flex items-center gap-1 text-[10px] text-rose-600 whitespace-nowrap">
+                              <input type="checkbox" checked={!!e.deduction} onChange={(ev) => setField('deduction', ev.target.checked)} />
+                              減給
+                            </label>
+                          </div>
                         )}
                       </td>
                     </tr>
@@ -5550,10 +5593,16 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
                   </div>
                   <div className="mt-2 text-[11px] text-slate-400">{r.status} ・実働 {minutesToHHMM(r.workedMin)}{r.overtimeMin > 0 ? ` ・ 残業 ${minutesToHHMM(r.overtimeMin)}` : ''}</div>
                   {r.needsApproval && (
-                    <label className="mt-1.5 flex items-center gap-1.5 text-[11.5px] text-amber-700">
-                      <input type="checkbox" checked={!!e.approve} onChange={(ev) => setField('approve', ev.target.checked)} />
-                      この記録を承認する
-                    </label>
+                    <div className="mt-1.5 space-y-1">
+                      <label className="flex items-center gap-1.5 text-[11.5px] text-amber-700">
+                        <input type="checkbox" checked={!!e.approve} onChange={(ev) => setField('approve', ev.target.checked)} />
+                        この記録を承認する
+                      </label>
+                      <label className="flex items-center gap-1.5 text-[11px] text-rose-600">
+                        <input type="checkbox" checked={!!e.deduction} onChange={(ev) => setField('deduction', ev.target.checked)} />
+                        減給あり
+                      </label>
+                    </div>
                   )}
                 </div>
               );
