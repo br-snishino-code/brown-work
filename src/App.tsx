@@ -1092,7 +1092,7 @@ export default function AttendanceApp() {
   // カテゴリー（上部タブ・下部ナビ）を切り替えたら画面を一番上に戻し、最新データを取得し直す
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
-    if (CLOUD_ENABLED && session) refreshData();
+    if (CLOUD_ENABLED && session) refreshData({ showIndicator: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [topTab, employeeTab]);
 
@@ -1207,7 +1207,8 @@ export default function AttendanceApp() {
   // 個々のミューテーションの後、DBの最新状態を再取得してUIへ反映する。
   // （旧app_state方式のように巨大JSONを毎回書き戻すのではなく、
   //   テーブル単位の差分更新＋再読み込みに変更）
-  const refreshData = async () => {
+  const refreshData = async (opts = {}) => {
+    if (opts.showIndicator) setCloudStatus('connecting');
     try {
       const fresh = await fetchAllData();
       setData(fresh);
@@ -4783,7 +4784,7 @@ function AdminView({ data, employeeAccounts, session, onDecide, onDecideLeave, o
   const [tab, setTab] = useState('dashboard'); // dashboard | attendance | requests | leave | performance | accounts
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
-    if (onRefresh) onRefresh();
+    if (onRefresh) onRefresh({ showIndicator: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
   const pending = data.corrections.filter((c) => c.status === 'pending');
