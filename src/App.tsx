@@ -7133,7 +7133,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
   const [activeTab, setActiveTab] = useState('basic');
   const containerRef = useRef(null);
   const sectionRefs = useRef({});
-  const SCROLL_OFFSET = 118; // ヘッダー＋タブバーの高さ分オフセット
+  const SCROLL_OFFSET = 128; // ヘッダー＋タブバーの高さ分オフセット
 
   // スクロール位置に応じて、今見えているセクションのタブを自動でハイライト
   const handleScroll = () => {
@@ -7335,10 +7335,10 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
   const tabs = isMasterAdmin ? [...PROFILE_MODAL_TABS, { key: 'mynumber', label: 'マイナンバー' }] : PROFILE_MODAL_TABS;
 
   return (
-    <div className="max-w-2xl mx-auto space-y-0">
-      <div ref={containerRef} onScroll={handleScroll} className="bg-white rounded-2xl border border-slate-200 shadow-sm max-h-[85vh] overflow-y-auto">
-        <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white z-10">
-          <button onClick={onClose} className="text-[12.5px] font-bold text-slate-500 border border-slate-200 rounded-lg px-3 py-2 flex items-center gap-1">
+    <div className="max-w-4xl mx-auto space-y-0">
+      <div ref={containerRef} onScroll={handleScroll} className="bg-white rounded-2xl border border-slate-200 shadow-sm max-h-[88vh] overflow-y-auto">
+        <div className="px-6 pt-6 pb-4 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white z-10">
+          <button onClick={onClose} className="text-[13px] font-bold text-slate-500 border border-slate-200 rounded-lg px-3.5 py-2.5 flex items-center gap-1">
             ← 一覧に戻る
           </button>
           <div className="text-right">
@@ -7347,7 +7347,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
           </div>
         </div>
 
-        <div className="px-5 pt-3 flex items-center gap-1 flex-wrap sticky top-[57px] bg-white z-10 border-b border-slate-100 pb-2">
+        <div className="px-6 pt-3 flex items-center gap-1.5 flex-wrap sticky top-[65px] bg-white z-10 border-b border-slate-100 pb-2.5">
           {tabs.map((t) => (
             <button
               key={t.key}
@@ -7359,7 +7359,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
           ))}
         </div>
 
-        <div className="px-5 py-4 space-y-4">
+        <div className="px-6 py-5 space-y-4">
           {activeTab !== 'mynumber' && (
           <>
           <div ref={(el) => (sectionRefs.current.basic = el)} className="space-y-4">
@@ -7773,9 +7773,9 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
           )}
         </div>
         {activeTab !== 'mynumber' && (
-          <div className="px-5 pb-5 pt-1 flex gap-2 sticky bottom-0 bg-white">
-            <button onClick={onClose} className="flex-1 py-2.5 rounded-lg border border-slate-200 text-[13.5px] font-medium text-slate-500">キャンセル</button>
-            <button onClick={save} disabled={saving} className="flex-1 py-2.5 rounded-lg bg-slate-800 disabled:bg-slate-300 text-white text-[13.5px] font-bold">
+          <div className="px-6 pb-6 pt-2 flex gap-2 sticky bottom-0 bg-white border-t border-slate-100">
+            <button onClick={onClose} className="flex-1 py-3 rounded-lg border border-slate-200 text-[14px] font-medium text-slate-500">キャンセル</button>
+            <button onClick={save} disabled={saving} className="flex-1 py-3 rounded-lg bg-slate-800 disabled:bg-slate-300 text-white text-[14px] font-bold">
               {saving ? '保存中…' : '保存する'}
             </button>
           </div>
