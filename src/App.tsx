@@ -1017,6 +1017,125 @@ async function saveGroupIncentiveFlags(groupName, year, month, flags) {
   return true;
 }
 
+// ---- 給与設定（毎月の固定支給・控除項目／通勤手当の経路／標準報酬月額） ----
+async function fetchEmployeeSalaryItems(employeeId) {
+  const { data, error } = await supabase
+    .from('employee_salary_items')
+    .select('*')
+    .eq('employee_id', employeeId)
+    .order('sort_order', { ascending: true });
+  if (error) { console.error('固定支給・控除項目の取得に失敗しました', error); return []; }
+  return (data || []).map((row) => ({ id: row.id, kind: row.kind, label: row.label, amount: Number(row.amount) || 0, sortOrder: row.sort_order }));
+}
+
+async function saveEmployeeSalaryItems(employeeId, items) {
+  // シンプルに全削除→再作成
+  const { error: delError } = await supabase.from('employee_salary_items').delete().eq('employee_id', employeeId);
+  if (delError) { console.error('固定支給・控除項目の保存に失敗しました', delError); return false; }
+  const toInsert = items.filter((it) => it.label.trim()).map((it, i) => ({
+    employee_id: employeeId,
+    kind: it.kind,
+    label: it.label.trim(),
+    amount: Number(it.amount) || 0,
+    sort_order: i,
+  }));
+  if (toInsert.length > 0) {
+    const { error } = await supabase.from('employee_salary_items').insert(toInsert);
+    if (error) { console.error('固定支給・控除項目の保存に失敗しました', error); return false; }
+  }
+  return true;
+}
+
+async function fetchEmployeeCommuteRoutes(employeeId) {
+  const { data, error } = await supabase
+    .from('employee_commute_routes')
+    .select('*')
+    .eq('employee_id', employeeId)
+    .order('sort_order', { ascending: true });
+  if (error) { console.error('通勤経路の取得に失敗しました', error); return []; }
+  return (data || []).map((row) => ({
+    id: row.id,
+    transportMethod: row.transport_method || '電車',
+    boardingStation: row.boarding_station || '',
+    alightingStation: row.alighting_station || '',
+    viaPoint: row.via_point || '',
+    paymentUnit: row.payment_unit || 'monthly_pass',
+    oneWayFare: Number(row.one_way_fare) || 0,
+    passFare: Number(row.pass_fare) || 0,
+    sortOrder: row.sort_order,
+  }));
+}
+
+async function saveEmployeeCommuteRoutes(employeeId, routes) {
+  const { error: delError } = await supabase.from('employee_commute_routes').delete().eq('employee_id', employeeId);
+  if (delError) { console.error('通勤経路の保存に失敗しました', delError); return false; }
+  const toInsert = routes.map((r, i) => ({
+    employee_id: employeeId,
+    transport_method: r.transportMethod,
+    boarding_station: r.boardingStation || null,
+    alighting_station: r.alightingStation || null,
+    via_point: r.viaPoint || null,
+    payment_unit: r.paymentUnit,
+    one_way_fare: Number(r.oneWayFare) || 0,
+    pass_fare: Number(r.passFare) || 0,
+    sort_order: i,
+  }));
+  if (toInsert.length > 0) {
+    const { error } = await supabase.from('employee_commute_routes').insert(toInsert);
+    if (error) { console.error('通勤経路の保存に失敗しました', error); return false; }
+  }
+  return true;
+}
+
+// 経路1件あたりの月額換算（支給単位に応じて計算）
+function computeRouteMonthlyAmount(route, referenceDaysPerMonth = 20) {
+  switch (route.paymentUnit) {
+    case 'monthly_pass': return route.passFare;
+    case 'three_month_pass': return route.passFare / 3;
+    case 'six_month_pass': return route.passFare / 6;
+    case 'round_trip_daily': return route.oneWayFare * 2 * referenceDaysPerMonth;
+    default: return route.passFare;
+  }
+}
+
+async function fetchStandardRemuneration(employeeId, year, month) {
+  const { data, error } = await supabase
+    .from('employee_standard_remuneration')
+    .select('*')
+    .eq('employee_id', employeeId)
+    .eq('year', year)
+    .eq('month', month)
+    .maybeSingle();
+  if (error) { console.error('標準報酬月額の取得に失敗しました', error); return null; }
+  if (!data) return null;
+  return {
+    healthInsuranceAmount: data.health_insurance_amount != null ? Number(data.health_insurance_amount) : null,
+    pensionAmount: data.pension_amount != null ? Number(data.pension_amount) : null,
+    healthInsurancePremium: data.health_insurance_premium != null ? Number(data.health_insurance_premium) : null,
+    nursingInsurancePremium: data.nursing_insurance_premium != null ? Number(data.nursing_insurance_premium) : null,
+    pensionPremium: data.pension_premium != null ? Number(data.pension_premium) : null,
+  };
+}
+
+async function saveStandardRemuneration(employeeId, year, month, payload) {
+  const { error } = await supabase.from('employee_standard_remuneration').upsert(
+    {
+      employee_id: employeeId,
+      year,
+      month,
+      health_insurance_amount: payload.healthInsuranceAmount === '' ? null : Number(payload.healthInsuranceAmount),
+      pension_amount: payload.pensionAmount === '' ? null : Number(payload.pensionAmount),
+      health_insurance_premium: payload.healthInsurancePremium === '' ? null : Number(payload.healthInsurancePremium),
+      nursing_insurance_premium: payload.nursingInsurancePremium === '' ? null : Number(payload.nursingInsurancePremium),
+      pension_premium: payload.pensionPremium === '' ? null : Number(payload.pensionPremium),
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: 'employee_id,year,month' }
+  );
+  if (error) { console.error('標準報酬月額の保存に失敗しました', error); return false; }
+  return true;
+}
+
 // ---- 月ごとの規定勤怠時間パターン（社員が月初に自分で設定） ----
 async function fetchSchedulePatterns(employeeId, year, month) {
   const { data, error } = await supabase
@@ -4440,6 +4559,8 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, groupAtten
   const [absentDays, setAbsentDays] = useState('0');
   const [paidLeaveDays, setPaidLeaveDays] = useState('0');
   const [paidLeaveHours, setPaidLeaveHours] = useState('0');
+  const [employeeSalaryItems, setEmployeeSalaryItems] = useState([]);
+  const [employeeCommuteRoutes, setEmployeeCommuteRoutes] = useState([]);
 
   const employee = employeeAccounts.find((a) => a.id === employeeId);
   const existing = payrollRecords.find((p) => p.employeeId === employeeId && p.year === year && p.month === month);
@@ -4451,6 +4572,21 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, groupAtten
     setMonthlySalary(String(employee.monthlySalary || 0));
   }, [employeeId]);
 
+  // 社員の固定支給・控除項目、通勤経路を取得（毎月同じ内容を自動で候補に出すため）
+  useEffect(() => {
+    if (!employeeId) return;
+    (async () => {
+      const [items, routes] = await Promise.all([
+        fetchEmployeeSalaryItems(employeeId),
+        fetchEmployeeCommuteRoutes(employeeId),
+      ]);
+      setEmployeeSalaryItems(items);
+      setEmployeeCommuteRoutes(routes);
+    })();
+  }, [employeeId]);
+
+  const commuteRouteTotal = employeeCommuteRoutes.reduce((sum, r) => sum + computeRouteMonthlyAmount(r), 0);
+
   const monthly = computeMonthlySummary(records[employeeId] || {}, new Date(year, month - 1, 1));
   const attendanceDays = employee ? getPrescribedAttendanceDays(employee, month, groupAttendanceSchedules, employeeAttendanceSchedules) : null;
   const preview = employee ? computePayrollPreview({
@@ -4459,7 +4595,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, groupAtten
     monthlySalary,
     workedMinutes: monthly.workedMin,
     overtimeMinutes: monthly.overtimeMin,
-    commuteAllowance: employee.commuteAllowance || 0,
+    commuteAllowance: commuteRouteTotal > 0 ? commuteRouteTotal : (employee.commuteAllowance || 0),
     attendanceDays,
     actualDays: monthly.days,
   }) : null;
@@ -4474,18 +4610,22 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, groupAtten
         { label: '基本給', amount: preview.baseAmount },
         ...(preview.allowanceAmount > 0 ? [{ label: '通勤手当', amount: preview.allowanceAmount }] : []),
         ...(preview.overtimeAmount > 0 ? [{ label: '残業手当', amount: preview.overtimeAmount }] : []),
+        ...employeeSalaryItems.filter((it) => it.kind === 'payment').map((it) => ({ label: it.label, amount: it.amount })),
       ]);
     }
     if (existing?.deductionItems) {
       setDeductionItems(existing.deductionItems);
     } else {
-      setDeductionItems(DEFAULT_DEDUCTION_LABELS.map((label) => ({ label, amount: 0 })));
+      setDeductionItems([
+        ...DEFAULT_DEDUCTION_LABELS.map((label) => ({ label, amount: 0 })),
+        ...employeeSalaryItems.filter((it) => it.kind === 'deduction').map((it) => ({ label: it.label, amount: it.amount })),
+      ]);
     }
     setAbsentDays(String(existing?.attendanceExtra?.absentDays ?? 0));
     setPaidLeaveDays(String(existing?.attendanceExtra?.paidLeaveDays ?? 0));
     setPaidLeaveHours(String(existing?.attendanceExtra?.paidLeaveHours ?? 0));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [employeeId, year, month, existing?.id]);
+  }, [employeeId, year, month, existing?.id, employeeSalaryItems]);
 
   if (!employee) {
     return <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-6 py-14 text-center text-[12.5px] text-slate-300">社員が登録されていません</div>;
@@ -4601,6 +4741,12 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, groupAtten
           </Field>
         </div>
 
+        {commuteRouteTotal > 0 && (
+          <div className="text-[11px] text-slate-400 -mt-1">通勤手当は、社員詳細で登録された経路（合計 {formatYen(commuteRouteTotal)}）を初期値にしています。金額は下の支給項目欄で調整できます。</div>
+        )}
+        {employeeSalaryItems.length > 0 && (
+          <div className="text-[11px] text-slate-400 -mt-1">社員詳細で登録された固定支給・控除項目（{employeeSalaryItems.length}件）を初期値として含めています。</div>
+        )}
         <PayrollItemsEditor title="支給項目" items={paymentItems} onChange={setPaymentItems} addLabel="支給項目を追加" />
         <PayrollItemsEditor title="控除項目" items={deductionItems} onChange={setDeductionItems} addLabel="控除項目を追加" />
 
@@ -7015,6 +7161,69 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
       container.scrollTo({ top: el.offsetTop - SCROLL_OFFSET, behavior: 'smooth' });
     }
   };
+
+  // ---- 給与設定（固定支給・控除項目／通勤経路／標準報酬月額）----
+  const [salaryItems, setSalaryItems] = useState([]);
+  const [commuteRoutes, setCommuteRoutes] = useState([]);
+  const [savingSalaryItems, setSavingSalaryItems] = useState(false);
+  const [savingCommuteRoutes, setSavingCommuteRoutes] = useState(false);
+  const nowForRemuneration = new Date();
+  const [remunerationYear, setRemunerationYear] = useState(nowForRemuneration.getFullYear());
+  const [remunerationMonth, setRemunerationMonth] = useState(nowForRemuneration.getMonth() + 1);
+  const [remuneration, setRemuneration] = useState({ healthInsuranceAmount: '', pensionAmount: '', healthInsurancePremium: '', nursingInsurancePremium: '', pensionPremium: '' });
+  const [savingRemuneration, setSavingRemuneration] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      const [items, routes] = await Promise.all([
+        fetchEmployeeSalaryItems(account.id),
+        fetchEmployeeCommuteRoutes(account.id),
+      ]);
+      setSalaryItems(items);
+      setCommuteRoutes(routes);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [account.id]);
+
+  useEffect(() => {
+    (async () => {
+      const r = await fetchStandardRemuneration(account.id, remunerationYear, remunerationMonth);
+      setRemuneration({
+        healthInsuranceAmount: r?.healthInsuranceAmount ?? '',
+        pensionAmount: r?.pensionAmount ?? '',
+        healthInsurancePremium: r?.healthInsurancePremium ?? '',
+        nursingInsurancePremium: r?.nursingInsurancePremium ?? '',
+        pensionPremium: r?.pensionPremium ?? '',
+      });
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [account.id, remunerationYear, remunerationMonth]);
+
+  const addSalaryItem = (kind) => setSalaryItems((prev) => [...prev, { label: '', amount: 0, kind }]);
+  const updateSalaryItem = (i, field, value) => setSalaryItems((prev) => prev.map((it, idx) => (idx === i ? { ...it, [field]: value } : it)));
+  const removeSalaryItem = (i) => setSalaryItems((prev) => prev.filter((_, idx) => idx !== i));
+  const saveSalaryItemsNow = async () => {
+    setSavingSalaryItems(true);
+    await saveEmployeeSalaryItems(account.id, salaryItems);
+    setSavingSalaryItems(false);
+  };
+
+  const addCommuteRoute = () => setCommuteRoutes((prev) => [...prev, { transportMethod: '電車', boardingStation: '', alightingStation: '', viaPoint: '', paymentUnit: 'monthly_pass', oneWayFare: 0, passFare: 0 }]);
+  const updateCommuteRoute = (i, field, value) => setCommuteRoutes((prev) => prev.map((r, idx) => (idx === i ? { ...r, [field]: value } : r)));
+  const removeCommuteRoute = (i) => setCommuteRoutes((prev) => prev.filter((_, idx) => idx !== i));
+  const commuteTotal = commuteRoutes.reduce((sum, r) => sum + computeRouteMonthlyAmount(r), 0);
+  const saveCommuteRoutesNow = async () => {
+    setSavingCommuteRoutes(true);
+    await saveEmployeeCommuteRoutes(account.id, commuteRoutes);
+    setSavingCommuteRoutes(false);
+  };
+
+  const saveRemunerationNow = async () => {
+    setSavingRemuneration(true);
+    await saveStandardRemuneration(account.id, remunerationYear, remunerationMonth, remuneration);
+    setSavingRemuneration(false);
+  };
+
   const [personalMonths, setPersonalMonths] = useState(() => {
     const initial = {};
     for (let m = 1; m <= 12; m++) initial[m] = String(employeeAttendanceSchedule[m] || 0);
@@ -7312,12 +7521,111 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
               </div>
               <Field label="口座番号"><input value={form.accountNumber} onChange={set('accountNumber')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" /></Field>
 
-              <div className="text-[11px] font-bold text-slate-400 pt-2">標準報酬月額</div>
+              <div className="text-[11px] font-bold text-slate-400 pt-2">標準報酬月額（現在の基準額）</div>
               <div className="grid grid-cols-2 gap-3">
                 <Field label="健康保険（円）"><input type="number" value={form.standardRemunerationHealth} onChange={set('standardRemunerationHealth')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" /></Field>
                 <Field label="厚生年金保険（円）"><input type="number" value={form.standardRemunerationPension} onChange={set('standardRemunerationPension')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" /></Field>
               </div>
               <div className="text-[10.5px] text-slate-400">実際の時給・月給・給与計算の設定は「給与」タブから行ってください。ここは社会保険の届出に使う標準報酬月額のみです。</div>
+
+              {/* 通勤手当（経路） */}
+              <div className="text-[11px] font-bold text-slate-400 pt-4 flex items-center justify-between">
+                <span>通勤手当（経路ごとに設定）</span>
+                <span className="font-mono text-slate-600">月額換算 合計 {formatYen(commuteTotal)}</span>
+              </div>
+              <div className="space-y-3">
+                {commuteRoutes.map((r, i) => (
+                  <div key={i} className="border border-slate-200 rounded-xl p-3 space-y-2 bg-slate-50">
+                    <div className="flex items-center justify-between">
+                      <select value={r.transportMethod} onChange={(e) => updateCommuteRoute(i, 'transportMethod', e.target.value)} className="border border-slate-200 rounded-lg px-2 py-1.5 text-[12.5px] bg-white">
+                        <option value="電車">電車</option>
+                        <option value="バス">バス</option>
+                        <option value="車">車</option>
+                        <option value="自転車">自転車</option>
+                        <option value="徒歩">徒歩</option>
+                      </select>
+                      <button onClick={() => removeCommuteRoute(i)} className="text-slate-300 hover:text-rose-500"><Trash2 size={14} /></button>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <input value={r.boardingStation} onChange={(e) => updateCommuteRoute(i, 'boardingStation', e.target.value)} placeholder="乗駅" className="border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white" />
+                      <input value={r.alightingStation} onChange={(e) => updateCommuteRoute(i, 'alightingStation', e.target.value)} placeholder="降駅" className="border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white" />
+                    </div>
+                    <input value={r.viaPoint} onChange={(e) => updateCommuteRoute(i, 'viaPoint', e.target.value)} placeholder="経由地（任意）" className="w-full border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white" />
+                    <select value={r.paymentUnit} onChange={(e) => updateCommuteRoute(i, 'paymentUnit', e.target.value)} className="w-full border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white">
+                      <option value="monthly_pass">1ヶ月定期代で支給</option>
+                      <option value="three_month_pass">3ヶ月定期代で支給（月割り）</option>
+                      <option value="six_month_pass">6ヶ月定期代で支給（月割り）</option>
+                      <option value="round_trip_daily">片道運賃×往復×出勤日数で支給</option>
+                    </select>
+                    <div className="grid grid-cols-2 gap-2">
+                      <Field label="片道運賃（円）"><input type="number" value={r.oneWayFare} onChange={(e) => updateCommuteRoute(i, 'oneWayFare', e.target.value)} className="w-full border border-slate-200 rounded-lg px-2.5 py-1.5 font-mono text-[12.5px] bg-white" /></Field>
+                      <Field label="定期代（円）"><input type="number" value={r.passFare} onChange={(e) => updateCommuteRoute(i, 'passFare', e.target.value)} className="w-full border border-slate-200 rounded-lg px-2.5 py-1.5 font-mono text-[12.5px] bg-white" /></Field>
+                    </div>
+                    <div className="text-[11px] text-slate-500 text-right">月額換算：{formatYen(computeRouteMonthlyAmount(r))}</div>
+                  </div>
+                ))}
+                {commuteRoutes.length === 0 && <div className="text-[12px] text-slate-300 text-center py-4 bg-slate-50 rounded-lg">経路が登録されていません</div>}
+              </div>
+              <div className="flex items-center justify-between">
+                <button onClick={addCommuteRoute} className="text-[11px] font-bold text-amber-600 flex items-center gap-1"><Plus size={12} />経路を追加</button>
+                <button onClick={saveCommuteRoutesNow} disabled={savingCommuteRoutes} className="text-[11px] font-bold text-white bg-slate-800 disabled:bg-slate-300 rounded-lg px-3 py-1.5">{savingCommuteRoutes ? '保存中…' : '通勤経路を保存'}</button>
+              </div>
+              <div className="text-[10.5px] text-slate-400">保存すると、月額換算の合計が「給与」タブの通勤手当の初期値として使えるようになります（自動反映ではなく、給与作成時にコピーする形です）。</div>
+
+              {/* 毎月の固定支給・控除項目 */}
+              <div className="text-[11px] font-bold text-slate-400 pt-4">毎月の固定支給項目（資格手当・役割手当など）</div>
+              <div className="space-y-1.5">
+                {salaryItems.filter((it) => it.kind === 'payment').map((it) => {
+                  const i = salaryItems.indexOf(it);
+                  return (
+                    <div key={i} className="flex items-center gap-2">
+                      <input value={it.label} onChange={(e) => updateSalaryItem(i, 'label', e.target.value)} placeholder="項目名（例：資格手当）" className="flex-1 border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px]" />
+                      <input type="number" value={it.amount} onChange={(e) => updateSalaryItem(i, 'amount', e.target.value)} className="w-28 border border-slate-200 rounded-lg px-2.5 py-1.5 font-mono text-[12.5px] text-right" />
+                      <button onClick={() => removeSalaryItem(i)} className="text-slate-300 hover:text-rose-500 shrink-0"><Trash2 size={14} /></button>
+                    </div>
+                  );
+                })}
+              </div>
+              <button onClick={() => addSalaryItem('payment')} className="text-[11px] font-bold text-amber-600 flex items-center gap-1"><Plus size={12} />支給項目を追加</button>
+
+              <div className="text-[11px] font-bold text-slate-400 pt-3">毎月の固定控除項目</div>
+              <div className="space-y-1.5">
+                {salaryItems.filter((it) => it.kind === 'deduction').map((it) => {
+                  const i = salaryItems.indexOf(it);
+                  return (
+                    <div key={i} className="flex items-center gap-2">
+                      <input value={it.label} onChange={(e) => updateSalaryItem(i, 'label', e.target.value)} placeholder="項目名（例：社宅費控除）" className="flex-1 border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px]" />
+                      <input type="number" value={it.amount} onChange={(e) => updateSalaryItem(i, 'amount', e.target.value)} className="w-28 border border-slate-200 rounded-lg px-2.5 py-1.5 font-mono text-[12.5px] text-right" />
+                      <button onClick={() => removeSalaryItem(i)} className="text-slate-300 hover:text-rose-500 shrink-0"><Trash2 size={14} /></button>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="flex items-center justify-between">
+                <button onClick={() => addSalaryItem('deduction')} className="text-[11px] font-bold text-amber-600 flex items-center gap-1"><Plus size={12} />控除項目を追加</button>
+                <button onClick={saveSalaryItemsNow} disabled={savingSalaryItems} className="text-[11px] font-bold text-white bg-slate-800 disabled:bg-slate-300 rounded-lg px-3 py-1.5">{savingSalaryItems ? '保存中…' : '固定項目を保存'}</button>
+              </div>
+              <div className="text-[10.5px] text-slate-400">ここで登録した項目は、「給与」タブでその社員の給与を新規作成する際に、毎回自動で候補として追加されます。</div>
+
+              {/* 標準報酬月額（月別履歴） */}
+              <div className="text-[11px] font-bold text-slate-400 pt-4 flex items-center justify-between">
+                <span>標準報酬月額（月ごとの記録）</span>
+                <div className="flex items-center gap-1">
+                  <input type="number" value={remunerationYear} onChange={(e) => setRemunerationYear(Number(e.target.value))} className="w-16 border border-slate-200 rounded px-1.5 py-1 font-mono text-[11px] bg-white" />年
+                  <input type="number" min="1" max="12" value={remunerationMonth} onChange={(e) => setRemunerationMonth(Number(e.target.value))} className="w-12 border border-slate-200 rounded px-1.5 py-1 font-mono text-[11px] bg-white" />月
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="標準報酬月額（健康保険）"><input type="number" value={remuneration.healthInsuranceAmount} onChange={(e) => setRemuneration((p) => ({ ...p, healthInsuranceAmount: e.target.value }))} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" /></Field>
+                <Field label="標準報酬月額（厚生年金）"><input type="number" value={remuneration.pensionAmount} onChange={(e) => setRemuneration((p) => ({ ...p, pensionAmount: e.target.value }))} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" /></Field>
+              </div>
+              <div className="grid grid-cols-3 gap-3">
+                <Field label="健康保険料（参考・円）"><input type="number" value={remuneration.healthInsurancePremium} onChange={(e) => setRemuneration((p) => ({ ...p, healthInsurancePremium: e.target.value }))} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" /></Field>
+                <Field label="介護保険料（参考・円）"><input type="number" value={remuneration.nursingInsurancePremium} onChange={(e) => setRemuneration((p) => ({ ...p, nursingInsurancePremium: e.target.value }))} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" /></Field>
+                <Field label="厚生年金保険料（参考・円）"><input type="number" value={remuneration.pensionPremium} onChange={(e) => setRemuneration((p) => ({ ...p, pensionPremium: e.target.value }))} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" /></Field>
+              </div>
+              <button onClick={saveRemunerationNow} disabled={savingRemuneration} className="w-full py-2 rounded-lg bg-slate-800 disabled:bg-slate-300 text-white text-[12.5px] font-bold">{savingRemuneration ? '保存中…' : `${remunerationYear}年${remunerationMonth}月分を保存`}</button>
+              <div className="text-[10.5px] text-slate-400">保険料額は協会けんぽ等の保険料額表をご確認のうえ手入力してください（都道府県・年度で変わるため自動計算していません）。</div>
           </div>
 
           <div ref={(el) => (sectionRefs.current.insurance = el)} className="space-y-4 pt-1">
