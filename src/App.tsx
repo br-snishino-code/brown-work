@@ -7273,12 +7273,26 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
       const wb = XLSX.utils.book_new();
       let failed = [];
       for (const table of BACKUP_TABLES) {
-        const { data: rows, error } = await supabase.from(table).select('*');
-        if (error) {
+        // Supabaseは1回のリクエストで返す行数に上限があるため、1000件ずつ繰り返し取得して全件つなげる
+        const rows = [];
+        let from = 0;
+        const CHUNK = 1000;
+        let tableFailed = false;
+        for (;;) {
+          const { data: chunk, error } = await supabase.from(table).select('*').range(from, from + CHUNK - 1);
+          if (error) {
+            tableFailed = true;
+            break;
+          }
+          rows.push(...(chunk || []));
+          if (!chunk || chunk.length < CHUNK) break;
+          from += CHUNK;
+        }
+        if (tableFailed) {
           failed.push(table);
           continue;
         }
-        const flat = (rows || []).map((row) => {
+        const flat = rows.map((row) => {
           const out = {};
           for (const [k, v] of Object.entries(row)) {
             out[k] = v !== null && typeof v === 'object' ? JSON.stringify(v) : v;
