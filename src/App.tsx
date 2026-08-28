@@ -7,9 +7,18 @@ import { supabase, CLOUD_ENABLED, usernameToEmail } from './supabaseClient';
 const SCHEDULED_START = '09:00';
 const SCHEDULED_END = '18:00';
 const BREAK_MINUTES_DEFAULT = 60;
+const STANDARD_CLOCK_IN_HOUR = 10; // 出勤確認ポップアップの基準時刻（10:00）
 
 const pad = (n) => String(n).padStart(2, '0');
 const todayKey = (d = new Date()) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const todayAt = (hour, minute, from = new Date()) => new Date(from.getFullYear(), from.getMonth(), from.getDate(), hour, minute, 0, 0);
+const CLOCK_IN_STATUS_LABEL = {
+  early_confirmed: '早出（10:00で記録）',
+  early_manual: '早出（実打刻で記録）',
+  forgot_corrected: '打刻漏れ（10:00に自動修正）',
+  late: '遅刻',
+  event: 'イベント',
+};
 const timeStr = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 const hhmm = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 const toMinutes = (hhmmStr) => {
@@ -549,6 +558,9 @@ const rowToRecord = (row) => ({
   clockOutLocation: row.clock_out_location,
   scheduledStart: row.scheduled_start || SCHEDULED_START,
   scheduledEnd: row.scheduled_end || SCHEDULED_END,
+  clockInActual: row.clock_in_actual,
+  clockInStatus: row.clock_in_status,
+  clockInNote: row.clock_in_note,
 });
 
 const rowToCorrection = (row) => ({
@@ -1146,13 +1158,18 @@ export default function AttendanceApp() {
   const employeeRecords = (employeeId && data.records[employeeId]) || {};
   const todayRecord = employeeRecords[today];
 
-  const handleClockIn = async () => {
+  const handleClockIn = async (confirm = {}) => {
     const loc = await geo.capture();
+    const actualNow = new Date();
+    const clockInDate = confirm.clockInTime || actualNow;
     const { error } = await supabase.from('attendance_records').upsert(
       {
         employee_id: employeeId,
         date: today,
-        clock_in: new Date().toISOString(),
+        clock_in: clockInDate.toISOString(),
+        clock_in_actual: actualNow.toISOString(),
+        clock_in_status: confirm.status || null,
+        clock_in_note: confirm.note || null,
         clock_out: null,
         break_periods: [],
         break_started_at: null,
@@ -2214,7 +2231,8 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
   const todayKeyStr = todayKey();
   const missingCount = historyDates.filter((k) => k !== todayKeyStr && records[k]?.clockIn && !records[k]?.clockOut).length;
   const primaryLabel = doneToday ? '退勤済み' : canClockIn ? '出勤' : '退勤';
-  const primaryAction = canClockIn ? onClockIn : canClockOut ? onClockOut : undefined;
+  const [clockInConfirmOpen, setClockInConfirmOpen] = useState(false);
+  const primaryAction = canClockIn ? () => setClockInConfirmOpen(true) : canClockOut ? onClockOut : undefined;
   const primaryDisabled = doneToday;
 
   const clockSection = (
@@ -2315,6 +2333,13 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
               <div className="min-w-0">
                 <div className="flex items-center gap-2"><span className="text-[13px] font-bold text-slate-800">{dateLabel(dateKey)}</span>{dayStatus.tone === 'danger' && <span className="text-[10px] font-bold text-rose-600">未退勤</span>}{pendingForDay && <span className="text-[10px] font-bold text-amber-600">申請中</span>}</div>
                 <div className="mt-1 font-mono text-[12px] text-slate-500">{r?.clockIn ? hhmm(new Date(r.clockIn)) : '--:--'} — {r?.clockOut ? hhmm(new Date(r.clockOut)) : '--:--'}{metrics && <span className="ml-2 text-slate-400">実働 {minutesToHHMM(metrics.workedMin)} / 休憩 {metrics.breakMin}分</span>}</div>
+                {r?.clockInStatus && CLOCK_IN_STATUS_LABEL[r.clockInStatus] && (
+                  <div className="mt-0.5 text-[10.5px] font-medium text-blue-600">
+                    {CLOCK_IN_STATUS_LABEL[r.clockInStatus]}
+                    {r.clockInActual && r.clockInActual !== r.clockIn && <span className="text-slate-400 font-normal">（実打刻 {hhmm(new Date(r.clockInActual))}）</span>}
+                    {r.clockInNote && <span className="text-slate-400 font-normal">・{r.clockInNote}</span>}
+                  </div>
+                )}
                 {metrics && (metrics.lateMin > 0 || metrics.earlyLeaveMin > 0 || metrics.overtimeMin > 0) && <div className="mt-1 text-[10.5px] font-medium"><span className="text-rose-500">{metrics.lateMin > 0 ? `遅刻 ${metrics.lateMin}分 ` : ''}{metrics.earlyLeaveMin > 0 ? `早退 ${metrics.earlyLeaveMin}分` : ''}</span>{metrics.overtimeMin > 0 && <span className="ml-2 text-amber-600">残業 {minutesToHHMM(metrics.overtimeMin)}</span>}</div>}
               </div>
               <button onClick={() => onOpenCorrection(dateKey)} className="shrink-0 rounded-xl border border-slate-200 p-2.5 text-slate-500 hover:bg-white"><FileEdit size={15}/></button>
@@ -2325,8 +2350,32 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
     </div>
   );
 
-  if (isDesktop) return <div className="grid grid-cols-[420px_1fr] gap-6 items-start">{clockSection}{historySection}</div>;
-  return <div className="space-y-5">{clockSection}{historySection}</div>;
+  if (isDesktop) return (
+    <div className="grid grid-cols-[420px_1fr] gap-6 items-start">
+      {clockSection}
+      {historySection}
+      {clockInConfirmOpen && (
+        <ClockInConfirmModal
+          now={now}
+          onClose={() => setClockInConfirmOpen(false)}
+          onConfirm={async (payload) => { await onClockIn(payload); setClockInConfirmOpen(false); }}
+        />
+      )}
+    </div>
+  );
+  return (
+    <div className="space-y-5">
+      {clockSection}
+      {historySection}
+      {clockInConfirmOpen && (
+        <ClockInConfirmModal
+          now={now}
+          onClose={() => setClockInConfirmOpen(false)}
+          onConfirm={async (payload) => { await onClockIn(payload); setClockInConfirmOpen(false); }}
+        />
+      )}
+    </div>
+  );
 }
 
 function SummaryTile({ label, value, icon }) {
@@ -2352,6 +2401,108 @@ function DayMetricsCard({ record }) {
 
 function Metric({ label, value, warn = false, danger = false }) {
   return <div><div className="text-[9.5px] font-bold text-slate-400">{label}</div><div className={`mt-1 font-mono text-[13px] font-bold ${danger ? 'text-rose-600' : warn ? 'text-amber-600' : 'text-slate-800'}`}>{value}</div></div>;
+}
+
+function ClockInConfirmModal({ now, onClose, onConfirm }) {
+  const [saving, setSaving] = useState(false);
+  const [note, setNote] = useState('');
+  const [lateChoice, setLateChoice] = useState(null); // 'forgot' | 'late' | 'event'
+  const nowMinutes = now.getHours() * 60 + now.getMinutes();
+  const isEarly = nowMinutes < STANDARD_CLOCK_IN_HOUR * 60;
+  const nowLabel = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+
+  const run = async (payload) => {
+    setSaving(true);
+    await onConfirm(payload);
+    setSaving(false);
+  };
+
+  return createPortal(
+    <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-40 p-0 sm:p-4">
+      <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-sm max-h-[90vh] overflow-y-auto">
+        <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center gap-2">
+          <div className="w-9 h-9 rounded-xl bg-amber-50 flex items-center justify-center shrink-0">
+            <Clock size={16} className="text-amber-600" />
+          </div>
+          <h3 className="font-bold text-[15px]">出勤時刻の確認</h3>
+        </div>
+
+        {isEarly ? (
+          <div className="px-5 py-4 space-y-3">
+            <div className="text-[12.5px] text-slate-600">
+              現在の時刻は <b className="font-mono">{nowLabel}</b> です。出勤時刻を <b>10:00</b> として記録しますか？
+            </div>
+            <button
+              onClick={() => run({ clockInTime: todayAt(STANDARD_CLOCK_IN_HOUR, 0, now), status: 'early_confirmed' })}
+              disabled={saving}
+              className="w-full py-2.5 rounded-lg bg-amber-600 disabled:bg-slate-200 text-white text-[13.5px] font-bold"
+            >
+              はい（10:00で記録する）
+            </button>
+            <button
+              onClick={() => run({ clockInTime: now, status: 'early_manual' })}
+              disabled={saving}
+              className="w-full py-2.5 rounded-lg border border-slate-200 text-[13.5px] font-medium text-slate-600"
+            >
+              いいえ（実際の時刻 {nowLabel} で記録する）
+            </button>
+          </div>
+        ) : (
+          <div className="px-5 py-4 space-y-3">
+            <div className="text-[12.5px] text-slate-600">
+              現在の時刻は <b className="font-mono">{nowLabel}</b> です（10:00より後）。今回の出勤はどれに当てはまりますか？
+            </div>
+            <div className="space-y-2">
+              <button
+                onClick={() => setLateChoice('forgot')}
+                className={`w-full py-2.5 rounded-lg border-2 text-[13px] font-bold text-left px-3.5 ${lateChoice === 'forgot' ? 'border-amber-500 bg-amber-50 text-amber-700' : 'border-slate-200 text-slate-600'}`}
+              >
+                打刻漏れ（本当は10:00に出勤していた）
+              </button>
+              <button
+                onClick={() => setLateChoice('late')}
+                className={`w-full py-2.5 rounded-lg border-2 text-[13px] font-bold text-left px-3.5 ${lateChoice === 'late' ? 'border-rose-500 bg-rose-50 text-rose-700' : 'border-slate-200 text-slate-600'}`}
+              >
+                遅刻
+              </button>
+              <button
+                onClick={() => setLateChoice('event')}
+                className={`w-full py-2.5 rounded-lg border-2 text-[13px] font-bold text-left px-3.5 ${lateChoice === 'event' ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-slate-200 text-slate-600'}`}
+              >
+                イベント（会議・研修など）
+              </button>
+            </div>
+            {lateChoice === 'forgot' && (
+              <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2.5 text-[11.5px] text-amber-700">
+                出勤時刻は <b>10:00</b> に自動修正されます。実際に打刻した時刻（{nowLabel}）は記録として残ります。
+              </div>
+            )}
+            {(lateChoice === 'late' || lateChoice === 'event') && (
+              <Field label="メモ（任意）">
+                <input value={note} onChange={(e) => setNote(e.target.value)} placeholder={lateChoice === 'late' ? '理由があれば入力' : '会議名・研修名など'} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px]" />
+              </Field>
+            )}
+            <button
+              onClick={() => {
+                if (lateChoice === 'forgot') run({ clockInTime: todayAt(STANDARD_CLOCK_IN_HOUR, 0, now), status: 'forgot_corrected' });
+                else if (lateChoice === 'late') run({ clockInTime: now, status: 'late', note });
+                else if (lateChoice === 'event') run({ clockInTime: now, status: 'event', note });
+              }}
+              disabled={!lateChoice || saving}
+              className="w-full py-2.5 rounded-lg bg-slate-800 disabled:bg-slate-200 text-white text-[13.5px] font-bold"
+            >
+              {saving ? '記録中…' : 'この内容で出勤を記録する'}
+            </button>
+          </div>
+        )}
+
+        <div className="px-5 pb-5 pt-1">
+          <button onClick={onClose} className="w-full py-2.5 rounded-lg text-[12.5px] font-medium text-slate-400">キャンセル</button>
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
 }
 
 function CorrectionModal({ dateKey, record, onClose, onSubmit }) {
@@ -4015,23 +4166,36 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], isDesktop 
   });
 
   const rows = [];
+  const todayStr = todayKey();
+  const monthDates = (() => {
+    const [y, m] = month.split('-').map(Number);
+    const count = lastDayOfMonth(y, m);
+    const list = [];
+    for (let d = 1; d <= count; d++) list.push(`${y}-${pad(m)}-${pad(d)}`);
+    return list;
+  })();
   filteredAccounts.forEach((acc) => {
     const recs = data.records[acc.id] || {};
-    Object.values(recs).forEach((record) => {
-      if (!record?.date || !record.date.startsWith(month)) return;
+    monthDates.forEach((dateStr) => {
+      if (dateStr > todayStr) return; // 未来日は表示しない
+      if (acc.hireDate && dateStr < acc.hireDate) return; // 入職前
+      if (acc.resignationDate && dateStr > acc.resignationDate) return; // 退職後
+      const record = recs[dateStr] || null;
       const metrics = computeMetrics(record);
       rows.push({
         employeeId: acc.id,
         employeeName: acc.name,
-        date: record.date,
-        clockIn: record.clockIn ? hhmm(new Date(record.clockIn)) : '',
-        clockOut: record.clockOut ? hhmm(new Date(record.clockOut)) : '',
-        breakMin: getRecordedBreakMinutes(record, record.clockOut ? new Date(record.clockOut) : new Date()),
+        date: dateStr,
+        clockIn: record?.clockIn ? hhmm(new Date(record.clockIn)) : '',
+        clockOut: record?.clockOut ? hhmm(new Date(record.clockOut)) : '',
+        breakMin: record ? getRecordedBreakMinutes(record, record.clockOut ? new Date(record.clockOut) : new Date()) : 0,
         workedMin: metrics?.workedMin ?? 0,
         overtimeMin: metrics?.overtimeMin ?? 0,
         lateMin: metrics?.lateMin ?? 0,
         earlyLeaveMin: metrics?.earlyLeaveMin ?? 0,
         status: computeDayStatus(record).label,
+        clockInStatusLabel: record?.clockInStatus ? (CLOCK_IN_STATUS_LABEL[record.clockInStatus] || '') : '',
+        clockInActual: record?.clockInActual && record.clockInActual !== record.clockIn ? hhmm(new Date(record.clockInActual)) : '',
       });
     });
   });
@@ -4054,8 +4218,8 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], isDesktop 
 
   const escapeCsv = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
   const exportCsv = () => {
-    const header = ['社員名','日付','出勤','退勤','休憩(分)','実働','残業','遅刻(分)','早退(分)','状態'];
-    const body = rows.map((r) => [r.employeeName,r.date,r.clockIn,r.clockOut,r.breakMin,minutesToHHMM(r.workedMin),minutesToHHMM(r.overtimeMin),r.lateMin,r.earlyLeaveMin,r.status]);
+    const header = ['社員名','日付','出勤','実打刻','出勤区分','退勤','休憩(分)','実働','残業','遅刻(分)','早退(分)','状態'];
+    const body = rows.map((r) => [r.employeeName,r.date,r.clockIn,r.clockInActual,r.clockInStatusLabel,r.clockOut,r.breakMin,minutesToHHMM(r.workedMin),minutesToHHMM(r.overtimeMin),r.lateMin,r.earlyLeaveMin,r.status]);
     const csv = '\uFEFF' + [header, ...body].map((line) => line.map(escapeCsv).join(',')).join('\r\n');
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -4122,10 +4286,10 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], isDesktop 
           <div className="overflow-x-auto">
             <table className="w-full min-w-[900px] text-[12.5px]">
               <thead><tr className="text-left text-[10.5px] text-slate-400 border-b border-slate-100">
-                {['社員','日付','出勤','退勤','休憩','実働','残業','遅刻','早退','状態'].map((h) => <th key={h} className="px-4 py-2 font-medium">{h}</th>)}
+                {['社員','日付','出勤','実打刻','退勤','休憩','実働','残業','遅刻','早退','状態'].map((h) => <th key={h} className="px-4 py-2 font-medium">{h}</th>)}
               </tr></thead>
               <tbody>{rows.map((r) => <tr key={`${r.employeeId}-${r.date}`} className="border-b border-slate-100 last:border-0">
-                <td className="px-4 py-2.5 font-semibold">{r.employeeName}</td><td className="px-4 py-2.5 font-mono">{r.date}</td><td className="px-4 py-2.5 font-mono">{r.clockIn || '--:--'}</td><td className="px-4 py-2.5 font-mono">{r.clockOut || '--:--'}</td><td className="px-4 py-2.5">{r.breakMin}分</td><td className="px-4 py-2.5 font-mono font-semibold">{minutesToHHMM(r.workedMin)}</td><td className="px-4 py-2.5 font-mono">{minutesToHHMM(r.overtimeMin)}</td><td className="px-4 py-2.5">{r.lateMin}分</td><td className="px-4 py-2.5">{r.earlyLeaveMin}分</td><td className="px-4 py-2.5">{r.status}</td>
+                <td className="px-4 py-2.5 font-semibold">{r.employeeName}</td><td className="px-4 py-2.5 font-mono">{r.date}</td><td className="px-4 py-2.5 font-mono">{r.clockIn || '--:--'}</td><td className="px-4 py-2.5 font-mono text-slate-400">{r.clockInActual || ''}{r.clockInStatusLabel && <div className="text-[10px] text-blue-600 font-sans whitespace-nowrap">{r.clockInStatusLabel}</div>}</td><td className="px-4 py-2.5 font-mono">{r.clockOut || '--:--'}</td><td className="px-4 py-2.5">{r.breakMin}分</td><td className="px-4 py-2.5 font-mono font-semibold">{minutesToHHMM(r.workedMin)}</td><td className="px-4 py-2.5 font-mono">{minutesToHHMM(r.overtimeMin)}</td><td className="px-4 py-2.5">{r.lateMin}分</td><td className="px-4 py-2.5">{r.earlyLeaveMin}分</td><td className="px-4 py-2.5">{r.status}</td>
               </tr>)}</tbody>
             </table>
           </div>
@@ -4134,6 +4298,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], isDesktop 
             <div className="flex items-center justify-between"><div className="font-semibold text-[13px]">{r.employeeName}</div><div className="font-mono text-[11.5px] text-slate-400">{r.date}</div></div>
             <div className="mt-1.5 grid grid-cols-4 gap-2 text-center"><MiniValue label="出勤" value={r.clockIn || '--:--'} /><MiniValue label="退勤" value={r.clockOut || '--:--'} /><MiniValue label="休憩" value={`${r.breakMin}分`} /><MiniValue label="実働" value={minutesToHHMM(r.workedMin)} /></div>
             <div className="mt-2 text-[11px] text-slate-400">{r.status}{r.overtimeMin > 0 ? ` ・ 残業 ${minutesToHHMM(r.overtimeMin)}` : ''}{r.lateMin > 0 ? ` ・ 遅刻 ${r.lateMin}分` : ''}{r.earlyLeaveMin > 0 ? ` ・ 早退 ${r.earlyLeaveMin}分` : ''}</div>
+            {r.clockInStatusLabel && <div className="mt-1 text-[11px] text-blue-600 font-medium">{r.clockInStatusLabel}{r.clockInActual ? `（実打刻 ${r.clockInActual}）` : ''}</div>}
           </div>)}</div>
         )}
       </div>
