@@ -15,7 +15,8 @@ export const supabase = createClient(
     auth: {
       persistSession: true,
       autoRefreshToken: true,
-      detectSessionInUrl: false,
+      // パスワード再設定メールのリンク（URLに認証トークンが付く）を検出するため true にする
+      detectSessionInUrl: true,
     },
   }
 );
