@@ -24,6 +24,7 @@ const CLOCK_OUT_STATUS_LABEL = {
   overtime: '残業',
   forgot_corrected_out: '打刻漏れ（19:00に自動修正）',
 };
+const NEEDS_APPROVAL_STATUSES = ['late', 'event', 'early_confirmed', 'early_manual'];
 const timeStr = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 const hhmm = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 const toMinutes = (hhmmStr) => {
@@ -1271,7 +1272,7 @@ export default function AttendanceApp() {
         clock_in_actual: actualNow.toISOString(),
         clock_in_status: confirm.status || null,
         clock_in_note: confirm.note || null,
-        clock_in_approval: (confirm.status === 'late' || confirm.status === 'event') ? 'pending' : null,
+        clock_in_approval: NEEDS_APPROVAL_STATUSES.includes(confirm.status) ? 'pending' : null,
         clock_out: null,
         break_periods: [],
         break_started_at: null,
@@ -1287,11 +1288,12 @@ export default function AttendanceApp() {
       return;
     }
     await refreshData();
-    const needsApproval = confirm.status === 'late' || confirm.status === 'event';
+    const needsApproval = NEEDS_APPROVAL_STATUSES.includes(confirm.status);
     if (needsApproval) {
+      const reasonLabel = CLOCK_IN_STATUS_LABEL[confirm.status] || confirm.status;
       await notifyAdmin(
-        `【出勤確認】${session.name} - ${confirm.status === 'late' ? '遅刻' : 'イベント'}の承認待ち`,
-        `${session.name}さんが${confirm.status === 'late' ? '遅刻' : 'イベント'}として出勤を記録しました（${confirm.note ? `メモ：${confirm.note}` : 'メモなし'}）。内容をご確認のうえ承認してください。`,
+        `【出勤確認】${session.name} - ${reasonLabel}の承認待ち`,
+        `${session.name}さんが「${reasonLabel}」として出勤を記録しました（${confirm.note ? `メモ：${confirm.note}` : 'メモなし'}）。内容をご確認のうえ、勤怠一覧上部の「承認待ちの出勤」から承認してください。`,
         today
       );
     }
@@ -1427,7 +1429,7 @@ export default function AttendanceApp() {
         clock_in_actual: existing?.clockInActual || null,
         clock_in_status: existing?.clockInStatus || null,
         clock_in_note: existing?.clockInNote || null,
-        clock_in_approval: patch.approve ? 'approved' : (existing?.clockInApproval || null),
+        clock_in_approval: patch.approve === true ? 'approved' : (patch.approve === false ? null : (existing?.clockInApproval || null)),
         clock_out_actual: existing?.clockOutActual || null,
         clock_out_status: existing?.clockOutStatus || null,
         clock_out_note: existing?.clockOutNote || null,
@@ -2782,6 +2784,9 @@ function ClockInConfirmModal({ now, standardMinutes, onClose, onConfirm }) {
             <div className="text-[12.5px] text-slate-600">
               現在の時刻は <b className="font-mono">{nowLabel}</b> です。出勤時刻を <b>{stdLabel}</b> として記録しますか？
             </div>
+            <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-[11px] text-amber-700">
+              規定時間より早い出勤のため、記録後に管理者の承認が必要になります。
+            </div>
             <button
               onClick={() => run({ clockInTime: todayAt(stdHour, stdMin, now), status: 'early_confirmed' })}
               disabled={saving}
@@ -3655,7 +3660,7 @@ function EoAdminIncentiveTab({ employeeAccounts, isDesktop }) {
   );
 }
 
-function AdminDashboardTab({ missingCount, correctionCount, leaveCount, performanceCount, gpsAlertCount, contractAlertCount, employeeCount, onNavigate, isDesktop }) {
+function AdminDashboardTab({ missingCount, correctionCount, leaveCount, performanceCount, gpsAlertCount, contractAlertCount, clockInApprovalCount = 0, employeeCount, onNavigate, isDesktop }) {
   const alertRows = [
     { label: '打刻漏れ・打刻間違い', count: missingCount, tab: 'requests', icon: <AlertTriangle size={14} /> },
     { label: '位置情報が5回以上連続で未記録', count: gpsAlertCount, tab: 'attendance', icon: <MapPin size={14} /> },
@@ -3665,6 +3670,7 @@ function AdminDashboardTab({ missingCount, correctionCount, leaveCount, performa
     { label: '未承認の勤怠修正申請', count: correctionCount, tab: 'requests', icon: <FileEdit size={14} /> },
     { label: '未承認の休暇申請', count: leaveCount, tab: 'leave', icon: <Palmtree size={14} /> },
     { label: '未承認の実績報告', count: performanceCount, tab: 'performance', icon: <ClipboardList size={14} /> },
+    { label: '遅刻・早出などの出勤承認', count: clockInApprovalCount, tab: 'attendance', icon: <Clock size={14} /> },
   ];
   const quickLinks = [
     { label: '勤怠一覧', tab: 'attendance', icon: <Clock size={17} /> },
@@ -4194,6 +4200,11 @@ function AdminView({ data, employeeAccounts, session, onDecide, onDecideLeave, o
   const contractAlertKey = todayKey(contractAlertDate);
   const contractAlerts = employeeAccounts.filter((acc) => acc.contractEnd && acc.contractEnd <= contractAlertKey);
 
+  const clockInApprovalCount = employeeAccounts.reduce((sum, acc) => {
+    const recs = data.records[acc.id] || {};
+    return sum + Object.values(recs).filter((r) => r?.clockInApproval === 'pending').length;
+  }, 0);
+
   const notifications = (data.notifications || []).slice(0, 6);
   const isMasterAdmin = session?.role === 'master_admin';
   const adminAccounts = data.accounts.filter((a) => a.role === 'admin' || a.role === 'master_admin');
@@ -4276,6 +4287,7 @@ function AdminView({ data, employeeAccounts, session, onDecide, onDecideLeave, o
           performanceCount={performancePending.length}
           gpsAlertCount={gpsAlerts.length}
           contractAlertCount={contractAlerts.length}
+          clockInApprovalCount={clockInApprovalCount}
           employeeCount={employeeAccounts.length}
           onNavigate={setTab}
           isDesktop={isDesktop}
@@ -4590,6 +4602,34 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
     return true;
   });
 
+  // 承認待ちの出勤（月・社員フィルターに関係なく、全期間から探す）
+  const [approvingKey, setApprovingKey] = useState(null);
+  const pendingApprovals = [];
+  employeeAccounts.forEach((acc) => {
+    const recs = data.records[acc.id] || {};
+    Object.values(recs).forEach((record) => {
+      if (record?.clockInApproval === 'pending') {
+        pendingApprovals.push({
+          employeeId: acc.id,
+          employeeName: acc.name,
+          date: record.date,
+          dateShort: formatAdminDate(record.date),
+          statusLabel: CLOCK_IN_STATUS_LABEL[record.clockInStatus] || record.clockInStatus,
+          clockIn: record.clockIn ? hhmm(new Date(record.clockIn)) : '',
+          clockInActual: record.clockInActual ? hhmm(new Date(record.clockInActual)) : '',
+          note: record.clockInNote || '',
+        });
+      }
+    });
+  });
+  pendingApprovals.sort((a, b) => (a.date < b.date ? 1 : -1));
+
+  const decideApproval = async (item, approve) => {
+    setApprovingKey(`${item.employeeId}|${item.date}`);
+    await onAdminUpdateAttendance(item.employeeId, item.date, { approve }, {});
+    setApprovingKey(null);
+  };
+
   const rows = [];
   const todayStr = todayKey();
   const monthDates = (() => {
@@ -4664,6 +4704,37 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
 
   return (
     <div className="space-y-5">
+      {pendingApprovals.length > 0 && (
+        <div className="bg-white rounded-2xl border-2 border-amber-300 shadow-sm overflow-hidden">
+          <div className="px-5 py-3.5 border-b border-amber-100 bg-amber-50 flex items-center gap-2">
+            <AlertTriangle size={16} className="text-amber-600" />
+            <h2 className="font-bold text-[13.5px] text-amber-800">承認待ちの出勤</h2>
+            <span className="ml-auto text-[11px] font-bold text-white bg-amber-600 rounded-full px-2 py-0.5">{pendingApprovals.length}件</span>
+          </div>
+          <div className="divide-y divide-slate-100">
+            {pendingApprovals.map((item) => {
+              const key = `${item.employeeId}|${item.date}`;
+              const busy = approvingKey === key;
+              return (
+                <div key={key} className="px-5 py-3 flex items-center justify-between gap-3 flex-wrap">
+                  <div>
+                    <div className="text-[13px] font-bold text-slate-800">{item.employeeName} ・ {item.dateShort}</div>
+                    <div className="text-[11.5px] text-slate-500 mt-0.5">
+                      {item.statusLabel}／記録 {item.clockIn}{item.clockInActual && item.clockInActual !== item.clockIn ? `（実打刻 ${item.clockInActual}）` : ''}
+                      {item.note && `・${item.note}`}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => decideApproval(item, false)} disabled={busy} className="text-[12px] font-bold text-slate-500 border border-slate-200 rounded-lg px-3 py-1.5 disabled:opacity-50">却下</button>
+                    <button onClick={() => decideApproval(item, true)} disabled={busy} className="text-[12px] font-bold text-white bg-amber-600 rounded-lg px-3 py-1.5 disabled:opacity-50">{busy ? '処理中…' : '承認する'}</button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {gpsAlerts.length > 0 && (
         <div className="bg-rose-50 border border-rose-200 rounded-xl px-4 py-3 flex items-start gap-2.5">
           <MapPin size={16} className="text-rose-500 mt-0.5 shrink-0" />
@@ -4721,8 +4792,8 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
               </tr></thead>
               <tbody>{rows.map((r) => {
                 const key = `${r.employeeId}|${r.date}`;
-                const e = edits[key] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: false };
-                const setField = (field, value) => setEdits((prev) => ({ ...prev, [key]: { ...(prev[key] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: false }), [field]: value } }));
+                const e = edits[key] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: undefined };
+                const setField = (field, value) => setEdits((prev) => ({ ...prev, [key]: { ...(prev[key] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: undefined }), [field]: value } }));
                 return (
                   <tr key={key} className={`border-b border-slate-100 last:border-0 ${r.needsApproval ? 'bg-amber-50/60' : ''}`}>
                     <td className="px-3 py-2 font-mono whitespace-nowrap">{r.dateShort}</td>
@@ -4764,8 +4835,8 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
         ) : (
           <div className="divide-y divide-slate-100">{rows.map((r) => {
             const key = `${r.employeeId}|${r.date}`;
-            const e = edits[key] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: false };
-            const setField = (field, value) => setEdits((prev) => ({ ...prev, [key]: { ...(prev[key] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: false }), [field]: value } }));
+            const e = edits[key] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: undefined };
+            const setField = (field, value) => setEdits((prev) => ({ ...prev, [key]: { ...(prev[key] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: undefined }), [field]: value } }));
             return (
               <div key={key} className={`px-4 py-3 ${r.needsApproval ? 'bg-amber-50/60' : ''}`}>
                 <div className="flex items-center justify-between">
