@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
+import * as XLSX from 'xlsx';
 import { Clock, MapPin, CheckCircle2, XCircle, AlertTriangle, LogIn, LogOut, FileEdit, Users, Bell, Calendar, Mail, LogOut as LogoutIcon, UserPlus, Lock, User, Monitor, Smartphone, Palmtree, Plus, Pencil, CalendarDays, ListChecks, ClipboardList, MessageSquare, Coffee, BarChart3, Home, Download, ChevronRight, LayoutGrid, Wallet, Briefcase, UserCog, Construction, Megaphone, Paperclip, FileText, Pin, Trash2, Key, ShieldCheck } from 'lucide-react';
 import { supabase, CLOUD_ENABLED, usernameToEmail } from './supabaseClient';
 
@@ -6639,10 +6640,51 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit }) {
 
 function AdminCommuteExpenseClaimsTab({ claims, onDecide, isDesktop }) {
   const [comment, setComment] = useState({});
+  const [exportMonth, setExportMonth] = useState('all');
   const pending = claims.filter((c) => c.status === 'pending');
   const decided = claims.filter((c) => c.status !== 'pending').slice(0, 20);
   const statusLabel = { pending: '承認待ち', approved: '承認済み', rejected: '差し戻し' };
   const statusClass = { pending: 'bg-amber-50 text-amber-600', approved: 'bg-emerald-50 text-emerald-600', rejected: 'bg-rose-50 text-rose-600' };
+  const targetMonths = Array.from(new Set(claims.map((c) => c.targetMonth).filter(Boolean))).sort().reverse();
+
+  const exportExcel = () => {
+    const approved = claims.filter((c) => c.status === 'approved' && (exportMonth === 'all' || c.targetMonth === exportMonth));
+    const rows = [];
+    approved.forEach((c) => {
+      c.items.forEach((r) => {
+        const amount = r.calcMethod === 'within_pass' ? 0 : r.calcMethod === 'excess' ? (Number(r.excessAmount) || 0) : r.calcMethod === 'pass_fare' ? (Number(r.passFare) || 0) : (Number(r.unitPrice) || 0);
+        rows.push({
+          '社員名': c.employeeName,
+          '対象月': c.targetMonth ? monthKeyLabel(c.targetMonth) : '',
+          '提出日': c.submittedDate,
+          '利用日': r.date,
+          '勤務先': r.workplace || '',
+          '乗物': r.transport || '',
+          '乗駅': r.fromStation || '',
+          '降駅': r.toStation || '',
+          '算出方法': COMMUTE_CALC_METHODS.find((m) => m.key === r.calcMethod)?.label || r.calcMethod,
+          '金額': amount,
+          '小計': r.subtotal,
+          '備考': r.note || '',
+          '承認日': c.decidedAt ? c.decidedAt.slice(0, 10) : '',
+          '管理者コメント': c.adminComment || '',
+        });
+      });
+    });
+    if (rows.length === 0) {
+      alert('対象の承認済み申請がありません');
+      return;
+    }
+    const ws = XLSX.utils.json_to_sheet(rows);
+    ws['!cols'] = [
+      { wch: 12 }, { wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 14 }, { wch: 8 },
+      { wch: 12 }, { wch: 12 }, { wch: 22 }, { wch: 10 }, { wch: 10 }, { wch: 16 }, { wch: 12 }, { wch: 20 },
+    ];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, '交通費精算');
+    const fileLabel = exportMonth === 'all' ? '全期間' : monthKeyLabel(exportMonth).replace(/[年月]/g, '');
+    XLSX.writeFile(wb, `交通費精算_承認済み_${fileLabel}.xlsx`);
+  };
 
   const Card = ({ c }) => (
     <div className="px-5 py-3.5 border-b border-slate-100 last:border-0">
@@ -6698,10 +6740,19 @@ function AdminCommuteExpenseClaimsTab({ claims, onDecide, isDesktop }) {
 
   return (
     <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-      <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+      <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2 flex-wrap">
         <Wallet size={15} className="text-slate-400" />
         <h2 className="font-bold text-[13.5px]">交通費精算書</h2>
         {pending.length > 0 && <span className="text-[10.5px] font-bold text-white bg-amber-600 rounded-full px-2 py-0.5">{pending.length}件 承認待ち</span>}
+        <div className="ml-auto flex items-center gap-2">
+          <select value={exportMonth} onChange={(e) => setExportMonth(e.target.value)} className="border border-slate-200 rounded-lg px-2 py-1.5 text-[12px] bg-white">
+            <option value="all">全期間</option>
+            {targetMonths.map((m) => <option key={m} value={m}>{monthKeyLabel(m)}分</option>)}
+          </select>
+          <button onClick={exportExcel} className="flex items-center gap-1.5 rounded-lg bg-slate-900 text-white px-3 py-1.5 text-[12px] font-bold">
+            <Download size={13} /> Excel出力（承認済み）
+          </button>
+        </div>
       </div>
       {claims.length === 0 ? (
         <div className="px-5 py-10 text-center text-[12.5px] text-slate-300">申請はまだありません</div>
