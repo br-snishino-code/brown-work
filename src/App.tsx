@@ -1089,9 +1089,11 @@ export default function AttendanceApp() {
   const geo = useGeolocation();
   const { toast, show } = useToast();
 
-  // カテゴリー（上部タブ・下部ナビ）を切り替えたら画面を一番上に戻す
+  // カテゴリー（上部タブ・下部ナビ）を切り替えたら画面を一番上に戻し、最新データを取得し直す
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
+    if (CLOUD_ENABLED && session) refreshData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [topTab, employeeTab]);
 
   // 今月の規定勤怠時間パターンを取得（社員のみ）
@@ -2304,6 +2306,7 @@ export default function AttendanceApp() {
             onSaveEmployeeAttendance={saveEmployeeAttendanceSchedule}
             onAdminUpdateAttendance={adminUpdateAttendance}
             onAdminUpdateAttendanceBatch={adminUpdateAttendanceBatch}
+            onRefresh={refreshData}
             isDesktop={isDesktop}
           />
         ))}
@@ -4776,10 +4779,12 @@ function AdminTopNav({ tab, setTab, correctionCount, leaveCount, performanceCoun
   );
 }
 
-function AdminView({ data, employeeAccounts, session, onDecide, onDecideLeave, onDecidePerformance, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, isDesktop }) {
+function AdminView({ data, employeeAccounts, session, onDecide, onDecideLeave, onDecidePerformance, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
   const [tab, setTab] = useState('dashboard'); // dashboard | attendance | requests | leave | performance | accounts
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
+    if (onRefresh) onRefresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
   const pending = data.corrections.filter((c) => c.status === 'pending');
   const decided = data.corrections.filter((c) => c.status !== 'pending').slice(0, 8);
