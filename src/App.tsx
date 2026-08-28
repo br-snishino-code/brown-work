@@ -125,7 +125,7 @@ const formatAdminDate = (key) => {
   const wd = d.getDay();
   const holidayName = getHolidayName(key);
   const label = `${pad(d.getMonth() + 1)}-${pad(d.getDate())}(${days[wd]}${holidayName ? '・祝' : ''})`;
-  const badgeClass = (wd === 0 || holidayName) ? 'bg-rose-50 text-rose-600' : wd === 6 ? 'bg-sky-50 text-sky-600' : '';
+  const badgeClass = (wd === 0 || holidayName) ? 'bg-rose-100 text-rose-700' : wd === 6 ? 'bg-sky-100 text-sky-700' : '';
   return { label, badgeClass, holidayName };
 };
 
@@ -4875,9 +4875,9 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
                 const e = edits[key] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: undefined };
                 const setField = (field, value) => setEdits((prev) => ({ ...prev, [key]: { ...(prev[key] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: undefined }), [field]: value } }));
                 return (
-                  <tr key={key} className={`border-b border-slate-100 last:border-0 ${r.needsApproval ? 'bg-amber-50/60' : ''}`}>
+                  <tr key={key} className={`border-b border-slate-100 last:border-0 ${r.needsApproval ? 'bg-amber-50/60' : r.dateBadgeClass}`}>
                     {employeeFilter === 'all' && <td className="px-3 py-2 font-semibold whitespace-nowrap">{r.employeeName}</td>}
-                    <td className={`px-3 py-2 font-mono font-semibold whitespace-nowrap ${r.dateBadgeClass}`}>{r.dateShort}</td>
+                    <td className="px-3 py-2 font-mono font-semibold whitespace-nowrap">{r.dateShort}</td>
                     <td className="px-3 py-2"><input type="time" value={e.clockIn || ''} onChange={(ev) => setField('clockIn', ev.target.value)} className="w-[92px] border border-slate-200 rounded px-1.5 py-1 font-mono text-[12px]" /></td>
                     <td className="px-3 py-2 font-mono text-slate-400 whitespace-nowrap">
                       {r.clockInActual || ''}
@@ -4919,9 +4919,9 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
             const e = edits[key] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: undefined };
             const setField = (field, value) => setEdits((prev) => ({ ...prev, [key]: { ...(prev[key] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: undefined }), [field]: value } }));
             return (
-              <div key={key} className={`px-4 py-3 ${r.needsApproval ? 'bg-amber-50/60' : ''}`}>
+              <div key={key} className={`px-4 py-3 ${r.needsApproval ? 'bg-amber-50/60' : r.dateBadgeClass}`}>
                 <div className="flex items-center justify-between">
-                  <div className={`inline-block font-mono text-[13px] font-semibold text-slate-700 px-2 py-0.5 rounded ${r.dateBadgeClass}`}>{r.dateShort}</div>
+                  <div className="inline-block font-mono text-[13px] font-semibold text-slate-700">{r.dateShort}</div>
                   {employeeFilter === 'all' && <div className="text-[12px] font-bold text-slate-600">{r.employeeName}</div>}
                 </div>
                 <div className="mt-2 grid grid-cols-3 gap-2">
