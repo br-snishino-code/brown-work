@@ -549,7 +549,7 @@ function ToastView({ toast }) {
 // 以降のコンポーネント（LoginScreenなど）は一切変更していません。
 // ============================================================
 
-const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, performanceReports: [], payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, employeeAttendanceSchedules: {}, announcements: [] };
+const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, performanceReports: [], payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, employeeAttendanceSchedules: {}, announcements: [], yearEndAdjustments: [] };
 
 // ---- row(snake_case) → app(camelCase) 変換 ----
 const rowToAccount = (row) => ({
@@ -754,6 +754,26 @@ const rowToProfileRequest = (row) => ({
   decidedAt: row.decided_at,
 });
 
+const rowToYearEndAdjustment = (row) => ({
+  id: row.id,
+  employeeId: row.employee_id,
+  employeeName: row.employees?.name || '',
+  year: row.year,
+  spouseStatus: row.spouse_status || '無',
+  spouseIncome: row.spouse_income != null ? Number(row.spouse_income) : null,
+  dependentsCount: row.dependents_count || 0,
+  lifeInsurancePremium: Number(row.life_insurance_premium) || 0,
+  earthquakeInsurancePremium: Number(row.earthquake_insurance_premium) || 0,
+  socialInsurancePremiumPaid: Number(row.social_insurance_premium_paid) || 0,
+  hasMortgageDeduction: !!row.has_mortgage_deduction,
+  mortgageDeductionAmount: row.mortgage_deduction_amount != null ? Number(row.mortgage_deduction_amount) : null,
+  notes: row.notes || '',
+  status: row.status,
+  adminComment: row.admin_comment,
+  submittedAt: row.submitted_at,
+  decidedAt: row.decided_at,
+});
+
 const ANNOUNCEMENT_CATEGORIES = ['お知らせ', '制度・インセンティブ', '資料・料金表', 'キャンペーン', 'その他'];
 
 const rowToAnnouncement = (row) => ({
@@ -784,6 +804,7 @@ async function fetchAllData() {
     groupLeaveRes,
     employeeAttendanceRes,
     announcementsRes,
+    yearEndRes,
   ] = await Promise.all([
     supabase.from('employees').select('*'),
     supabase.from('attendance_records').select('*'),
@@ -797,9 +818,10 @@ async function fetchAllData() {
     supabase.from('group_attendance_schedules').select('*'),
     supabase.from('employee_attendance_schedules').select('*'),
     supabase.from('announcements').select('*').order('is_pinned', { ascending: false }).order('created_at', { ascending: false }),
+    supabase.from('year_end_adjustments').select('*, employees(name)').order('submitted_at', { ascending: false }),
   ]);
 
-  for (const res of [employeesRes, recordsRes, correctionsRes, leaveRes, perfRes, notifRes, payrollRes, auditRes, profileReqRes, groupLeaveRes, employeeAttendanceRes, announcementsRes]) {
+  for (const res of [employeesRes, recordsRes, correctionsRes, leaveRes, perfRes, notifRes, payrollRes, auditRes, profileReqRes, groupLeaveRes, employeeAttendanceRes, announcementsRes, yearEndRes]) {
     if (res.error) throw res.error;
   }
 
@@ -837,6 +859,7 @@ async function fetchAllData() {
     groupLeaveSchedules,
     employeeAttendanceSchedules,
     announcements: (announcementsRes.data || []).map(rowToAnnouncement),
+    yearEndAdjustments: (yearEndRes.data || []).map(rowToYearEndAdjustment),
   };
 }
 
@@ -1771,6 +1794,66 @@ export default function AttendanceApp() {
     show(decision === 'approved' ? '変更申請を承認しました' : '変更申請を却下しました', decision === 'approved' ? 'success' : 'warn');
   };
 
+  // 年末調整の申告を提出（対象年ごとに1件、既にあれば上書き）
+  const submitYearEndAdjustment = async (payload) => {
+    const { data: inserted, error } = await supabase
+      .from('year_end_adjustments')
+      .upsert(
+        {
+          employee_id: employeeId,
+          year: payload.year,
+          spouse_status: payload.spouseStatus,
+          spouse_income: payload.spouseStatus === '有' ? Number(payload.spouseIncome) || 0 : null,
+          dependents_count: Number(payload.dependentsCount) || 0,
+          life_insurance_premium: Number(payload.lifeInsurancePremium) || 0,
+          earthquake_insurance_premium: Number(payload.earthquakeInsurancePremium) || 0,
+          social_insurance_premium_paid: Number(payload.socialInsurancePremiumPaid) || 0,
+          has_mortgage_deduction: !!payload.hasMortgageDeduction,
+          mortgage_deduction_amount: payload.hasMortgageDeduction ? Number(payload.mortgageDeductionAmount) || 0 : null,
+          notes: payload.notes || null,
+          status: 'pending',
+          admin_comment: null,
+          decided_at: null,
+        },
+        { onConflict: 'employee_id,year' }
+      )
+      .select()
+      .single();
+    if (error) {
+      show('年末調整の申告に失敗しました', 'warn');
+      return;
+    }
+    await notifyAdmin(
+      `【年末調整】${session.name} - ${payload.year}年分`,
+      `${session.name}さんより ${payload.year}年分の年末調整申告が届きました。内容をご確認のうえ承認してください。`,
+      inserted?.id
+    );
+    await refreshData();
+    show(`${payload.year}年分の年末調整を申告しました`, 'success');
+  };
+
+  const decideYearEndAdjustment = async (id, decision, comment) => {
+    const request = data.yearEndAdjustments.find((r) => r.id === id);
+    if (!request) return;
+    const { error } = await supabase
+      .from('year_end_adjustments')
+      .update({ status: decision, admin_comment: comment || null, decided_at: new Date().toISOString() })
+      .eq('id', id);
+    if (error) {
+      show('処理に失敗しました', 'warn');
+      return;
+    }
+    await notifyEmployeeUser(
+      request.employeeId,
+      `【年末調整${decision === 'approved' ? '承認' : '差し戻し'}】${request.year}年分`,
+      `${request.year}年分の年末調整申告が${decision === 'approved' ? '承認されました' : '差し戻されました'}。${comment ? `管理者コメント：${comment}` : ''}`,
+      id
+    );
+    await refreshData();
+    await logAudit(session, decision === 'approved' ? '年末調整を承認' : '年末調整を差し戻し', `${request.year}年分`, request.employeeId, request.employeeName);
+    show(decision === 'approved' ? '承認しました' : '差し戻しました', decision === 'approved' ? 'success' : 'warn');
+  };
+
   const saveGroupLeaveSchedule = async (groupName, monthlyDays) => {
     const rows = Object.entries(monthlyDays).map(([month, days]) => ({
       group_name: groupName,
@@ -2028,17 +2111,31 @@ export default function AttendanceApp() {
         )}
         {topTab === 'hr' && (
           session.role === 'employee' ? (
-            <ProfileRequestView
-              session={session}
-              requests={data.profileUpdateRequests.filter((r) => r.employeeId === employeeId)}
-              onSubmit={submitProfileUpdateRequest}
-            />
+            <div className="space-y-5">
+              <YearEndAdjustmentSection
+                session={session}
+                requests={data.yearEndAdjustments.filter((r) => r.employeeId === employeeId)}
+                onSubmit={submitYearEndAdjustment}
+              />
+              <ProfileRequestView
+                session={session}
+                requests={data.profileUpdateRequests.filter((r) => r.employeeId === employeeId)}
+                onSubmit={submitProfileUpdateRequest}
+              />
+            </div>
           ) : (
-            <AdminProfileRequestsTab
-              requests={data.profileUpdateRequests}
-              onDecide={decideProfileUpdateRequest}
-              isDesktop={isDesktop}
-            />
+            <div className="space-y-5">
+              <AdminYearEndAdjustmentTab
+                requests={data.yearEndAdjustments}
+                onDecide={decideYearEndAdjustment}
+                isDesktop={isDesktop}
+              />
+              <AdminProfileRequestsTab
+                requests={data.profileUpdateRequests}
+                onDecide={decideProfileUpdateRequest}
+                isDesktop={isDesktop}
+              />
+            </div>
           )
         )}
         {topTab === 'payroll' && (
@@ -5170,6 +5267,212 @@ function StatMini({ label, value }) {
 }
 function MiniValue({ label, value }) {
   return <div><div className="text-[9.5px] text-slate-400">{label}</div><div className="font-mono text-[12.5px] font-semibold text-slate-700">{value}</div></div>;
+}
+
+// ---- 年末調整 ----
+function YearEndAdjustmentSection({ session, requests, onSubmit }) {
+  const now = new Date();
+  const [year, setYear] = useState(now.getFullYear());
+  const existing = requests.find((r) => r.year === year);
+  const [editing, setEditing] = useState(!existing);
+
+  const [spouseStatus, setSpouseStatus] = useState('無');
+  const [spouseIncome, setSpouseIncome] = useState('0');
+  const [dependentsCount, setDependentsCount] = useState('0');
+  const [lifeInsurancePremium, setLifeInsurancePremium] = useState('0');
+  const [earthquakeInsurancePremium, setEarthquakeInsurancePremium] = useState('0');
+  const [socialInsurancePremiumPaid, setSocialInsurancePremiumPaid] = useState('0');
+  const [hasMortgageDeduction, setHasMortgageDeduction] = useState(false);
+  const [mortgageDeductionAmount, setMortgageDeductionAmount] = useState('0');
+  const [notes, setNotes] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setEditing(!existing);
+    setSpouseStatus(existing?.spouseStatus || '無');
+    setSpouseIncome(String(existing?.spouseIncome ?? 0));
+    setDependentsCount(String(existing?.dependentsCount ?? 0));
+    setLifeInsurancePremium(String(existing?.lifeInsurancePremium ?? 0));
+    setEarthquakeInsurancePremium(String(existing?.earthquakeInsurancePremium ?? 0));
+    setSocialInsurancePremiumPaid(String(existing?.socialInsurancePremiumPaid ?? 0));
+    setHasMortgageDeduction(!!existing?.hasMortgageDeduction);
+    setMortgageDeductionAmount(String(existing?.mortgageDeductionAmount ?? 0));
+    setNotes(existing?.notes || '');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [year, existing?.id]);
+
+  const submit = async () => {
+    setSaving(true);
+    await onSubmit({
+      year,
+      spouseStatus,
+      spouseIncome,
+      dependentsCount,
+      lifeInsurancePremium,
+      earthquakeInsurancePremium,
+      socialInsurancePremiumPaid,
+      hasMortgageDeduction,
+      mortgageDeductionAmount,
+      notes,
+    });
+    setSaving(false);
+    setEditing(false);
+  };
+
+  const years = [now.getFullYear() - 1, now.getFullYear()];
+  const statusLabel = { pending: '承認待ち', approved: '承認済み', rejected: '差し戻し' };
+  const statusClass = { pending: 'bg-amber-50 text-amber-600', approved: 'bg-emerald-50 text-emerald-600', rejected: 'bg-rose-50 text-rose-600' };
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+      <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2 flex-wrap">
+        <FileText size={15} className="text-slate-400" />
+        <h2 className="font-bold text-[13.5px]">年末調整の申告</h2>
+        <select value={year} onChange={(e) => setYear(Number(e.target.value))} className="ml-auto border border-slate-200 rounded-lg px-2 py-1.5 text-[12.5px] bg-white">
+          {years.map((y) => <option key={y} value={y}>{y}年分</option>)}
+        </select>
+      </div>
+
+      {existing && (
+        <div className="px-5 pt-3 flex items-center gap-2">
+          <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${statusClass[existing.status]}`}>{statusLabel[existing.status]}</span>
+          {existing.adminComment && <span className="text-[11.5px] text-slate-400">管理者コメント：{existing.adminComment}</span>}
+          {!editing && existing.status !== 'approved' && (
+            <button onClick={() => setEditing(true)} className="ml-auto text-[11.5px] font-bold text-amber-600">編集する</button>
+          )}
+        </div>
+      )}
+
+      {!editing && existing ? (
+        <div className="px-5 py-4 space-y-1.5 text-[12.5px]">
+          <Row label="配偶者の有無" value={existing.spouseStatus} />
+          {existing.spouseStatus === '有' && <Row label="配偶者の年間所得見積" value={formatYen(existing.spouseIncome || 0)} />}
+          <Row label="扶養親族の人数" value={`${existing.dependentsCount}人`} />
+          <Row label="生命保険料（年間）" value={formatYen(existing.lifeInsurancePremium)} />
+          <Row label="地震保険料（年間）" value={formatYen(existing.earthquakeInsurancePremium)} />
+          <Row label="社会保険料（本人払い分）" value={formatYen(existing.socialInsurancePremiumPaid)} />
+          <Row label="住宅ローン控除" value={existing.hasMortgageDeduction ? `有（${formatYen(existing.mortgageDeductionAmount || 0)}）` : '無'} />
+          {existing.notes && <Row label="備考" value={existing.notes} />}
+        </div>
+      ) : (
+        <div className="px-5 py-4 space-y-3">
+          <Field label="配偶者の有無">
+            <select value={spouseStatus} onChange={(e) => setSpouseStatus(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white">
+              <option value="無">無</option>
+              <option value="有">有</option>
+            </select>
+          </Field>
+          {spouseStatus === '有' && (
+            <Field label="配偶者の年間所得見積（円）">
+              <input type="number" value={spouseIncome} onChange={(e) => setSpouseIncome(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
+            </Field>
+          )}
+          <Field label="扶養親族の人数">
+            <input type="number" min="0" value={dependentsCount} onChange={(e) => setDependentsCount(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
+          </Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="生命保険料（年間支払額・円）">
+              <input type="number" value={lifeInsurancePremium} onChange={(e) => setLifeInsurancePremium(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
+            </Field>
+            <Field label="地震保険料（年間支払額・円）">
+              <input type="number" value={earthquakeInsurancePremium} onChange={(e) => setEarthquakeInsurancePremium(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
+            </Field>
+          </div>
+          <Field label="社会保険料（給与天引き以外で本人が支払った分・円）">
+            <input type="number" value={socialInsurancePremiumPaid} onChange={(e) => setSocialInsurancePremiumPaid(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
+          </Field>
+          <label className="flex items-center gap-2 text-[12.5px] text-slate-600">
+            <input type="checkbox" checked={hasMortgageDeduction} onChange={(e) => setHasMortgageDeduction(e.target.checked)} />
+            住宅借入金等特別控除（住宅ローン控除）を受ける
+          </label>
+          {hasMortgageDeduction && (
+            <Field label="住宅ローン控除の見込み額（円）">
+              <input type="number" value={mortgageDeductionAmount} onChange={(e) => setMortgageDeductionAmount(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
+            </Field>
+          )}
+          <Field label="備考（任意）">
+            <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px] resize-none" />
+          </Field>
+          <div className="text-[11px] text-slate-400">保険料控除証明書などの証憑書類は、別途管理者へご提出ください。</div>
+          <div className="flex gap-2">
+            {existing && <button onClick={() => setEditing(false)} className="flex-1 py-2.5 rounded-lg border border-slate-200 text-[13px] font-medium text-slate-500">キャンセル</button>}
+            <button onClick={submit} disabled={saving} className="flex-1 py-2.5 rounded-lg bg-amber-600 disabled:bg-slate-200 text-white text-[13px] font-bold">
+              {saving ? '送信中…' : `${year}年分を申告する`}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AdminYearEndAdjustmentTab({ requests, onDecide, isDesktop }) {
+  const now = new Date();
+  const [yearFilter, setYearFilter] = useState(now.getFullYear());
+  const [comment, setComment] = useState({});
+
+  const years = Array.from(new Set(requests.map((r) => r.year))).sort((a, b) => b - a);
+  if (!years.includes(now.getFullYear())) years.unshift(now.getFullYear());
+
+  const filtered = requests.filter((r) => r.year === yearFilter).sort((a, b) => (a.submittedAt < b.submittedAt ? 1 : -1));
+  const pending = filtered.filter((r) => r.status === 'pending');
+  const decided = filtered.filter((r) => r.status !== 'pending');
+  const statusLabel = { pending: '承認待ち', approved: '承認済み', rejected: '差し戻し' };
+  const statusClass = { pending: 'bg-amber-50 text-amber-600', approved: 'bg-emerald-50 text-emerald-600', rejected: 'bg-rose-50 text-rose-600' };
+
+  const Card = ({ r }) => (
+    <div className="px-5 py-3.5 border-b border-slate-100 last:border-0">
+      <div className="flex items-center justify-between mb-1.5">
+        <span className="font-semibold text-[13px] text-slate-800">{r.employeeName}</span>
+        <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full ${statusClass[r.status]}`}>{statusLabel[r.status]}</span>
+      </div>
+      <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[12px] text-slate-600 mb-2">
+        <span>配偶者：{r.spouseStatus}{r.spouseStatus === '有' ? `（${formatYen(r.spouseIncome || 0)}）` : ''}</span>
+        <span>扶養親族：{r.dependentsCount}人</span>
+        <span>生命保険料：{formatYen(r.lifeInsurancePremium)}</span>
+        <span>地震保険料：{formatYen(r.earthquakeInsurancePremium)}</span>
+        <span>社会保険料（本人払い）：{formatYen(r.socialInsurancePremiumPaid)}</span>
+        <span>住宅ローン控除：{r.hasMortgageDeduction ? `有（${formatYen(r.mortgageDeductionAmount || 0)}）` : '無'}</span>
+      </div>
+      {r.notes && <div className="text-[11.5px] text-slate-500 mb-2">備考：{r.notes}</div>}
+      {r.status === 'pending' ? (
+        <div className="space-y-2">
+          <input
+            value={comment[r.id] || ''}
+            onChange={(e) => setComment((c) => ({ ...c, [r.id]: e.target.value }))}
+            placeholder="コメント（任意）"
+            className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-[12.5px]"
+          />
+          <div className="flex gap-2">
+            <button onClick={() => onDecide(r.id, 'rejected', comment[r.id])} className="flex-1 py-1.5 rounded-lg border border-slate-200 text-[12px] font-bold text-slate-500">差し戻す</button>
+            <button onClick={() => onDecide(r.id, 'approved', comment[r.id])} className="flex-1 py-1.5 rounded-lg bg-emerald-600 text-white text-[12px] font-bold">承認する</button>
+          </div>
+        </div>
+      ) : (
+        r.adminComment && <div className="text-[11.5px] text-slate-400">管理者コメント：{r.adminComment}</div>
+      )}
+    </div>
+  );
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+      <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+        <FileText size={15} className="text-slate-400" />
+        <h2 className="font-bold text-[13.5px]">年末調整の申告一覧</h2>
+        <select value={yearFilter} onChange={(e) => setYearFilter(Number(e.target.value))} className="ml-auto border border-slate-200 rounded-lg px-2 py-1.5 text-[12.5px] bg-white">
+          {years.map((y) => <option key={y} value={y}>{y}年分</option>)}
+        </select>
+      </div>
+      {filtered.length === 0 ? (
+        <div className="px-5 py-10 text-center text-[12.5px] text-slate-300">{yearFilter}年分の申告はまだありません</div>
+      ) : (
+        <div>
+          {pending.map((r) => <Card key={r.id} r={r} />)}
+          {decided.map((r) => <Card key={r.id} r={r} />)}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function ProfileRequestView({ session, requests, onSubmit }) {
