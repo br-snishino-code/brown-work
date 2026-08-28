@@ -6429,12 +6429,26 @@ function AdminYearEndAdjustmentTab({ requests, onDecide, isDesktop }) {
 }
 
 // ---- 交通費精算書 ----
-const emptyCommuteRow = () => ({ date: '', transport: '', fromStation: '', toStation: '', unitPrice: '', roundTrip: true, note: '' });
-const computeCommuteRowSubtotal = (row) => (Number(row.unitPrice) || 0) * (row.roundTrip ? 2 : 1);
+const COMMUTE_CALC_METHODS = [
+  { key: 'round_trip', label: '実費（往復）' },
+  { key: 'one_way', label: '実費（片道）' },
+  { key: 'within_pass', label: '定期代の範囲内（追加費用なし）' },
+  { key: 'excess', label: '定期代を超える差額分' },
+];
+const emptyCommuteRow = () => ({ date: '', workplace: '', transport: '', fromStation: '', toStation: '', calcMethod: 'round_trip', unitPrice: '', excessAmount: '', note: '' });
+const computeCommuteRowSubtotal = (row) => {
+  switch (row.calcMethod) {
+    case 'one_way': return Number(row.unitPrice) || 0;
+    case 'within_pass': return 0;
+    case 'excess': return Number(row.excessAmount) || 0;
+    case 'round_trip':
+    default: return (Number(row.unitPrice) || 0) * 2;
+  }
+};
+const yahooTransitUrl = (from, to) => `https://transit.yahoo.co.jp/search/result?flatlon=&from=${encodeURIComponent(from || '')}&to=${encodeURIComponent(to || '')}`;
 
 function CommuteExpenseClaimSection({ session, claims, onSubmit }) {
   const [formOpen, setFormOpen] = useState(false);
-  const [workplace, setWorkplace] = useState('');
   const [targetMonth, setTargetMonth] = useState(() => prevMonthKey());
   const [submittedDate, setSubmittedDate] = useState(todayKey());
   const [rows, setRows] = useState(() => Array.from({ length: 5 }, emptyCommuteRow));
@@ -6442,19 +6456,19 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit }) {
 
   const updateRow = (i, field, value) => setRows((prev) => prev.map((r, idx) => (idx === i ? { ...r, [field]: value } : r)));
   const addRow = () => setRows((prev) => [...prev, emptyCommuteRow()]);
+  const copyPrevRow = (i) => setRows((prev) => prev.map((r, idx) => (idx === i && i > 0 ? { ...prev[i - 1], date: r.date, note: '' } : r)));
   const removeRow = (i) => setRows((prev) => prev.filter((_, idx) => idx !== i));
   const total = rows.reduce((sum, r) => sum + computeCommuteRowSubtotal(r), 0);
 
   const submit = async () => {
     const items = rows
-      .filter((r) => r.date && r.fromStation && r.toStation && r.unitPrice)
+      .filter((r) => r.date && r.fromStation && r.toStation)
       .map((r) => ({ ...r, subtotal: computeCommuteRowSubtotal(r) }));
     if (items.length === 0) return;
     setSaving(true);
-    const ok = await onSubmit({ workplace, targetMonth, submittedDate, items, totalAmount: items.reduce((s, r) => s + r.subtotal, 0) });
+    const ok = await onSubmit({ targetMonth, submittedDate, items, totalAmount: items.reduce((s, r) => s + r.subtotal, 0) });
     setSaving(false);
     if (ok) {
-      setWorkplace('');
       setTargetMonth(prevMonthKey());
       setSubmittedDate(todayKey());
       setRows(Array.from({ length: 5 }, emptyCommuteRow));
@@ -6467,44 +6481,74 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit }) {
 
   return (
     <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-      <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+      <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2 flex-wrap">
         <Wallet size={15} className="text-slate-400" />
         <h2 className="font-bold text-[13.5px]">交通費精算書</h2>
+        <span className="text-[13px] font-extrabold text-rose-600">※ 締切：毎月1日</span>
         <button onClick={() => setFormOpen((v) => !v)} className="ml-auto text-[11.5px] font-bold text-amber-600 flex items-center gap-1">
           <Plus size={12} />{formOpen ? '閉じる' : '新規申請'}
         </button>
       </div>
 
+      <div className="px-5 py-2.5 bg-rose-50 border-b border-rose-100 text-[11.5px] text-rose-700">
+        締切（毎月1日）までに申請が間に合わない場合、給与の締め処理の都合上、お支払いが<b>翌月分に繰り越される</b>場合があります。お早めの申請にご協力ください。
+      </div>
+
       {formOpen && (
         <div className="px-5 py-4 space-y-3 border-b border-slate-100">
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-2 gap-3">
             <Field label="対象月">
               <input type="month" value={targetMonth} onChange={(e) => setTargetMonth(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
             </Field>
-            <Field label="勤務先"><input value={workplace} onChange={(e) => setWorkplace(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" /></Field>
             <Field label="提出日"><input type="date" value={submittedDate} onChange={(e) => setSubmittedDate(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" /></Field>
           </div>
-          <div className="text-[10.5px] text-slate-400">毎月分をまとめて、翌月1日までに申請してください。往復利用の場合は「往復」にチェックを入れると、単価×2で小計が自動計算されます。行が足りない場合は下の「行を追加」で増やせます。</div>
+
+          <div className="bg-blue-50 border border-blue-200 rounded-xl px-3.5 py-3 text-[11.5px] text-blue-800 space-y-1">
+            <div className="font-bold">入力方法のご案内</div>
+            <div>・勤務先が日によって変わる方は、行ごとに「勤務先」を入力してください。</div>
+            <div>・算出方法は行ごとに選べます：<b>実費(往復/片道)</b>／<b>定期代の範囲内(追加費用なし)</b>／<b>定期代を超える差額分</b>。</div>
+            <div>・運賃がわからない場合は、各行の「経路を調べる」リンクからYahoo!路線情報で最安の交通手段・運賃を確認できます。</div>
+            <div>・行が足りない場合は下の「行を追加」で増やせます。</div>
+          </div>
 
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[720px] text-[12px]">
+            <table className="w-full min-w-[980px] text-[12px]">
               <thead>
                 <tr className="text-left text-[10.5px] text-slate-400 border-b border-slate-100">
-                  {['利用日','乗物','乗駅','降駅','単価','往復','小計','備考',''].map((h) => <th key={h} className="px-2 py-1.5 font-medium">{h}</th>)}
+                  {['利用日','勤務先','乗物','乗駅','降駅','算出方法','金額','小計','備考',''].map((h) => <th key={h} className="px-2 py-1.5 font-medium whitespace-nowrap">{h}</th>)}
                 </tr>
               </thead>
               <tbody>
                 {rows.map((r, i) => (
-                  <tr key={i} className="border-b border-slate-100 last:border-0">
-                    <td className="px-2 py-1.5"><input type="date" value={r.date} onChange={(e) => updateRow(i, 'date', e.target.value)} className="w-[130px] border border-slate-200 rounded px-1.5 py-1 font-mono text-[11.5px]" /></td>
-                    <td className="px-2 py-1.5"><input value={r.transport} onChange={(e) => updateRow(i, 'transport', e.target.value)} placeholder="阪急" className="w-20 border border-slate-200 rounded px-1.5 py-1 text-[11.5px]" /></td>
+                  <tr key={i} className="border-b border-slate-100 last:border-0 align-top">
+                    <td className="px-2 py-1.5">
+                      <input type="date" value={r.date} onChange={(e) => updateRow(i, 'date', e.target.value)} className="w-[128px] border border-slate-200 rounded px-1.5 py-1 font-mono text-[11.5px]" />
+                      {i > 0 && <button onClick={() => copyPrevRow(i)} className="block mt-1 text-[10px] text-amber-600 font-bold">↑前日をコピー</button>}
+                    </td>
+                    <td className="px-2 py-1.5"><input value={r.workplace} onChange={(e) => updateRow(i, 'workplace', e.target.value)} placeholder="勤務先" className="w-24 border border-slate-200 rounded px-1.5 py-1 text-[11.5px]" /></td>
+                    <td className="px-2 py-1.5"><input value={r.transport} onChange={(e) => updateRow(i, 'transport', e.target.value)} placeholder="阪急" className="w-16 border border-slate-200 rounded px-1.5 py-1 text-[11.5px]" /></td>
                     <td className="px-2 py-1.5"><input value={r.fromStation} onChange={(e) => updateRow(i, 'fromStation', e.target.value)} placeholder="西向日" className="w-20 border border-slate-200 rounded px-1.5 py-1 text-[11.5px]" /></td>
                     <td className="px-2 py-1.5"><input value={r.toStation} onChange={(e) => updateRow(i, 'toStation', e.target.value)} placeholder="烏丸" className="w-20 border border-slate-200 rounded px-1.5 py-1 text-[11.5px]" /></td>
-                    <td className="px-2 py-1.5"><input type="number" value={r.unitPrice} onChange={(e) => updateRow(i, 'unitPrice', e.target.value)} className="w-16 border border-slate-200 rounded px-1.5 py-1 font-mono text-[11.5px]" /></td>
-                    <td className="px-2 py-1.5 text-center"><input type="checkbox" checked={r.roundTrip} onChange={(e) => updateRow(i, 'roundTrip', e.target.checked)} /></td>
-                    <td className="px-2 py-1.5 font-mono text-slate-500 whitespace-nowrap">{formatYen(computeCommuteRowSubtotal(r))}</td>
+                    <td className="px-2 py-1.5">
+                      <select value={r.calcMethod} onChange={(e) => updateRow(i, 'calcMethod', e.target.value)} className="w-[168px] border border-slate-200 rounded px-1.5 py-1 text-[11px] bg-white">
+                        {COMMUTE_CALC_METHODS.map((m) => <option key={m.key} value={m.key}>{m.label}</option>)}
+                      </select>
+                    </td>
+                    <td className="px-2 py-1.5">
+                      {r.calcMethod === 'within_pass' ? (
+                        <span className="text-[10.5px] text-slate-300">不要</span>
+                      ) : r.calcMethod === 'excess' ? (
+                        <input type="number" value={r.excessAmount} onChange={(e) => updateRow(i, 'excessAmount', e.target.value)} placeholder="差額" className="w-20 border border-slate-200 rounded px-1.5 py-1 font-mono text-[11.5px]" />
+                      ) : (
+                        <input type="number" value={r.unitPrice} onChange={(e) => updateRow(i, 'unitPrice', e.target.value)} placeholder={r.calcMethod === 'round_trip' ? '片道単価' : '運賃'} className="w-20 border border-slate-200 rounded px-1.5 py-1 font-mono text-[11.5px]" />
+                      )}
+                      {r.fromStation && r.toStation && (
+                        <a href={yahooTransitUrl(r.fromStation, r.toStation)} target="_blank" rel="noopener noreferrer" className="block mt-1 text-[10px] text-blue-600 font-bold">経路を調べる↗</a>
+                      )}
+                    </td>
+                    <td className="px-2 py-1.5 font-mono text-slate-500 whitespace-nowrap pt-2.5">{formatYen(computeCommuteRowSubtotal(r))}</td>
                     <td className="px-2 py-1.5"><input value={r.note} onChange={(e) => updateRow(i, 'note', e.target.value)} className="w-20 border border-slate-200 rounded px-1.5 py-1 text-[11.5px]" /></td>
-                    <td className="px-2 py-1.5"><button onClick={() => removeRow(i)} className="text-slate-300 hover:text-rose-500"><Trash2 size={13} /></button></td>
+                    <td className="px-2 py-1.5 pt-2.5"><button onClick={() => removeRow(i)} className="text-slate-300 hover:text-rose-500"><Trash2 size={13} /></button></td>
                   </tr>
                 ))}
               </tbody>
@@ -6552,24 +6596,25 @@ function AdminCommuteExpenseClaimsTab({ claims, onDecide, isDesktop }) {
   const Card = ({ c }) => (
     <div className="px-5 py-3.5 border-b border-slate-100 last:border-0">
       <div className="flex items-center justify-between mb-1.5">
-        <span className="font-semibold text-[13px] text-slate-800">{c.employeeName} ・ {c.targetMonth ? `${monthKeyLabel(c.targetMonth)}分` : ''} ・ {dateLabel(c.submittedDate)}提出{c.workplace ? `（${c.workplace}）` : ''}</span>
+        <span className="font-semibold text-[13px] text-slate-800">{c.employeeName} ・ {c.targetMonth ? `${monthKeyLabel(c.targetMonth)}分` : ''} ・ {dateLabel(c.submittedDate)}提出</span>
         <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full ${statusClass[c.status]}`}>{statusLabel[c.status]}</span>
       </div>
       <div className="overflow-x-auto mb-2">
-        <table className="w-full min-w-[600px] text-[11.5px]">
+        <table className="w-full min-w-[720px] text-[11.5px]">
           <thead>
             <tr className="text-left text-[10px] text-slate-400 border-b border-slate-100">
-              {['利用日','乗物','区間','単価','往復','小計','備考'].map((h) => <th key={h} className="px-2 py-1 font-medium">{h}</th>)}
+              {['利用日','勤務先','乗物','区間','算出方法','金額','小計','備考'].map((h) => <th key={h} className="px-2 py-1 font-medium whitespace-nowrap">{h}</th>)}
             </tr>
           </thead>
           <tbody>
             {c.items.map((r, i) => (
               <tr key={i} className="border-b border-slate-50 last:border-0">
                 <td className="px-2 py-1 font-mono whitespace-nowrap">{r.date}</td>
+                <td className="px-2 py-1 whitespace-nowrap">{r.workplace}</td>
                 <td className="px-2 py-1">{r.transport}</td>
                 <td className="px-2 py-1 whitespace-nowrap">{r.fromStation}～{r.toStation}</td>
-                <td className="px-2 py-1 font-mono">{formatYen(Number(r.unitPrice) || 0)}</td>
-                <td className="px-2 py-1">{r.roundTrip ? '○' : ''}</td>
+                <td className="px-2 py-1 whitespace-nowrap">{COMMUTE_CALC_METHODS.find((m) => m.key === r.calcMethod)?.label || r.calcMethod}</td>
+                <td className="px-2 py-1 font-mono">{r.calcMethod === 'within_pass' ? '－' : formatYen(r.calcMethod === 'excess' ? (Number(r.excessAmount) || 0) : (Number(r.unitPrice) || 0))}</td>
                 <td className="px-2 py-1 font-mono font-semibold">{formatYen(r.subtotal)}</td>
                 <td className="px-2 py-1">{r.note}</td>
               </tr>
