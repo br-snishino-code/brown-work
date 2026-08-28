@@ -43,11 +43,90 @@ const dateLabel = (key) => {
   const days = ['日', '月', '火', '水', '木', '金', '土'];
   return `${d.getMonth() + 1}/${d.getDate()}（${days[d.getDay()]}）`;
 };
-// 管理者向け一覧用：YYYY-MM-DD → MM-DD(曜)
+
+// ---- 日本の祝日判定 ----
+const _nthMonday = (year, month, n) => {
+  let count = 0;
+  for (let d = 1; d <= 31; d++) {
+    const dt = new Date(year, month - 1, d);
+    if (dt.getMonth() !== month - 1) break;
+    if (dt.getDay() === 1) {
+      count++;
+      if (count === n) return d;
+    }
+  }
+  return null;
+};
+const _holidayCache = {};
+function getJapaneseHolidays(year) {
+  if (_holidayCache[year]) return _holidayCache[year];
+  const base = {};
+  const add = (m, d, name) => { if (d) base[`${year}-${pad(m)}-${pad(d)}`] = name; };
+
+  add(1, 1, '元日');
+  add(1, _nthMonday(year, 1, 2), '成人の日');
+  add(2, 11, '建国記念の日');
+  if (year >= 2020) add(2, 23, '天皇誕生日');
+  const shunbun = Math.floor(20.8431 + 0.242194 * (year - 1980)) - Math.floor((year - 1980) / 4);
+  add(3, shunbun, '春分の日');
+  add(4, 29, '昭和の日');
+  add(5, 3, '憲法記念日');
+  add(5, 4, 'みどりの日');
+  add(5, 5, 'こどもの日');
+  add(7, _nthMonday(year, 7, 3), '海の日');
+  add(8, 11, '山の日');
+  add(9, _nthMonday(year, 9, 3), '敬老の日');
+  const shubun = Math.floor(23.2488 + 0.242194 * (year - 1980)) - Math.floor((year - 1980) / 4);
+  add(9, shubun, '秋分の日');
+  add(10, _nthMonday(year, 10, 2), 'スポーツの日');
+  add(11, 3, '文化の日');
+  add(11, 23, '勤労感謝の日');
+
+  const result = { ...base };
+
+  // 国民の休日：前後を祝日に挟まれた平日（日曜以外）
+  Object.keys(base).forEach((dateStr) => {
+    const d = new Date(dateStr + 'T00:00:00');
+    const next = new Date(d);
+    next.setDate(next.getDate() + 2);
+    const nextKey = todayKey(next);
+    const between = new Date(d);
+    between.setDate(between.getDate() + 1);
+    const betweenKey = todayKey(between);
+    if (base[nextKey] && !base[betweenKey] && between.getDay() !== 0) {
+      result[betweenKey] = '国民の休日';
+    }
+  });
+
+  // 振替休日：日曜に当たる祝日の翌日以降、最初の非祝日
+  Object.entries(base).forEach(([dateStr, name]) => {
+    const d = new Date(dateStr + 'T00:00:00');
+    if (d.getDay() === 0) {
+      let next = new Date(d);
+      do {
+        next.setDate(next.getDate() + 1);
+      } while (result[todayKey(next)]);
+      result[todayKey(next)] = '振替休日';
+    }
+  });
+
+  _holidayCache[year] = result;
+  return result;
+}
+const getHolidayName = (dateStr) => {
+  const year = Number(dateStr.slice(0, 4));
+  return getJapaneseHolidays(year)[dateStr] || null;
+};
+
+// 管理者向け一覧用：YYYY-MM-DD → MM-DD(曜) ／ 土=水色・日祝=ピンクの表示情報も返す
 const formatAdminDate = (key) => {
   const d = new Date(key + 'T00:00:00');
   const days = ['日', '月', '火', '水', '木', '金', '土'];
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())}(${days[d.getDay()]})`;
+  const wd = d.getDay();
+  const holidayName = getHolidayName(key);
+  const label = `${pad(d.getMonth() + 1)}-${pad(d.getDate())}(${days[wd]}${holidayName ? '・祝' : ''})`;
+  const badgeClass = (wd === 0 || holidayName) ? 'bg-rose-50 text-rose-600' : wd === 6 ? 'bg-sky-50 text-sky-600' : '';
+  return { label, badgeClass, holidayName };
 };
 
 // ---- Leave (休暇) ----
@@ -4613,7 +4692,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
           employeeId: acc.id,
           employeeName: acc.name,
           date: record.date,
-          dateShort: formatAdminDate(record.date),
+          dateShort: formatAdminDate(record.date).label,
           statusLabel: CLOCK_IN_STATUS_LABEL[record.clockInStatus] || record.clockInStatus,
           clockIn: record.clockIn ? hhmm(new Date(record.clockIn)) : '',
           clockInActual: record.clockInActual ? hhmm(new Date(record.clockInActual)) : '',
@@ -4665,7 +4744,8 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
         clockOutActual: record?.clockOutActual && record.clockOutActual !== record.clockOut ? hhmm(new Date(record.clockOutActual)) : '',
         needsApproval: record?.clockInApproval === 'pending',
         breakMinutes: record ? getRecordedBreakMinutes(record, record.clockOut ? new Date(record.clockOut) : new Date()) : null,
-        dateShort: formatAdminDate(dateStr),
+        dateShort: formatAdminDate(dateStr).label,
+        dateBadgeClass: formatAdminDate(dateStr).badgeClass,
       });
     });
   });
@@ -4796,7 +4876,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
                 const setField = (field, value) => setEdits((prev) => ({ ...prev, [key]: { ...(prev[key] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: undefined }), [field]: value } }));
                 return (
                   <tr key={key} className={`border-b border-slate-100 last:border-0 ${r.needsApproval ? 'bg-amber-50/60' : ''}`}>
-                    <td className="px-3 py-2 font-mono whitespace-nowrap">{r.dateShort}</td>
+                    <td className={`px-3 py-2 font-mono font-semibold whitespace-nowrap ${r.dateBadgeClass}`}>{r.dateShort}</td>
                     <td className="px-3 py-2"><input type="time" value={e.clockIn || ''} onChange={(ev) => setField('clockIn', ev.target.value)} className="w-[92px] border border-slate-200 rounded px-1.5 py-1 font-mono text-[12px]" /></td>
                     <td className="px-3 py-2 font-mono text-slate-400 whitespace-nowrap">
                       {r.clockInActual || ''}
@@ -4840,7 +4920,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
             return (
               <div key={key} className={`px-4 py-3 ${r.needsApproval ? 'bg-amber-50/60' : ''}`}>
                 <div className="flex items-center justify-between">
-                  <div className="font-mono text-[13px] font-semibold text-slate-700">{r.dateShort}</div>
+                  <div className={`inline-block font-mono text-[13px] font-semibold text-slate-700 px-2 py-0.5 rounded ${r.dateBadgeClass}`}>{r.dateShort}</div>
                 </div>
                 <div className="mt-2 grid grid-cols-3 gap-2">
                   <Field label="出勤"><input type="time" value={e.clockIn || ''} onChange={(ev) => setField('clockIn', ev.target.value)} className="w-full border border-slate-200 rounded px-2 py-1.5 font-mono text-[12.5px]" /></Field>
