@@ -4868,7 +4868,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
           <div className="overflow-x-auto">
             <table className="w-full min-w-[980px] text-[12.5px]">
               <thead><tr className="text-left text-[10.5px] text-slate-400 border-b border-slate-100">
-                {['日付','出勤','実打刻','退勤','実打刻','休憩(分)','実働','残業','遅刻','早退','状態','承認'].map((h, i) => <th key={h + i} className="px-3 py-2 font-medium">{h}</th>)}
+                {(employeeFilter === 'all' ? ['社員','日付','出勤','実打刻','退勤','実打刻','休憩(分)','実働','残業','遅刻','早退','状態','承認'] : ['日付','出勤','実打刻','退勤','実打刻','休憩(分)','実働','残業','遅刻','早退','状態','承認']).map((h, i) => <th key={h + i} className="px-3 py-2 font-medium">{h}</th>)}
               </tr></thead>
               <tbody>{rows.map((r) => {
                 const key = `${r.employeeId}|${r.date}`;
@@ -4876,6 +4876,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
                 const setField = (field, value) => setEdits((prev) => ({ ...prev, [key]: { ...(prev[key] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: undefined }), [field]: value } }));
                 return (
                   <tr key={key} className={`border-b border-slate-100 last:border-0 ${r.needsApproval ? 'bg-amber-50/60' : ''}`}>
+                    {employeeFilter === 'all' && <td className="px-3 py-2 font-semibold whitespace-nowrap">{r.employeeName}</td>}
                     <td className={`px-3 py-2 font-mono font-semibold whitespace-nowrap ${r.dateBadgeClass}`}>{r.dateShort}</td>
                     <td className="px-3 py-2"><input type="time" value={e.clockIn || ''} onChange={(ev) => setField('clockIn', ev.target.value)} className="w-[92px] border border-slate-200 rounded px-1.5 py-1 font-mono text-[12px]" /></td>
                     <td className="px-3 py-2 font-mono text-slate-400 whitespace-nowrap">
@@ -4921,6 +4922,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
               <div key={key} className={`px-4 py-3 ${r.needsApproval ? 'bg-amber-50/60' : ''}`}>
                 <div className="flex items-center justify-between">
                   <div className={`inline-block font-mono text-[13px] font-semibold text-slate-700 px-2 py-0.5 rounded ${r.dateBadgeClass}`}>{r.dateShort}</div>
+                  {employeeFilter === 'all' && <div className="text-[12px] font-bold text-slate-600">{r.employeeName}</div>}
                 </div>
                 <div className="mt-2 grid grid-cols-3 gap-2">
                   <Field label="出勤"><input type="time" value={e.clockIn || ''} onChange={(ev) => setField('clockIn', ev.target.value)} className="w-full border border-slate-200 rounded px-2 py-1.5 font-mono text-[12.5px]" /></Field>
