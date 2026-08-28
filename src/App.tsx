@@ -4908,9 +4908,23 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
   const [groupFilter, setGroupFilter] = useState('all');
   const [edits, setEdits] = useState({}); // { 'employeeId|date': { clockIn, clockOut, breakMinutes, approve } }
   const [savingAll, setSavingAll] = useState(false);
-  const [monthlyViewTarget, setMonthlyViewTarget] = useState(null); // { employeeId, employeeName }
+  const [monthlyViewTarget, setMonthlyViewTarget] = useState(null); // { employeeId, employeeName, month }
   const gpsAlertIds = new Set(gpsAlerts.map((g) => g.employeeId));
   const groups = Array.from(new Set(employeeAccounts.map((a) => a.mainGroup).filter(Boolean)));
+
+  if (monthlyViewTarget) {
+    return (
+      <EmployeeMonthlyPage
+        data={data}
+        employeeId={monthlyViewTarget.employeeId}
+        employeeName={monthlyViewTarget.employeeName}
+        initialMonth={monthlyViewTarget.month}
+        onBack={() => setMonthlyViewTarget(null)}
+        onAdminUpdateAttendanceBatch={onAdminUpdateAttendanceBatch}
+        isDesktop={isDesktop}
+      />
+    );
+  }
 
   const filteredAccounts = employeeAccounts.filter((acc) => {
     if (groupFilter !== 'all' && acc.mainGroup !== groupFilter) return false;
@@ -5133,7 +5147,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
                       )}
                     </td>
                     <td className="px-3 py-2">
-                      <button onClick={() => setMonthlyViewTarget({ employeeId: r.employeeId, employeeName: r.employeeName })} className="text-[11px] font-bold text-slate-500 border border-slate-200 rounded-md px-2 py-1 whitespace-nowrap">月間</button>
+                      <button onClick={() => setMonthlyViewTarget({ employeeId: r.employeeId, employeeName: r.employeeName, month: dateFilter.slice(0, 7) })} className="text-[11px] font-bold text-slate-500 border border-slate-200 rounded-md px-2 py-1 whitespace-nowrap">月間</button>
                     </td>
                   </tr>
                 );
@@ -5151,7 +5165,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
                   <div className="inline-block font-mono text-[13px] font-semibold text-slate-700">{r.dateShort}</div>
                   <div className="flex items-center gap-2">
                     {employeeFilter === 'all' && <div className="text-[12px] font-bold text-slate-600">{r.employeeName}</div>}
-                    <button onClick={() => setMonthlyViewTarget({ employeeId: r.employeeId, employeeName: r.employeeName })} className="text-[10.5px] font-bold text-slate-500 border border-slate-200 rounded-md px-2 py-1">月間</button>
+                    <button onClick={() => setMonthlyViewTarget({ employeeId: r.employeeId, employeeName: r.employeeName, month: dateFilter.slice(0, 7) })} className="text-[10.5px] font-bold text-slate-500 border border-slate-200 rounded-md px-2 py-1">月間</button>
                   </div>
                 </div>
                 <div className="mt-2 grid grid-cols-3 gap-2">
@@ -5196,23 +5210,14 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
           </div>
         )}
       </div>
-
-      {monthlyViewTarget && (
-        <EmployeeMonthlyModal
-          data={data}
-          employeeId={monthlyViewTarget.employeeId}
-          employeeName={monthlyViewTarget.employeeName}
-          initialMonth={dateFilter.slice(0, 7)}
-          onClose={() => setMonthlyViewTarget(null)}
-          onJumpToDate={(d) => { setDateFilter(d); setEmployeeFilter(monthlyViewTarget.employeeId); setMonthlyViewTarget(null); }}
-        />
-      )}
     </div>
   );
 }
 
-function EmployeeMonthlyModal({ data, employeeId, employeeName, initialMonth, onClose, onJumpToDate }) {
+function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onBack, onAdminUpdateAttendanceBatch, isDesktop }) {
   const [month, setMonth] = useState(initialMonth); // 'YYYY-MM'
+  const [edits, setEdits] = useState({}); // { date: { clockIn, clockOut, breakMinutes, approve } }
+  const [savingAll, setSavingAll] = useState(false);
   const [y, m] = month.split('-').map(Number);
   const days = Array.from({ length: lastDayOfMonth(y, m) }, (_, i) => i + 1);
   const todayStr = todayKey();
@@ -5223,11 +5228,14 @@ function EmployeeMonthlyModal({ data, employeeId, employeeName, initialMonth, on
     .map((dateStr) => {
       const record = data.records[employeeId]?.[dateStr] || null;
       const metrics = computeMetrics(record);
+      const dateInfo = formatAdminDate(dateStr);
       return {
         date: dateStr,
-        ...formatAdminDate(dateStr),
+        label: dateInfo.label,
+        badgeClass: dateInfo.badgeClass,
         clockIn: record?.clockIn ? hhmm(new Date(record.clockIn)) : '',
         clockOut: record?.clockOut ? hhmm(new Date(record.clockOut)) : '',
+        breakMin: record ? getRecordedBreakMinutes(record, record.clockOut ? new Date(record.clockOut) : new Date()) : 0,
         workedMin: metrics?.workedMin ?? 0,
         overtimeMin: metrics?.overtimeMin ?? 0,
         status: computeDayStatus(record).label,
@@ -5239,61 +5247,115 @@ function EmployeeMonthlyModal({ data, employeeId, employeeName, initialMonth, on
   const totalOvertime = rows.reduce((s, r) => s + r.overtimeMin, 0);
   const workedDays = rows.filter((r) => r.clockIn).length;
 
-  return createPortal(
-    <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-40 p-0 sm:p-4">
-      <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-2xl max-h-[92vh] overflow-y-auto">
-        <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white z-10">
-          <div>
-            <div className="text-[11px] text-slate-400 font-medium">{employeeName}</div>
-            <h3 className="font-bold text-[15px]">月間勤怠</h3>
-          </div>
-          <div className="flex items-center gap-2">
-            <input type="month" value={month} onChange={(e) => setMonth(e.target.value)} className="border border-slate-200 rounded-lg px-2.5 py-1.5 font-mono text-[12.5px]" />
-            <button onClick={onClose} className="text-slate-400 text-xl leading-none px-1">×</button>
-          </div>
-        </div>
+  const saveAll = async () => {
+    setSavingAll(true);
+    const changes = Object.entries(edits).map(([dateStr, patch]) => ({ employeeId, date: dateStr, patch }));
+    await onAdminUpdateAttendanceBatch(changes);
+    setEdits({});
+    setSavingAll(false);
+  };
 
-        <div className="px-5 py-3 grid grid-cols-3 gap-3">
-          <PayrollMetric label="出勤日数" value={`${workedDays}日`} />
-          <PayrollMetric label="総実働" value={minutesToHHMM(totalWorked)} />
-          <PayrollMetric label="総残業" value={minutesToHHMM(totalOvertime)} />
+  return (
+    <div className="space-y-5">
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 flex flex-wrap items-center gap-3">
+        <button onClick={onBack} className="text-[12.5px] font-bold text-slate-500 border border-slate-200 rounded-lg px-3 py-2 flex items-center gap-1">
+          ← 一覧に戻る
+        </button>
+        <div>
+          <div className="text-[11px] text-slate-400 font-medium">{employeeName}</div>
+          <div className="font-bold text-[14px]">月間勤怠</div>
         </div>
+        <input type="month" value={month} onChange={(e) => { setMonth(e.target.value); setEdits({}); }} className="ml-auto border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px] bg-white" />
+      </div>
 
-        <div className="px-5 pb-5">
-          <div className="border border-slate-200 rounded-xl overflow-hidden">
-            <table className="w-full text-[12.5px]">
+      <div className="grid grid-cols-3 gap-3">
+        <StatMini label="出勤日数" value={`${workedDays}日`} />
+        <StatMini label="総実働" value={minutesToHHMM(totalWorked)} />
+        <StatMini label="総残業" value={minutesToHHMM(totalOvertime)} />
+      </div>
+
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+          <Clock size={15} className="text-slate-400" />
+          <h2 className="font-bold text-[13.5px]">{month} の勤怠</h2>
+          <span className="text-[10.5px] text-slate-400">出勤・退勤・休憩を直接書き換えて、下の「まとめて更新」で保存できます</span>
+        </div>
+        {isDesktop ? (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[760px] text-[12.5px]">
               <thead>
-                <tr className="text-left text-[10.5px] text-slate-400 border-b border-slate-100 bg-slate-50">
-                  <th className="px-3 py-2 font-medium">日付</th>
-                  <th className="px-3 py-2 font-medium">出勤</th>
-                  <th className="px-3 py-2 font-medium">退勤</th>
-                  <th className="px-3 py-2 font-medium">実働</th>
-                  <th className="px-3 py-2 font-medium">残業</th>
-                  <th className="px-3 py-2 font-medium">状態</th>
-                  <th className="px-3 py-2 font-medium"></th>
+                <tr className="text-left text-[10.5px] text-slate-400 border-b border-slate-100">
+                  {['日付', '出勤', '退勤', '休憩(分)', '実働', '残業', '状態', '承認'].map((h) => <th key={h} className="px-3 py-2 font-medium">{h}</th>)}
                 </tr>
               </thead>
               <tbody>
-                {rows.map((r) => (
-                  <tr key={r.date} className={`border-b border-slate-100 last:border-0 ${r.needsApproval ? 'bg-amber-50/60' : r.badgeClass}`}>
-                    <td className="px-3 py-2 font-mono whitespace-nowrap">{r.label}</td>
-                    <td className="px-3 py-2 font-mono">{r.clockIn || '--:--'}</td>
-                    <td className="px-3 py-2 font-mono">{r.clockOut || '--:--'}</td>
-                    <td className="px-3 py-2 font-mono">{minutesToHHMM(r.workedMin)}</td>
-                    <td className="px-3 py-2 font-mono">{minutesToHHMM(r.overtimeMin)}</td>
-                    <td className="px-3 py-2 whitespace-nowrap">{r.status}{r.needsApproval ? '・承認待ち' : ''}</td>
-                    <td className="px-3 py-2">
-                      <button onClick={() => onJumpToDate(r.date)} className="text-[11px] font-bold text-amber-600 whitespace-nowrap">修正</button>
-                    </td>
-                  </tr>
-                ))}
+                {rows.map((r) => {
+                  const e = edits[r.date] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: undefined };
+                  const setField = (field, value) => setEdits((prev) => ({ ...prev, [r.date]: { ...(prev[r.date] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: undefined }), [field]: value } }));
+                  return (
+                    <tr key={r.date} className={`border-b border-slate-100 last:border-0 ${r.needsApproval ? 'bg-amber-50/60' : r.badgeClass}`}>
+                      <td className="px-3 py-2 font-mono font-semibold whitespace-nowrap">{r.label}</td>
+                      <td className="px-3 py-2"><input type="time" value={e.clockIn || ''} onChange={(ev) => setField('clockIn', ev.target.value)} className="w-[92px] border border-slate-200 rounded px-1.5 py-1 font-mono text-[12px]" /></td>
+                      <td className="px-3 py-2"><input type="time" value={e.clockOut || ''} onChange={(ev) => setField('clockOut', ev.target.value)} className="w-[92px] border border-slate-200 rounded px-1.5 py-1 font-mono text-[12px]" /></td>
+                      <td className="px-3 py-2"><input type="number" min="0" step="5" value={e.breakMinutes ?? ''} onChange={(ev) => setField('breakMinutes', ev.target.value)} className="w-16 border border-slate-200 rounded px-1.5 py-1 font-mono text-[12px]" /></td>
+                      <td className="px-3 py-2 font-mono font-semibold whitespace-nowrap">{minutesToHHMM(r.workedMin)}</td>
+                      <td className="px-3 py-2 font-mono whitespace-nowrap">{minutesToHHMM(r.overtimeMin)}</td>
+                      <td className="px-3 py-2 whitespace-nowrap">{r.status}</td>
+                      <td className="px-3 py-2">
+                        {r.needsApproval && (
+                          <label className="flex items-center gap-1 text-[10.5px] text-amber-700 whitespace-nowrap">
+                            <input type="checkbox" checked={!!e.approve} onChange={(ev) => setField('approve', ev.target.checked)} />
+                            承認
+                          </label>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
-        </div>
+        ) : (
+          <div className="divide-y divide-slate-100">
+            {rows.map((r) => {
+              const e = edits[r.date] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: undefined };
+              const setField = (field, value) => setEdits((prev) => ({ ...prev, [r.date]: { ...(prev[r.date] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: undefined }), [field]: value } }));
+              return (
+                <div key={r.date} className={`px-4 py-3 ${r.needsApproval ? 'bg-amber-50/60' : r.badgeClass}`}>
+                  <div className="font-mono text-[13px] font-semibold text-slate-700">{r.label}</div>
+                  <div className="mt-2 grid grid-cols-3 gap-2">
+                    <Field label="出勤"><input type="time" value={e.clockIn || ''} onChange={(ev) => setField('clockIn', ev.target.value)} className="w-full border border-slate-200 rounded px-2 py-1.5 font-mono text-[12.5px]" /></Field>
+                    <Field label="退勤"><input type="time" value={e.clockOut || ''} onChange={(ev) => setField('clockOut', ev.target.value)} className="w-full border border-slate-200 rounded px-2 py-1.5 font-mono text-[12.5px]" /></Field>
+                    <Field label="休憩(分)"><input type="number" min="0" step="5" value={e.breakMinutes ?? ''} onChange={(ev) => setField('breakMinutes', ev.target.value)} className="w-full border border-slate-200 rounded px-2 py-1.5 font-mono text-[12.5px]" /></Field>
+                  </div>
+                  <div className="mt-2 text-[11px] text-slate-400">{r.status} ・実働 {minutesToHHMM(r.workedMin)}{r.overtimeMin > 0 ? ` ・ 残業 ${minutesToHHMM(r.overtimeMin)}` : ''}</div>
+                  {r.needsApproval && (
+                    <label className="mt-1.5 flex items-center gap-1.5 text-[11.5px] text-amber-700">
+                      <input type="checkbox" checked={!!e.approve} onChange={(ev) => setField('approve', ev.target.checked)} />
+                      この出勤を承認する
+                    </label>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+        {rows.length > 0 && (
+          <div className="px-5 py-3.5 border-t border-slate-100 flex items-center justify-end gap-2">
+            {Object.keys(edits).length > 0 && (
+              <button onClick={() => setEdits({})} className="text-[12px] font-medium text-slate-400 px-3 py-2">変更を取り消す</button>
+            )}
+            <button
+              onClick={saveAll}
+              disabled={Object.keys(edits).length === 0 || savingAll}
+              className="rounded-lg bg-slate-900 disabled:bg-slate-200 text-white px-5 py-2.5 text-[13px] font-bold"
+            >
+              {savingAll ? '更新中…' : `まとめて更新${Object.keys(edits).length > 0 ? `（${Object.keys(edits).length}件）` : ''}`}
+            </button>
+          </div>
+        )}
       </div>
-    </div>,
-    document.body
+    </div>
   );
 }
 
