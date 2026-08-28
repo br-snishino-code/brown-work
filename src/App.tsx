@@ -4026,9 +4026,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, groupAtten
         <h2 className="font-bold text-[14px] text-slate-800 flex items-center gap-2"><Wallet size={16} className="text-slate-400" />給与計算</h2>
         <div className={`grid gap-3 ${isDesktop ? 'grid-cols-3' : 'grid-cols-1'}`}>
           <Field label="社員">
-            <select value={employeeId} onChange={(e) => setEmployeeId(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px] bg-white">
-              {employeeAccounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-            </select>
+            <EmployeeSearchSelect employeeAccounts={employeeAccounts} value={employeeId} onChange={setEmployeeId} showAllOption={false} />
           </Field>
           <Field label="年">
             <select value={year} onChange={(e) => setYear(Number(e.target.value))} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px] bg-white">
@@ -4829,10 +4827,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
           </Field>
         )}
         <Field label="社員">
-          <select value={employeeFilter} onChange={(e) => setEmployeeFilter(e.target.value)} className="border border-slate-200 rounded-lg px-3 py-2 text-[13px] bg-white min-w-[180px]">
-            <option value="all">全社員</option>
-            {employeeAccounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-          </select>
+          <EmployeeSearchSelect employeeAccounts={employeeAccounts} value={employeeFilter} onChange={setEmployeeFilter} />
         </Field>
         <button onClick={exportCsv} disabled={rows.length === 0} className="ml-auto flex items-center gap-1.5 rounded-lg bg-slate-900 disabled:bg-slate-200 text-white px-4 py-2.5 text-[12.5px] font-bold">
           <Download size={14} /> CSV出力
@@ -4956,6 +4951,75 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// 社員数が多い場合に備えた、1文字入力するごとに絞り込まれる検索付きセレクト
+function EmployeeSearchSelect({ employeeAccounts, value, onChange, allLabel = '全社員', showAllOption = true, placeholder = '名前で検索…' }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const wrapRef = useRef(null);
+
+  useEffect(() => {
+    const onClickOutside = (e) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onClickOutside);
+    return () => document.removeEventListener('mousedown', onClickOutside);
+  }, []);
+
+  const selected = employeeAccounts.find((a) => a.id === value);
+  const displayValue = open ? query : (selected ? selected.name : (showAllOption ? allLabel : ''));
+
+  const q = query.trim();
+  const filtered = q
+    ? employeeAccounts.filter((a) => (a.name || '').includes(q) || (a.furigana || '').includes(q))
+    : employeeAccounts;
+
+  const pick = (id) => {
+    onChange(id);
+    setQuery('');
+    setOpen(false);
+  };
+
+  return (
+    <div ref={wrapRef} className="relative">
+      <input
+        value={displayValue}
+        onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
+        onFocus={() => { setQuery(''); setOpen(true); }}
+        placeholder={placeholder}
+        className="border border-slate-200 rounded-lg px-3 py-2 text-[13px] bg-white min-w-[180px] w-full"
+      />
+      {open && (
+        <div className="absolute z-20 mt-1 w-full max-h-64 overflow-y-auto bg-white border border-slate-200 rounded-lg shadow-lg">
+          {showAllOption && (
+            <button
+              type="button"
+              onClick={() => pick('all')}
+              className={`w-full text-left px-3 py-2 text-[13px] hover:bg-slate-50 ${value === 'all' ? 'font-bold text-slate-800' : 'text-slate-600'}`}
+            >
+              {allLabel}
+            </button>
+          )}
+          {filtered.length === 0 ? (
+            <div className="px-3 py-2 text-[12.5px] text-slate-300">該当する社員がいません</div>
+          ) : (
+            filtered.map((a) => (
+              <button
+                key={a.id}
+                type="button"
+                onClick={() => pick(a.id)}
+                className={`w-full text-left px-3 py-2 text-[13px] hover:bg-slate-50 ${value === a.id ? 'font-bold text-slate-800' : 'text-slate-600'}`}
+              >
+                {a.name}
+                {a.furigana && <span className="ml-1.5 text-[11px] text-slate-400">{a.furigana}</span>}
+              </button>
+            ))
+          )}
+        </div>
+      )}
     </div>
   );
 }
