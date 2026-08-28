@@ -3493,26 +3493,30 @@ function SchedulePatternCard({ now, patterns, activePatternNo, onSetActivePatter
         <div className="px-5 py-4 space-y-3">
           <div className="text-[11px] text-slate-400">パターンは最大3つまで設定できます。1つだけ設定すれば、その時間が毎日自動で使われます。2つ以上ある場合は、下で毎日どのパターンかを選んでください。</div>
           {form.map((p) => (
-            <div key={p.patternNo} className="grid grid-cols-[70px_1fr_auto_1fr] items-center gap-2">
-              <div className="text-[11.5px] font-bold text-slate-500">パターン{p.patternNo}</div>
-              <input
-                value={p.label}
-                onChange={(e) => setFormField(p.patternNo, 'label', e.target.value)}
-                placeholder="呼び方（任意）"
-                className="border border-slate-200 rounded-lg px-2 py-1.5 text-[12.5px]"
-              />
-              <input
-                type="time"
-                value={p.startTime}
-                onChange={(e) => setFormField(p.patternNo, 'startTime', e.target.value)}
-                className="border border-slate-200 rounded-lg px-2 py-1.5 font-mono text-[12.5px]"
-              />
-              <input
-                type="time"
-                value={p.endTime}
-                onChange={(e) => setFormField(p.patternNo, 'endTime', e.target.value)}
-                className="border border-slate-200 rounded-lg px-2 py-1.5 font-mono text-[12.5px]"
-              />
+            <div key={p.patternNo} className="border border-slate-200 rounded-lg p-2.5 space-y-2">
+              <div className="flex items-center gap-2">
+                <div className="text-[11.5px] font-bold text-slate-500 shrink-0 w-[64px]">パターン{p.patternNo}</div>
+                <input
+                  value={p.label}
+                  onChange={(e) => setFormField(p.patternNo, 'label', e.target.value)}
+                  placeholder="呼び方（任意）"
+                  className="flex-1 min-w-0 border border-slate-200 rounded-lg px-2 py-1.5 text-[12.5px]"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <input
+                  type="time"
+                  value={p.startTime}
+                  onChange={(e) => setFormField(p.patternNo, 'startTime', e.target.value)}
+                  className="w-full min-w-0 border border-slate-200 rounded-lg px-2 py-1.5 font-mono text-[12.5px]"
+                />
+                <input
+                  type="time"
+                  value={p.endTime}
+                  onChange={(e) => setFormField(p.patternNo, 'endTime', e.target.value)}
+                  className="w-full min-w-0 border border-slate-200 rounded-lg px-2 py-1.5 font-mono text-[12.5px]"
+                />
+              </div>
             </div>
           ))}
           <button onClick={save} disabled={saving} className="w-full py-2.5 rounded-lg bg-slate-800 disabled:bg-slate-300 text-white text-[13px] font-bold">
