@@ -23,8 +23,11 @@ const CLOCK_IN_STATUS_LABEL = {
 const CLOCK_OUT_STATUS_LABEL = {
   overtime: '残業',
   forgot_corrected_out: '打刻漏れ（19:00に自動修正）',
-  early_leave: '早退',
+  early_event: '早退（イベント・研修）',
+  early_personal: '早退（自己都合）',
+  early_other: '早退（その他）',
 };
+const CLOCK_OUT_NEEDS_APPROVAL_STATUSES = ['overtime', 'early_event', 'early_personal', 'early_other'];
 const NEEDS_APPROVAL_STATUSES = ['late', 'event', 'early_confirmed', 'early_manual'];
 const timeStr = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 const hhmm = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
@@ -1438,7 +1441,7 @@ export default function AttendanceApp() {
         clock_out_actual: nowIso,
         clock_out_status: confirm.status || null,
         clock_out_note: confirm.note || null,
-        clock_out_approval: confirm.status === 'early_leave' ? 'pending' : null,
+        clock_out_approval: CLOCK_OUT_NEEDS_APPROVAL_STATUSES.includes(confirm.status) ? 'pending' : null,
         clock_out_location: loc,
       },
       { onConflict: 'employee_id,date' }
@@ -1448,11 +1451,12 @@ export default function AttendanceApp() {
       return;
     }
     await refreshData();
-    const needsApproval = confirm.status === 'early_leave';
+    const needsApproval = CLOCK_OUT_NEEDS_APPROVAL_STATUSES.includes(confirm.status);
     if (needsApproval) {
+      const reasonLabel = CLOCK_OUT_STATUS_LABEL[confirm.status] || confirm.status;
       await notifyAdmin(
-        `【退勤確認】${session.name} - 早退の承認待ち`,
-        `${session.name}さんが早退として退勤を記録しました（${confirm.note ? `メモ：${confirm.note}` : 'メモなし'}）。内容をご確認のうえ承認してください。`,
+        `【退勤確認】${session.name} - ${reasonLabel}の承認待ち`,
+        `${session.name}さんが「${reasonLabel}」として退勤を記録しました（${confirm.note ? `メモ：${confirm.note}` : 'メモなし'}）。内容をご確認のうえ承認してください。`,
         today
       );
     }
@@ -3237,7 +3241,7 @@ function ClockInConfirmModal({ now, standardMinutes, onClose, onConfirm }) {
 function ClockOutConfirmModal({ now, standardMinutes, onClose, onConfirm }) {
   const [saving, setSaving] = useState(false);
   const [note, setNote] = useState('');
-  const [choice, setChoice] = useState(null); // 'overtime' | 'forgot'
+  const [choice, setChoice] = useState(null); // 'overtime' | 'forgot' | 'early_event' | 'early_personal' | 'early_other'
   const stdMinutes = standardMinutes != null ? standardMinutes : STANDARD_CLOCK_OUT_HOUR * 60;
   const stdHour = Math.floor(stdMinutes / 60);
   const stdMin = stdMinutes % 60;
@@ -3265,17 +3269,37 @@ function ClockOutConfirmModal({ now, standardMinutes, onClose, onConfirm }) {
         {isEarly ? (
           <div className="px-5 py-4 space-y-3">
             <div className="text-[12.5px] text-slate-600">
-              現在の時刻は <b className="font-mono">{nowLabel}</b> です（規定の退勤時刻 {stdLabel} より前）。<b>早退</b>として記録します。
+              現在の時刻は <b className="font-mono">{nowLabel}</b> です（規定の退勤時刻 {stdLabel} より前）。早退の理由はどれに当てはまりますか？
+            </div>
+            <div className="space-y-2">
+              <button
+                onClick={() => setChoice('early_event')}
+                className={`w-full py-2.5 rounded-lg border-2 text-[13px] font-bold text-left px-3.5 ${choice === 'early_event' ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-slate-200 text-slate-600'}`}
+              >
+                イベント・研修
+              </button>
+              <button
+                onClick={() => setChoice('early_personal')}
+                className={`w-full py-2.5 rounded-lg border-2 text-[13px] font-bold text-left px-3.5 ${choice === 'early_personal' ? 'border-amber-500 bg-amber-50 text-amber-700' : 'border-slate-200 text-slate-600'}`}
+              >
+                自己都合
+              </button>
+              <button
+                onClick={() => setChoice('early_other')}
+                className={`w-full py-2.5 rounded-lg border-2 text-[13px] font-bold text-left px-3.5 ${choice === 'early_other' ? 'border-slate-500 bg-slate-100 text-slate-700' : 'border-slate-200 text-slate-600'}`}
+              >
+                その他
+              </button>
             </div>
             <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-[11px] text-amber-700">
               早退のため、記録後に管理者の承認が必要になります。
             </div>
-            <Field label="理由（任意）">
-              <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="体調不良・私用など" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px]" />
+            <Field label={choice === 'early_other' ? '理由（できるだけ入力してください）' : '理由・メモ（任意）'}>
+              <input value={note} onChange={(e) => setNote(e.target.value)} placeholder={choice === 'early_event' ? '研修名・イベント名など' : '理由があれば入力'} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px]" />
             </Field>
             <button
-              onClick={() => run({ clockOutTime: now, status: 'early_leave', note })}
-              disabled={saving}
+              onClick={() => run({ clockOutTime: now, status: choice, note })}
+              disabled={!choice || saving}
               className="w-full py-2.5 rounded-lg bg-amber-600 disabled:bg-slate-200 text-white text-[13.5px] font-bold"
             >
               {saving ? '記録中…' : '早退として退勤を記録する'}
@@ -3306,9 +3330,14 @@ function ClockOutConfirmModal({ now, standardMinutes, onClose, onConfirm }) {
               </div>
             )}
             {choice === 'overtime' && (
-              <Field label="メモ（任意）">
-                <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="残業の理由があれば入力" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px]" />
-              </Field>
+              <>
+                <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-[11px] text-amber-700">
+                  残業のため、記録後に管理者の承認が必要になります。
+                </div>
+                <Field label="メモ（任意）">
+                  <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="残業の理由があれば入力" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px]" />
+                </Field>
+              </>
             )}
             <button
               onClick={() => {
