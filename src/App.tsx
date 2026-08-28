@@ -4908,6 +4908,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
   const [groupFilter, setGroupFilter] = useState('all');
   const [edits, setEdits] = useState({}); // { 'employeeId|date': { clockIn, clockOut, breakMinutes, approve } }
   const [savingAll, setSavingAll] = useState(false);
+  const [monthlyViewTarget, setMonthlyViewTarget] = useState(null); // { employeeId, employeeName }
   const gpsAlertIds = new Set(gpsAlerts.map((g) => g.employeeId));
   const groups = Array.from(new Set(employeeAccounts.map((a) => a.mainGroup).filter(Boolean)));
 
@@ -5091,7 +5092,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
           <div className="overflow-x-auto">
             <table className="w-full min-w-[980px] text-[12.5px]">
               <thead><tr className="text-left text-[10.5px] text-slate-400 border-b border-slate-100">
-                {(employeeFilter === 'all' ? ['社員','日付','出勤','実打刻','退勤','実打刻','休憩(分)','実働','残業','遅刻','早退','状態','承認'] : ['日付','出勤','実打刻','退勤','実打刻','休憩(分)','実働','残業','遅刻','早退','状態','承認']).map((h, i) => <th key={h + i} className="px-3 py-2 font-medium">{h}</th>)}
+                {(employeeFilter === 'all' ? ['社員','日付','出勤','実打刻','退勤','実打刻','休憩(分)','実働','残業','遅刻','早退','状態','承認',''] : ['日付','出勤','実打刻','退勤','実打刻','休憩(分)','実働','残業','遅刻','早退','状態','承認','']).map((h, i) => <th key={h + i} className="px-3 py-2 font-medium">{h}</th>)}
               </tr></thead>
               <tbody>{rows.map((r) => {
                 const key = `${r.employeeId}|${r.date}`;
@@ -5131,6 +5132,9 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
                         </label>
                       )}
                     </td>
+                    <td className="px-3 py-2">
+                      <button onClick={() => setMonthlyViewTarget({ employeeId: r.employeeId, employeeName: r.employeeName })} className="text-[11px] font-bold text-slate-500 border border-slate-200 rounded-md px-2 py-1 whitespace-nowrap">月間</button>
+                    </td>
                   </tr>
                 );
               })}</tbody>
@@ -5145,7 +5149,10 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
               <div key={key} className={`px-4 py-3 ${r.needsApproval ? 'bg-amber-50/60' : r.dateBadgeClass}`}>
                 <div className="flex items-center justify-between">
                   <div className="inline-block font-mono text-[13px] font-semibold text-slate-700">{r.dateShort}</div>
-                  {employeeFilter === 'all' && <div className="text-[12px] font-bold text-slate-600">{r.employeeName}</div>}
+                  <div className="flex items-center gap-2">
+                    {employeeFilter === 'all' && <div className="text-[12px] font-bold text-slate-600">{r.employeeName}</div>}
+                    <button onClick={() => setMonthlyViewTarget({ employeeId: r.employeeId, employeeName: r.employeeName })} className="text-[10.5px] font-bold text-slate-500 border border-slate-200 rounded-md px-2 py-1">月間</button>
+                  </div>
                 </div>
                 <div className="mt-2 grid grid-cols-3 gap-2">
                   <Field label="出勤"><input type="time" value={e.clockIn || ''} onChange={(ev) => setField('clockIn', ev.target.value)} className="w-full border border-slate-200 rounded px-2 py-1.5 font-mono text-[12.5px]" /></Field>
@@ -5189,7 +5196,104 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
           </div>
         )}
       </div>
+
+      {monthlyViewTarget && (
+        <EmployeeMonthlyModal
+          data={data}
+          employeeId={monthlyViewTarget.employeeId}
+          employeeName={monthlyViewTarget.employeeName}
+          initialMonth={dateFilter.slice(0, 7)}
+          onClose={() => setMonthlyViewTarget(null)}
+          onJumpToDate={(d) => { setDateFilter(d); setEmployeeFilter(monthlyViewTarget.employeeId); setMonthlyViewTarget(null); }}
+        />
+      )}
     </div>
+  );
+}
+
+function EmployeeMonthlyModal({ data, employeeId, employeeName, initialMonth, onClose, onJumpToDate }) {
+  const [month, setMonth] = useState(initialMonth); // 'YYYY-MM'
+  const [y, m] = month.split('-').map(Number);
+  const days = Array.from({ length: lastDayOfMonth(y, m) }, (_, i) => i + 1);
+  const todayStr = todayKey();
+
+  const rows = days
+    .map((d) => `${y}-${pad(m)}-${pad(d)}`)
+    .filter((dateStr) => dateStr <= todayStr)
+    .map((dateStr) => {
+      const record = data.records[employeeId]?.[dateStr] || null;
+      const metrics = computeMetrics(record);
+      return {
+        date: dateStr,
+        ...formatAdminDate(dateStr),
+        clockIn: record?.clockIn ? hhmm(new Date(record.clockIn)) : '',
+        clockOut: record?.clockOut ? hhmm(new Date(record.clockOut)) : '',
+        workedMin: metrics?.workedMin ?? 0,
+        overtimeMin: metrics?.overtimeMin ?? 0,
+        status: computeDayStatus(record).label,
+        needsApproval: record?.clockInApproval === 'pending',
+      };
+    });
+
+  const totalWorked = rows.reduce((s, r) => s + r.workedMin, 0);
+  const totalOvertime = rows.reduce((s, r) => s + r.overtimeMin, 0);
+  const workedDays = rows.filter((r) => r.clockIn).length;
+
+  return createPortal(
+    <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-40 p-0 sm:p-4">
+      <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-2xl max-h-[92vh] overflow-y-auto">
+        <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white z-10">
+          <div>
+            <div className="text-[11px] text-slate-400 font-medium">{employeeName}</div>
+            <h3 className="font-bold text-[15px]">月間勤怠</h3>
+          </div>
+          <div className="flex items-center gap-2">
+            <input type="month" value={month} onChange={(e) => setMonth(e.target.value)} className="border border-slate-200 rounded-lg px-2.5 py-1.5 font-mono text-[12.5px]" />
+            <button onClick={onClose} className="text-slate-400 text-xl leading-none px-1">×</button>
+          </div>
+        </div>
+
+        <div className="px-5 py-3 grid grid-cols-3 gap-3">
+          <PayrollMetric label="出勤日数" value={`${workedDays}日`} />
+          <PayrollMetric label="総実働" value={minutesToHHMM(totalWorked)} />
+          <PayrollMetric label="総残業" value={minutesToHHMM(totalOvertime)} />
+        </div>
+
+        <div className="px-5 pb-5">
+          <div className="border border-slate-200 rounded-xl overflow-hidden">
+            <table className="w-full text-[12.5px]">
+              <thead>
+                <tr className="text-left text-[10.5px] text-slate-400 border-b border-slate-100 bg-slate-50">
+                  <th className="px-3 py-2 font-medium">日付</th>
+                  <th className="px-3 py-2 font-medium">出勤</th>
+                  <th className="px-3 py-2 font-medium">退勤</th>
+                  <th className="px-3 py-2 font-medium">実働</th>
+                  <th className="px-3 py-2 font-medium">残業</th>
+                  <th className="px-3 py-2 font-medium">状態</th>
+                  <th className="px-3 py-2 font-medium"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.date} className={`border-b border-slate-100 last:border-0 ${r.needsApproval ? 'bg-amber-50/60' : r.badgeClass}`}>
+                    <td className="px-3 py-2 font-mono whitespace-nowrap">{r.label}</td>
+                    <td className="px-3 py-2 font-mono">{r.clockIn || '--:--'}</td>
+                    <td className="px-3 py-2 font-mono">{r.clockOut || '--:--'}</td>
+                    <td className="px-3 py-2 font-mono">{minutesToHHMM(r.workedMin)}</td>
+                    <td className="px-3 py-2 font-mono">{minutesToHHMM(r.overtimeMin)}</td>
+                    <td className="px-3 py-2 whitespace-nowrap">{r.status}{r.needsApproval ? '・承認待ち' : ''}</td>
+                    <td className="px-3 py-2">
+                      <button onClick={() => onJumpToDate(r.date)} className="text-[11px] font-bold text-amber-600 whitespace-nowrap">修正</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body
   );
 }
 
