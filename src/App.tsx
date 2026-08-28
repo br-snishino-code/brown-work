@@ -880,6 +880,57 @@ async function saveGroupIncentiveFlags(groupName, year, month, flags) {
   return true;
 }
 
+// ---- 月ごとの規定勤怠時間パターン（社員が月初に自分で設定） ----
+async function fetchSchedulePatterns(employeeId, year, month) {
+  const { data, error } = await supabase
+    .from('employee_schedule_patterns')
+    .select('*')
+    .eq('employee_id', employeeId)
+    .eq('year', year)
+    .eq('month', month)
+    .order('pattern_no', { ascending: true });
+  if (error) { console.error('規定勤怠時間の取得に失敗しました', error); return []; }
+  return (data || []).map((row) => ({
+    patternNo: row.pattern_no,
+    label: row.label || '',
+    startTime: row.start_time,
+    endTime: row.end_time,
+  }));
+}
+
+async function saveSchedulePatterns(employeeId, year, month, patterns) {
+  // 空欄になったパターンは削除、それ以外はupsert
+  const toSave = patterns.filter((p) => p.startTime && p.endTime);
+  const toDeleteNos = patterns.filter((p) => !p.startTime || !p.endTime).map((p) => p.patternNo);
+  if (toSave.length > 0) {
+    const { error } = await supabase.from('employee_schedule_patterns').upsert(
+      toSave.map((p) => ({
+        employee_id: employeeId,
+        year,
+        month,
+        pattern_no: p.patternNo,
+        label: p.label || null,
+        start_time: p.startTime,
+        end_time: p.endTime,
+        updated_at: new Date().toISOString(),
+      })),
+      { onConflict: 'employee_id,year,month,pattern_no' }
+    );
+    if (error) { console.error('規定勤怠時間の保存に失敗しました', error); return false; }
+  }
+  if (toDeleteNos.length > 0) {
+    const { error } = await supabase
+      .from('employee_schedule_patterns')
+      .delete()
+      .eq('employee_id', employeeId)
+      .eq('year', year)
+      .eq('month', month)
+      .in('pattern_no', toDeleteNos);
+    if (error) console.error('規定勤怠時間の削除に失敗しました', error);
+  }
+  return true;
+}
+
 // ============================================================
 // Main App
 // ============================================================
@@ -894,6 +945,8 @@ export default function AttendanceApp() {
   const [employeeTab, setEmployeeTab] = useState('attendance');
   const [topTab, setTopTab] = useState('attendance'); // attendance | labor | hr | payroll
   const [viewMode, setViewMode] = useState(() => (typeof window !== 'undefined' && window.matchMedia('(min-width: 1024px)').matches ? 'desktop' : 'mobile'));
+  const [schedulePatterns, setSchedulePatterns] = useState([]);
+  const [activePatternNo, setActivePatternNo] = useState(1);
   const now = useNow();
   const geo = useGeolocation();
   const { toast, show } = useToast();
@@ -902,6 +955,36 @@ export default function AttendanceApp() {
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
   }, [topTab, employeeTab]);
+
+  // 今月の規定勤怠時間パターンを取得（社員のみ）
+  useEffect(() => {
+    if (!session || session.role !== 'employee') return;
+    const y = now.getFullYear();
+    const m = now.getMonth() + 1;
+    fetchSchedulePatterns(session.id, y, m).then((patterns) => {
+      setSchedulePatterns(patterns);
+      if (patterns.length > 0 && !patterns.some((p) => p.patternNo === activePatternNo)) {
+        setActivePatternNo(patterns[0].patternNo);
+      }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session?.id, now.getFullYear(), now.getMonth()]);
+
+  const savePatterns = async (patterns) => {
+    const y = now.getFullYear();
+    const m = now.getMonth() + 1;
+    const ok = await saveSchedulePatterns(session.id, y, m, patterns);
+    if (ok) {
+      const updated = await fetchSchedulePatterns(session.id, y, m);
+      setSchedulePatterns(updated);
+      if (updated.length > 0 && !updated.some((p) => p.patternNo === activePatternNo)) {
+        setActivePatternNo(updated[0].patternNo);
+      }
+      show('規定勤怠時間を保存しました', 'success');
+    } else {
+      show('規定勤怠時間の保存に失敗しました', 'warn');
+    }
+  };
 
   const loadSessionAndData = useCallback(async () => {
     if (!CLOUD_ENABLED) {
@@ -1167,6 +1250,8 @@ export default function AttendanceApp() {
   const employeeRecords = (employeeId && data.records[employeeId]) || {};
   const todayRecord = employeeRecords[today];
 
+  const activePattern = schedulePatterns.find((p) => p.patternNo === activePatternNo) || schedulePatterns[0] || null;
+
   const handleClockIn = async (confirm = {}) => {
     const loc = await geo.capture();
     const actualNow = new Date();
@@ -1183,8 +1268,8 @@ export default function AttendanceApp() {
         clock_out: null,
         break_periods: [],
         break_started_at: null,
-        scheduled_start: SCHEDULED_START,
-        scheduled_end: SCHEDULED_END,
+        scheduled_start: activePattern?.startTime || SCHEDULED_START,
+        scheduled_end: activePattern?.endTime || SCHEDULED_END,
         clock_in_location: loc,
         clock_out_location: null,
       },
@@ -1902,6 +1987,10 @@ export default function AttendanceApp() {
                 onOpenCorrection={(dateKey) => setCorrectionModal(dateKey)}
                 notifications={data.notifications.filter((n) => n.toEmployeeId === employeeId)}
                 onMarkNotificationRead={async (id) => { await markNotificationRead(id); await refreshData(); }}
+                schedulePatterns={schedulePatterns}
+                activePatternNo={activePatternNo}
+                onSetActivePattern={setActivePatternNo}
+                onSavePatterns={savePatterns}
                 isDesktop={isDesktop}
               />
             )}
@@ -2313,7 +2402,7 @@ function Header({ session, onLogout, pendingCount, missingPunchCount, viewMode, 
   );
 }
 
-function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, historyDates, records, corrections, onOpenCorrection, notifications, onMarkNotificationRead, isDesktop }) {
+function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, historyDates, records, corrections, onOpenCorrection, notifications, onMarkNotificationRead, schedulePatterns = [], activePatternNo, onSetActivePattern, onSavePatterns, isDesktop }) {
   const status = computeDayStatus(todayRecord);
   const canClockIn = !todayRecord?.clockIn;
   const canClockOut = todayRecord?.clockIn && !todayRecord?.clockOut;
@@ -2324,8 +2413,11 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
   const missingDate = historyDates.find((k) => k !== todayKeyStr && records[k]?.clockIn && !records[k]?.clockOut);
   const missingCount = historyDates.filter((k) => k !== todayKeyStr && records[k]?.clockIn && !records[k]?.clockOut).length;
   const hasMissingPunch = missingCount > 0;
+  const activePattern = schedulePatterns.find((p) => p.patternNo === activePatternNo) || schedulePatterns[0] || null;
+  const standardStartMinutes = activePattern ? toMinutes(activePattern.startTime) : STANDARD_CLOCK_IN_HOUR * 60;
+  const standardEndMinutes = activePattern ? toMinutes(activePattern.endTime) : STANDARD_CLOCK_OUT_HOUR * 60;
   const nowMinutes = now.getHours() * 60 + now.getMinutes();
-  const isLateClockOut = nowMinutes >= STANDARD_CLOCK_OUT_HOUR * 60;
+  const isLateClockOut = nowMinutes >= standardEndMinutes;
   const primaryLabel = doneToday ? '退勤済み' : canClockIn ? '出勤' : '退勤';
   const [clockInConfirmOpen, setClockInConfirmOpen] = useState(false);
   const [clockOutConfirmOpen, setClockOutConfirmOpen] = useState(false);
@@ -2335,6 +2427,17 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
       ? (isLateClockOut ? () => setClockOutConfirmOpen(true) : onClockOut)
       : undefined;
   const primaryDisabled = doneToday || (canClockIn && hasMissingPunch);
+
+  const patternSection = (schedulePatterns.length > 0 || canClockIn) && (
+    <SchedulePatternCard
+      now={now}
+      patterns={schedulePatterns}
+      activePatternNo={activePatternNo}
+      onSetActivePattern={onSetActivePattern}
+      onSavePatterns={onSavePatterns}
+      locked={!canClockIn}
+    />
+  );
 
   const clockSection = (
     <div className="space-y-4">
@@ -2378,6 +2481,8 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
           <MapPin size={11} />{geoStatus === 'loading' ? '位置情報を取得中…' : geoStatus === 'denied' ? '位置情報が許可されていません' : '打刻時に位置情報を記録'}
         </div>
       </div>
+
+      {patternSection}
 
       <div className="rounded-2xl bg-white border border-slate-200 shadow-sm overflow-hidden">
         <div className="px-5 py-3 bg-slate-100 text-[12.5px] font-bold text-slate-500">以下の項目の確認をお願いいたします</div>
@@ -2472,6 +2577,7 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
       {clockInConfirmOpen && (
         <ClockInConfirmModal
           now={now}
+          standardMinutes={standardStartMinutes}
           onClose={() => setClockInConfirmOpen(false)}
           onConfirm={async (payload) => { await onClockIn(payload); setClockInConfirmOpen(false); }}
         />
@@ -2479,6 +2585,7 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
       {clockOutConfirmOpen && (
         <ClockOutConfirmModal
           now={now}
+          standardMinutes={standardEndMinutes}
           onClose={() => setClockOutConfirmOpen(false)}
           onConfirm={async (payload) => { await onClockOut(payload); setClockOutConfirmOpen(false); }}
         />
@@ -2492,6 +2599,7 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
       {clockInConfirmOpen && (
         <ClockInConfirmModal
           now={now}
+          standardMinutes={standardStartMinutes}
           onClose={() => setClockInConfirmOpen(false)}
           onConfirm={async (payload) => { await onClockIn(payload); setClockInConfirmOpen(false); }}
         />
@@ -2499,6 +2607,7 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
       {clockOutConfirmOpen && (
         <ClockOutConfirmModal
           now={now}
+          standardMinutes={standardEndMinutes}
           onClose={() => setClockOutConfirmOpen(false)}
           onConfirm={async (payload) => { await onClockOut(payload); setClockOutConfirmOpen(false); }}
         />
@@ -2532,12 +2641,116 @@ function Metric({ label, value, warn = false, danger = false }) {
   return <div><div className="text-[9.5px] font-bold text-slate-400">{label}</div><div className={`mt-1 font-mono text-[13px] font-bold ${danger ? 'text-rose-600' : warn ? 'text-amber-600' : 'text-slate-800'}`}>{value}</div></div>;
 }
 
-function ClockInConfirmModal({ now, onClose, onConfirm }) {
+function SchedulePatternCard({ now, patterns, activePatternNo, onSetActivePattern, onSavePatterns, locked }) {
+  const [editing, setEditing] = useState(patterns.length === 0);
+  const [form, setForm] = useState(() => {
+    const base = [1, 2, 3].map((no) => {
+      const existing = patterns.find((p) => p.patternNo === no);
+      return existing ? { ...existing } : { patternNo: no, label: '', startTime: '', endTime: '' };
+    });
+    return base;
+  });
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setForm([1, 2, 3].map((no) => {
+      const existing = patterns.find((p) => p.patternNo === no);
+      return existing ? { ...existing } : { patternNo: no, label: '', startTime: '', endTime: '' };
+    }));
+  }, [patterns.length]);
+
+  const setFormField = (no, field, value) => {
+    setForm((prev) => prev.map((p) => (p.patternNo === no ? { ...p, [field]: value } : p)));
+  };
+
+  const save = async () => {
+    setSaving(true);
+    await onSavePatterns(form);
+    setSaving(false);
+    setEditing(false);
+  };
+
+  const monthLabel = `${now.getFullYear()}年${now.getMonth() + 1}月`;
+
+  return (
+    <div className="rounded-2xl bg-white border border-slate-200 shadow-sm overflow-hidden">
+      <div className="px-5 py-3 bg-slate-100 flex items-center justify-between">
+        <span className="text-[12.5px] font-bold text-slate-500">今月（{monthLabel}）の規定勤怠時間</span>
+        {!editing && (
+          <button onClick={() => setEditing(true)} className="text-[11px] font-bold text-slate-500 border border-slate-200 rounded-md px-2 py-1 bg-white">編集</button>
+        )}
+      </div>
+
+      {editing ? (
+        <div className="px-5 py-4 space-y-3">
+          <div className="text-[11px] text-slate-400">パターンは最大3つまで設定できます。1つだけ設定すれば、その時間が毎日自動で使われます。2つ以上ある場合は、下で毎日どのパターンかを選んでください。</div>
+          {form.map((p) => (
+            <div key={p.patternNo} className="grid grid-cols-[70px_1fr_auto_1fr] items-center gap-2">
+              <div className="text-[11.5px] font-bold text-slate-500">パターン{p.patternNo}</div>
+              <input
+                value={p.label}
+                onChange={(e) => setFormField(p.patternNo, 'label', e.target.value)}
+                placeholder="呼び方（任意）"
+                className="border border-slate-200 rounded-lg px-2 py-1.5 text-[12.5px]"
+              />
+              <input
+                type="time"
+                value={p.startTime}
+                onChange={(e) => setFormField(p.patternNo, 'startTime', e.target.value)}
+                className="border border-slate-200 rounded-lg px-2 py-1.5 font-mono text-[12.5px]"
+              />
+              <input
+                type="time"
+                value={p.endTime}
+                onChange={(e) => setFormField(p.patternNo, 'endTime', e.target.value)}
+                className="border border-slate-200 rounded-lg px-2 py-1.5 font-mono text-[12.5px]"
+              />
+            </div>
+          ))}
+          <button onClick={save} disabled={saving} className="w-full py-2.5 rounded-lg bg-slate-800 disabled:bg-slate-300 text-white text-[13px] font-bold">
+            {saving ? '保存中…' : '保存する'}
+          </button>
+        </div>
+      ) : (
+        <div className="px-5 py-4 space-y-3">
+          {patterns.length > 1 && (
+            <div>
+              <div className="text-[11px] text-slate-400 mb-1.5">{locked ? '本日のパターン（出勤打刻後は変更できません）' : '本日のパターンを選んでください'}</div>
+              <div className="flex gap-2 flex-wrap">
+                {patterns.map((p) => (
+                  <button
+                    key={p.patternNo}
+                    onClick={() => !locked && onSetActivePattern(p.patternNo)}
+                    disabled={locked}
+                    className={`px-3 py-2 rounded-lg text-[12.5px] font-bold border-2 ${activePatternNo === p.patternNo ? 'border-amber-500 bg-amber-50 text-amber-700' : 'border-slate-200 text-slate-500'} ${locked ? 'opacity-70' : ''}`}
+                  >
+                    {p.label || `パターン${p.patternNo}`}（{p.startTime}〜{p.endTime}）
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          {patterns.length === 1 && (
+            <div className="text-[12.5px] text-slate-600">
+              規定時間：<b className="font-mono">{patterns[0].startTime}〜{patterns[0].endTime}</b>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ClockInConfirmModal({ now, standardMinutes, onClose, onConfirm }) {
   const [saving, setSaving] = useState(false);
   const [note, setNote] = useState('');
   const [lateChoice, setLateChoice] = useState(null); // 'forgot' | 'late' | 'event'
+  const stdMinutes = standardMinutes != null ? standardMinutes : STANDARD_CLOCK_IN_HOUR * 60;
+  const stdHour = Math.floor(stdMinutes / 60);
+  const stdMin = stdMinutes % 60;
+  const stdLabel = `${pad(stdHour)}:${pad(stdMin)}`;
   const nowMinutes = now.getHours() * 60 + now.getMinutes();
-  const isEarly = nowMinutes < STANDARD_CLOCK_IN_HOUR * 60;
+  const isEarly = nowMinutes < stdMinutes;
   const nowLabel = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
 
   const run = async (payload) => {
@@ -2559,14 +2772,14 @@ function ClockInConfirmModal({ now, onClose, onConfirm }) {
         {isEarly ? (
           <div className="px-5 py-4 space-y-3">
             <div className="text-[12.5px] text-slate-600">
-              現在の時刻は <b className="font-mono">{nowLabel}</b> です。出勤時刻を <b>10:00</b> として記録しますか？
+              現在の時刻は <b className="font-mono">{nowLabel}</b> です。出勤時刻を <b>{stdLabel}</b> として記録しますか？
             </div>
             <button
-              onClick={() => run({ clockInTime: todayAt(STANDARD_CLOCK_IN_HOUR, 0, now), status: 'early_confirmed' })}
+              onClick={() => run({ clockInTime: todayAt(stdHour, stdMin, now), status: 'early_confirmed' })}
               disabled={saving}
               className="w-full py-2.5 rounded-lg bg-amber-600 disabled:bg-slate-200 text-white text-[13.5px] font-bold"
             >
-              はい（10:00で記録する）
+              はい（{stdLabel}で記録する）
             </button>
             <button
               onClick={() => run({ clockInTime: now, status: 'early_manual' })}
@@ -2579,14 +2792,14 @@ function ClockInConfirmModal({ now, onClose, onConfirm }) {
         ) : (
           <div className="px-5 py-4 space-y-3">
             <div className="text-[12.5px] text-slate-600">
-              現在の時刻は <b className="font-mono">{nowLabel}</b> です（10:00より後）。今回の出勤はどれに当てはまりますか？
+              現在の時刻は <b className="font-mono">{nowLabel}</b> です（{stdLabel}より後）。今回の出勤はどれに当てはまりますか？
             </div>
             <div className="space-y-2">
               <button
                 onClick={() => setLateChoice('forgot')}
                 className={`w-full py-2.5 rounded-lg border-2 text-[13px] font-bold text-left px-3.5 ${lateChoice === 'forgot' ? 'border-amber-500 bg-amber-50 text-amber-700' : 'border-slate-200 text-slate-600'}`}
               >
-                打刻漏れ（本当は10:00に出勤していた）
+                打刻漏れ（本当は{stdLabel}に出勤していた）
               </button>
               <button
                 onClick={() => setLateChoice('late')}
@@ -2603,7 +2816,7 @@ function ClockInConfirmModal({ now, onClose, onConfirm }) {
             </div>
             {lateChoice === 'forgot' && (
               <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2.5 text-[11.5px] text-amber-700">
-                出勤時刻は <b>10:00</b> に自動修正されます。実際に打刻した時刻（{nowLabel}）は記録として残ります。
+                出勤時刻は <b>{stdLabel}</b> に自動修正されます。実際に打刻した時刻（{nowLabel}）は記録として残ります。
               </div>
             )}
             {(lateChoice === 'late' || lateChoice === 'event') && (
@@ -2613,7 +2826,7 @@ function ClockInConfirmModal({ now, onClose, onConfirm }) {
             )}
             <button
               onClick={() => {
-                if (lateChoice === 'forgot') run({ clockInTime: todayAt(STANDARD_CLOCK_IN_HOUR, 0, now), status: 'forgot_corrected' });
+                if (lateChoice === 'forgot') run({ clockInTime: todayAt(stdHour, stdMin, now), status: 'forgot_corrected' });
                 else if (lateChoice === 'late') run({ clockInTime: now, status: 'late', note });
                 else if (lateChoice === 'event') run({ clockInTime: now, status: 'event', note });
               }}
@@ -2634,10 +2847,14 @@ function ClockInConfirmModal({ now, onClose, onConfirm }) {
   );
 }
 
-function ClockOutConfirmModal({ now, onClose, onConfirm }) {
+function ClockOutConfirmModal({ now, standardMinutes, onClose, onConfirm }) {
   const [saving, setSaving] = useState(false);
   const [note, setNote] = useState('');
   const [choice, setChoice] = useState(null); // 'overtime' | 'forgot'
+  const stdMinutes = standardMinutes != null ? standardMinutes : STANDARD_CLOCK_OUT_HOUR * 60;
+  const stdHour = Math.floor(stdMinutes / 60);
+  const stdMin = stdMinutes % 60;
+  const stdLabel = `${pad(stdHour)}:${pad(stdMin)}`;
   const nowLabel = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
 
   const run = async (payload) => {
@@ -2657,7 +2874,7 @@ function ClockOutConfirmModal({ now, onClose, onConfirm }) {
         </div>
         <div className="px-5 py-4 space-y-3">
           <div className="text-[12.5px] text-slate-600">
-            現在の時刻は <b className="font-mono">{nowLabel}</b> です（19:00より後）。今回の退勤はどちらに当てはまりますか？
+            現在の時刻は <b className="font-mono">{nowLabel}</b> です（{stdLabel}より後）。今回の退勤はどちらに当てはまりますか？
           </div>
           <div className="space-y-2">
             <button
@@ -2670,12 +2887,12 @@ function ClockOutConfirmModal({ now, onClose, onConfirm }) {
               onClick={() => setChoice('forgot')}
               className={`w-full py-2.5 rounded-lg border-2 text-[13px] font-bold text-left px-3.5 ${choice === 'forgot' ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-slate-200 text-slate-600'}`}
             >
-              打刻漏れ（本当は19:00に退勤していた）
+              打刻漏れ（本当は{stdLabel}に退勤していた）
             </button>
           </div>
           {choice === 'forgot' && (
             <div className="bg-blue-50 border border-blue-200 rounded-lg px-3 py-2.5 text-[11.5px] text-blue-700">
-              退勤時刻は <b>19:00</b> に自動修正されます。実際に打刻した時刻（{nowLabel}）は記録として残ります。
+              退勤時刻は <b>{stdLabel}</b> に自動修正されます。実際に打刻した時刻（{nowLabel}）は記録として残ります。
             </div>
           )}
           {choice === 'overtime' && (
@@ -2686,7 +2903,7 @@ function ClockOutConfirmModal({ now, onClose, onConfirm }) {
           <button
             onClick={() => {
               if (choice === 'overtime') run({ clockOutTime: now, status: 'overtime', note });
-              else if (choice === 'forgot') run({ clockOutTime: todayAt(STANDARD_CLOCK_OUT_HOUR, 0, now), status: 'forgot_corrected_out' });
+              else if (choice === 'forgot') run({ clockOutTime: todayAt(stdHour, stdMin, now), status: 'forgot_corrected_out' });
             }}
             disabled={!choice || saving}
             className="w-full py-2.5 rounded-lg bg-slate-800 disabled:bg-slate-200 text-white text-[13.5px] font-bold"
