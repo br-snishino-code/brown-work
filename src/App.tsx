@@ -5497,9 +5497,6 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
   const [role, setRole] = useState('employee');
   const [adminPermissions, setAdminPermissions] = useState(['attendance', 'labor', 'hr', 'payroll']);
   const [showForm, setShowForm] = useState(false);
-  const [editingId, setEditingId] = useState(null);
-  const [editHire, setEditHire] = useState('');
-  const [editResign, setEditResign] = useState('');
   const [profileModalAccount, setProfileModalAccount] = useState(null);
   const [csvModalOpen, setCsvModalOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
@@ -5555,24 +5552,6 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
       setAdminPermissions(['attendance', 'labor', 'hr', 'payroll']);
       setShowForm(false);
     }
-  };
-
-  const startEdit = (acc) => {
-    setEditingId(acc.id);
-    setEditHire(acc.hireDate || todayKey());
-    setEditResign(acc.resignationDate || '');
-  };
-
-  const saveEdit = (id) => {
-    onUpdateDates(id, { hireDate: editHire, resignationDate: editResign || null });
-    setEditingId(null);
-  };
-
-  const employeeRow = (acc) => {
-    const isEditing = editingId === acc.id;
-    const granted = computeLeaveTotal(acc, new Date(), groupLeaveSchedules);
-    const retired = acc.resignationDate && acc.resignationDate <= todayKey();
-    return { acc, isEditing, granted, retired };
   };
 
   const listCard = (
@@ -5633,11 +5612,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
           <thead>
             <tr className="text-left text-[11px] text-slate-400 border-b border-slate-100">
               <th className="px-5 py-2 font-medium">氏名</th>
-              <th className="px-5 py-2 font-medium">ログインID</th>
-              <th className="px-5 py-2 font-medium">入職日</th>
-              <th className="px-5 py-2 font-medium">退職日</th>
-              <th className="px-5 py-2 font-medium">法定有休（自動計算）</th>
-              <th className="px-5 py-2 font-medium"></th>
+              <th className="px-5 py-2 font-medium">雇用形態</th>
               <th className="px-5 py-2 font-medium"></th>
               <th className="px-5 py-2 font-medium"></th>
               <th className="px-5 py-2 font-medium"></th>
@@ -5645,7 +5620,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
           </thead>
           <tbody>
             {filteredEmployeeAccounts.map((acc) => {
-              const { isEditing, granted, retired } = employeeRow(acc);
+              const retired = !!acc.resignationDate;
               return (
                 <tr key={acc.id} className="border-b border-slate-100 last:border-0">
                   <td className="px-5 py-2.5 font-semibold text-slate-800">
@@ -5653,79 +5628,39 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
                     {retired && <span className="ml-1.5 text-[10px] font-bold text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">退職済み</span>}
                     {acc.furigana && <div className="text-[10.5px] font-normal text-slate-400">{acc.furigana}</div>}
                   </td>
-                  <td className="px-5 py-2.5 font-mono text-slate-500">{acc.username}</td>
-                  {isEditing ? (
-                    <>
-                      <td className="px-5 py-2.5"><input type="date" value={editHire} onChange={(e) => setEditHire(e.target.value)} className="border border-slate-200 rounded-md px-2 py-1 font-mono text-[12px]" /></td>
-                      <td className="px-5 py-2.5"><input type="date" value={editResign} onChange={(e) => setEditResign(e.target.value)} className="border border-slate-200 rounded-md px-2 py-1 font-mono text-[12px]" /></td>
-                      <td className="px-5 py-2.5 font-mono text-slate-400">{computeStatutoryPaidLeaveDays(editHire)}日</td>
-                      <td className="px-5 py-2.5"><button onClick={() => saveEdit(acc.id)} className="text-[11px] font-bold text-amber-600">保存</button></td>
-                      <td className="px-5 py-2.5"></td>
-                      <td className="px-5 py-2.5"></td>
-                      <td className="px-5 py-2.5"></td>
-                    </>
-                  ) : (
-                    <>
-                      <td className="px-5 py-2.5 font-mono text-slate-500">{acc.hireDate || '未設定'}</td>
-                      <td className="px-5 py-2.5 font-mono text-slate-400">{acc.resignationDate || '在籍中'}</td>
-                      <td className="px-5 py-2.5 font-mono font-semibold text-slate-800">{granted}日</td>
-                      <td className="px-5 py-2.5"><button onClick={() => startEdit(acc)} className="text-slate-400"><Pencil size={13} /></button></td>
-                      <td className="px-5 py-2.5"><button onClick={() => setProfileModalAccount(acc)} className="text-[11px] font-bold text-slate-500 border border-slate-200 rounded-md px-2 py-1">詳細</button></td>
-                      <td className="px-5 py-2.5"><button onClick={() => setResetPasswordTarget(acc)} className="text-slate-300 hover:text-amber-600" title="パスワードリセット"><Key size={14} /></button></td>
-                      <td className="px-5 py-2.5"><button onClick={() => setDeleteTarget(acc)} className="text-slate-300 hover:text-rose-500"><Trash2 size={14} /></button></td>
-                    </>
-                  )}
+                  <td className="px-5 py-2.5 text-slate-600">{acc.staffType || '社員'}</td>
+                  <td className="px-5 py-2.5"><button onClick={() => setProfileModalAccount(acc)} className="text-[11px] font-bold text-slate-500 border border-slate-200 rounded-md px-2 py-1">詳細</button></td>
+                  <td className="px-5 py-2.5"><button onClick={() => setResetPasswordTarget(acc)} className="text-slate-300 hover:text-amber-600" title="パスワードリセット"><Key size={14} /></button></td>
+                  <td className="px-5 py-2.5"><button onClick={() => setDeleteTarget(acc)} className="text-slate-300 hover:text-rose-500"><Trash2 size={14} /></button></td>
                 </tr>
               );
             })}
             {filteredEmployeeAccounts.length === 0 && (
-              <tr><td colSpan={9} className="px-5 py-8 text-center text-[12.5px] text-slate-300">該当する社員がいません</td></tr>
+              <tr><td colSpan={5} className="px-5 py-8 text-center text-[12.5px] text-slate-300">該当する社員がいません</td></tr>
             )}
           </tbody>
         </table>
       ) : (
         <div className="divide-y divide-slate-100">
           {filteredEmployeeAccounts.map((acc) => {
-            const { isEditing, granted, retired } = employeeRow(acc);
+            const retired = !!acc.resignationDate;
             return (
               <div key={acc.id} className="px-5 py-3.5">
-                <div className="flex items-center justify-between mb-1.5">
+                <div className="flex items-center justify-between">
                   <div>
                     <div className="text-[13px] font-semibold text-slate-800 flex items-center gap-1.5">
                       {acc.name}
                       {retired && <span className="text-[10px] font-bold text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">退職済み</span>}
                     </div>
                     {acc.furigana && <div className="text-[10.5px] text-slate-400">{acc.furigana}</div>}
-                    <div className="text-[11.5px] text-slate-400 font-mono">ID: {acc.username}</div>
+                    <div className="text-[11.5px] text-slate-500 mt-0.5">{acc.staffType || '社員'}</div>
                   </div>
                   <div className="flex items-center gap-1">
                     <button onClick={() => setProfileModalAccount(acc)} className="text-[11px] font-bold text-slate-500 border border-slate-200 rounded-md px-2 py-1">詳細</button>
-                    {!isEditing && (
-                      <button onClick={() => startEdit(acc)} className="text-slate-400 p-1"><Pencil size={13} /></button>
-                    )}
                     <button onClick={() => setResetPasswordTarget(acc)} className="text-slate-300 hover:text-amber-600 p-1"><Key size={14} /></button>
                     <button onClick={() => setDeleteTarget(acc)} className="text-slate-300 hover:text-rose-500 p-1"><Trash2 size={14} /></button>
                   </div>
                 </div>
-                {isEditing ? (
-                  <div className="space-y-2 bg-slate-50 rounded-lg p-3">
-                    <Field label="入職日">
-                      <input type="date" value={editHire} onChange={(e) => setEditHire(e.target.value)} className="w-full border border-slate-200 rounded-md px-2 py-1.5 font-mono text-[13px] bg-white" />
-                    </Field>
-                    <Field label="退職日（在籍中は空欄）">
-                      <input type="date" value={editResign} onChange={(e) => setEditResign(e.target.value)} className="w-full border border-slate-200 rounded-md px-2 py-1.5 font-mono text-[13px] bg-white" />
-                    </Field>
-                    <div className="flex gap-2 pt-1">
-                      <button onClick={() => setEditingId(null)} className="flex-1 py-1.5 rounded-md border border-slate-200 text-[12px] font-medium text-slate-500">キャンセル</button>
-                      <button onClick={() => saveEdit(acc.id)} className="flex-1 py-1.5 rounded-md bg-amber-600 text-white text-[12px] font-bold">保存</button>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-3 text-[11.5px] text-slate-500 font-mono">
-                    <span>入職 {acc.hireDate || '未設定'}</span>
-                    <span className="text-amber-600 font-bold">法定有休 {granted}日</span>
-                  </div>
-                )}
               </div>
             );
           })}
@@ -6100,6 +6035,8 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
     furigana: account.furigana || '',
     contactEmail: account.contactEmail || '',
     staffNumber: account.staffNumber || '',
+    hireDate: account.hireDate || '',
+    resignationDate: account.resignationDate || '',
     address: account.address || '',
     phone: account.phone || '',
     emergencyContactName: account.emergencyContactName || '',
@@ -6168,7 +6105,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
   const save = async () => {
     setSaving(true);
     // 日付項目は空欄のままだと DB が "" を日付として受け付けずエラーになるため、null に変換する
-    const DATE_FIELDS = ['birthDate', 'contractStart', 'contractEnd', 'healthInsuranceAcquiredDate', 'healthInsuranceLostDate', 'pensionAcquiredDate', 'pensionLostDate', 'employmentInsuranceAcquiredDate', 'employmentInsuranceLostDate'];
+    const DATE_FIELDS = ['birthDate', 'resignationDate', 'contractStart', 'contractEnd', 'healthInsuranceAcquiredDate', 'healthInsuranceLostDate', 'pensionAcquiredDate', 'pensionLostDate', 'employmentInsuranceAcquiredDate', 'employmentInsuranceLostDate'];
     const normalizedDates = {};
     DATE_FIELDS.forEach((k) => { normalizedDates[k] = form[k] === '' ? null : form[k]; });
     await onSave(account.id, {
@@ -6218,6 +6155,14 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
               <Field label="ふりがな">
                 <input value={form.furigana} onChange={set('furigana')} placeholder="例）タナカ ハナコ" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
               </Field>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="入職日">
+                  <input type="date" value={form.hireDate} onChange={set('hireDate')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
+                </Field>
+                <Field label="退職日（在籍中は空欄）">
+                  <input type="date" value={form.resignationDate} onChange={set('resignationDate')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
+                </Field>
+              </div>
               <div className="grid grid-cols-2 gap-3">
                 <Field label="生年月日">
                   <input type="date" value={form.birthDate} onChange={set('birthDate')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
