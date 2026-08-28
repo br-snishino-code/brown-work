@@ -1136,6 +1136,62 @@ async function saveStandardRemuneration(employeeId, year, month, payload) {
   return true;
 }
 
+// ---- 標準報酬月額 等級表（令和8年度・全国共通の区分。健保50等級／厚年32等級） ----
+// 出典：全国健康保険協会・日本年金機構の公表資料に基づく（等級区分自体は都道府県によらず全国共通）
+const HEALTH_INSURANCE_GRADES = [
+  [1,58000,0,63000],[2,68000,63000,73000],[3,78000,73000,83000],[4,88000,83000,93000],[5,98000,93000,101000],
+  [6,104000,101000,107000],[7,110000,107000,114000],[8,118000,114000,122000],[9,126000,122000,130000],[10,134000,130000,138000],
+  [11,142000,138000,146000],[12,150000,146000,155000],[13,160000,155000,165000],[14,170000,165000,175000],[15,180000,175000,185000],
+  [16,190000,185000,195000],[17,200000,195000,210000],[18,220000,210000,230000],[19,240000,230000,250000],[20,260000,250000,270000],
+  [21,280000,270000,290000],[22,300000,290000,310000],[23,320000,310000,330000],[24,340000,330000,350000],[25,360000,350000,370000],
+  [26,380000,370000,395000],[27,410000,395000,425000],[28,440000,425000,455000],[29,470000,455000,485000],[30,500000,485000,515000],
+  [31,530000,515000,545000],[32,560000,545000,575000],[33,590000,575000,605000],[34,620000,605000,635000],[35,650000,635000,665000],
+  [36,680000,665000,695000],[37,710000,695000,730000],[38,750000,730000,770000],[39,790000,770000,810000],[40,830000,810000,855000],
+  [41,880000,855000,905000],[42,930000,905000,955000],[43,980000,955000,1005000],[44,1030000,1005000,1055000],[45,1090000,1055000,1115000],
+  [46,1150000,1115000,1175000],[47,1210000,1175000,1235000],[48,1270000,1235000,1295000],[49,1330000,1295000,1355000],[50,1390000,1355000,Infinity],
+].map(([grade, amount, min, max]) => ({ grade, amount, min, max }));
+
+const PENSION_INSURANCE_GRADES = [
+  [1,88000,0,93000],[2,98000,93000,101000],[3,104000,101000,107000],[4,110000,107000,114000],[5,118000,114000,122000],
+  [6,126000,122000,130000],[7,134000,130000,138000],[8,142000,138000,146000],[9,150000,146000,155000],[10,160000,155000,165000],
+  [11,170000,165000,175000],[12,180000,175000,185000],[13,190000,185000,195000],[14,200000,195000,210000],[15,220000,210000,230000],
+  [16,240000,230000,250000],[17,260000,250000,270000],[18,280000,270000,290000],[19,300000,290000,310000],[20,320000,310000,330000],
+  [21,340000,330000,350000],[22,360000,350000,370000],[23,380000,370000,395000],[24,410000,395000,425000],[25,440000,425000,455000],
+  [26,470000,455000,485000],[27,500000,485000,515000],[28,530000,515000,545000],[29,560000,545000,575000],[30,590000,575000,605000],
+  [31,620000,605000,635000],[32,650000,635000,Infinity],
+].map(([grade, amount, min, max]) => ({ grade, amount, min, max }));
+
+const findGradeByMonthlyAmount = (grades, monthlyAmount) => {
+  const amt = Number(monthlyAmount) || 0;
+  return grades.find((g) => amt >= g.min && amt < g.max) || grades[grades.length - 1];
+};
+
+async function fetchInsuranceRateSettings() {
+  const { data, error } = await supabase.from('insurance_rate_settings').select('*').eq('id', 'default').maybeSingle();
+  if (error) { console.error('保険料率設定の取得に失敗しました', error); return null; }
+  if (!data) return null;
+  return {
+    healthInsuranceRate: data.health_insurance_rate != null ? Number(data.health_insurance_rate) : null,
+    nursingInsuranceRate: data.nursing_insurance_rate != null ? Number(data.nursing_insurance_rate) : 1.62,
+    pensionInsuranceRate: data.pension_insurance_rate != null ? Number(data.pension_insurance_rate) : 18.3,
+  };
+}
+
+async function saveInsuranceRateSettings(payload) {
+  const { error } = await supabase.from('insurance_rate_settings').upsert(
+    {
+      id: 'default',
+      health_insurance_rate: payload.healthInsuranceRate === '' ? null : Number(payload.healthInsuranceRate),
+      nursing_insurance_rate: payload.nursingInsuranceRate === '' ? null : Number(payload.nursingInsuranceRate),
+      pension_insurance_rate: payload.pensionInsuranceRate === '' ? null : Number(payload.pensionInsuranceRate),
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: 'id' }
+  );
+  if (error) { console.error('保険料率設定の保存に失敗しました', error); return false; }
+  return true;
+}
+
 // ---- 月ごとの規定勤怠時間パターン（社員が月初に自分で設定） ----
 async function fetchSchedulePatterns(employeeId, year, month) {
   const { data, error } = await supabase
@@ -2599,6 +2655,83 @@ function LoginScreen({ onLogin, toast }) {
       </div>
       <ToastView toast={toast} />
     </div>
+  );
+}
+
+function StandardRemunerationTablePicker({ onClose, onPick }) {
+  const [query, setQuery] = useState('');
+  const amt = Number(query) || 0;
+  const healthGrade = query ? findGradeByMonthlyAmount(HEALTH_INSURANCE_GRADES, amt) : null;
+  const pensionGrade = query ? findGradeByMonthlyAmount(PENSION_INSURANCE_GRADES, amt) : null;
+
+  const formatRange = (g) => `${formatYen(g.min)}〜${g.max === Infinity ? '上限なし' : formatYen(g.max)}`;
+
+  return createPortal(
+    <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-50 p-0 sm:p-4">
+      <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-2xl max-h-[90vh] overflow-y-auto">
+        <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white z-10">
+          <h3 className="font-bold text-[15px]">標準報酬月額表から選択</h3>
+          <button onClick={onClose} className="text-slate-400 text-xl leading-none px-1">×</button>
+        </div>
+        <div className="px-5 py-4 space-y-3">
+          <Field label="報酬月額（基本給＋残業代＋通勤手当などの合計・円）">
+            <input
+              type="number"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="例）340000"
+              autoFocus
+              className="w-full border-2 border-slate-200 rounded-lg px-3 py-2.5 font-mono text-[15px] focus:border-slate-900"
+            />
+          </Field>
+          {healthGrade && pensionGrade && (
+            <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 space-y-2">
+              <div className="grid grid-cols-2 gap-3 text-[13px]">
+                <div>
+                  <div className="text-[10.5px] text-slate-500 font-bold">健康保険 {healthGrade.grade}等級</div>
+                  <div className="font-mono text-[16px] font-bold text-slate-800">{formatYen(healthGrade.amount)}</div>
+                  <div className="text-[10.5px] text-slate-400">報酬月額 {formatRange(healthGrade)}</div>
+                </div>
+                <div>
+                  <div className="text-[10.5px] text-slate-500 font-bold">厚生年金 {pensionGrade.grade}等級</div>
+                  <div className="font-mono text-[16px] font-bold text-slate-800">{formatYen(pensionGrade.amount)}</div>
+                  <div className="text-[10.5px] text-slate-400">報酬月額 {formatRange(pensionGrade)}</div>
+                </div>
+              </div>
+              <button
+                onClick={() => onPick({ healthInsuranceAmount: healthGrade.amount, pensionAmount: pensionGrade.amount })}
+                className="w-full py-2.5 rounded-lg bg-amber-600 text-white text-[13.5px] font-bold"
+              >
+                この等級を使う
+              </button>
+            </div>
+          )}
+
+          <div className="border border-slate-200 rounded-xl overflow-hidden">
+            <div className="px-3 py-2 bg-slate-50 text-[11px] font-bold text-slate-500 border-b border-slate-200">健康保険（50等級）一覧</div>
+            <div className="max-h-56 overflow-y-auto">
+              <table className="w-full text-[12px]">
+                <tbody>
+                  {HEALTH_INSURANCE_GRADES.map((g) => (
+                    <tr
+                      key={g.grade}
+                      onClick={() => onPick({ healthInsuranceAmount: g.amount, pensionAmount: findGradeByMonthlyAmount(PENSION_INSURANCE_GRADES, (g.min + (g.max === Infinity ? g.min : g.max)) / 2).amount })}
+                      className={`cursor-pointer hover:bg-amber-50 border-b border-slate-100 last:border-0 ${healthGrade?.grade === g.grade ? 'bg-amber-100 font-bold' : ''}`}
+                    >
+                      <td className="px-3 py-1.5 text-slate-400 font-mono">{g.grade}</td>
+                      <td className="px-3 py-1.5 font-mono">{formatYen(g.amount)}</td>
+                      <td className="px-3 py-1.5 text-slate-400 font-mono">{formatRange(g)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div className="text-[10.5px] text-slate-400">等級区分は令和8年度・全国共通の基準です。行をクリックしても選択できます。</div>
+        </div>
+      </div>
+    </div>,
+    document.body
   );
 }
 
@@ -7175,6 +7308,28 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
   const [remunerationMonth, setRemunerationMonth] = useState(nowForRemuneration.getMonth() + 1);
   const [remuneration, setRemuneration] = useState({ healthInsuranceAmount: '', pensionAmount: '', healthInsurancePremium: '', nursingInsurancePremium: '', pensionPremium: '' });
   const [savingRemuneration, setSavingRemuneration] = useState(false);
+  const [tablePickerOpen, setTablePickerOpen] = useState(false);
+  const [insuranceRates, setInsuranceRates] = useState({ healthInsuranceRate: '', nursingInsuranceRate: '1.62', pensionInsuranceRate: '18.3' });
+  const [savingInsuranceRates, setSavingInsuranceRates] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      const r = await fetchInsuranceRateSettings();
+      if (r) {
+        setInsuranceRates({
+          healthInsuranceRate: r.healthInsuranceRate != null ? String(r.healthInsuranceRate) : '',
+          nursingInsuranceRate: r.nursingInsuranceRate != null ? String(r.nursingInsuranceRate) : '1.62',
+          pensionInsuranceRate: r.pensionInsuranceRate != null ? String(r.pensionInsuranceRate) : '18.3',
+        });
+      }
+    })();
+  }, []);
+
+  const saveInsuranceRatesNow = async () => {
+    setSavingInsuranceRates(true);
+    await saveInsuranceRateSettings(insuranceRates);
+    setSavingInsuranceRates(false);
+  };
 
   useEffect(() => {
     (async () => {
@@ -7620,18 +7775,67 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                   <input type="number" min="1" max="12" value={remunerationMonth} onChange={(e) => setRemunerationMonth(Number(e.target.value))} className="w-12 border border-slate-200 rounded px-1.5 py-1 font-mono text-[11px] bg-white" />月
                 </div>
               </div>
+              <button onClick={() => setTablePickerOpen(true)} className="w-full py-2 rounded-lg border-2 border-slate-200 text-[12.5px] font-bold text-slate-600 flex items-center justify-center gap-1.5">
+                <FileText size={13} /> 表から選択
+              </button>
               <div className="grid grid-cols-2 gap-3">
                 <Field label="標準報酬月額（健康保険）"><input type="number" value={remuneration.healthInsuranceAmount} onChange={(e) => setRemuneration((p) => ({ ...p, healthInsuranceAmount: e.target.value }))} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" /></Field>
                 <Field label="標準報酬月額（厚生年金）"><input type="number" value={remuneration.pensionAmount} onChange={(e) => setRemuneration((p) => ({ ...p, pensionAmount: e.target.value }))} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" /></Field>
               </div>
-              <div className="grid grid-cols-3 gap-3">
-                <Field label="健康保険料（参考・円）"><input type="number" value={remuneration.healthInsurancePremium} onChange={(e) => setRemuneration((p) => ({ ...p, healthInsurancePremium: e.target.value }))} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" /></Field>
-                <Field label="介護保険料（参考・円）"><input type="number" value={remuneration.nursingInsurancePremium} onChange={(e) => setRemuneration((p) => ({ ...p, nursingInsurancePremium: e.target.value }))} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" /></Field>
-                <Field label="厚生年金保険料（参考・円）"><input type="number" value={remuneration.pensionPremium} onChange={(e) => setRemuneration((p) => ({ ...p, pensionPremium: e.target.value }))} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" /></Field>
+
+              <div className="bg-slate-50 rounded-xl p-3 space-y-2">
+                <div className="text-[11px] font-bold text-slate-500">保険料率（全社共通の設定）</div>
+                <div className="grid grid-cols-3 gap-2">
+                  <Field label="健康保険料率（%）"><input type="number" step="0.01" value={insuranceRates.healthInsuranceRate} onChange={(e) => setInsuranceRates((p) => ({ ...p, healthInsuranceRate: e.target.value }))} placeholder="要確認" className="w-full border border-slate-200 rounded-lg px-2.5 py-1.5 font-mono text-[12.5px] bg-white" /></Field>
+                  <Field label="介護保険料率（%）"><input type="number" step="0.01" value={insuranceRates.nursingInsuranceRate} onChange={(e) => setInsuranceRates((p) => ({ ...p, nursingInsuranceRate: e.target.value }))} className="w-full border border-slate-200 rounded-lg px-2.5 py-1.5 font-mono text-[12.5px] bg-white" /></Field>
+                  <Field label="厚生年金料率（%）"><input type="number" step="0.01" value={insuranceRates.pensionInsuranceRate} onChange={(e) => setInsuranceRates((p) => ({ ...p, pensionInsuranceRate: e.target.value }))} className="w-full border border-slate-200 rounded-lg px-2.5 py-1.5 font-mono text-[12.5px] bg-white" /></Field>
+                </div>
+                <button onClick={saveInsuranceRatesNow} disabled={savingInsuranceRates} className="text-[11px] font-bold text-amber-600">{savingInsuranceRates ? '保存中…' : '料率を保存（全社共通）'}</button>
+                <div className="text-[10px] text-slate-400">健康保険料率は協会けんぽの都道府県支部ごとに異なるため、京都支部の最新の料率表をご確認のうえ入力してください。介護・厚生年金は全国一律の値を初期値にしています。</div>
               </div>
+
+              <div className="grid grid-cols-3 gap-3">
+                <Field label="健康保険料（参考・円）">
+                  <input type="number" value={remuneration.healthInsurancePremium} onChange={(e) => setRemuneration((p) => ({ ...p, healthInsurancePremium: e.target.value }))} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" />
+                </Field>
+                <Field label="介護保険料（参考・円）">
+                  <input type="number" value={remuneration.nursingInsurancePremium} onChange={(e) => setRemuneration((p) => ({ ...p, nursingInsurancePremium: e.target.value }))} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" />
+                </Field>
+                <Field label="厚生年金保険料（参考・円）">
+                  <input type="number" value={remuneration.pensionPremium} onChange={(e) => setRemuneration((p) => ({ ...p, pensionPremium: e.target.value }))} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" />
+                </Field>
+              </div>
+              <button
+                onClick={() => {
+                  const h = Number(remuneration.healthInsuranceAmount) || 0;
+                  const p = Number(remuneration.pensionAmount) || 0;
+                  const healthRate = Number(insuranceRates.healthInsuranceRate) || 0;
+                  const nursingRate = Number(insuranceRates.nursingInsuranceRate) || 0;
+                  const pensionRate = Number(insuranceRates.pensionInsuranceRate) || 0;
+                  setRemuneration((prev) => ({
+                    ...prev,
+                    healthInsurancePremium: healthRate > 0 ? String(Math.round((h * healthRate) / 100 / 2)) : prev.healthInsurancePremium,
+                    nursingInsurancePremium: nursingRate > 0 ? String(Math.round((h * nursingRate) / 100 / 2)) : prev.nursingInsurancePremium,
+                    pensionPremium: pensionRate > 0 ? String(Math.round((p * pensionRate) / 100 / 2)) : prev.pensionPremium,
+                  }));
+                }}
+                className="w-full py-2 rounded-lg border-2 border-amber-200 text-amber-700 text-[12.5px] font-bold"
+              >
+                上の標準報酬月額・料率から自動計算する（本人負担分）
+              </button>
               <button onClick={saveRemunerationNow} disabled={savingRemuneration} className="w-full py-2 rounded-lg bg-slate-800 disabled:bg-slate-300 text-white text-[12.5px] font-bold">{savingRemuneration ? '保存中…' : `${remunerationYear}年${remunerationMonth}月分を保存`}</button>
-              <div className="text-[10.5px] text-slate-400">保険料額は協会けんぽ等の保険料額表をご確認のうえ手入力してください（都道府県・年度で変わるため自動計算していません）。</div>
+              <div className="text-[10.5px] text-slate-400">自動計算はあくまで概算です。最終的な金額は協会けんぽ等の保険料額表で必ずご確認ください。</div>
           </div>
+
+          {tablePickerOpen && (
+            <StandardRemunerationTablePicker
+              onClose={() => setTablePickerOpen(false)}
+              onPick={({ healthInsuranceAmount, pensionAmount }) => {
+                setRemuneration((prev) => ({ ...prev, healthInsuranceAmount: String(healthInsuranceAmount), pensionAmount: String(pensionAmount) }));
+                setTablePickerOpen(false);
+              }}
+            />
+          )}
 
           <div ref={(el) => (sectionRefs.current.insurance = el)} className="space-y-4 pt-1">
             <div className="text-[12px] font-bold text-slate-500 border-b border-slate-100 pb-2">社会保険</div>
