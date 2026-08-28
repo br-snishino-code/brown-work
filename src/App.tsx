@@ -6436,13 +6436,15 @@ function AdminYearEndAdjustmentTab({ requests, onDecide, isDesktop }) {
 const COMMUTE_CALC_METHODS = [
   { key: 'round_trip', label: '実費（往復）' },
   { key: 'one_way', label: '実費（片道）' },
+  { key: 'pass_fare', label: '定期代で支給' },
   { key: 'within_pass', label: '定期代の範囲内（追加費用なし）' },
   { key: 'excess', label: '定期代を超える差額分' },
 ];
-const emptyCommuteRow = () => ({ date: '', workplace: '', transport: '', fromStation: '', toStation: '', calcMethod: 'round_trip', unitPrice: '', excessAmount: '', note: '' });
+const emptyCommuteRow = () => ({ date: '', workplace: '', transport: '', fromStation: '', toStation: '', calcMethod: 'round_trip', unitPrice: '', passFare: '', excessAmount: '', note: '' });
 const computeCommuteRowSubtotal = (row) => {
   switch (row.calcMethod) {
     case 'one_way': return Number(row.unitPrice) || 0;
+    case 'pass_fare': return Number(row.passFare) || 0;
     case 'within_pass': return 0;
     case 'excess': return Number(row.excessAmount) || 0;
     case 'round_trip':
@@ -6543,6 +6545,8 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit }) {
                         <span className="text-[10.5px] text-slate-300">不要</span>
                       ) : r.calcMethod === 'excess' ? (
                         <input type="number" value={r.excessAmount} onChange={(e) => updateRow(i, 'excessAmount', e.target.value)} placeholder="差額" className="w-20 border border-slate-200 rounded px-1.5 py-1 font-mono text-[11.5px]" />
+                      ) : r.calcMethod === 'pass_fare' ? (
+                        <input type="number" value={r.passFare} onChange={(e) => updateRow(i, 'passFare', e.target.value)} placeholder="定期代" className="w-20 border border-slate-200 rounded px-1.5 py-1 font-mono text-[11.5px]" />
                       ) : (
                         <input type="number" value={r.unitPrice} onChange={(e) => updateRow(i, 'unitPrice', e.target.value)} placeholder={r.calcMethod === 'round_trip' ? '片道単価' : '運賃'} className="w-20 border border-slate-200 rounded px-1.5 py-1 font-mono text-[11.5px]" />
                       )}
@@ -6618,7 +6622,7 @@ function AdminCommuteExpenseClaimsTab({ claims, onDecide, isDesktop }) {
                 <td className="px-2 py-1">{r.transport}</td>
                 <td className="px-2 py-1 whitespace-nowrap">{r.fromStation}～{r.toStation}</td>
                 <td className="px-2 py-1 whitespace-nowrap">{COMMUTE_CALC_METHODS.find((m) => m.key === r.calcMethod)?.label || r.calcMethod}</td>
-                <td className="px-2 py-1 font-mono">{r.calcMethod === 'within_pass' ? '－' : formatYen(r.calcMethod === 'excess' ? (Number(r.excessAmount) || 0) : (Number(r.unitPrice) || 0))}</td>
+                <td className="px-2 py-1 font-mono">{r.calcMethod === 'within_pass' ? '－' : formatYen(r.calcMethod === 'excess' ? (Number(r.excessAmount) || 0) : r.calcMethod === 'pass_fare' ? (Number(r.passFare) || 0) : (Number(r.unitPrice) || 0))}</td>
                 <td className="px-2 py-1 font-mono font-semibold">{formatYen(r.subtotal)}</td>
                 <td className="px-2 py-1">{r.note}</td>
               </tr>
