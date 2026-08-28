@@ -4154,6 +4154,49 @@ function PerformanceModal({ type, onClose, onSubmit }) {
   );
 }
 
+function PerformanceView({ reports, onOpenModal, isDesktop }) {
+  const sorted = [...reports].sort((a, b) => (a.submittedAt < b.submittedAt ? 1 : -1));
+  const statusLabel = { pending: '承認待ち', approved: '承認済み', rejected: '却下' };
+  const statusClass = { pending: 'bg-amber-50 text-amber-600', approved: 'bg-emerald-50 text-emerald-600', rejected: 'bg-rose-50 text-rose-600' };
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+      <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2 flex-wrap">
+        <ClipboardList size={15} className="text-slate-400" />
+        <h2 className="font-bold text-[13.5px]">実績報告</h2>
+        <div className="ml-auto flex gap-2">
+          <button onClick={() => onOpenModal('half')} className="text-[11.5px] font-bold text-amber-600 border border-amber-200 rounded-lg px-2.5 py-1.5 flex items-center gap-1">
+            <Plus size={12} />半月実績
+          </button>
+          <button onClick={() => onOpenModal('month')} className="text-[11.5px] font-bold text-amber-600 border border-amber-200 rounded-lg px-2.5 py-1.5 flex items-center gap-1">
+            <Plus size={12} />月末まとめ
+          </button>
+        </div>
+      </div>
+      {sorted.length === 0 ? (
+        <div className="px-5 py-10 text-center text-[12.5px] text-slate-300">まだ実績報告はありません</div>
+      ) : (
+        <div className="divide-y divide-slate-100">
+          {sorted.map((r) => (
+            <div key={r.id} className="px-5 py-3.5">
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[13px] font-bold text-slate-800">{r.periodLabel}</span>
+                <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full ${statusClass[r.status]}`}>{statusLabel[r.status]}</span>
+              </div>
+              <div className="text-[12.5px] text-slate-600 whitespace-pre-wrap">{r.summary}</div>
+              {r.numericLabel && (
+                <div className="text-[12px] text-slate-500 mt-1">{r.numericLabel}：<span className="font-mono font-bold text-slate-700">{r.numericValue}</span></div>
+              )}
+              {r.notes && <div className="text-[11.5px] text-slate-400 mt-1">備考：{r.notes}</div>}
+              {r.adminMemo && <div className="text-[11.5px] text-slate-400 mt-1">管理者コメント：{r.adminMemo}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ==== eo業務 実績管理（新規実績・既存実績・インセンティブ） ====
 
 const NEW_PERF_BASIC_FIELDS = [
