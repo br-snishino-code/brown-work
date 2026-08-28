@@ -13,6 +13,18 @@ const STANDARD_CLOCK_OUT_HOUR = 19; // 退勤確認ポップアップの基準�
 const pad = (n) => String(n).padStart(2, '0');
 const todayKey = (d = new Date()) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const todayAt = (hour, minute, from = new Date()) => new Date(from.getFullYear(), from.getMonth(), from.getDate(), hour, minute, 0, 0);
+// 前月のキー（'YYYY-MM'）。交通費精算の対象月＝前月分を毎月1日までに申請するために使う
+const prevMonthKey = (from = new Date()) => {
+  const y = from.getFullYear();
+  const m = from.getMonth(); // 0始まり。前月 = m（例：3月[getMonth()=2]なら前月2月[m=1]）
+  const targetYear = m === 0 ? y - 1 : y;
+  const targetMonth = m === 0 ? 12 : m;
+  return `${targetYear}-${pad(targetMonth)}`;
+};
+const monthKeyLabel = (yearMonth) => {
+  const [y, m] = yearMonth.split('-').map(Number);
+  return `${y}年${m}月`;
+};
 const CLOCK_IN_STATUS_LABEL = {
   early_confirmed: '早出（10:00で記録）',
   early_manual: '早出（実打刻で記録）',
@@ -803,6 +815,7 @@ const rowToCommuteClaim = (row) => ({
   employeeId: row.employee_id,
   employeeName: row.employees?.name || '',
   workplace: row.workplace || '',
+  targetMonth: row.target_month || '',
   submittedDate: row.submitted_date,
   items: Array.isArray(row.items) ? row.items : [],
   totalAmount: Number(row.total_amount) || 0,
@@ -1588,6 +1601,13 @@ export default function AttendanceApp() {
 
   const activePattern = schedulePatterns.find((p) => p.patternNo === activePatternNo) || schedulePatterns[0] || null;
 
+  // 交通費精算：前月分を毎月1日までに申請できているか（未提出・却下のままなら出勤時にリマインド）
+  const commuteClaimTargetMonthKey = prevMonthKey(now);
+  const hasSubmittedCommuteClaim = (data.commuteExpenseClaims || []).some(
+    (c) => c.employeeId === employeeId && c.targetMonth === commuteClaimTargetMonthKey && c.status !== 'rejected'
+  );
+  const needsCommuteClaimReminder = !hasSubmittedCommuteClaim;
+
   const handleClockIn = async (confirm = {}) => {
     const loc = await geo.capture();
     const actualNow = new Date();
@@ -2120,6 +2140,7 @@ export default function AttendanceApp() {
       .insert({
         employee_id: employeeId,
         workplace: payload.workplace || null,
+        target_month: payload.targetMonth,
         submitted_date: payload.submittedDate,
         items: payload.items,
         total_amount: payload.totalAmount,
@@ -2518,6 +2539,9 @@ export default function AttendanceApp() {
                 activePatternNo={activePatternNo}
                 onSetActivePattern={setActivePatternNo}
                 onSavePatterns={savePatterns}
+                needsCommuteClaimReminder={needsCommuteClaimReminder}
+                commuteClaimTargetMonth={commuteClaimTargetMonthKey}
+                onGoToCommuteClaim={() => setTopTab('payroll')}
                 isDesktop={isDesktop}
               />
             )}
@@ -3160,7 +3184,7 @@ function Header({ session, onLogout, pendingCount, missingPunchCount, viewMode, 
   );
 }
 
-function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, historyDates, records, corrections, onOpenCorrection, notifications, onMarkNotificationRead, schedulePatterns = [], activePatternNo, onSetActivePattern, onSavePatterns, isDesktop }) {
+function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, historyDates, records, corrections, onOpenCorrection, notifications, onMarkNotificationRead, schedulePatterns = [], activePatternNo, onSetActivePattern, onSavePatterns, needsCommuteClaimReminder, commuteClaimTargetMonth, onGoToCommuteClaim, isDesktop }) {
   const status = computeDayStatus(todayRecord);
   const canClockIn = !todayRecord?.clockIn;
   const canClockOut = todayRecord?.clockIn && !todayRecord?.clockOut;
@@ -3178,8 +3202,9 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
   const primaryLabel = doneToday ? '退勤済み' : canClockIn ? '出勤' : '退勤';
   const [clockInConfirmOpen, setClockInConfirmOpen] = useState(false);
   const [clockOutConfirmOpen, setClockOutConfirmOpen] = useState(false);
+  const [commuteReminderOpen, setCommuteReminderOpen] = useState(false);
   const primaryAction = canClockIn
-    ? (hasMissingPunch ? undefined : () => setClockInConfirmOpen(true))
+    ? (hasMissingPunch ? undefined : () => (needsCommuteClaimReminder ? setCommuteReminderOpen(true) : setClockInConfirmOpen(true)))
     : canClockOut
       ? () => setClockOutConfirmOpen(true)
       : undefined;
@@ -3357,6 +3382,14 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
           onConfirm={async (payload) => { await onClockOut(payload); setClockOutConfirmOpen(false); }}
         />
       )}
+      {commuteReminderOpen && (
+        <CommuteClaimReminderModal
+          targetMonth={commuteClaimTargetMonth}
+          onClose={() => setCommuteReminderOpen(false)}
+          onContinue={() => { setCommuteReminderOpen(false); setClockInConfirmOpen(true); }}
+          onGoToClaim={() => { setCommuteReminderOpen(false); onGoToCommuteClaim && onGoToCommuteClaim(); }}
+        />
+      )}
     </div>
   );
   return (
@@ -3377,6 +3410,14 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
           standardMinutes={standardEndMinutes}
           onClose={() => setClockOutConfirmOpen(false)}
           onConfirm={async (payload) => { await onClockOut(payload); setClockOutConfirmOpen(false); }}
+        />
+      )}
+      {commuteReminderOpen && (
+        <CommuteClaimReminderModal
+          targetMonth={commuteClaimTargetMonth}
+          onClose={() => setCommuteReminderOpen(false)}
+          onContinue={() => { setCommuteReminderOpen(false); setClockInConfirmOpen(true); }}
+          onGoToClaim={() => { setCommuteReminderOpen(false); onGoToCommuteClaim && onGoToCommuteClaim(); }}
         />
       )}
     </div>
@@ -3610,6 +3651,39 @@ function ClockInConfirmModal({ now, standardMinutes, onClose, onConfirm }) {
 
         <div className="px-5 pb-5 pt-1">
           <button onClick={onClose} className="w-full py-2.5 rounded-lg text-[12.5px] font-medium text-slate-400">キャンセル</button>
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+function CommuteClaimReminderModal({ targetMonth, onClose, onContinue, onGoToClaim }) {
+  return createPortal(
+    <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-40 p-0 sm:p-4">
+      <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-sm max-h-[90vh] overflow-y-auto">
+        <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center gap-2">
+          <div className="w-9 h-9 rounded-xl bg-amber-50 flex items-center justify-center shrink-0">
+            <Wallet size={16} className="text-amber-600" />
+          </div>
+          <h3 className="font-bold text-[15px]">交通費精算のお願い</h3>
+        </div>
+        <div className="px-5 py-4 space-y-3">
+          <div className="text-[12.5px] text-slate-600">
+            <b>{monthKeyLabel(targetMonth)}分</b>の交通費精算書がまだ提出されていません。毎月1日までに提出をお願いしています。
+          </div>
+          <button
+            onClick={onGoToClaim}
+            className="w-full py-2.5 rounded-lg bg-amber-600 text-white text-[13.5px] font-bold"
+          >
+            今すぐ申請する
+          </button>
+          <button
+            onClick={onContinue}
+            className="w-full py-2.5 rounded-lg border border-slate-200 text-[13.5px] font-medium text-slate-600"
+          >
+            後で（このまま出勤する）
+          </button>
         </div>
       </div>
     </div>,
@@ -6361,6 +6435,7 @@ const computeCommuteRowSubtotal = (row) => (Number(row.unitPrice) || 0) * (row.r
 function CommuteExpenseClaimSection({ session, claims, onSubmit }) {
   const [formOpen, setFormOpen] = useState(false);
   const [workplace, setWorkplace] = useState('');
+  const [targetMonth, setTargetMonth] = useState(() => prevMonthKey());
   const [submittedDate, setSubmittedDate] = useState(todayKey());
   const [rows, setRows] = useState(() => Array.from({ length: 5 }, emptyCommuteRow));
   const [saving, setSaving] = useState(false);
@@ -6376,10 +6451,11 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit }) {
       .map((r) => ({ ...r, subtotal: computeCommuteRowSubtotal(r) }));
     if (items.length === 0) return;
     setSaving(true);
-    const ok = await onSubmit({ workplace, submittedDate, items, totalAmount: items.reduce((s, r) => s + r.subtotal, 0) });
+    const ok = await onSubmit({ workplace, targetMonth, submittedDate, items, totalAmount: items.reduce((s, r) => s + r.subtotal, 0) });
     setSaving(false);
     if (ok) {
       setWorkplace('');
+      setTargetMonth(prevMonthKey());
       setSubmittedDate(todayKey());
       setRows(Array.from({ length: 5 }, emptyCommuteRow));
       setFormOpen(false);
@@ -6401,11 +6477,14 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit }) {
 
       {formOpen && (
         <div className="px-5 py-4 space-y-3 border-b border-slate-100">
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-3 gap-3">
+            <Field label="対象月">
+              <input type="month" value={targetMonth} onChange={(e) => setTargetMonth(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
+            </Field>
             <Field label="勤務先"><input value={workplace} onChange={(e) => setWorkplace(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" /></Field>
             <Field label="提出日"><input type="date" value={submittedDate} onChange={(e) => setSubmittedDate(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" /></Field>
           </div>
-          <div className="text-[10.5px] text-slate-400">往復利用の場合は「往復」にチェックを入れてください（小計は単価×2で自動計算されます）。行が足りない場合は下の「行を追加」で増やせます。</div>
+          <div className="text-[10.5px] text-slate-400">毎月分をまとめて、翌月1日までに申請してください。往復利用の場合は「往復」にチェックを入れると、単価×2で小計が自動計算されます。行が足りない場合は下の「行を追加」で増やせます。</div>
 
           <div className="overflow-x-auto">
             <table className="w-full min-w-[720px] text-[12px]">
@@ -6450,7 +6529,7 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit }) {
           claims.map((c) => (
             <div key={c.id} className="px-5 py-3">
               <div className="flex items-center justify-between mb-1">
-                <span className="text-[13px] font-bold text-slate-800">{dateLabel(c.submittedDate)} 提出 ・ {c.items.length}件</span>
+                <span className="text-[13px] font-bold text-slate-800">{c.targetMonth ? `${monthKeyLabel(c.targetMonth)}分 ・ ` : ''}{dateLabel(c.submittedDate)} 提出 ・ {c.items.length}件</span>
                 <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full ${statusClass[c.status]}`}>{statusLabel[c.status]}</span>
               </div>
               <div className="font-mono text-[15px] font-bold text-slate-800">{formatYen(c.totalAmount)}</div>
@@ -6473,7 +6552,7 @@ function AdminCommuteExpenseClaimsTab({ claims, onDecide, isDesktop }) {
   const Card = ({ c }) => (
     <div className="px-5 py-3.5 border-b border-slate-100 last:border-0">
       <div className="flex items-center justify-between mb-1.5">
-        <span className="font-semibold text-[13px] text-slate-800">{c.employeeName} ・ {dateLabel(c.submittedDate)}提出{c.workplace ? `（${c.workplace}）` : ''}</span>
+        <span className="font-semibold text-[13px] text-slate-800">{c.employeeName} ・ {c.targetMonth ? `${monthKeyLabel(c.targetMonth)}分` : ''} ・ {dateLabel(c.submittedDate)}提出{c.workplace ? `（${c.workplace}）` : ''}</span>
         <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full ${statusClass[c.status]}`}>{statusLabel[c.status]}</span>
       </div>
       <div className="overflow-x-auto mb-2">
