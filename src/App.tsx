@@ -42,6 +42,12 @@ const dateLabel = (key) => {
   const days = ['日', '月', '火', '水', '木', '金', '土'];
   return `${d.getMonth() + 1}/${d.getDate()}（${days[d.getDay()]}）`;
 };
+// 管理者向け一覧用：YYYY-MM-DD → MM-DD(曜)
+const formatAdminDate = (key) => {
+  const d = new Date(key + 'T00:00:00');
+  const days = ['日', '月', '火', '水', '木', '金', '土'];
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())}(${days[d.getDay()]})`;
+};
 
 // ---- Leave (休暇) ----
 const LEAVE_TYPES = ['有休', '振休', '代休', '特別休暇'];
@@ -489,6 +495,7 @@ const rowToAccount = (row) => ({
   mainGroup: row.main_group || '',
   subGroup: row.sub_group || '',
   commuteAllowance: row.commute_allowance != null ? Number(row.commute_allowance) : 0,
+  deemedOvertimeHours: row.deemed_overtime_hours != null ? Number(row.deemed_overtime_hours) : null,
   nearestStation: row.nearest_station || '',
   staffNote1: row.staff_note1 || '',
   staffNote2: row.staff_note2 || '',
@@ -1564,6 +1571,7 @@ export default function AttendanceApp() {
       mainGroup: 'main_group',
       subGroup: 'sub_group',
       commuteAllowance: 'commute_allowance',
+      deemedOvertimeHours: 'deemed_overtime_hours',
       nearestStation: 'nearest_station',
       staffNote1: 'staff_note1',
       staffNote2: 'staff_note2',
@@ -4613,8 +4621,11 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
         status: computeDayStatus(record).label,
         clockInStatusLabel: record?.clockInStatus ? (CLOCK_IN_STATUS_LABEL[record.clockInStatus] || '') : '',
         clockInActual: record?.clockInActual && record.clockInActual !== record.clockIn ? hhmm(new Date(record.clockInActual)) : '',
+        clockOutStatusLabel: record?.clockOutStatus ? (CLOCK_OUT_STATUS_LABEL[record.clockOutStatus] || '') : '',
+        clockOutActual: record?.clockOutActual && record.clockOutActual !== record.clockOut ? hhmm(new Date(record.clockOutActual)) : '',
         needsApproval: record?.clockInApproval === 'pending',
         breakMinutes: record ? getRecordedBreakMinutes(record, record.clockOut ? new Date(record.clockOut) : new Date()) : null,
+        dateShort: formatAdminDate(dateStr),
       });
     });
   });
@@ -4637,8 +4648,8 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
 
   const escapeCsv = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
   const exportCsv = () => {
-    const header = ['社員名','日付','出勤','実打刻','出勤区分','退勤','休憩(分)','実働','残業','遅刻(分)','早退(分)','状態'];
-    const body = rows.map((r) => [r.employeeName,r.date,r.clockIn,r.clockInActual,r.clockInStatusLabel,r.clockOut,r.breakMin,minutesToHHMM(r.workedMin),minutesToHHMM(r.overtimeMin),r.lateMin,r.earlyLeaveMin,r.status]);
+    const header = ['社員名','日付','出勤','実打刻','出勤区分','退勤','実打刻','退勤区分','休憩(分)','実働','残業','遅刻(分)','早退(分)','状態'];
+    const body = rows.map((r) => [r.employeeName,r.date,r.clockIn,r.clockInActual,r.clockInStatusLabel,r.clockOut,r.clockOutActual,r.clockOutStatusLabel,r.breakMin,minutesToHHMM(r.workedMin),minutesToHHMM(r.overtimeMin),r.lateMin,r.earlyLeaveMin,r.status]);
     const csv = '\uFEFF' + [header, ...body].map((line) => line.map(escapeCsv).join(',')).join('\r\n');
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -4706,7 +4717,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
           <div className="overflow-x-auto">
             <table className="w-full min-w-[980px] text-[12.5px]">
               <thead><tr className="text-left text-[10.5px] text-slate-400 border-b border-slate-100">
-                {['社員','日付','出勤','実打刻','退勤','休憩(分)','実働','残業','遅刻','早退','状態','承認'].map((h) => <th key={h} className="px-3 py-2 font-medium">{h}</th>)}
+                {['日付','出勤','実打刻','退勤','実打刻','休憩(分)','実働','残業','遅刻','早退','状態','承認'].map((h, i) => <th key={h + i} className="px-3 py-2 font-medium">{h}</th>)}
               </tr></thead>
               <tbody>{rows.map((r) => {
                 const key = `${r.employeeId}|${r.date}`;
@@ -4714,8 +4725,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
                 const setField = (field, value) => setEdits((prev) => ({ ...prev, [key]: { ...(prev[key] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: false }), [field]: value } }));
                 return (
                   <tr key={key} className={`border-b border-slate-100 last:border-0 ${r.needsApproval ? 'bg-amber-50/60' : ''}`}>
-                    <td className="px-3 py-2 font-semibold whitespace-nowrap">{r.employeeName}</td>
-                    <td className="px-3 py-2 font-mono whitespace-nowrap">{r.date}</td>
+                    <td className="px-3 py-2 font-mono whitespace-nowrap">{r.dateShort}</td>
                     <td className="px-3 py-2"><input type="time" value={e.clockIn || ''} onChange={(ev) => setField('clockIn', ev.target.value)} className="w-[92px] border border-slate-200 rounded px-1.5 py-1 font-mono text-[12px]" /></td>
                     <td className="px-3 py-2 font-mono text-slate-400 whitespace-nowrap">
                       {r.clockInActual || ''}
@@ -4726,6 +4736,12 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
                       )}
                     </td>
                     <td className="px-3 py-2"><input type="time" value={e.clockOut || ''} onChange={(ev) => setField('clockOut', ev.target.value)} className="w-[92px] border border-slate-200 rounded px-1.5 py-1 font-mono text-[12px]" /></td>
+                    <td className="px-3 py-2 font-mono text-slate-400 whitespace-nowrap">
+                      {r.clockOutActual || ''}
+                      {r.clockOutStatusLabel && (
+                        <div className="text-[10px] font-sans whitespace-nowrap text-purple-600">{r.clockOutStatusLabel}</div>
+                      )}
+                    </td>
                     <td className="px-3 py-2"><input type="number" min="0" step="5" value={e.breakMinutes ?? ''} onChange={(ev) => setField('breakMinutes', ev.target.value)} className="w-16 border border-slate-200 rounded px-1.5 py-1 font-mono text-[12px]" /></td>
                     <td className="px-3 py-2 font-mono font-semibold whitespace-nowrap">{minutesToHHMM(r.workedMin)}</td>
                     <td className="px-3 py-2 font-mono whitespace-nowrap">{minutesToHHMM(r.overtimeMin)}</td>
@@ -4753,8 +4769,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
             return (
               <div key={key} className={`px-4 py-3 ${r.needsApproval ? 'bg-amber-50/60' : ''}`}>
                 <div className="flex items-center justify-between">
-                  <div className="font-semibold text-[13px]">{r.employeeName}</div>
-                  <div className="font-mono text-[11.5px] text-slate-400">{r.date}</div>
+                  <div className="font-mono text-[13px] font-semibold text-slate-700">{r.dateShort}</div>
                 </div>
                 <div className="mt-2 grid grid-cols-3 gap-2">
                   <Field label="出勤"><input type="time" value={e.clockIn || ''} onChange={(ev) => setField('clockIn', ev.target.value)} className="w-full border border-slate-200 rounded px-2 py-1.5 font-mono text-[12.5px]" /></Field>
@@ -4763,6 +4778,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
                 </div>
                 <div className="mt-2 text-[11px] text-slate-400">{r.status} ・実働 {minutesToHHMM(r.workedMin)}{r.overtimeMin > 0 ? ` ・ 残業 ${minutesToHHMM(r.overtimeMin)}` : ''}{r.lateMin > 0 ? ` ・ 遅刻 ${r.lateMin}分` : ''}{r.earlyLeaveMin > 0 ? ` ・ 早退 ${r.earlyLeaveMin}分` : ''}</div>
                 {r.clockInStatusLabel && <div className={`mt-1 text-[11px] font-medium ${r.needsApproval ? 'text-amber-600' : 'text-blue-600'}`}>{r.clockInStatusLabel}{r.needsApproval ? '・承認待ち' : ''}{r.clockInActual ? `（実打刻 ${r.clockInActual}）` : ''}</div>}
+                {r.clockOutStatusLabel && <div className="mt-1 text-[11px] font-medium text-purple-600">{r.clockOutStatusLabel}{r.clockOutActual ? `（実打刻 ${r.clockOutActual}）` : ''}</div>}
                 {r.needsApproval && (
                   <label className="mt-1.5 flex items-center gap-1.5 text-[11.5px] text-amber-700">
                     <input type="checkbox" checked={!!e.approve} onChange={(ev) => setField('approve', ev.target.checked)} />
@@ -5834,6 +5850,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
     mainGroup: account.mainGroup || '',
     subGroup: account.subGroup || '',
     commuteAllowance: String(account.commuteAllowance || 0),
+    deemedOvertimeHours: account.deemedOvertimeHours != null ? String(account.deemedOvertimeHours) : '',
     nearestStation: account.nearestStation || '',
     staffNote1: account.staffNote1 || '',
     staffNote2: account.staffNote2 || '',
@@ -5899,6 +5916,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
       ...form,
       ...normalizedDates,
       commuteAllowance: Number(form.commuteAllowance) || 0,
+      deemedOvertimeHours: form.deemedOvertimeHours === '' ? null : Number(form.deemedOvertimeHours),
       leaveAdjustment: Number(form.leaveAdjustment) || 0,
       scheduledWeeklyDays: form.scheduledWeeklyDays === '' ? null : Number(form.scheduledWeeklyDays),
       standardRemunerationHealth: form.standardRemunerationHealth === '' ? null : Number(form.standardRemunerationHealth),
@@ -6062,6 +6080,9 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
               <div className="text-[11px] font-bold text-slate-400 pt-2">勤務条件</div>
               <Field label="交通費（月額・円）">
                 <input type="number" value={form.commuteAllowance} onChange={set('commuteAllowance')} placeholder="0" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
+              </Field>
+              <Field label="みなし残業時間（月あたり・時間）">
+                <input type="number" step="0.5" value={form.deemedOvertimeHours} onChange={set('deemedOvertimeHours')} placeholder="未設定" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
               </Field>
               <Field label="有休の手動調整（日・マイナス可）">
                 <input type="number" value={form.leaveAdjustment} onChange={set('leaveAdjustment')} placeholder="0" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
