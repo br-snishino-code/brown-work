@@ -5623,7 +5623,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
               const retired = !!acc.resignationDate;
               return (
                 <tr key={acc.id} className="border-b border-slate-100 last:border-0">
-                  <td className="px-5 py-2.5 font-semibold text-slate-800">
+                  <td className="px-5 py-2.5 font-semibold text-slate-800 cursor-pointer hover:text-amber-700" onClick={() => setProfileModalAccount(acc)}>
                     {acc.name}
                     {retired && <span className="ml-1.5 text-[10px] font-bold text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">退職済み</span>}
                     {acc.furigana && <div className="text-[10.5px] font-normal text-slate-400">{acc.furigana}</div>}
@@ -5647,7 +5647,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
             return (
               <div key={acc.id} className="px-5 py-3.5">
                 <div className="flex items-center justify-between">
-                  <div>
+                  <div className="cursor-pointer" onClick={() => setProfileModalAccount(acc)}>
                     <div className="text-[13px] font-semibold text-slate-800 flex items-center gap-1.5">
                       {acc.name}
                       {retired && <span className="text-[10px] font-bold text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">退職済み</span>}
