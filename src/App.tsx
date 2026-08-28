@@ -7984,9 +7984,9 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
   const tabs = isMasterAdmin ? [...PROFILE_MODAL_TABS, { key: 'mynumber', label: 'マイナンバー' }] : PROFILE_MODAL_TABS;
 
   return (
-    <div className={isDesktop ? 'mx-[calc(50%-50vw)] w-screen px-6 -mt-5 -mb-10' : ''}>
-    <div className={isDesktop ? 'max-w-[1700px] mx-auto space-y-0' : 'max-w-2xl mx-auto space-y-0'}>
-      <div ref={containerRef} onScroll={handleScroll} className="bg-white rounded-2xl border border-slate-200 shadow-sm max-h-[calc(100vh-105px)] overflow-y-auto">
+    <div className={isDesktop ? 'fixed inset-0 z-50 bg-slate-100 p-4 overflow-hidden' : ''}>
+    <div className={isDesktop ? 'h-full max-w-[1700px] mx-auto space-y-0' : 'max-w-2xl mx-auto space-y-0'}>
+      <div ref={containerRef} onScroll={handleScroll} className={`bg-white rounded-2xl border border-slate-200 shadow-sm overflow-y-auto ${isDesktop ? 'h-full' : 'max-h-[88vh]'}`}>
         <div className="px-6 pt-6 pb-4 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white z-10">
           <button onClick={onClose} className="text-[13px] font-bold text-slate-500 border border-slate-200 rounded-lg px-3.5 py-2.5 flex items-center gap-1">
             ← 一覧に戻る
