@@ -26,6 +26,7 @@ const CLOCK_OUT_STATUS_LABEL = {
   early_event: '早退（イベント・研修）',
   early_personal: '早退（自己都合）',
   early_other: '早退（その他）',
+  early_leave: '早退', // 旧バージョンのデータ用
 };
 const CLOCK_OUT_NEEDS_APPROVAL_STATUSES = ['overtime', 'early_event', 'early_personal', 'early_other'];
 const NEEDS_APPROVAL_STATUSES = ['late', 'event', 'early_confirmed', 'early_manual'];
@@ -1558,11 +1559,15 @@ export default function AttendanceApp() {
         clock_in_actual: existing?.clockInActual || null,
         clock_in_status: existing?.clockInStatus || null,
         clock_in_note: existing?.clockInNote || null,
-        clock_in_approval: patch.approve === true ? (existing?.clockInApproval === 'pending' ? 'approved' : existing?.clockInApproval || null) : (patch.approve === false ? (existing?.clockInApproval === 'pending' ? null : existing?.clockInApproval || null) : (existing?.clockInApproval || null)),
+        clock_in_approval: (patch.kind ? patch.kind === 'in' : true) && patch.approve != null
+          ? (patch.approve === true ? (existing?.clockInApproval === 'pending' ? 'approved' : existing?.clockInApproval || null) : (existing?.clockInApproval === 'pending' ? null : existing?.clockInApproval || null))
+          : (existing?.clockInApproval || null),
         clock_out_actual: existing?.clockOutActual || null,
         clock_out_status: existing?.clockOutStatus || null,
         clock_out_note: existing?.clockOutNote || null,
-        clock_out_approval: patch.approve === true ? (existing?.clockOutApproval === 'pending' ? 'approved' : existing?.clockOutApproval || null) : (patch.approve === false ? (existing?.clockOutApproval === 'pending' ? null : existing?.clockOutApproval || null) : (existing?.clockOutApproval || null)),
+        clock_out_approval: (patch.kind ? patch.kind === 'out' : true) && patch.approve != null
+          ? (patch.approve === true ? (existing?.clockOutApproval === 'pending' ? 'approved' : existing?.clockOutApproval || null) : (existing?.clockOutApproval === 'pending' ? null : existing?.clockOutApproval || null))
+          : (existing?.clockOutApproval || null),
         pay_deduction: patch.approve != null ? !!patch.deduction : (existing?.payDeduction ?? null),
         pay_deduction_note: patch.approve != null ? (patch.deductionNote || null) : (existing?.payDeductionNote || null),
       },
@@ -5187,6 +5192,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
     Object.values(recs).forEach((record) => {
       if (record?.clockInApproval === 'pending') {
         pendingApprovals.push({
+          kind: 'in',
           employeeId: acc.id,
           employeeName: acc.name,
           date: record.date,
@@ -5199,6 +5205,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
       }
       if (record?.clockOutApproval === 'pending') {
         pendingApprovals.push({
+          kind: 'out',
           employeeId: acc.id,
           employeeName: acc.name,
           date: record.date,
@@ -5214,8 +5221,8 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
   pendingApprovals.sort((a, b) => (a.date < b.date ? 1 : -1));
 
   const decideApproval = async (item, approve, deduction, deductionNote) => {
-    setApprovingKey(`${item.employeeId}|${item.date}`);
-    await onAdminUpdateAttendance(item.employeeId, item.date, { approve, deduction, deductionNote }, {});
+    setApprovingKey(`${item.employeeId}|${item.date}|${item.kind}`);
+    await onAdminUpdateAttendance(item.employeeId, item.date, { approve, deduction, deductionNote, kind: item.kind }, {});
     setApprovingKey(null);
   };
 
@@ -5295,13 +5302,13 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
           </div>
           <div className="divide-y divide-slate-100">
             {pendingApprovals.map((item) => {
-              const key = `${item.employeeId}|${item.date}`;
+              const key = `${item.employeeId}|${item.date}|${item.kind}`;
               const busy = approvingKey === key;
               const d = deductionState[key] || { deduction: false, note: '' };
               return (
                 <div key={key} className="px-5 py-3 space-y-2">
                   <div>
-                    <div className="text-[13px] font-bold text-slate-800">{item.employeeName} ・ {item.dateShort}</div>
+                    <div className="text-[13px] font-bold text-slate-800">{item.employeeName} ・ {item.dateShort}（{item.kind === 'in' ? '出勤' : '退勤'}）</div>
                     <div className="text-[11.5px] text-slate-500 mt-0.5">
                       {item.statusLabel}／記録 {item.clockIn}{item.clockInActual && item.clockInActual !== item.clockIn ? `（実打刻 ${item.clockInActual}）` : ''}
                       {item.note && `・${item.note}`}
@@ -5413,16 +5420,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
                     <td className="px-2 py-2 whitespace-nowrap">{r.status}</td>
                     <td className="px-2 py-2">
                       {r.needsApproval && (
-                        <div className="flex flex-col gap-0.5">
-                          <label className="flex items-center gap-1 text-[10px] text-amber-700 whitespace-nowrap">
-                            <input type="checkbox" checked={!!e.approve} onChange={(ev) => setField('approve', ev.target.checked)} />
-                            承認
-                          </label>
-                          <label className="flex items-center gap-1 text-[9.5px] text-rose-600 whitespace-nowrap">
-                            <input type="checkbox" checked={!!e.deduction} onChange={(ev) => setField('deduction', ev.target.checked)} />
-                            減給
-                          </label>
-                        </div>
+                        <span className="text-[10px] font-bold text-amber-600 whitespace-nowrap">上のパネルで承認</span>
                       )}
                     </td>
                     <td className="px-2 py-2">
@@ -5456,16 +5454,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
                 {r.clockInStatusLabel && <div className={`mt-1 text-[11px] font-medium ${r.needsApproval ? 'text-amber-600' : 'text-blue-600'}`}>{r.clockInStatusLabel}{r.needsApproval ? '・承認待ち' : ''}{r.clockInActual ? `（実打刻 ${r.clockInActual}）` : ''}</div>}
                 {r.clockOutStatusLabel && <div className="mt-1 text-[11px] font-medium text-purple-600">{r.clockOutStatusLabel}{r.clockOutActual ? `（実打刻 ${r.clockOutActual}）` : ''}</div>}
                 {r.needsApproval && (
-                  <div className="mt-1.5 space-y-1">
-                    <label className="flex items-center gap-1.5 text-[11.5px] text-amber-700">
-                      <input type="checkbox" checked={!!e.approve} onChange={(ev) => setField('approve', ev.target.checked)} />
-                      この記録を承認する
-                    </label>
-                    <label className="flex items-center gap-1.5 text-[11px] text-rose-600">
-                      <input type="checkbox" checked={!!e.deduction} onChange={(ev) => setField('deduction', ev.target.checked)} />
-                      減給あり
-                    </label>
-                  </div>
+                  <div className="mt-1.5 text-[11px] font-bold text-amber-700">↑上の「承認待ちの出勤」パネルで承認してください</div>
                 )}
               </div>
             );
@@ -5588,16 +5577,7 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
                       <td className="px-3 py-2 whitespace-nowrap">{r.status}</td>
                       <td className="px-3 py-2">
                         {r.needsApproval && (
-                          <div className="flex flex-col gap-0.5">
-                            <label className="flex items-center gap-1 text-[10.5px] text-amber-700 whitespace-nowrap">
-                              <input type="checkbox" checked={!!e.approve} onChange={(ev) => setField('approve', ev.target.checked)} />
-                              承認
-                            </label>
-                            <label className="flex items-center gap-1 text-[10px] text-rose-600 whitespace-nowrap">
-                              <input type="checkbox" checked={!!e.deduction} onChange={(ev) => setField('deduction', ev.target.checked)} />
-                              減給
-                            </label>
-                          </div>
+                          <span className="text-[10.5px] font-bold text-amber-700 whitespace-nowrap">要承認</span>
                         )}
                       </td>
                     </tr>
@@ -5621,16 +5601,7 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
                   </div>
                   <div className="mt-2 text-[11px] text-slate-400">{r.status} ・実働 {minutesToHHMM(r.workedMin)}{r.overtimeMin > 0 ? ` ・ 残業 ${minutesToHHMM(r.overtimeMin)}` : ''}</div>
                   {r.needsApproval && (
-                    <div className="mt-1.5 space-y-1">
-                      <label className="flex items-center gap-1.5 text-[11.5px] text-amber-700">
-                        <input type="checkbox" checked={!!e.approve} onChange={(ev) => setField('approve', ev.target.checked)} />
-                        この記録を承認する
-                      </label>
-                      <label className="flex items-center gap-1.5 text-[11px] text-rose-600">
-                        <input type="checkbox" checked={!!e.deduction} onChange={(ev) => setField('deduction', ev.target.checked)} />
-                        減給あり
-                      </label>
-                    </div>
+                    <div className="mt-1.5 text-[11px] font-bold text-amber-700">「承認待ちの出勤」パネルで承認してください</div>
                   )}
                 </div>
               );
