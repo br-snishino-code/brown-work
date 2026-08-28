@@ -1060,6 +1060,7 @@ export default function AttendanceApp() {
   const [viewMode, setViewMode] = useState(() => (typeof window !== 'undefined' && window.matchMedia('(min-width: 1024px)').matches ? 'desktop' : 'mobile'));
   const [schedulePatterns, setSchedulePatterns] = useState([]);
   const [activePatternNo, setActivePatternNo] = useState(1);
+  const [passwordRecoveryMode, setPasswordRecoveryMode] = useState(false);
   const now = useNow();
   const geo = useGeolocation();
   const { toast, show } = useToast();
@@ -1160,6 +1161,9 @@ export default function AttendanceApp() {
       if (event === 'SIGNED_OUT') {
         setSession(null);
         setData(EMPTY_DATA);
+      }
+      if (event === 'PASSWORD_RECOVERY') {
+        setPasswordRecoveryMode(true);
       }
     });
     return () => sub?.subscription?.unsubscribe();
@@ -2060,6 +2064,18 @@ export default function AttendanceApp() {
     return <div className="min-h-screen flex items-center justify-center bg-slate-50 text-slate-400 font-sans text-sm">読み込み中…</div>;
   }
 
+  if (passwordRecoveryMode) {
+    return (
+      <ResetPasswordRecoveryScreen
+        toast={toast}
+        onDone={async () => {
+          setPasswordRecoveryMode(false);
+          await supabase.auth.signOut();
+        }}
+      />
+    );
+  }
+
   if (!session) {
     return <LoginScreen onLogin={handleLogin} toast={toast} />;
   }
@@ -2271,12 +2287,32 @@ export default function AttendanceApp() {
 function LoginScreen({ onLogin, toast }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [forgotMode, setForgotMode] = useState(false);
+  const [forgotInput, setForgotInput] = useState('');
+  const [forgotSending, setForgotSending] = useState(false);
+  const [forgotDone, setForgotDone] = useState(false);
 
   const submit = (e) => {
     e.preventDefault();
     if (username.trim().length > 0 && password.length > 0) {
       onLogin(username.trim(), password);
     }
+  };
+
+  const submitForgot = async (e) => {
+    e.preventDefault();
+    if (!forgotInput.trim()) return;
+    setForgotSending(true);
+    const email = usernameToEmail(forgotInput.trim());
+    try {
+      await supabase.auth.resetPasswordForEmail(email, {
+        redirectTo: typeof window !== 'undefined' ? window.location.origin : undefined,
+      });
+    } catch (e) {
+      console.error('パスワード再設定メールの送信に失敗しました', e);
+    }
+    setForgotSending(false);
+    setForgotDone(true);
   };
 
   return (
@@ -2289,44 +2325,177 @@ function LoginScreen({ onLogin, toast }) {
           <h1 className="text-slate-800 font-bold text-[21px] tracking-tight">Brown Work</h1>
           <p className="text-slate-500 text-[13px] mt-1.5">勤怠・シフト・申請をひとつに</p>
         </div>
-        <form onSubmit={submit} className="bg-white rounded-2xl p-6 space-y-4 border-2 border-slate-200 shadow-lg">
-          <div>
-            <label className="block text-[12.5px] font-bold text-slate-800 mb-1.5">ユーザー名（メールアドレスでも可）</label>
-            <div className="flex items-center border-2 border-slate-200 rounded-xl px-3.5 gap-2 focus-within:border-slate-900 transition-colors">
-              <User size={16} className="text-slate-400 shrink-0" />
-              <input
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                className="w-full py-3 text-[15px] outline-none bg-transparent text-slate-800"
-                placeholder="ユーザー名またはメールアドレス"
-                autoCapitalize="none"
-                autoFocus
-                required
-              />
-            </div>
+
+        {!forgotMode ? (
+          <>
+            <form onSubmit={submit} className="bg-white rounded-2xl p-6 space-y-4 border-2 border-slate-200 shadow-lg">
+              <div>
+                <label className="block text-[12.5px] font-bold text-slate-800 mb-1.5">ユーザー名（メールアドレスでも可）</label>
+                <div className="flex items-center border-2 border-slate-200 rounded-xl px-3.5 gap-2 focus-within:border-slate-900 transition-colors">
+                  <User size={16} className="text-slate-400 shrink-0" />
+                  <input
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    className="w-full py-3 text-[15px] outline-none bg-transparent text-slate-800"
+                    placeholder="ユーザー名またはメールアドレス"
+                    autoCapitalize="none"
+                    autoFocus
+                    required
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-[12.5px] font-bold text-slate-800 mb-1.5">パスワード</label>
+                <div className="flex items-center border-2 border-slate-200 rounded-xl px-3.5 gap-2 focus-within:border-slate-900 transition-colors">
+                  <Lock size={16} className="text-slate-400 shrink-0" />
+                  <input
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    className="w-full py-3 text-[15px] outline-none bg-transparent text-slate-800"
+                    placeholder="パスワードを入力"
+                    required
+                  />
+                </div>
+              </div>
+              <button
+                type="submit"
+                className="w-full py-3.5 rounded-xl bg-slate-950 text-white text-[15px] font-bold flex items-center justify-center gap-2 shadow-md shadow-amber-200 active:brightness-95 transition-all mt-2"
+              >
+                <LogIn size={17} strokeWidth={2.4} />
+                ログイン
+              </button>
+            </form>
+            <button
+              onClick={() => { setForgotMode(true); setForgotDone(false); setForgotInput(''); }}
+              className="w-full text-center mt-4 text-[12.5px] font-bold text-slate-500"
+            >
+              パスワードをお忘れですか？
+            </button>
+          </>
+        ) : (
+          <div className="bg-white rounded-2xl p-6 space-y-4 border-2 border-slate-200 shadow-lg">
+            <h2 className="font-bold text-[15px] text-slate-800">パスワードの再設定</h2>
+            {forgotDone ? (
+              <>
+                <div className="bg-emerald-50 border border-emerald-200 rounded-xl px-4 py-3 text-[12.5px] text-emerald-700">
+                  登録されているメールアドレス宛に、パスワード再設定用のメールをお送りしました（届くまで数分かかる場合があります）。
+                </div>
+                <div className="text-[11px] text-slate-400">
+                  ※ユーザー名がメールアドレス形式で登録されている場合のみ届きます。短いID（例：tanaka）で登録されている場合は、管理者にパスワードのリセットを依頼してください。
+                </div>
+                <button onClick={() => setForgotMode(false)} className="w-full py-2.5 rounded-lg border-2 border-slate-200 text-[13.5px] font-bold text-slate-600">
+                  ログイン画面に戻る
+                </button>
+              </>
+            ) : (
+              <form onSubmit={submitForgot} className="space-y-4">
+                <div>
+                  <label className="block text-[12.5px] font-bold text-slate-800 mb-1.5">ユーザー名またはメールアドレス</label>
+                  <input
+                    value={forgotInput}
+                    onChange={(e) => setForgotInput(e.target.value)}
+                    className="w-full border-2 border-slate-200 rounded-xl px-3.5 py-3 text-[15px] outline-none focus:border-slate-900"
+                    placeholder="ユーザー名またはメールアドレス"
+                    autoCapitalize="none"
+                    autoFocus
+                    required
+                  />
+                </div>
+                <div className="text-[11px] text-slate-400">メールアドレスでご登録の方のみご利用いただけます。</div>
+                <button type="submit" disabled={forgotSending} className="w-full py-3 rounded-xl bg-slate-950 disabled:bg-slate-300 text-white text-[14px] font-bold">
+                  {forgotSending ? '送信中…' : '再設定メールを送る'}
+                </button>
+                <button type="button" onClick={() => setForgotMode(false)} className="w-full text-center text-[12.5px] font-bold text-slate-500">
+                  ログイン画面に戻る
+                </button>
+              </form>
+            )}
           </div>
-          <div>
-            <label className="block text-[12.5px] font-bold text-slate-800 mb-1.5">パスワード</label>
-            <div className="flex items-center border-2 border-slate-200 rounded-xl px-3.5 gap-2 focus-within:border-slate-900 transition-colors">
-              <Lock size={16} className="text-slate-400 shrink-0" />
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="w-full py-3 text-[15px] outline-none bg-transparent text-slate-800"
-                placeholder="パスワードを入力"
-                required
-              />
-            </div>
+        )}
+      </div>
+      <ToastView toast={toast} />
+    </div>
+  );
+}
+
+function ResetPasswordRecoveryScreen({ toast, onDone }) {
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [done, setDone] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setError('');
+    if (password.length < 6) {
+      setError('パスワードは6文字以上にしてください');
+      return;
+    }
+    if (password !== confirmPassword) {
+      setError('パスワードが一致しません');
+      return;
+    }
+    setSaving(true);
+    const { error: updateError } = await supabase.auth.updateUser({ password });
+    setSaving(false);
+    if (updateError) {
+      setError('パスワードの更新に失敗しました。もう一度リンクを開き直してお試しください。');
+      return;
+    }
+    setDone(true);
+  };
+
+  return (
+    <div className="min-h-[100dvh] bg-white flex items-center justify-center px-4 py-[max(1rem,env(safe-area-inset-top))] font-sans">
+      <div className="w-full max-w-[360px]">
+        <div className="text-center mb-8">
+          <div className="w-14 h-14 rounded-2xl bg-slate-950 flex items-center justify-center mx-auto mb-4 shadow-lg shadow-amber-200">
+            <Lock size={24} className="text-white" strokeWidth={2.4} />
           </div>
-          <button
-            type="submit"
-            className="w-full py-3.5 rounded-xl bg-slate-950 text-white text-[15px] font-bold flex items-center justify-center gap-2 shadow-md shadow-amber-200 active:brightness-95 transition-all mt-2"
-          >
-            <LogIn size={17} strokeWidth={2.4} />
-            ログイン
-          </button>
-        </form>
+          <h1 className="text-slate-800 font-bold text-[19px] tracking-tight">新しいパスワードを設定</h1>
+        </div>
+        <div className="bg-white rounded-2xl p-6 space-y-4 border-2 border-slate-200 shadow-lg">
+          {done ? (
+            <>
+              <div className="bg-emerald-50 border border-emerald-200 rounded-xl px-4 py-3 text-[12.5px] text-emerald-700">
+                パスワードを更新しました。もう一度ログインしてください。
+              </div>
+              <button onClick={onDone} className="w-full py-3 rounded-xl bg-slate-950 text-white text-[14px] font-bold">
+                ログイン画面へ
+              </button>
+            </>
+          ) : (
+            <form onSubmit={submit} className="space-y-4">
+              <div>
+                <label className="block text-[12.5px] font-bold text-slate-800 mb-1.5">新しいパスワード（6文字以上）</label>
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  className="w-full border-2 border-slate-200 rounded-xl px-3.5 py-3 text-[15px] outline-none focus:border-slate-900"
+                  autoFocus
+                  required
+                />
+              </div>
+              <div>
+                <label className="block text-[12.5px] font-bold text-slate-800 mb-1.5">新しいパスワード（確認）</label>
+                <input
+                  type="password"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  className="w-full border-2 border-slate-200 rounded-xl px-3.5 py-3 text-[15px] outline-none focus:border-slate-900"
+                  required
+                />
+              </div>
+              {error && <div className="bg-rose-50 border border-rose-200 rounded-xl px-4 py-2.5 text-[12px] text-rose-700">{error}</div>}
+              <button type="submit" disabled={saving} className="w-full py-3 rounded-xl bg-slate-950 disabled:bg-slate-300 text-white text-[14px] font-bold">
+                {saving ? '更新中…' : 'パスワードを更新する'}
+              </button>
+            </form>
+          )}
+        </div>
       </div>
       <ToastView toast={toast} />
     </div>
@@ -5262,8 +5431,8 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
           ← 一覧に戻る
         </button>
         <div>
-          <div className="text-[11px] text-slate-400 font-medium">{employeeName}</div>
-          <div className="font-bold text-[14px]">月間勤怠</div>
+          <div className="text-[19px] font-extrabold text-slate-800">{employeeName}</div>
+          <div className="text-[12px] text-slate-400 font-medium">月間勤怠</div>
         </div>
         <input type="month" value={month} onChange={(e) => { setMonth(e.target.value); setEdits({}); }} className="ml-auto border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px] bg-white" />
       </div>
