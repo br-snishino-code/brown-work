@@ -6019,6 +6019,39 @@ const PROFILE_MODAL_TABS = [
 
 function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSaveMyNumber, isMasterAdmin, knownGroups = [], groupAttendanceSchedules = {}, employeeAttendanceSchedule = {}, onSaveEmployeeAttendance }) {
   const [activeTab, setActiveTab] = useState('basic');
+  const containerRef = useRef(null);
+  const sectionRefs = useRef({});
+  const SCROLL_OFFSET = 118; // ヘッダー＋タブバーの高さ分オフセット
+
+  // スクロール位置に応じて、今見えているセクションのタブを自動でハイライト
+  const handleScroll = () => {
+    if (activeTab === 'mynumber') return;
+    const container = containerRef.current;
+    if (!container) return;
+    const scrollTop = container.scrollTop;
+    let current = PROFILE_MODAL_TABS[0].key;
+    for (const t of PROFILE_MODAL_TABS) {
+      const el = sectionRefs.current[t.key];
+      if (el && el.offsetTop - SCROLL_OFFSET <= scrollTop) {
+        current = t.key;
+      }
+    }
+    setActiveTab(current);
+  };
+
+  // タブを押したら、対応するセクションへスクロール（マイナンバーのみ通常のタブ切り替え）
+  const goToTab = (key) => {
+    if (key === 'mynumber') {
+      setActiveTab('mynumber');
+      return;
+    }
+    if (activeTab === 'mynumber') setActiveTab(key);
+    const el = sectionRefs.current[key];
+    const container = containerRef.current;
+    if (el && container) {
+      container.scrollTo({ top: el.offsetTop - SCROLL_OFFSET, behavior: 'smooth' });
+    }
+  };
   const [personalMonths, setPersonalMonths] = useState(() => {
     const initial = {};
     for (let m = 1; m <= 12; m++) initial[m] = String(employeeAttendanceSchedule[m] || 0);
@@ -6128,7 +6161,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
 
   return createPortal(
     <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-40 p-0 sm:p-4">
-      <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg max-h-[92vh] overflow-y-auto">
+      <div ref={containerRef} onScroll={handleScroll} className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg max-h-[92vh] overflow-y-auto">
         <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white z-10">
           <div>
             <div className="text-[11px] text-slate-400 font-medium">{account.name}</div>
@@ -6141,7 +6174,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
           {tabs.map((t) => (
             <button
               key={t.key}
-              onClick={() => setActiveTab(t.key)}
+              onClick={() => goToTab(t.key)}
               className={`text-[11.5px] font-bold px-2.5 py-1.5 rounded-lg transition-colors ${activeTab === t.key ? 'bg-slate-800 text-white' : 'text-slate-500 bg-slate-100'}`}
             >
               {t.label}
@@ -6150,8 +6183,10 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
         </div>
 
         <div className="px-5 py-4 space-y-4">
-          {activeTab === 'basic' && (
-            <>
+          {activeTab !== 'mynumber' && (
+          <>
+          <div ref={(el) => (sectionRefs.current.basic = el)} className="space-y-4">
+            <div className="text-[12px] font-bold text-slate-500 border-b border-slate-100 pb-2">基本</div>
               <Field label="ふりがな">
                 <input value={form.furigana} onChange={set('furigana')} placeholder="例）タナカ ハナコ" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
               </Field>
@@ -6215,11 +6250,10 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
               <Field label="スタッフ備考1"><input value={form.staffNote1} onChange={set('staffNote1')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" /></Field>
               <Field label="スタッフ備考2"><input value={form.staffNote2} onChange={set('staffNote2')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" /></Field>
               <Field label="スタッフ備考3"><input value={form.staffNote3} onChange={set('staffNote3')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" /></Field>
-            </>
-          )}
+          </div>
 
-          {activeTab === 'group' && (
-            <>
+          <div ref={(el) => (sectionRefs.current.group = el)} className="space-y-4 pt-1">
+            <div className="text-[12px] font-bold text-slate-500 border-b border-slate-100 pb-2">グループ</div>
               <div className="grid grid-cols-2 gap-3">
                 <Field label="メイングループ">
                   <select value={form.mainGroup} onChange={set('mainGroup')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white">
@@ -6264,11 +6298,10 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                   </button>
                 </div>
               )}
-            </>
-          )}
+          </div>
 
-          {activeTab === 'work' && (
-            <>
+          <div ref={(el) => (sectionRefs.current.work = el)} className="space-y-4 pt-1">
+            <div className="text-[12px] font-bold text-slate-500 border-b border-slate-100 pb-2">業務・契約</div>
               <Field label="役職">
                 <input value={form.jobTitle} onChange={set('jobTitle')} placeholder="例）代表取締役" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" />
               </Field>
@@ -6292,11 +6325,10 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                 <input type="number" value={form.leaveAdjustment} onChange={set('leaveAdjustment')} placeholder="0" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
               </Field>
               <div className="text-[10.5px] text-slate-400 -mt-2">自動計算された有休日数に、この日数を加算（マイナスなら減算）します。</div>
-            </>
-          )}
+          </div>
 
-          {activeTab === 'pay' && (
-            <>
+          <div ref={(el) => (sectionRefs.current.pay = el)} className="space-y-4 pt-1">
+            <div className="text-[12px] font-bold text-slate-500 border-b border-slate-100 pb-2">給与・口座</div>
               <div className="text-[11px] font-bold text-slate-400">口座情報（給与振込先）</div>
               <div className="grid grid-cols-2 gap-3">
                 <Field label="銀行コード"><input value={form.bankCode} onChange={set('bankCode')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" /></Field>
@@ -6323,11 +6355,10 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                 <Field label="厚生年金保険（円）"><input type="number" value={form.standardRemunerationPension} onChange={set('standardRemunerationPension')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" /></Field>
               </div>
               <div className="text-[10.5px] text-slate-400">実際の時給・月給・給与計算の設定は「給与」タブから行ってください。ここは社会保険の届出に使う標準報酬月額のみです。</div>
-            </>
-          )}
+          </div>
 
-          {activeTab === 'insurance' && (
-            <>
+          <div ref={(el) => (sectionRefs.current.insurance = el)} className="space-y-4 pt-1">
+            <div className="text-[12px] font-bold text-slate-500 border-b border-slate-100 pb-2">社会保険</div>
               <div className="text-[11px] font-bold text-slate-400">健康保険</div>
               <div className="grid grid-cols-2 gap-3">
                 <Field label="加入状況">
@@ -6372,11 +6403,10 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                 <Field label="資格取得日"><input type="date" value={form.employmentInsuranceAcquiredDate} onChange={set('employmentInsuranceAcquiredDate')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" /></Field>
                 <Field label="離職等年月日"><input type="date" value={form.employmentInsuranceLostDate} onChange={set('employmentInsuranceLostDate')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" /></Field>
               </div>
-            </>
-          )}
+          </div>
 
-          {activeTab === 'family' && (
-            <>
+          <div ref={(el) => (sectionRefs.current.family = el)} className="space-y-4 pt-1">
+            <div className="text-[12px] font-bold text-slate-500 border-b border-slate-100 pb-2">家族・配偶者</div>
               <div className="text-[11px] font-bold text-slate-400">配偶者情報</div>
               <Field label="配偶者の有無">
                 <select value={form.spouseStatus} onChange={set('spouseStatus')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white">
@@ -6413,11 +6443,10 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                   ))}
                 </div>
               )}
-            </>
-          )}
+          </div>
 
-          {activeTab === 'tax' && (
-            <>
+          <div ref={(el) => (sectionRefs.current.tax = el)} className="space-y-4 pt-1">
+            <div className="text-[12px] font-bold text-slate-500 border-b border-slate-100 pb-2">住民税・税区分</div>
               <div className="text-[11px] font-bold text-slate-400">住民税</div>
               <div className="grid grid-cols-2 gap-3">
                 <Field label="給与支払報告書提出先 市区町村コード"><input value={form.residentTaxMunicipalityCode} onChange={set('residentTaxMunicipalityCode')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" /></Field>
@@ -6455,7 +6484,8 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
               </div>
               <label className="flex items-center gap-2 text-[12.5px] text-slate-600"><input type="checkbox" checked={form.isNonResident} onChange={setCheck('isNonResident')} />非居住者</label>
               <label className="flex items-center gap-2 text-[12.5px] text-slate-600"><input type="checkbox" checked={form.isWorkingStudent} onChange={setCheck('isWorkingStudent')} />勤労学生</label>
-            </>
+          </div>
+          </>
           )}
 
           {activeTab === 'mynumber' && isMasterAdmin && (
