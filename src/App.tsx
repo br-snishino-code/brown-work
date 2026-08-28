@@ -6612,6 +6612,23 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
   const [resetPasswordTarget, setResetPasswordTarget] = useState(null);
   const isMasterAdmin = session?.role === 'master_admin';
 
+  if (profileModalAccount) {
+    return (
+      <EmployeeProfileModal
+        account={profileModalAccount}
+        onClose={() => setProfileModalAccount(null)}
+        onSave={onUpdateDates}
+        onFetchMyNumber={onFetchMyNumber}
+        onSaveMyNumber={onSaveMyNumber}
+        isMasterAdmin={isMasterAdmin}
+        knownGroups={knownGroups}
+        groupAttendanceSchedules={groupLeaveSchedules}
+        employeeAttendanceSchedule={employeeAttendanceSchedules?.[profileModalAccount.id] || {}}
+        onSaveEmployeeAttendance={onSaveEmployeeAttendance}
+      />
+    );
+  }
+
   const canSubmit = sei.trim() && mei.trim() && username.trim() && password.trim().length >= 6 && hireDate;
 
   const filteredEmployeeAccounts = employeeAccounts
@@ -6854,20 +6871,6 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
 
   const modals = (
     <>
-      {profileModalAccount && (
-        <EmployeeProfileModal
-          account={profileModalAccount}
-          onClose={() => setProfileModalAccount(null)}
-          onSave={onUpdateDates}
-          onFetchMyNumber={onFetchMyNumber}
-          onSaveMyNumber={onSaveMyNumber}
-          isMasterAdmin={isMasterAdmin}
-          knownGroups={knownGroups}
-          groupAttendanceSchedules={groupLeaveSchedules}
-          employeeAttendanceSchedule={employeeAttendanceSchedules?.[profileModalAccount.id] || {}}
-          onSaveEmployeeAttendance={onSaveEmployeeAttendance}
-        />
-      )}
       {csvModalOpen && (
         <CsvImportModal
           onClose={() => setCsvModalOpen(false)}
@@ -7331,15 +7334,17 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
 
   const tabs = isMasterAdmin ? [...PROFILE_MODAL_TABS, { key: 'mynumber', label: 'マイナンバー' }] : PROFILE_MODAL_TABS;
 
-  return createPortal(
-    <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-40 p-0 sm:p-4">
-      <div ref={containerRef} onScroll={handleScroll} className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg max-h-[92vh] overflow-y-auto">
+  return (
+    <div className="max-w-2xl mx-auto space-y-0">
+      <div ref={containerRef} onScroll={handleScroll} className="bg-white rounded-2xl border border-slate-200 shadow-sm max-h-[85vh] overflow-y-auto">
         <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white z-10">
-          <div>
+          <button onClick={onClose} className="text-[12.5px] font-bold text-slate-500 border border-slate-200 rounded-lg px-3 py-2 flex items-center gap-1">
+            ← 一覧に戻る
+          </button>
+          <div className="text-right">
             <div className="text-[11px] text-slate-400 font-medium">{account.name}</div>
             <h3 className="font-bold text-[15px]">アカウント詳細情報</h3>
           </div>
-          <button onClick={onClose} className="text-slate-400 text-xl leading-none px-1">×</button>
         </div>
 
         <div className="px-5 pt-3 flex items-center gap-1 flex-wrap sticky top-[57px] bg-white z-10 border-b border-slate-100 pb-2">
@@ -7776,8 +7781,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
           </div>
         )}
       </div>
-    </div>,
-    document.body
+    </div>
   );
 }
 
