@@ -36,6 +36,13 @@ const approvalSuffix = (approvalState, payDeduction) => {
   if (approvalState === 'approved') return payDeduction ? '減給あり' : '減給なし';
   return APPROVAL_STATE_LABEL[approvalState] || '';
 };
+// 承認状態に応じた表示色（減給ありの場合は赤字で強調）
+const approvalColorClass = (approvalState, payDeduction, normalColorClass) => {
+  if (approvalState === 'pending') return 'text-amber-600 font-bold';
+  if (approvalState === 'rejected') return 'text-rose-500';
+  if (approvalState === 'approved') return payDeduction ? 'text-rose-600 font-bold' : 'text-emerald-600';
+  return normalColorClass;
+};
 const NEEDS_APPROVAL_STATUSES = ['late', 'event', 'early_confirmed', 'early_manual'];
 const timeStr = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 const hhmm = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
@@ -5417,7 +5424,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
                     <td className="px-2 py-2">
                       <input type="time" value={e.clockIn || ''} onChange={(ev) => setField('clockIn', ev.target.value)} className="w-[84px] border border-slate-200 rounded px-1 py-1 font-mono text-[11.5px]" />
                       {(r.clockInActual || r.clockInStatusLabel) && (
-                        <div className={`text-[9.5px] font-sans whitespace-nowrap mt-0.5 ${r.clockInApproval === 'pending' ? 'text-amber-600 font-bold' : r.clockInApproval === 'rejected' ? 'text-rose-500' : r.clockInApproval === 'approved' ? 'text-emerald-600' : 'text-blue-600'}`}>
+                        <div className={`text-[9.5px] font-sans whitespace-nowrap mt-0.5 ${approvalColorClass(r.clockInApproval, r.payDeduction, 'text-blue-600')}`}>
                           {r.clockInActual ? `実${r.clockInActual}` : ''}{r.clockInStatusLabel ? `・${r.clockInStatusLabel}` : ''}{r.clockInApproval ? `・${approvalSuffix(r.clockInApproval, r.payDeduction)}` : ''}
                         </div>
                       )}
@@ -5425,7 +5432,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
                     <td className="px-2 py-2">
                       <input type="time" value={e.clockOut || ''} onChange={(ev) => setField('clockOut', ev.target.value)} className="w-[84px] border border-slate-200 rounded px-1 py-1 font-mono text-[11.5px]" />
                       {(r.clockOutActual || r.clockOutStatusLabel) && (
-                        <div className={`text-[9.5px] font-sans whitespace-nowrap mt-0.5 ${r.clockOutApproval === 'pending' ? 'text-amber-600 font-bold' : r.clockOutApproval === 'rejected' ? 'text-rose-500' : r.clockOutApproval === 'approved' ? 'text-emerald-600' : 'text-purple-600'}`}>
+                        <div className={`text-[9.5px] font-sans whitespace-nowrap mt-0.5 ${approvalColorClass(r.clockOutApproval, r.payDeduction, 'text-purple-600')}`}>
                           {r.clockOutActual ? `実${r.clockOutActual}` : ''}{r.clockOutStatusLabel ? `・${r.clockOutStatusLabel}` : ''}{r.clockOutApproval ? `・${approvalSuffix(r.clockOutApproval, r.payDeduction)}` : ''}
                         </div>
                       )}
@@ -5471,8 +5478,8 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
                   <Field label="休憩(分)"><input type="number" min="0" step="5" value={e.breakMinutes ?? ''} onChange={(ev) => setField('breakMinutes', ev.target.value)} className="w-full border border-slate-200 rounded px-2 py-1.5 font-mono text-[12.5px]" /></Field>
                 </div>
                 <div className="mt-2 text-[11px] text-slate-400">{r.status} ・実働 {minutesToHHMM(r.workedMin)}{r.overtimeMin > 0 ? ` ・ 残業 ${minutesToHHMM(r.overtimeMin)}` : ''}{r.lateMin > 0 ? ` ・ 遅刻 ${r.lateMin}分` : ''}{r.earlyLeaveMin > 0 ? ` ・ 早退 ${r.earlyLeaveMin}分` : ''}</div>
-                {r.clockInStatusLabel && <div className={`mt-1 text-[11px] font-medium ${r.clockInApproval === 'pending' ? 'text-amber-600' : r.clockInApproval === 'rejected' ? 'text-rose-500' : r.clockInApproval === 'approved' ? 'text-emerald-600' : 'text-blue-600'}`}>{r.clockInStatusLabel}{r.clockInApproval ? `・${approvalSuffix(r.clockInApproval, r.payDeduction)}` : ''}{r.clockInActual ? `（実打刻 ${r.clockInActual}）` : ''}</div>}
-                {r.clockOutStatusLabel && <div className={`mt-1 text-[11px] font-medium ${r.clockOutApproval === 'pending' ? 'text-amber-600' : r.clockOutApproval === 'rejected' ? 'text-rose-500' : r.clockOutApproval === 'approved' ? 'text-emerald-600' : 'text-purple-600'}`}>{r.clockOutStatusLabel}{r.clockOutApproval ? `・${approvalSuffix(r.clockOutApproval, r.payDeduction)}` : ''}{r.clockOutActual ? `（実打刻 ${r.clockOutActual}）` : ''}</div>}
+                {r.clockInStatusLabel && <div className={`mt-1 text-[11px] font-medium ${approvalColorClass(r.clockInApproval, r.payDeduction, 'text-blue-600')}`}>{r.clockInStatusLabel}{r.clockInApproval ? `・${approvalSuffix(r.clockInApproval, r.payDeduction)}` : ''}{r.clockInActual ? `（実打刻 ${r.clockInActual}）` : ''}</div>}
+                {r.clockOutStatusLabel && <div className={`mt-1 text-[11px] font-medium ${approvalColorClass(r.clockOutApproval, r.payDeduction, 'text-purple-600')}`}>{r.clockOutStatusLabel}{r.clockOutApproval ? `・${approvalSuffix(r.clockOutApproval, r.payDeduction)}` : ''}{r.clockOutActual ? `（実打刻 ${r.clockOutActual}）` : ''}</div>}
                 {r.payDeduction && r.payDeductionNote && <div className="mt-1 text-[11px] text-rose-500">メモ：{r.payDeductionNote}</div>}
                 {r.needsApproval && (
                   <div className="mt-1.5 text-[11px] font-bold text-amber-700">↑上の「承認待ちの出勤」パネルで承認してください</div>
@@ -5599,7 +5606,7 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
                       <td className="px-3 py-2">
                         <input type="time" value={e.clockIn || ''} onChange={(ev) => setField('clockIn', ev.target.value)} className="w-[92px] border border-slate-200 rounded px-1.5 py-1 font-mono text-[12px]" />
                         {r.clockInStatusLabel && (
-                          <div className={`text-[9.5px] whitespace-nowrap mt-0.5 ${r.clockInApproval === 'pending' ? 'text-amber-600 font-bold' : r.clockInApproval === 'rejected' ? 'text-rose-500' : r.clockInApproval === 'approved' ? 'text-emerald-600' : 'text-blue-600'}`}>
+                          <div className={`text-[9.5px] whitespace-nowrap mt-0.5 ${approvalColorClass(r.clockInApproval, r.payDeduction, 'text-blue-600')}`}>
                             {r.clockInStatusLabel}{r.clockInApproval ? `・${approvalSuffix(r.clockInApproval, r.payDeduction)}` : ''}
                           </div>
                         )}
@@ -5607,7 +5614,7 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
                       <td className="px-3 py-2">
                         <input type="time" value={e.clockOut || ''} onChange={(ev) => setField('clockOut', ev.target.value)} className="w-[92px] border border-slate-200 rounded px-1.5 py-1 font-mono text-[12px]" />
                         {r.clockOutStatusLabel && (
-                          <div className={`text-[9.5px] whitespace-nowrap mt-0.5 ${r.clockOutApproval === 'pending' ? 'text-amber-600 font-bold' : r.clockOutApproval === 'rejected' ? 'text-rose-500' : r.clockOutApproval === 'approved' ? 'text-emerald-600' : 'text-purple-600'}`}>
+                          <div className={`text-[9.5px] whitespace-nowrap mt-0.5 ${approvalColorClass(r.clockOutApproval, r.payDeduction, 'text-purple-600')}`}>
                             {r.clockOutStatusLabel}{r.clockOutApproval ? `・${approvalSuffix(r.clockOutApproval, r.payDeduction)}` : ''}
                           </div>
                         )}
@@ -5644,8 +5651,8 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
                     <Field label="休憩(分)"><input type="number" min="0" step="5" value={e.breakMinutes ?? ''} onChange={(ev) => setField('breakMinutes', ev.target.value)} className="w-full border border-slate-200 rounded px-2 py-1.5 font-mono text-[12.5px]" /></Field>
                   </div>
                   <div className="mt-2 text-[11px] text-slate-400">{r.status} ・実働 {minutesToHHMM(r.workedMin)}{r.overtimeMin > 0 ? ` ・ 残業 ${minutesToHHMM(r.overtimeMin)}` : ''}</div>
-                  {r.clockInStatusLabel && <div className={`mt-1 text-[11px] font-medium ${r.clockInApproval === 'pending' ? 'text-amber-600' : r.clockInApproval === 'rejected' ? 'text-rose-500' : r.clockInApproval === 'approved' ? 'text-emerald-600' : 'text-blue-600'}`}>{r.clockInStatusLabel}{r.clockInApproval ? `・${approvalSuffix(r.clockInApproval, r.payDeduction)}` : ''}</div>}
-                  {r.clockOutStatusLabel && <div className={`mt-1 text-[11px] font-medium ${r.clockOutApproval === 'pending' ? 'text-amber-600' : r.clockOutApproval === 'rejected' ? 'text-rose-500' : r.clockOutApproval === 'approved' ? 'text-emerald-600' : 'text-purple-600'}`}>{r.clockOutStatusLabel}{r.clockOutApproval ? `・${approvalSuffix(r.clockOutApproval, r.payDeduction)}` : ''}</div>}
+                  {r.clockInStatusLabel && <div className={`mt-1 text-[11px] font-medium ${approvalColorClass(r.clockInApproval, r.payDeduction, 'text-blue-600')}`}>{r.clockInStatusLabel}{r.clockInApproval ? `・${approvalSuffix(r.clockInApproval, r.payDeduction)}` : ''}</div>}
+                  {r.clockOutStatusLabel && <div className={`mt-1 text-[11px] font-medium ${approvalColorClass(r.clockOutApproval, r.payDeduction, 'text-purple-600')}`}>{r.clockOutStatusLabel}{r.clockOutApproval ? `・${approvalSuffix(r.clockOutApproval, r.payDeduction)}` : ''}</div>}
                   {r.payDeduction && r.payDeductionNote && <div className="mt-1 text-[11px] text-rose-500">メモ：{r.payDeductionNote}</div>}
                   {r.needsApproval && (
                     <div className="mt-1.5 text-[11px] font-bold text-amber-700">「承認待ちの出勤」パネルで承認してください</div>
