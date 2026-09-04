@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useContext, createContext } from 'react';
 import { createPortal } from 'react-dom';
 import * as XLSX from 'xlsx';
 import { Clock, MapPin, CheckCircle2, XCircle, AlertTriangle, LogIn, LogOut, FileEdit, Users, Bell, Calendar, Mail, LogOut as LogoutIcon, UserPlus, Lock, User, Monitor, Smartphone, Palmtree, Plus, Pencil, CalendarDays, ListChecks, ClipboardList, MessageSquare, Coffee, BarChart3, Home, Download, ChevronRight, LayoutGrid, Wallet, Briefcase, UserCog, Construction, Megaphone, Paperclip, FileText, Pin, Trash2, Key, ShieldCheck, HelpCircle, ChevronDown } from 'lucide-react';
@@ -162,6 +162,76 @@ const formatAdminDate = (key) => {
 };
 
 // ---- Leave (休暇) ----
+// ---- 36協定の上限チェック ----
+// 原則の上限：月45時間・年360時間。起算月は設定画面から変更でき、既定は4月。
+const OVERTIME_MONTHLY_LIMIT_MIN = 45 * 60;
+const OVERTIME_MONTHLY_CAUTION_MIN = 30 * 60;
+const OVERTIME_YEARLY_LIMIT_MIN = 360 * 60;
+const OVERTIME_START_MONTH_KEY = 'brownwork_overtime_start_month';
+
+function getOvertimeStartMonth() {
+  if (typeof window === 'undefined') return 4;
+  const v = Number(window.localStorage.getItem(OVERTIME_START_MONTH_KEY));
+  return v >= 1 && v <= 12 ? v : 4;
+}
+
+// 36協定の起算月から見た「協定年度」の12ヶ月分のキー（YYYY-MM）を返す
+function getAgreementYearMonths(startMonth, asOf = new Date()) {
+  const y = asOf.getFullYear();
+  const m = asOf.getMonth() + 1;
+  const baseYear = m >= startMonth ? y : y - 1;
+  const months = [];
+  for (let i = 0; i < 12; i++) {
+    const d = new Date(baseYear, startMonth - 1 + i, 1);
+    months.push(`${d.getFullYear()}-${pad(d.getMonth() + 1)}`);
+  }
+  return { baseYear, months };
+}
+
+// 社員ごとに、月別の残業時間と協定年度の累計を集計する
+function computeOvertimeStatus(employeeAccounts, records, startMonth, asOf = new Date()) {
+  const { baseYear, months } = getAgreementYearMonths(startMonth, asOf);
+  const currentKey = `${asOf.getFullYear()}-${pad(asOf.getMonth() + 1)}`;
+  const rows = (employeeAccounts || []).map((acc) => {
+    const recs = records[acc.id] || {};
+    const byMonth = {};
+    months.forEach((mk) => { byMonth[mk] = 0; });
+    Object.entries(recs).forEach(([dateKey, rec]) => {
+      const mk = dateKey.slice(0, 7);
+      if (!(mk in byMonth)) return;
+      const m = computeMetrics(rec);
+      if (m) byMonth[mk] += m.overtimeMin;
+    });
+    const yearTotal = months.reduce((s, mk) => s + byMonth[mk], 0);
+    const currentMonth = byMonth[currentKey] || 0;
+    const overMonths = months.filter((mk) => byMonth[mk] > OVERTIME_MONTHLY_LIMIT_MIN);
+    let level = 'ok';
+    if (currentMonth > OVERTIME_MONTHLY_LIMIT_MIN || yearTotal > OVERTIME_YEARLY_LIMIT_MIN) level = 'warn';
+    else if (currentMonth > OVERTIME_MONTHLY_CAUTION_MIN || yearTotal > OVERTIME_YEARLY_LIMIT_MIN * 0.8) level = 'caution';
+    return { acc, byMonth, yearTotal, currentMonth, overMonths, level };
+  });
+  return { baseYear, months, currentKey, rows };
+}
+
+
+// 画面のどこに表示されている氏名でも、クリックするとその社員の詳細ページに移動できるようにする
+const EmployeeLinkContext = createContext(null);
+
+function EmployeeLink({ id, name, className = '' }) {
+  const openEmployee = useContext(EmployeeLinkContext);
+  if (!openEmployee || !id) return <span className={className}>{name}</span>;
+  return (
+    <button
+      type="button"
+      onClick={(e) => { e.stopPropagation(); openEmployee(id); }}
+      className={`hover:text-amber-600 hover:underline underline-offset-2 transition-colors text-left ${className}`}
+      title="クリックすると社員詳細を開きます"
+    >
+      {name}
+    </button>
+  );
+}
+
 const LEAVE_TYPES = ['有休', '振休', '代休', '特別休暇'];
 const DEFAULT_PAID_LEAVE_TOTAL = 10;
 const daysBetweenInclusive = (startKey, endKey) => {
@@ -2563,6 +2633,13 @@ export default function AttendanceApp() {
               isDesktop={isDesktop}
             />
             {(session.role === 'admin' || session.role === 'master_admin') && (
+              <OvertimeLimitTab
+                employeeAccounts={employeeAccounts}
+                records={data.records}
+                isDesktop={isDesktop}
+              />
+            )}
+            {(session.role === 'admin' || session.role === 'master_admin') && (
               <PaidLeaveSummaryTab
                 employeeAccounts={employeeAccounts}
                 leaveRequests={data.leaveRequests}
@@ -4701,7 +4778,7 @@ function EoAdminIncentiveTab({ employeeAccounts, isDesktop }) {
               <tbody>
                 {rows.map((r) => (
                   <tr key={r.account.id} className="border-b border-slate-100 last:border-0">
-                    <td className="px-4 py-2.5 font-semibold text-slate-800">{r.account.name}</td>
+                    <td className="px-4 py-2.5 font-semibold text-slate-800"><EmployeeLink id={r.account.id} name={r.account.name} /></td>
                     <td className="px-4 py-2.5 font-mono">{r.incentive.newPointsForJudge}P</td>
                     <td className="px-4 py-2.5 font-mono">{r.existingPoints}P</td>
                     <td className="px-4 py-2.5 font-mono">{r.empakeCount}枚</td>
@@ -4716,6 +4793,118 @@ function EoAdminIncentiveTab({ employeeAccounts, isDesktop }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ---- 36協定の残業上限チェック（労務タブ） ----
+function OvertimeLimitTab({ employeeAccounts, records, isDesktop }) {
+  const [startMonth, setStartMonth] = useState(getOvertimeStartMonth());
+  const saveStartMonth = (v) => {
+    setStartMonth(v);
+    try { window.localStorage.setItem(OVERTIME_START_MONTH_KEY, String(v)); } catch (e) { /* 保存できなくても表示は動く */ }
+  };
+
+  const { baseYear, months, currentKey, rows } = computeOvertimeStatus(employeeAccounts, records, startMonth);
+  const warnRows = rows.filter((r) => r.level === 'warn');
+  const cautionRows = rows.filter((r) => r.level === 'caution');
+
+  const hm = (min) => (min > 0 ? minutesToHHMM(min) : '-');
+  const cellClass = (min) => {
+    if (min > OVERTIME_MONTHLY_LIMIT_MIN) return 'text-rose-600 font-bold';
+    if (min > OVERTIME_MONTHLY_CAUTION_MIN) return 'text-amber-600 font-bold';
+    if (min > 0) return 'text-slate-700';
+    return 'text-slate-300';
+  };
+
+  return (
+    <div className="space-y-5">
+      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+          <BarChart3 size={15} className="text-slate-400" />
+          <h2 className="font-bold text-[13.5px]">36協定 残業時間チェック</h2>
+          <div className="ml-auto flex items-center gap-2">
+            <span className="text-[11px] text-slate-400">起算月</span>
+            <select value={startMonth} onChange={(e) => saveStartMonth(Number(e.target.value))} className="border border-slate-200 rounded-lg px-2 py-1 text-[12px] font-bold bg-white">
+              {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => <option key={m} value={m}>{m}月</option>)}
+            </select>
+          </div>
+        </div>
+        <div className={`grid gap-4 px-5 py-4 ${isDesktop ? 'grid-cols-3' : 'grid-cols-1'}`}>
+          <div>
+            <div className="text-[11px] text-slate-400 mb-1">警告（上限超過）</div>
+            <div className={`font-mono text-[24px] leading-none font-bold ${warnRows.length > 0 ? 'text-rose-600' : 'text-slate-800'}`}>{warnRows.length}<span className="text-[12px] font-normal text-slate-400 ml-0.5">名</span></div>
+          </div>
+          <div>
+            <div className="text-[11px] text-slate-400 mb-1">注意（月30時間超）</div>
+            <div className={`font-mono text-[24px] leading-none font-bold ${cautionRows.length > 0 ? 'text-amber-600' : 'text-slate-800'}`}>{cautionRows.length}<span className="text-[12px] font-normal text-slate-400 ml-0.5">名</span></div>
+          </div>
+          <div>
+            <div className="text-[11px] text-slate-400 mb-1">対象期間</div>
+            <div className="font-mono text-[15px] font-bold text-slate-800 pt-1.5">{baseYear}年{startMonth}月 〜 {startMonth === 1 ? baseYear : baseYear + 1}年{startMonth === 1 ? 12 : startMonth - 1}月</div>
+          </div>
+        </div>
+      </div>
+
+      {(warnRows.length > 0 || cautionRows.length > 0) && (
+        <div className={`rounded-2xl border px-5 py-4 ${warnRows.length > 0 ? 'bg-rose-50 border-rose-200' : 'bg-amber-50 border-amber-200'}`}>
+          <div className="flex items-center gap-2 mb-2">
+            <AlertTriangle size={15} className={warnRows.length > 0 ? 'text-rose-500' : 'text-amber-500'} />
+            <h3 className={`font-bold text-[13px] ${warnRows.length > 0 ? 'text-rose-700' : 'text-amber-700'}`}>残業時間の確認が必要な社員がいます</h3>
+          </div>
+          <div className="space-y-1.5">
+            {warnRows.map((r) => (
+              <div key={r.acc.id} className="text-[12.5px] text-rose-700">
+                <b><EmployeeLink id={r.acc.id} name={r.acc.name} /></b> — 今月 {hm(r.currentMonth)}／年度累計 {hm(r.yearTotal)}
+                {r.currentMonth > OVERTIME_MONTHLY_LIMIT_MIN && <span className="ml-1.5 text-[11px] bg-rose-600 text-white rounded px-1.5 py-0.5 font-bold">月45時間超</span>}
+                {r.yearTotal > OVERTIME_YEARLY_LIMIT_MIN && <span className="ml-1.5 text-[11px] bg-rose-600 text-white rounded px-1.5 py-0.5 font-bold">年360時間超</span>}
+              </div>
+            ))}
+            {cautionRows.map((r) => (
+              <div key={r.acc.id} className="text-[12.5px] text-amber-700">
+                <b><EmployeeLink id={r.acc.id} name={r.acc.name} /></b> — 今月 {hm(r.currentMonth)}／年度累計 {hm(r.yearTotal)}
+                <span className="ml-1.5 text-[11px] bg-amber-500 text-white rounded px-1.5 py-0.5 font-bold">注意</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-100">
+          <h3 className="font-bold text-[13px]">社員別・月別の残業時間</h3>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-[12px]">
+            <thead>
+              <tr className="text-left text-[11px] text-slate-400 border-b border-slate-100">
+                <th className="px-3 py-2 font-medium sticky left-0 bg-white">氏名</th>
+                {months.map((mk) => (
+                  <th key={mk} className={`px-2 py-2 font-medium text-right whitespace-nowrap ${mk === currentKey ? 'text-slate-700' : ''}`}>{Number(mk.slice(5, 7))}月</th>
+                ))}
+                <th className="px-3 py-2 font-medium text-right">年度累計</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.acc.id} className="border-b border-slate-100 last:border-0">
+                  <td className="px-3 py-2 font-semibold text-slate-800 sticky left-0 bg-white whitespace-nowrap">
+                    <EmployeeLink id={r.acc.id} name={r.acc.name} />
+                  </td>
+                  {months.map((mk) => (
+                    <td key={mk} className={`px-2 py-2 text-right font-mono ${cellClass(r.byMonth[mk])}`}>{hm(r.byMonth[mk])}</td>
+                  ))}
+                  <td className={`px-3 py-2 text-right font-mono font-bold ${r.yearTotal > OVERTIME_YEARLY_LIMIT_MIN ? 'text-rose-600' : r.yearTotal > OVERTIME_YEARLY_LIMIT_MIN * 0.8 ? 'text-amber-600' : 'text-slate-800'}`}>{hm(r.yearTotal)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="px-5 py-3 text-[10.5px] text-slate-400 border-t border-slate-100 space-y-1">
+          <div>赤＝月45時間超（36協定の原則上限を超過）／橙＝月30時間超（注意）。年度累計が360時間を超えると赤で表示されます。</div>
+          <div>特別条項付きの協定を締結している場合は上限が異なります。この画面は原則の上限（月45時間・年360時間）のみで判定しています。</div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -5074,7 +5263,7 @@ function TurnoverAnalysisTab({ employeeAccounts, resignationReasons = [], isDesk
                   .sort((a, b) => (a.acc.resignationDate < b.acc.resignationDate ? 1 : -1))
                   .map(({ acc, months, reason }) => (
                     <tr key={acc.id} className="border-b border-slate-100 last:border-0">
-                      <td className="px-3 py-2 font-semibold text-slate-800 whitespace-nowrap">{acc.name}</td>
+                      <td className="px-3 py-2 font-semibold text-slate-800 whitespace-nowrap"><EmployeeLink id={acc.id} name={acc.name} /></td>
                       <td className="px-3 py-2 text-slate-500 whitespace-nowrap">{acc.mainGroup || '-'}</td>
                       <td className="px-3 py-2 font-mono text-slate-500 whitespace-nowrap">{acc.hireDate ? dateLabel(acc.hireDate) : '-'}</td>
                       <td className="px-3 py-2 font-mono text-slate-500 whitespace-nowrap">{dateLabel(acc.resignationDate)}</td>
@@ -5356,7 +5545,7 @@ function PaidLeaveSummaryTab({ employeeAccounts, leaveRequests, isDesktop }) {
           <div className="space-y-1.5">
             {shortages.map((s) => (
               <div key={s.employeeId} className="text-[12.5px] text-rose-700">
-                <b>{s.employeeName}</b>{s.group ? `（${s.group}）` : ''} — 期限 {dateLabel(s.periodEnd)} まで残り{s.monthsLeft}ヶ月／取得 {fmtDays(s.used)}日・<b>あと{fmtDays(s.shortage)}日</b>必要
+                <b><EmployeeLink id={s.employeeId} name={s.employeeName} /></b>{s.group ? `（${s.group}）` : ''} — 期限 {dateLabel(s.periodEnd)} まで残り{s.monthsLeft}ヶ月／取得 {fmtDays(s.used)}日・<b>あと{fmtDays(s.shortage)}日</b>必要
               </div>
             ))}
           </div>
@@ -5424,7 +5613,7 @@ function PaidLeaveSummaryTab({ employeeAccounts, leaveRequests, isDesktop }) {
             <tbody>
               {perEmployee.map(({ acc, period, granted, used, yearUsed, obligated }) => (
                 <tr key={acc.id} className="border-b border-slate-100 last:border-0">
-                  <td className="px-3 py-2 font-semibold text-slate-800 whitespace-nowrap">{acc.name}</td>
+                  <td className="px-3 py-2 font-semibold text-slate-800 whitespace-nowrap"><EmployeeLink id={acc.id} name={acc.name} /></td>
                   <td className="px-3 py-2 text-slate-500 whitespace-nowrap">{acc.mainGroup || '-'}</td>
                   <td className="px-3 py-2 text-right font-mono">{yearUsed > 0 ? `${fmtDays(yearUsed)}日` : '-'}</td>
                   <td className="px-3 py-2 text-slate-500 font-mono whitespace-nowrap text-[11px]">
@@ -5454,12 +5643,13 @@ function PaidLeaveSummaryTab({ employeeAccounts, leaveRequests, isDesktop }) {
   );
 }
 
-function AdminDashboardTab({ missingCount, correctionCount, leaveCount, performanceCount, gpsAlertCount, contractAlertCount, clockInApprovalCount = 0, employeeCount, todayPresentCount = 0, monthOvertimeMin = 0, paidLeaveShortages = [], announcements = [], notifications = [], onNavigate, onNavigateTop, isDesktop }) {
+function AdminDashboardTab({ missingCount, correctionCount, leaveCount, performanceCount, gpsAlertCount, contractAlertCount, clockInApprovalCount = 0, employeeCount, todayPresentCount = 0, monthOvertimeMin = 0, paidLeaveShortages = [], overtimeWarnCount = 0, announcements = [], notifications = [], onNavigate, onNavigateTop, isDesktop }) {
   const alertRows = [
     { label: '打刻漏れ・打刻間違い', count: missingCount, tab: 'requests', icon: <AlertTriangle size={14} /> },
     { label: '位置情報が5回以上連続で未記録', count: gpsAlertCount, tab: 'attendance', icon: <MapPin size={14} /> },
     { label: '契約更新が必要な社員がいます', count: contractAlertCount, tab: 'accounts', icon: <FileText size={14} /> },
     { label: '有休の年5日取得が不足しています', count: paidLeaveShortages.length, tab: 'leave', icon: <Palmtree size={14} /> },
+    { label: '36協定の残業上限を超えています', count: overtimeWarnCount, tab: 'attendance', icon: <BarChart3 size={14} /> },
   ];
   const unapprovedRows = [
     { label: '未承認の勤怠修正申請', count: correctionCount, tab: 'requests', icon: <FileEdit size={14} /> },
@@ -5579,7 +5769,7 @@ function AdminDashboardTab({ missingCount, correctionCount, leaveCount, performa
           <div className="space-y-1">
             {paidLeaveShortages.slice(0, 5).map((s) => (
               <div key={s.employeeId} className="text-[12.5px] text-rose-700">
-                <b>{s.employeeName}</b> — 期限 {dateLabel(s.periodEnd)}（残り{s.monthsLeft}ヶ月）／あと<b>{fmtDays(s.shortage)}日</b>必要
+                <b><EmployeeLink id={s.employeeId} name={s.employeeName} /></b> — 期限 {dateLabel(s.periodEnd)}（残り{s.monthsLeft}ヶ月）／あと<b>{fmtDays(s.shortage)}日</b>必要
               </div>
             ))}
             {paidLeaveShortages.length > 5 && (
@@ -6055,7 +6245,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, groupAtten
           <div className="divide-y divide-slate-100">
             {recent.map((p) => (
               <div key={p.id} className="px-5 py-3 flex items-center justify-between text-[12.5px]">
-                <span>{p.employeeName} — {p.year}年{p.month}月分</span>
+                <span><EmployeeLink id={p.employeeId} name={p.employeeName} /> — {p.year}年{p.month}月分</span>
                 <span className="flex items-center gap-2">
                   <span className="font-mono font-bold text-slate-700">{formatYen(p.totalAmount)}</span>
                   <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full ${p.status === 'published' ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-100 text-slate-400'}`}>
@@ -6242,8 +6432,18 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, o
     0
   );
   const paidLeaveShortages = computePaidLeaveShortages(employeeAccounts, data.leaveRequests);
+  const overtimeStatus = computeOvertimeStatus(employeeAccounts, data.records, getOvertimeStartMonth());
+  const overtimeWarnCount = overtimeStatus.rows.filter((r) => r.level === 'warn').length;
+
+  // 画面のどこかに表示された氏名がクリックされたら、その社員の詳細ページを開く
+  const [pendingProfileId, setPendingProfileId] = useState(null);
+  const openEmployee = useCallback((id) => {
+    setPendingProfileId(id);
+    setTab('accounts');
+  }, []);
 
   return (
+    <EmployeeLinkContext.Provider value={openEmployee}>
     <div className="space-y-5">
       {isDesktop ? (
         <AdminTopNav
@@ -6307,7 +6507,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, o
           <div className="text-[12.5px] text-rose-700">
             <div className="font-bold mb-0.5">打刻漏れが{missing.length}件あります</div>
             {missing.map((r, i) => (
-              <div key={i}>{dateLabel(r.date)}：{r.employeeName} — 退勤打刻がありません</div>
+              <div key={i}>{dateLabel(r.date)}：<EmployeeLink id={r.employeeId} name={r.employeeName} /> — 退勤打刻がありません</div>
             ))}
           </div>
         </div>
@@ -6326,6 +6526,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, o
           todayPresentCount={todayPresentCount}
           monthOvertimeMin={monthOvertimeMin}
           paidLeaveShortages={paidLeaveShortages}
+          overtimeWarnCount={overtimeWarnCount}
           announcements={data.announcements}
           notifications={data.notifications}
           onNavigate={setTab}
@@ -6351,6 +6552,8 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, o
           employeeAttendanceSchedules={data.employeeAttendanceSchedules}
           onSaveEmployeeAttendance={onSaveEmployeeAttendance}
           resignationReasons={data.resignationReasons}
+          initialProfileId={pendingProfileId}
+          onConsumeInitialProfile={() => setPendingProfileId(null)}
           session={session}
           isDesktop={isDesktop}
         />
@@ -6411,7 +6614,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, o
                 {leavePending.map((l) => (
                   <div key={l.id} className="px-5 py-4">
                     <div className="flex items-center justify-between mb-2">
-                      <div className="text-[13px] font-semibold">{l.employeeName} — {l.type}{l.halfDay ? '（半休）' : ''}</div>
+                      <div className="text-[13px] font-semibold"><EmployeeLink id={l.employeeId} name={l.employeeName} /> — {l.type}{l.halfDay ? '（半休）' : ''}</div>
                       <div className="text-[10.5px] text-slate-400">{new Date(l.submittedAt).toLocaleString('ja-JP')}</div>
                     </div>
                     <div className="font-mono text-[12.5px] text-slate-600 bg-slate-50 rounded-lg px-3 py-2 mb-2">
@@ -6441,7 +6644,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, o
               <div className="divide-y divide-slate-100">
                 {leaveDecided.map((l) => (
                   <div key={l.id} className="px-5 py-2.5 flex items-center justify-between text-[12.5px]">
-                    <span>{l.employeeName} — {l.type}{l.halfDay ? '（半休）' : ''}（{l.startDate === l.endDate ? dateLabel(l.startDate) : `${dateLabel(l.startDate)}〜${dateLabel(l.endDate)}`}）</span>
+                    <span><EmployeeLink id={l.employeeId} name={l.employeeName} /> — {l.type}{l.halfDay ? '（半休）' : ''}（{l.startDate === l.endDate ? dateLabel(l.startDate) : `${dateLabel(l.startDate)}〜${dateLabel(l.endDate)}`}）</span>
                     <span className={`font-medium shrink-0 ml-2 ${l.status === 'approved' ? 'text-emerald-600' : 'text-slate-400'}`}>
                       {l.status === 'approved' ? '承認済み' : '却下'}
                     </span>
@@ -6468,7 +6671,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, o
                 {pending.map((c) => (
                   <div key={c.id} className="px-5 py-4">
                     <div className="flex items-center justify-between mb-2">
-                      <div className="text-[13px] font-semibold">{c.employeeName} — {dateLabel(c.date)}</div>
+                      <div className="text-[13px] font-semibold"><EmployeeLink id={c.employeeId} name={c.employeeName} /> — {dateLabel(c.date)}</div>
                       <div className="text-[10.5px] text-slate-400">{new Date(c.submittedAt).toLocaleString('ja-JP')}</div>
                     </div>
                     <div className="font-mono text-[12.5px] text-slate-600 bg-slate-50 rounded-lg px-3 py-2 mb-2 flex flex-wrap gap-x-4 gap-y-1">
@@ -6500,7 +6703,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, o
                 <div className="divide-y divide-slate-100">
                   {decided.map((c) => (
                     <div key={c.id} className="px-5 py-2.5 flex items-center justify-between text-[12.5px]">
-                      <span>{c.employeeName} — {dateLabel(c.date)}</span>
+                      <span><EmployeeLink id={c.employeeId} name={c.employeeName} /> — {dateLabel(c.date)}</span>
                       <span className={`font-medium ${c.status === 'approved' ? 'text-emerald-600' : 'text-slate-400'}`}>
                         {c.status === 'approved' ? '承認済み' : '却下'}
                       </span>
@@ -6538,6 +6741,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, o
         </div>
       )}
     </div>
+    </EmployeeLinkContext.Provider>
   );
 }
 
@@ -6561,7 +6765,7 @@ function PerformanceAdminTab({ pending, decided, onDecide, isDesktop }) {
               <div className="flex items-center justify-between mb-2">
                 <div className="flex items-center gap-2">
                   <span className="text-[11px] font-bold text-slate-500 bg-slate-100 px-2 py-0.5 rounded-md">{r.type === 'half' ? '半月' : '月末'}</span>
-                  <span className="text-[13px] font-semibold text-slate-800">{r.employeeName} — {r.periodLabel}</span>
+                  <span className="text-[13px] font-semibold text-slate-800"><EmployeeLink id={r.employeeId} name={r.employeeName} /> — {r.periodLabel}</span>
                 </div>
                 <div className="text-[10.5px] text-slate-400">{new Date(r.submittedAt).toLocaleString('ja-JP')}</div>
               </div>
@@ -6601,7 +6805,7 @@ function PerformanceAdminTab({ pending, decided, onDecide, isDesktop }) {
         {decided.map((r) => (
           <div key={r.id} className="px-5 py-2.5 text-[12.5px]">
             <div className="flex items-center justify-between">
-              <span>{r.employeeName} — {r.periodLabel}</span>
+              <span><EmployeeLink id={r.employeeId} name={r.employeeName} /> — {r.periodLabel}</span>
               <span className={`font-medium shrink-0 ml-2 ${r.status === 'approved' ? 'text-emerald-600' : 'text-slate-400'}`}>
                 {r.status === 'approved' ? '承認済み' : '却下'}
               </span>
@@ -6793,7 +6997,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
               return (
                 <div key={key} className="px-5 py-3 space-y-2">
                   <div>
-                    <div className="text-[13px] font-bold text-slate-800">{item.employeeName} ・ {item.dateShort}（{item.kind === 'in' ? '出勤' : '退勤'}）</div>
+                    <div className="text-[13px] font-bold text-slate-800"><EmployeeLink id={item.employeeId} name={item.employeeName} /> ・ {item.dateShort}（{item.kind === 'in' ? '出勤' : '退勤'}）</div>
                     <div className="text-[11.5px] text-slate-500 mt-0.5">
                       {item.statusLabel}／記録 {item.clockIn}{item.clockInActual && item.clockInActual !== item.clockIn ? `（実打刻 ${item.clockInActual}）` : ''}
                       {item.note && `・${item.note}`}
@@ -6827,7 +7031,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
           <MapPin size={16} className="text-rose-500 mt-0.5 shrink-0" />
           <div className="text-[12.5px] text-rose-700">
             <div className="font-bold mb-0.5">位置情報が5回以上連続で記録されていないスタッフがいます</div>
-            {gpsAlerts.map((g) => <div key={g.employeeId}>{g.employeeName}（{g.consecutiveCount}回連続）</div>)}
+            {gpsAlerts.map((g) => <div key={g.employeeId}><EmployeeLink id={g.employeeId} name={g.employeeName} />（{g.consecutiveCount}回連続）</div>)}
           </div>
         </div>
       )}
@@ -6880,7 +7084,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
                 const setField = (field, value) => setEdits((prev) => ({ ...prev, [key]: { ...(prev[key] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: undefined }), [field]: value } }));
                 return (
                   <tr key={key} className={`border-b border-slate-100 last:border-0 ${r.needsApproval ? 'bg-amber-50/60' : r.dateBadgeClass}`}>
-                    {employeeFilter === 'all' && <td className="px-2 py-2 font-semibold whitespace-nowrap">{r.employeeName}</td>}
+                    {employeeFilter === 'all' && <td className="px-2 py-2 font-semibold whitespace-nowrap"><EmployeeLink id={r.employeeId} name={r.employeeName} /></td>}
                     <td className="px-2 py-2 font-mono font-semibold whitespace-nowrap">{r.dateShort}</td>
                     <td className="px-2 py-2">
                       <input type="time" value={e.clockIn || ''} onChange={(ev) => setField('clockIn', ev.target.value)} className="w-[84px] border border-slate-200 rounded px-1 py-1 font-mono text-[11.5px]" />
@@ -6930,7 +7134,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
                 <div className="flex items-center justify-between">
                   <div className="inline-block font-mono text-[13px] font-semibold text-slate-700">{r.dateShort}</div>
                   <div className="flex items-center gap-2">
-                    {employeeFilter === 'all' && <div className="text-[12px] font-bold text-slate-600">{r.employeeName}</div>}
+                    {employeeFilter === 'all' && <div className="text-[12px] font-bold text-slate-600"><EmployeeLink id={r.employeeId} name={r.employeeName} /></div>}
                     <button onClick={() => setMonthlyViewTarget({ employeeId: r.employeeId, employeeName: r.employeeName, month: dateFilter.slice(0, 7) })} className="text-[10.5px] font-bold text-slate-500 border border-slate-200 rounded-md px-2 py-1">月間</button>
                   </div>
                 </div>
@@ -7378,7 +7582,7 @@ function AdminYearEndAdjustmentTab({ requests, onDecide, isDesktop }) {
   const Card = ({ r }) => (
     <div className="px-5 py-3.5 border-b border-slate-100 last:border-0">
       <div className="flex items-center justify-between mb-1.5">
-        <span className="font-semibold text-[13px] text-slate-800">{r.employeeName}</span>
+        <span className="font-semibold text-[13px] text-slate-800"><EmployeeLink id={r.employeeId} name={r.employeeName} /></span>
         <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full ${statusClass[r.status]}`}>{statusLabel[r.status]}</span>
       </div>
       <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[12px] text-slate-600 mb-2">
@@ -7643,7 +7847,7 @@ function AdminCommuteExpenseClaimsTab({ claims, onDecide, isDesktop }) {
   const Card = ({ c }) => (
     <div className="px-5 py-3.5 border-b border-slate-100 last:border-0">
       <div className="flex items-center justify-between mb-1.5">
-        <span className="font-semibold text-[13px] text-slate-800">{c.employeeName} ・ {c.targetMonth ? `${monthKeyLabel(c.targetMonth)}分` : ''} ・ {dateLabel(c.submittedDate)}提出</span>
+        <span className="font-semibold text-[13px] text-slate-800"><EmployeeLink id={c.employeeId} name={c.employeeName} /> ・ {c.targetMonth ? `${monthKeyLabel(c.targetMonth)}分` : ''} ・ {dateLabel(c.submittedDate)}提出</span>
         <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full ${statusClass[c.status]}`}>{statusLabel[c.status]}</span>
       </div>
       <div className="overflow-x-auto mb-2">
@@ -7865,7 +8069,7 @@ function AdminProfileRequestsTab({ requests, onDecide, isDesktop }) {
           {pending.map((r) => (
             <div key={r.id} className="px-5 py-4">
               <div className="flex items-center justify-between mb-2">
-                <span className="text-[13px] font-semibold text-slate-800">{r.employeeName}</span>
+                <span className="text-[13px] font-semibold text-slate-800"><EmployeeLink id={r.employeeId} name={r.employeeName} /></span>
                 <span className="text-[10.5px] text-slate-400">{new Date(r.submittedAt).toLocaleString('ja-JP')}</span>
               </div>
               <div className="font-mono text-[12px] text-slate-600 bg-slate-50 rounded-lg px-3 py-2 mb-2 space-y-0.5">
@@ -7904,7 +8108,7 @@ function AdminProfileRequestsTab({ requests, onDecide, isDesktop }) {
       <div className="divide-y divide-slate-100">
         {decided.map((r) => (
           <div key={r.id} className="px-5 py-2.5 text-[12.5px] flex items-center justify-between">
-            <span>{r.employeeName}</span>
+            <span><EmployeeLink id={r.employeeId} name={r.employeeName} /></span>
             <span className={`font-medium ${r.status === 'approved' ? 'text-emerald-600' : 'text-slate-400'}`}>
               {r.status === 'approved' ? '承認済み' : '却下'}
             </span>
@@ -8169,7 +8373,7 @@ const ADMIN_TAB_OPTIONS = [
   { key: 'payroll', label: '給与' },
 ];
 
-function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, groupLeaveSchedules, employeeAttendanceSchedules, onSaveEmployeeAttendance, resignationReasons = [], session, isDesktop }) {
+function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, groupLeaveSchedules, employeeAttendanceSchedules, onSaveEmployeeAttendance, resignationReasons = [], initialProfileId = null, onConsumeInitialProfile, session, isDesktop }) {
   const knownGroups = Array.from(new Set([...employeeAccounts.map((a) => a.mainGroup).filter(Boolean), ...Object.keys(groupLeaveSchedules || {})]));
   const [listGroupFilter, setListGroupFilter] = useState('all');
   const [listStaffTypeFilter, setListStaffTypeFilter] = useState('all');
@@ -8192,6 +8396,15 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
   const [resetPasswordTarget, setResetPasswordTarget] = useState(null);
   const [backingUp, setBackingUp] = useState(false);
   const isMasterAdmin = session?.role === 'master_admin';
+
+  // 他の画面で氏名がクリックされた場合、その社員の詳細を自動で開く
+  useEffect(() => {
+    if (!initialProfileId) return;
+    const target = employeeAccounts.find((a) => a.id === initialProfileId);
+    if (target) setProfileModalAccount(target);
+    if (onConsumeInitialProfile) onConsumeInitialProfile();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialProfileId]);
 
   // 全テーブルを1つのExcelファイル（テーブルごとにシート）に書き出す
   const runFullBackup = async () => {
