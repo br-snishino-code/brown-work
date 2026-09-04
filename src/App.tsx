@@ -276,7 +276,7 @@ const PAID_LEAVE_ALERT_MONTHS_LEFT = 6;
 function computePaidLeaveShortages(employeeAccounts, leaveRequests, asOf = new Date()) {
   const out = [];
   (employeeAccounts || []).forEach((acc) => {
-    if (acc.retireDate && acc.retireDate < todayKey(asOf)) return;
+    if (acc.resignationDate && acc.resignationDate < todayKey(asOf)) return;
     const period = getPaidLeavePeriod(acc.hireDate, asOf);
     if (!period) return;
     const isPartTime = acc.staffType === 'パート' || acc.staffType === 'アルバイト';
@@ -646,7 +646,7 @@ function ToastView({ toast }) {
 // 以降のコンポーネント（LoginScreenなど）は一切変更していません。
 // ============================================================
 
-const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, performanceReports: [], payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, employeeAttendanceSchedules: {}, announcements: [], yearEndAdjustments: [], commuteExpenseClaims: [] };
+const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, performanceReports: [], payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, employeeAttendanceSchedules: {}, announcements: [], yearEndAdjustments: [], commuteExpenseClaims: [], resignationReasons: [] };
 
 // ---- row(snake_case) → app(camelCase) 変換 ----
 const rowToAccount = (row) => ({
@@ -658,6 +658,8 @@ const rowToAccount = (row) => ({
   adminPermissions: Array.isArray(row.admin_permissions) ? row.admin_permissions : ['attendance', 'labor', 'hr', 'payroll'],
   hireDate: row.hire_date,
   resignationDate: row.resignation_date,
+  resignationReasonId: row.resignation_reason_id || '',
+  resignationNote: row.resignation_note || '',
   contactEmail: row.contact_email || '',
   staffNumber: row.staff_number || '',
   address: row.address || '',
@@ -918,7 +920,16 @@ const BACKUP_TABLES = [
   'staff_existing_performance',
   'group_incentive_flags',
   'employee_my_numbers',
+  'resignation_reasons',
 ];
+
+const rowToResignationReason = (row) => ({
+  id: row.id,
+  label: row.label,
+  category: row.category || 'その他',
+  sortOrder: row.sort_order != null ? Number(row.sort_order) : 100,
+  isActive: row.is_active !== false,
+});
 
 const rowToAnnouncement = (row) => ({
   id: row.id,
@@ -950,6 +961,7 @@ async function fetchAllData() {
     announcementsRes,
     yearEndRes,
     commuteClaimsRes,
+    resignationReasonsRes,
   ] = await Promise.all([
     supabase.from('employees').select('*'),
     supabase.from('attendance_records').select('*'),
@@ -965,11 +977,14 @@ async function fetchAllData() {
     supabase.from('announcements').select('*').order('is_pinned', { ascending: false }).order('created_at', { ascending: false }),
     supabase.from('year_end_adjustments').select('*, employees(name)').order('submitted_at', { ascending: false }),
     supabase.from('commute_expense_claims').select('*, employees(name)').order('created_at', { ascending: false }),
+    supabase.from('resignation_reasons').select('*').order('sort_order', { ascending: true }),
   ]);
 
   for (const res of [employeesRes, recordsRes, correctionsRes, leaveRes, perfRes, notifRes, payrollRes, auditRes, profileReqRes, groupLeaveRes, employeeAttendanceRes, announcementsRes, yearEndRes, commuteClaimsRes]) {
     if (res.error) throw res.error;
   }
+  // 退職理由マスタはSQL未実行でも画面が落ちないよう、エラー時は空扱いにする
+  const resignationReasons = resignationReasonsRes?.error ? [] : (resignationReasonsRes?.data || []).map(rowToResignationReason);
 
   const records = {};
   (recordsRes.data || []).forEach((row) => {
@@ -1007,6 +1022,7 @@ async function fetchAllData() {
     announcements: (announcementsRes.data || []).map(rowToAnnouncement),
     yearEndAdjustments: (yearEndRes.data || []).map(rowToYearEndAdjustment),
     commuteExpenseClaims: (commuteClaimsRes.data || []).map(rowToCommuteClaim),
+    resignationReasons,
   };
 }
 
@@ -2060,6 +2076,8 @@ export default function AttendanceApp() {
       jobTitle: 'job_title',
       contractStart: 'contract_start',
       contractEnd: 'contract_end',
+      resignationReasonId: 'resignation_reason_id',
+      resignationNote: 'resignation_note',
       bankCode: 'bank_code',
       bankName: 'bank_name',
       branchCode: 'branch_code',
@@ -2548,6 +2566,13 @@ export default function AttendanceApp() {
               <PaidLeaveSummaryTab
                 employeeAccounts={employeeAccounts}
                 leaveRequests={data.leaveRequests}
+                isDesktop={isDesktop}
+              />
+            )}
+            {(session.role === 'admin' || session.role === 'master_admin') && (
+              <TurnoverAnalysisTab
+                employeeAccounts={employeeAccounts}
+                resignationReasons={data.resignationReasons}
                 isDesktop={isDesktop}
               />
             )}
@@ -4695,6 +4720,380 @@ function EoAdminIncentiveTab({ employeeAccounts, isDesktop }) {
   );
 }
 
+// ---- 退職理由マスタの設定（マスター管理者） ----
+const RESIGNATION_CATEGORIES = ['自己都合', '会社都合', '契約満了', '定年', 'その他'];
+
+function ResignationReasonSettings({ reasons = [], onRefresh, isDesktop }) {
+  const [label, setLabel] = useState('');
+  const [category, setCategory] = useState('自己都合');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const reload = async () => { if (onRefresh) await onRefresh({ showIndicator: true }); };
+
+  const add = async () => {
+    if (!label.trim()) return;
+    setSaving(true); setError('');
+    const maxOrder = reasons.reduce((m, r) => Math.max(m, r.sortOrder || 0), 0);
+    const { error: e } = await supabase.from('resignation_reasons').insert({
+      label: label.trim(), category, sort_order: maxOrder + 10, is_active: true,
+    });
+    if (e) setError(e.message.includes('duplicate') ? '同じ名前の理由がすでに登録されています。' : '登録に失敗しました。SQLファイル19番が未実行の可能性があります。');
+    else { setLabel(''); await reload(); }
+    setSaving(false);
+  };
+
+  const toggleActive = async (r) => {
+    setSaving(true); setError('');
+    const { error: e } = await supabase.from('resignation_reasons').update({ is_active: !r.isActive }).eq('id', r.id);
+    if (e) setError('更新に失敗しました。'); else await reload();
+    setSaving(false);
+  };
+
+  const move = async (r, dir) => {
+    const sorted = [...reasons].sort((a, b) => a.sortOrder - b.sortOrder);
+    const i = sorted.findIndex((x) => x.id === r.id);
+    const j = i + dir;
+    if (i < 0 || j < 0 || j >= sorted.length) return;
+    setSaving(true); setError('');
+    const a = sorted[i], b = sorted[j];
+    await supabase.from('resignation_reasons').update({ sort_order: b.sortOrder }).eq('id', a.id);
+    await supabase.from('resignation_reasons').update({ sort_order: a.sortOrder }).eq('id', b.id);
+    await reload();
+    setSaving(false);
+  };
+
+  const remove = async (r) => {
+    if (!window.confirm(`「${r.label}」を削除しますか？\nすでにこの理由で登録された社員がいる場合は削除できません。その場合は「無効にする」をお使いください。`)) return;
+    setSaving(true); setError('');
+    const { error: e } = await supabase.from('resignation_reasons').delete().eq('id', r.id);
+    if (e) setError('削除できませんでした。すでに使用されている理由は削除できません。「無効にする」をご利用ください。');
+    else await reload();
+    setSaving(false);
+  };
+
+  const sorted = [...reasons].sort((a, b) => a.sortOrder - b.sortOrder);
+
+  return (
+    <div className="space-y-5">
+      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+          <FileText size={15} className="text-slate-400" />
+          <h2 className="font-bold text-[13.5px]">退職理由の設定</h2>
+        </div>
+        <div className="px-5 py-4 space-y-3">
+          <div className={`grid gap-3 ${isDesktop ? 'grid-cols-[1fr_180px_auto]' : 'grid-cols-1'}`}>
+            <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="理由の名称（例：自己都合（転職））" className="border border-slate-200 rounded-lg px-3 py-2 text-[13px]" />
+            <select value={category} onChange={(e) => setCategory(e.target.value)} className="border border-slate-200 rounded-lg px-3 py-2 text-[13px] bg-white">
+              {RESIGNATION_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+            <button onClick={add} disabled={saving || !label.trim()} className="bg-slate-800 text-white rounded-lg px-4 py-2 text-[13px] font-bold disabled:bg-slate-300">追加</button>
+          </div>
+          {error && <div className="text-[12px] text-rose-600">{error}</div>}
+          <div className="text-[11px] text-slate-400">
+            分類（自己都合／会社都合など）は離職状況の集計に使われます。すでに使用中の理由は削除できないため、使わなくなった場合は「無効にする」を選んでください。無効にすると新規の選択肢から消えますが、過去の記録は残ります。
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+        {sorted.length === 0 ? (
+          <div className="px-6 py-14 text-center text-[12.5px] text-slate-300">
+            退職理由が登録されていません。SQLファイル19番を実行するか、上のフォームから追加してください。
+          </div>
+        ) : (
+          <table className="w-full text-[12.5px]">
+            <thead>
+              <tr className="text-left text-[11px] text-slate-400 border-b border-slate-100">
+                <th className="px-4 py-2 font-medium">理由</th>
+                <th className="px-4 py-2 font-medium">分類</th>
+                <th className="px-4 py-2 font-medium">状態</th>
+                <th className="px-4 py-2 font-medium text-right">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.map((r, i) => (
+                <tr key={r.id} className="border-b border-slate-100 last:border-0">
+                  <td className={`px-4 py-2.5 font-semibold ${r.isActive ? 'text-slate-800' : 'text-slate-300 line-through'}`}>{r.label}</td>
+                  <td className="px-4 py-2.5 text-slate-500">{r.category}</td>
+                  <td className="px-4 py-2.5">
+                    {r.isActive
+                      ? <span className="text-[11px] font-bold text-emerald-600">有効</span>
+                      : <span className="text-[11px] font-bold text-slate-400">無効</span>}
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <div className="flex items-center justify-end gap-2">
+                      <button onClick={() => move(r, -1)} disabled={saving || i === 0} className="text-[11px] text-slate-400 disabled:text-slate-200">↑</button>
+                      <button onClick={() => move(r, 1)} disabled={saving || i === sorted.length - 1} className="text-[11px] text-slate-400 disabled:text-slate-200">↓</button>
+                      <button onClick={() => toggleActive(r)} disabled={saving} className="text-[11px] font-bold text-slate-500">{r.isActive ? '無効にする' : '有効にする'}</button>
+                      <button onClick={() => remove(r)} disabled={saving} className="text-[11px] font-bold text-rose-500">削除</button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---- 離職状況の分析（労務タブ） ----
+// 勤続期間の区分：3ヶ月未満／3ヶ月〜1年未満／1年〜3年未満／3年以上
+const TENURE_BUCKETS = [
+  { key: 'lt3m', label: '3ヶ月未満', test: (m) => m < 3 },
+  { key: 'lt1y', label: '3ヶ月〜1年未満', test: (m) => m >= 3 && m < 12 },
+  { key: 'lt3y', label: '1年〜3年未満', test: (m) => m >= 12 && m < 36 },
+  { key: 'gte3y', label: '3年以上', test: (m) => m >= 36 },
+];
+
+function TurnoverAnalysisTab({ employeeAccounts, resignationReasons = [], isDesktop }) {
+  const now = new Date();
+  const retired = employeeAccounts.filter((a) => a.resignationDate);
+  const years = Array.from(new Set(retired.map((a) => a.resignationDate.slice(0, 4)))).sort().reverse();
+  if (!years.includes(String(now.getFullYear()))) years.unshift(String(now.getFullYear()));
+  const [year, setYear] = useState(String(now.getFullYear()));
+
+  const reasonById = {};
+  resignationReasons.forEach((r) => { reasonById[r.id] = r; });
+
+  // 対象年に退職した人
+  const yearRetired = retired
+    .filter((a) => a.resignationDate.slice(0, 4) === year)
+    .map((a) => {
+      const months = a.hireDate ? monthsBetween(new Date(a.hireDate + 'T00:00:00'), new Date(a.resignationDate + 'T00:00:00')) : null;
+      const reason = a.resignationReasonId ? reasonById[a.resignationReasonId] : null;
+      return { acc: a, months, reason };
+    });
+
+  // 期首（1月1日）在籍者＝その日までに入職し、まだ退職していない人
+  const periodStart = `${year}-01-01`;
+  const openingHeadcount = employeeAccounts.filter((a) => {
+    if (!a.hireDate || a.hireDate > periodStart) return false;
+    if (a.resignationDate && a.resignationDate < periodStart) return false;
+    return true;
+  }).length;
+  const turnoverRate = openingHeadcount > 0 ? (yearRetired.length / openingHeadcount) * 100 : null;
+
+  // 勤続期間別
+  const bucketCounts = {};
+  TENURE_BUCKETS.forEach((b) => { bucketCounts[b.key] = 0; });
+  let unknownTenure = 0;
+  yearRetired.forEach((r) => {
+    if (r.months == null) { unknownTenure += 1; return; }
+    const b = TENURE_BUCKETS.find((x) => x.test(r.months));
+    if (b) bucketCounts[b.key] += 1;
+  });
+
+  // 理由別
+  const reasonCounts = {};
+  yearRetired.forEach((r) => {
+    const key = r.reason ? r.reason.label : '未登録';
+    reasonCounts[key] = (reasonCounts[key] || 0) + 1;
+  });
+  const reasonRows = Object.entries(reasonCounts).sort((a, b) => b[1] - a[1]);
+
+  // 分類別（自己都合／会社都合など）
+  const categoryCounts = {};
+  yearRetired.forEach((r) => {
+    const key = r.reason ? r.reason.category : '未登録';
+    categoryCounts[key] = (categoryCounts[key] || 0) + 1;
+  });
+
+  // 勤続期間 × 理由のクロス集計
+  const crossReasons = Array.from(new Set(yearRetired.map((r) => (r.reason ? r.reason.label : '未登録'))));
+  const cross = {};
+  crossReasons.forEach((lab) => {
+    cross[lab] = {};
+    TENURE_BUCKETS.forEach((b) => { cross[lab][b.key] = 0; });
+  });
+  yearRetired.forEach((r) => {
+    const lab = r.reason ? r.reason.label : '未登録';
+    if (r.months == null) return;
+    const b = TENURE_BUCKETS.find((x) => x.test(r.months));
+    if (b) cross[lab][b.key] += 1;
+  });
+
+  const shortTermCount = bucketCounts.lt3m;
+  const withinYearCount = bucketCounts.lt3m + bucketCounts.lt1y;
+
+  const tenureText = (m) => {
+    if (m == null) return '不明';
+    const y = Math.floor(m / 12);
+    const mm = m % 12;
+    return y > 0 ? `${y}年${mm}ヶ月` : `${mm}ヶ月`;
+  };
+
+  return (
+    <div className="space-y-5">
+      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+          <UserCog size={15} className="text-slate-400" />
+          <h2 className="font-bold text-[13.5px]">離職状況</h2>
+          <select value={year} onChange={(e) => setYear(e.target.value)} className="ml-auto border border-slate-200 rounded-lg px-2.5 py-1 text-[12px] font-bold bg-white">
+            {years.map((y) => <option key={y} value={y}>{y}年</option>)}
+          </select>
+        </div>
+        <div className={`grid gap-4 px-5 py-4 ${isDesktop ? 'grid-cols-4' : 'grid-cols-2'}`}>
+          <div>
+            <div className="text-[11px] text-slate-400 mb-1">離職率</div>
+            <div className="font-mono text-[24px] leading-none font-bold text-slate-800">
+              {turnoverRate == null ? '-' : turnoverRate.toFixed(1)}<span className="text-[12px] font-normal text-slate-400 ml-0.5">%</span>
+            </div>
+            <div className="text-[10.5px] text-slate-400 mt-1">期首在籍{openingHeadcount}名が分母</div>
+          </div>
+          <div>
+            <div className="text-[11px] text-slate-400 mb-1">退職者数</div>
+            <div className="font-mono text-[24px] leading-none font-bold text-slate-800">{yearRetired.length}<span className="text-[12px] font-normal text-slate-400 ml-0.5">名</span></div>
+          </div>
+          <div>
+            <div className="text-[11px] text-slate-400 mb-1">短期離職（3ヶ月未満）</div>
+            <div className={`font-mono text-[24px] leading-none font-bold ${shortTermCount > 0 ? 'text-rose-600' : 'text-slate-800'}`}>{shortTermCount}<span className="text-[12px] font-normal text-slate-400 ml-0.5">名</span></div>
+          </div>
+          <div>
+            <div className="text-[11px] text-slate-400 mb-1">1年未満での離職</div>
+            <div className={`font-mono text-[24px] leading-none font-bold ${withinYearCount > 0 ? 'text-amber-600' : 'text-slate-800'}`}>{withinYearCount}<span className="text-[12px] font-normal text-slate-400 ml-0.5">名</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div className={isDesktop ? 'grid grid-cols-2 gap-5 items-start' : 'space-y-5'}>
+        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+          <div className="px-5 py-3.5 border-b border-slate-100">
+            <h3 className="font-bold text-[13px]">勤続期間別の退職者（{year}年）</h3>
+          </div>
+          <div>
+            {TENURE_BUCKETS.map((b) => {
+              const c = bucketCounts[b.key];
+              const pct = yearRetired.length > 0 ? (c / yearRetired.length) * 100 : 0;
+              return (
+                <div key={b.key} className="px-4 py-3 border-b border-slate-100 last:border-0">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-[12.5px] text-slate-700">{b.label}</span>
+                    <span className="text-[12.5px] font-bold font-mono text-slate-800">{c}名<span className="text-[11px] font-normal text-slate-400 ml-1.5">{pct.toFixed(0)}%</span></span>
+                  </div>
+                  <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                    <div className={`h-full rounded-full ${b.key === 'lt3m' ? 'bg-rose-400' : b.key === 'lt1y' ? 'bg-amber-400' : 'bg-slate-300'}`} style={{ width: `${pct}%` }} />
+                  </div>
+                </div>
+              );
+            })}
+            {unknownTenure > 0 && (
+              <div className="px-4 py-2.5 text-[11.5px] text-slate-400">入職日が未登録のため集計できない退職者が{unknownTenure}名います</div>
+            )}
+          </div>
+        </div>
+
+        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+          <div className="px-5 py-3.5 border-b border-slate-100">
+            <h3 className="font-bold text-[13px]">退職理由の内訳（{year}年）</h3>
+          </div>
+          {reasonRows.length === 0 ? (
+            <div className="px-5 py-10 text-center text-[12.5px] text-slate-300">この年の退職者はいません</div>
+          ) : (
+            <div>
+              {reasonRows.map(([lab, c]) => {
+                const pct = yearRetired.length > 0 ? (c / yearRetired.length) * 100 : 0;
+                return (
+                  <div key={lab} className="px-4 py-3 border-b border-slate-100 last:border-0">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className={`text-[12.5px] ${lab === '未登録' ? 'text-slate-400' : 'text-slate-700'}`}>{lab}</span>
+                      <span className="text-[12.5px] font-bold font-mono text-slate-800">{c}名<span className="text-[11px] font-normal text-slate-400 ml-1.5">{pct.toFixed(0)}%</span></span>
+                    </div>
+                    <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                      <div className="h-full rounded-full bg-slate-400" style={{ width: `${pct}%` }} />
+                    </div>
+                  </div>
+                );
+              })}
+              <div className="px-4 py-3 border-t border-slate-100 flex flex-wrap gap-x-4 gap-y-1">
+                {Object.entries(categoryCounts).map(([cat, c]) => (
+                  <span key={cat} className="text-[11.5px] text-slate-500">{cat} <b className="font-mono text-slate-800">{c}名</b></span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {yearRetired.length > 0 && (
+        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+          <div className="px-5 py-3.5 border-b border-slate-100">
+            <h3 className="font-bold text-[13px]">勤続期間 × 退職理由（{year}年）</h3>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-[12px]">
+              <thead>
+                <tr className="text-left text-[11px] text-slate-400 border-b border-slate-100">
+                  <th className="px-3 py-2 font-medium">退職理由</th>
+                  {TENURE_BUCKETS.map((b) => <th key={b.key} className="px-2 py-2 font-medium text-right whitespace-nowrap">{b.label}</th>)}
+                  <th className="px-3 py-2 font-medium text-right">合計</th>
+                </tr>
+              </thead>
+              <tbody>
+                {crossReasons.map((lab) => {
+                  const total = TENURE_BUCKETS.reduce((s, b) => s + cross[lab][b.key], 0);
+                  return (
+                    <tr key={lab} className="border-b border-slate-100 last:border-0">
+                      <td className={`px-3 py-2 font-semibold whitespace-nowrap ${lab === '未登録' ? 'text-slate-400' : 'text-slate-800'}`}>{lab}</td>
+                      {TENURE_BUCKETS.map((b) => (
+                        <td key={b.key} className={`px-2 py-2 text-right font-mono ${cross[lab][b.key] > 0 ? 'text-slate-800' : 'text-slate-300'}`}>{cross[lab][b.key] || '-'}</td>
+                      ))}
+                      <td className="px-3 py-2 text-right font-mono font-bold text-slate-800">{total}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-100">
+          <h3 className="font-bold text-[13px]">退職者一覧（{year}年）</h3>
+        </div>
+        {yearRetired.length === 0 ? (
+          <div className="px-5 py-10 text-center text-[12.5px] text-slate-300">この年の退職者はいません</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-[12px]">
+              <thead>
+                <tr className="text-left text-[11px] text-slate-400 border-b border-slate-100">
+                  <th className="px-3 py-2 font-medium">氏名</th>
+                  <th className="px-3 py-2 font-medium">グループ</th>
+                  <th className="px-3 py-2 font-medium">入職日</th>
+                  <th className="px-3 py-2 font-medium">退職日</th>
+                  <th className="px-3 py-2 font-medium">勤続</th>
+                  <th className="px-3 py-2 font-medium">理由</th>
+                </tr>
+              </thead>
+              <tbody>
+                {yearRetired
+                  .sort((a, b) => (a.acc.resignationDate < b.acc.resignationDate ? 1 : -1))
+                  .map(({ acc, months, reason }) => (
+                    <tr key={acc.id} className="border-b border-slate-100 last:border-0">
+                      <td className="px-3 py-2 font-semibold text-slate-800 whitespace-nowrap">{acc.name}</td>
+                      <td className="px-3 py-2 text-slate-500 whitespace-nowrap">{acc.mainGroup || '-'}</td>
+                      <td className="px-3 py-2 font-mono text-slate-500 whitespace-nowrap">{acc.hireDate ? dateLabel(acc.hireDate) : '-'}</td>
+                      <td className="px-3 py-2 font-mono text-slate-500 whitespace-nowrap">{dateLabel(acc.resignationDate)}</td>
+                      <td className={`px-3 py-2 font-mono whitespace-nowrap ${months != null && months < 3 ? 'text-rose-600 font-bold' : 'text-slate-700'}`}>{tenureText(months)}</td>
+                      <td className="px-3 py-2 text-slate-600">{reason ? reason.label : <span className="text-slate-300">未登録</span>}</td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <div className="px-5 py-3 text-[10.5px] text-slate-400 border-t border-slate-100">
+          離職率＝その年の退職者数 ÷ 期首（1月1日）在籍者数。勤続期間は入職日から退職日までで計算しています。
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ---- ヘルプ（操作Q&A） ----
 const HELP_STAFF = [
   {
@@ -5715,7 +6114,7 @@ function AdminTopNav({ tab, setTab, correctionCount, leaveCount, performanceCoun
     {
       key: 'staff-group',
       label: 'スタッフ管理',
-      tabs: isMasterAdmin ? ['accounts', 'groupleave', 'eoincentive', 'auditlog', 'adminperms'] : ['accounts', 'groupleave', 'eoincentive', 'auditlog'],
+      tabs: isMasterAdmin ? ['accounts', 'groupleave', 'eoincentive', 'auditlog', 'adminperms', 'resignreasons'] : ['accounts', 'groupleave', 'eoincentive', 'auditlog'],
       items: isMasterAdmin
         ? [
             { tab: 'accounts', label: '社員一覧・登録', sub: '入退職日・有休管理' },
@@ -5723,6 +6122,7 @@ function AdminTopNav({ tab, setTab, correctionCount, leaveCount, performanceCoun
             { tab: 'eoincentive', label: 'eo業務インセンティブ', sub: '新規実績・既存実績・支給額' },
             { tab: 'auditlog', label: '監査ログ', sub: '承認・操作の履歴' },
             { tab: 'adminperms', label: '管理者権限', sub: '管理者アカウント・権限設定' },
+            { tab: 'resignreasons', label: '退職理由の設定', sub: '選択肢の追加・編集' },
           ]
         : [
             { tab: 'accounts', label: '社員一覧・登録', sub: '入退職日・有休管理' },
@@ -5950,9 +6350,14 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, o
           groupLeaveSchedules={data.groupLeaveSchedules}
           employeeAttendanceSchedules={data.employeeAttendanceSchedules}
           onSaveEmployeeAttendance={onSaveEmployeeAttendance}
+          resignationReasons={data.resignationReasons}
           session={session}
           isDesktop={isDesktop}
         />
+      )}
+
+      {tab === 'resignreasons' && isMasterAdmin && (
+        <ResignationReasonSettings reasons={data.resignationReasons} onRefresh={onRefresh} isDesktop={isDesktop} />
       )}
 
       {tab === 'auditlog' && (
@@ -7764,7 +8169,7 @@ const ADMIN_TAB_OPTIONS = [
   { key: 'payroll', label: '給与' },
 ];
 
-function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, groupLeaveSchedules, employeeAttendanceSchedules, onSaveEmployeeAttendance, session, isDesktop }) {
+function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, groupLeaveSchedules, employeeAttendanceSchedules, onSaveEmployeeAttendance, resignationReasons = [], session, isDesktop }) {
   const knownGroups = Array.from(new Set([...employeeAccounts.map((a) => a.mainGroup).filter(Boolean), ...Object.keys(groupLeaveSchedules || {})]));
   const [listGroupFilter, setListGroupFilter] = useState('all');
   const [listStaffTypeFilter, setListStaffTypeFilter] = useState('all');
@@ -7847,6 +8252,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
         groupAttendanceSchedules={groupLeaveSchedules}
         employeeAttendanceSchedule={employeeAttendanceSchedules?.[profileModalAccount.id] || {}}
         onSaveEmployeeAttendance={onSaveEmployeeAttendance}
+        resignationReasons={resignationReasons}
         isDesktop={isDesktop}
       />
     );
@@ -8361,7 +8767,7 @@ const PROFILE_MODAL_TABS = [
   { key: 'tax', label: '住民税・税区分' },
 ];
 
-function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSaveMyNumber, isMasterAdmin, knownGroups = [], groupAttendanceSchedules = {}, employeeAttendanceSchedule = {}, onSaveEmployeeAttendance, isDesktop }) {
+function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSaveMyNumber, isMasterAdmin, knownGroups = [], groupAttendanceSchedules = {}, employeeAttendanceSchedule = {}, onSaveEmployeeAttendance, resignationReasons = [], isDesktop }) {
   const [activeTab, setActiveTab] = useState('basic');
   const containerRef = useRef(null);
   const sectionRefs = useRef({});
@@ -8499,6 +8905,8 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
     staffNumber: account.staffNumber || '',
     hireDate: account.hireDate || '',
     resignationDate: account.resignationDate || '',
+    resignationReasonId: account.resignationReasonId || '',
+    resignationNote: account.resignationNote || '',
     address: account.address || '',
     phone: account.phone || '',
     emergencyContactName: account.emergencyContactName || '',
@@ -8564,7 +8972,14 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
   });
   const removeFamilyMember = (i) => setForm((f) => ({ ...f, familyMembers: f.familyMembers.filter((_, idx) => idx !== i) }));
 
+  const activeResignationReasons = (resignationReasons || []).filter((r) => r.isActive);
+
   const save = async () => {
+    // 退職日を入れる場合は理由の選択を必須にする
+    if (form.resignationDate && !form.resignationReasonId) {
+      alert('退職日を登録するには、退職理由の選択が必要です。');
+      return;
+    }
     setSaving(true);
     // 日付項目は空欄のままだと DB が "" を日付として受け付けずエラーになるため、null に変換する
     const DATE_FIELDS = ['birthDate', 'resignationDate', 'contractStart', 'contractEnd', 'healthInsuranceAcquiredDate', 'healthInsuranceLostDate', 'pensionAcquiredDate', 'pensionLostDate', 'employmentInsuranceAcquiredDate', 'employmentInsuranceLostDate'];
@@ -8579,6 +8994,8 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
       scheduledWeeklyDays: form.scheduledWeeklyDays === '' ? null : Number(form.scheduledWeeklyDays),
       standardRemunerationHealth: form.standardRemunerationHealth === '' ? null : Number(form.standardRemunerationHealth),
       standardRemunerationPension: form.standardRemunerationPension === '' ? null : Number(form.standardRemunerationPension),
+      resignationReasonId: form.resignationDate && form.resignationReasonId ? form.resignationReasonId : null,
+      resignationNote: form.resignationDate ? (form.resignationNote || '') : '',
       spouseAnnualIncome: form.spouseAnnualIncome === '' ? null : Number(form.spouseAnnualIncome),
       spouseMonthlyIncome: form.spouseMonthlyIncome === '' ? null : Number(form.spouseMonthlyIncome),
     });
@@ -8630,6 +9047,23 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                   <input type="date" value={form.resignationDate} onChange={set('resignationDate')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
                 </Field>
               </div>
+              {form.resignationDate && (
+                <div className="rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-3 space-y-3">
+                  <div className="text-[11.5px] font-bold text-amber-700">退職処理には理由の登録が必要です</div>
+                  <Field label="退職理由（必須）">
+                    <select value={form.resignationReasonId} onChange={set('resignationReasonId')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white">
+                      <option value="">選択してください</option>
+                      {activeResignationReasons.map((r) => <option key={r.id} value={r.id}>{r.label}</option>)}
+                    </select>
+                  </Field>
+                  {activeResignationReasons.length === 0 && (
+                    <div className="text-[11px] text-rose-600">退職理由の選択肢が未登録です。「スタッフ管理」→「退職理由の設定」から登録してください。</div>
+                  )}
+                  <Field label="補足メモ（任意）">
+                    <textarea value={form.resignationNote} onChange={set('resignationNote')} rows={2} placeholder="引き継ぎ状況、面談内容など" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px]" />
+                  </Field>
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-3">
                 <Field label="生年月日">
                   <input type="date" value={form.birthDate} onChange={set('birthDate')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
