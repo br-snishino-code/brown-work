@@ -162,6 +162,27 @@ const formatAdminDate = (key) => {
 };
 
 // ---- Leave (休暇) ----
+// ---- 通知の件名から、確認すべき画面を判定する ----
+// topTab は画面上部のタブ、adminTab は「勤怠」タブ内のサブ画面を指す
+// 「承認」「却下」「差し戻し」を含む件名は、管理者が処理した結果を社員へ知らせるものなので、
+// 改めて開く必要がない。リンクにせず、処理済みとして薄く表示する。
+const NOTIFICATION_DONE_KEYWORDS = ['承認', '却下', '差し戻し'];
+function isNotificationDone(subject = '') {
+  return NOTIFICATION_DONE_KEYWORDS.some((k) => subject.includes(k));
+}
+
+function resolveNotificationTarget(subject = '') {
+  if (isNotificationDone(subject)) return null;
+  const has = (...keys) => keys.some((k) => subject.includes(k));
+  if (has('出勤確認', '退勤確認')) return { topTab: 'attendance', adminTab: 'attendance', label: '勤怠一覧' };
+  if (has('勤怠修正')) return { topTab: 'attendance', adminTab: 'requests', label: '勤怠修正申請' };
+  if (has('休暇申請')) return { topTab: 'attendance', adminTab: 'leave', label: '休暇申請' };
+  if (has('個人実績')) return { topTab: 'attendance', adminTab: 'performance', label: '実績報告' };
+  if (has('個人情報変更', '年末調整')) return { topTab: 'hr', adminTab: null, label: '人材' };
+  if (has('交通費精算', '給与明細')) return { topTab: 'payroll', adminTab: null, label: '給与' };
+  return null;
+}
+
 // ---- 36協定の上限チェック ----
 // 原則の上限：月45時間・年360時間。起算月は設定画面から変更でき、既定は4月。
 const OVERTIME_MONTHLY_LIMIT_MIN = 45 * 60;
@@ -5643,7 +5664,7 @@ function PaidLeaveSummaryTab({ employeeAccounts, leaveRequests, isDesktop }) {
   );
 }
 
-function AdminDashboardTab({ missingCount, correctionCount, leaveCount, performanceCount, gpsAlertCount, contractAlertCount, clockInApprovalCount = 0, employeeCount, todayPresentCount = 0, monthOvertimeMin = 0, paidLeaveShortages = [], overtimeWarnCount = 0, announcements = [], notifications = [], onNavigate, onNavigateTop, isDesktop }) {
+function AdminDashboardTab({ missingCount, correctionCount, leaveCount, performanceCount, gpsAlertCount, contractAlertCount, clockInApprovalCount = 0, employeeCount, todayPresentCount = 0, monthOvertimeMin = 0, paidLeaveShortages = [], overtimeWarnCount = 0, announcements = [], notifications = [], onNavigate, onNavigateTop, onOpenNotification, isDesktop }) {
   const alertRows = [
     { label: '打刻漏れ・打刻間違い', count: missingCount, tab: 'requests', icon: <AlertTriangle size={14} /> },
     { label: '位置情報が5回以上連続で未記録', count: gpsAlertCount, tab: 'attendance', icon: <MapPin size={14} /> },
@@ -5739,12 +5760,28 @@ function AdminDashboardTab({ missingCount, correctionCount, leaveCount, performa
             <div className="px-5 py-8 text-center text-[12px] text-slate-300">通知はありません</div>
           ) : (
             <div>
-              {notifications.slice(0, 8).map((n) => (
-                <div key={n.id} className="px-4 py-2.5 border-b border-slate-100 last:border-0 flex items-start gap-3">
-                  <span className="text-[11px] text-slate-400 font-mono shrink-0 mt-0.5">{n.sentAt ? dateLabel(String(n.sentAt).slice(0, 10)) : ''}</span>
-                  <span className="text-[12.5px] text-slate-700 line-clamp-1">{n.subject}</span>
-                </div>
-              ))}
+              {notifications.slice(0, 8).map((n) => {
+                const target = resolveNotificationTarget(n.subject || '');
+                const clickable = !!target && !!onOpenNotification;
+                const done = isNotificationDone(n.subject || '');
+                return (
+                  <button
+                    key={n.id}
+                    type="button"
+                    onClick={() => clickable && onOpenNotification(n)}
+                    disabled={!clickable}
+                    className={`w-full px-4 py-2.5 border-b border-slate-100 last:border-0 flex items-start gap-3 text-left ${clickable ? 'hover:bg-slate-50 transition-colors cursor-pointer' : 'cursor-default'}`}
+                    title={clickable ? `${target.label}の画面を開きます` : undefined}
+                  >
+                    <span className="text-[11px] text-slate-400 font-mono shrink-0 mt-0.5">{n.sentAt ? dateLabel(String(n.sentAt).slice(0, 10)) : ''}</span>
+                    <span className={`text-[12.5px] line-clamp-1 flex-1 ${done ? 'text-slate-400' : 'text-slate-700'}`}>{n.subject}</span>
+                    {done && (
+                      <span className="text-[10px] font-bold text-slate-400 bg-slate-100 rounded px-1.5 py-0.5 shrink-0">処理済み</span>
+                    )}
+                    {clickable && <ChevronRight size={14} className="text-slate-300 shrink-0 mt-0.5" />}
+                  </button>
+                );
+              })}
             </div>
           )}
         </Card>
@@ -6442,6 +6479,19 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, o
     setTab('accounts');
   }, []);
 
+  // 通知履歴の項目をクリックしたとき、その内容を確認できる画面へ移動する
+  const openNotification = useCallback((notif) => {
+    const target = resolveNotificationTarget(notif?.subject || '');
+    if (!target) return;
+    if (target.topTab !== 'attendance') {
+      if (onNavigateTop) onNavigateTop(target.topTab);
+      return;
+    }
+    if (onNavigateTop) onNavigateTop('attendance');
+    if (target.adminTab) setTab(target.adminTab);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onNavigateTop]);
+
   return (
     <EmployeeLinkContext.Provider value={openEmployee}>
     <div className="space-y-5">
@@ -6531,6 +6581,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, o
           notifications={data.notifications}
           onNavigate={setTab}
           onNavigateTop={onNavigateTop}
+          onOpenNotification={openNotification}
           isDesktop={isDesktop}
         />
       )}
