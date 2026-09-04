@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import * as XLSX from 'xlsx';
-import { Clock, MapPin, CheckCircle2, XCircle, AlertTriangle, LogIn, LogOut, FileEdit, Users, Bell, Calendar, Mail, LogOut as LogoutIcon, UserPlus, Lock, User, Monitor, Smartphone, Palmtree, Plus, Pencil, CalendarDays, ListChecks, ClipboardList, MessageSquare, Coffee, BarChart3, Home, Download, ChevronRight, LayoutGrid, Wallet, Briefcase, UserCog, Construction, Megaphone, Paperclip, FileText, Pin, Trash2, Key, ShieldCheck } from 'lucide-react';
+import { Clock, MapPin, CheckCircle2, XCircle, AlertTriangle, LogIn, LogOut, FileEdit, Users, Bell, Calendar, Mail, LogOut as LogoutIcon, UserPlus, Lock, User, Monitor, Smartphone, Palmtree, Plus, Pencil, CalendarDays, ListChecks, ClipboardList, MessageSquare, Coffee, BarChart3, Home, Download, ChevronRight, LayoutGrid, Wallet, Briefcase, UserCog, Construction, Megaphone, Paperclip, FileText, Pin, Trash2, Key, ShieldCheck, HelpCircle, ChevronDown } from 'lucide-react';
 import { supabase, CLOUD_ENABLED, usernameToEmail } from './supabaseClient';
 
 // ---- constants ----
@@ -238,7 +238,72 @@ function computeLeaveTotal(employee, now, groupLeaveSchedules) {
   return Math.max(0, base + (Number(employee.leaveAdjustment) || 0));
 }
 
-// グループ別または個人別の「出勤規定日数」を、指定した月について取得する
+// 有休の「付与日」は入職から6ヶ月後、以降は1年ごとの応当日。
+// 労基法39条の年5日取得義務は、この付与日から1年間を1単位として判定する。
+function getPaidLeavePeriod(hireDateStr, asOf = new Date()) {
+  if (!hireDateStr) return null;
+  const hire = new Date(hireDateStr + 'T00:00:00');
+  if (isNaN(hire.getTime())) return null;
+  const first = new Date(hire);
+  first.setMonth(first.getMonth() + 6);
+  if (first > asOf) return null; // 初回付与前（義務の対象外）
+  let start = new Date(first);
+  for (;;) {
+    const next = new Date(start);
+    next.setFullYear(next.getFullYear() + 1);
+    if (next > asOf) break;
+    start = next;
+  }
+  const endExclusive = new Date(start);
+  endExclusive.setFullYear(endExclusive.getFullYear() + 1);
+  const end = new Date(endExclusive);
+  end.setDate(end.getDate() - 1);
+  return { startKey: todayKey(start), endKey: todayKey(end), start, end };
+}
+
+// 指定期間内に承認された有休の消化日数を合計する（半休は0.5日として計上済み）
+function sumApprovedPaidLeaveDays(leaveRequests, employeeId, startKey, endKey) {
+  return (leaveRequests || [])
+    .filter((l) => l.employeeId === employeeId && l.type === '有休' && l.status === 'approved')
+    .filter((l) => l.startDate >= startKey && l.startDate <= endKey)
+    .reduce((sum, l) => sum + (Number(l.days) || 0), 0);
+}
+
+// 年5日の取得義務を満たせないおそれがある社員を抽出する。
+// 対象は「その付与年度に10日以上付与された社員」で、残り6ヶ月を切って取得5日未満の場合に警告する。
+const PAID_LEAVE_MANDATORY_DAYS = 5;
+const PAID_LEAVE_ALERT_MONTHS_LEFT = 6;
+function computePaidLeaveShortages(employeeAccounts, leaveRequests, asOf = new Date()) {
+  const out = [];
+  (employeeAccounts || []).forEach((acc) => {
+    if (acc.retireDate && acc.retireDate < todayKey(asOf)) return;
+    const period = getPaidLeavePeriod(acc.hireDate, asOf);
+    if (!period) return;
+    const isPartTime = acc.staffType === 'パート' || acc.staffType === 'アルバイト';
+    const granted = isPartTime && acc.scheduledWeeklyDays
+      ? computeProportionalLeaveDays(acc.hireDate, acc.scheduledWeeklyDays, period.start)
+      : computeStatutoryPaidLeaveDays(acc.hireDate, period.start);
+    if (granted < 10) return; // 10日未満の付与は義務の対象外
+    const used = sumApprovedPaidLeaveDays(leaveRequests, acc.id, period.startKey, period.endKey);
+    if (used >= PAID_LEAVE_MANDATORY_DAYS) return;
+    const monthsLeft = monthsBetween(asOf, period.end);
+    if (monthsLeft > PAID_LEAVE_ALERT_MONTHS_LEFT) return;
+    out.push({
+      employeeId: acc.id,
+      employeeName: acc.name,
+      group: acc.mainGroup || '',
+      granted,
+      used,
+      shortage: PAID_LEAVE_MANDATORY_DAYS - used,
+      periodStart: period.startKey,
+      periodEnd: period.endKey,
+      monthsLeft,
+    });
+  });
+  return out.sort((a, b) => a.monthsLeft - b.monthsLeft || b.shortage - a.shortage);
+}
+
+
 // 優先順位：社員にメイングループが設定されていればグループ規定 → 未設定なら個人別の月次設定
 function getPrescribedAttendanceDays(employee, month, groupAttendanceSchedules, employeeAttendanceSchedules) {
   if (!employee) return null;
@@ -2470,14 +2535,26 @@ export default function AttendanceApp() {
       />
       <main className={isDesktop ? 'max-w-6xl mx-auto px-6 pb-16 pt-8' : 'max-w-3xl mx-auto px-4 pb-24 pt-6'}>
         {topTab === 'labor' && (
-          <AnnouncementsView
-            announcements={data.announcements}
-            isAdmin={session.role === 'admin' || session.role === 'master_admin'}
-            onSubmit={submitAnnouncement}
-            onDelete={deleteAnnouncement}
-            onGetFileUrl={getAnnouncementFileUrl}
-            isDesktop={isDesktop}
-          />
+          <div className="space-y-5">
+            <AnnouncementsView
+              announcements={data.announcements}
+              isAdmin={session.role === 'admin' || session.role === 'master_admin'}
+              onSubmit={submitAnnouncement}
+              onDelete={deleteAnnouncement}
+              onGetFileUrl={getAnnouncementFileUrl}
+              isDesktop={isDesktop}
+            />
+            {(session.role === 'admin' || session.role === 'master_admin') && (
+              <PaidLeaveSummaryTab
+                employeeAccounts={employeeAccounts}
+                leaveRequests={data.leaveRequests}
+                isDesktop={isDesktop}
+              />
+            )}
+          </div>
+        )}
+        {topTab === 'help' && (
+          <HelpTab session={session} isDesktop={isDesktop} />
         )}
         {topTab === 'hr' && (
           session.role === 'employee' ? (
@@ -2601,6 +2678,7 @@ export default function AttendanceApp() {
             data={data}
             employeeAccounts={employeeAccounts}
             session={session}
+            onNavigateTop={setTopTab}
             onDecide={decideCorrection}
             onDecideLeave={decideLeaveRequest}
             onDecidePerformance={decidePerformanceReport}
@@ -2957,11 +3035,12 @@ function GlobalTopTabs({ topTab, setTopTab, session }) {
     { key: 'labor', label: '労務', icon: <Briefcase size={14} /> },
     { key: 'hr', label: '人材', icon: <UserCog size={14} /> },
     { key: 'payroll', label: '給与', icon: <Wallet size={14} /> },
+    { key: 'help', label: 'ヘルプ', icon: <HelpCircle size={14} /> },
   ];
   // 権限を制限された管理者は、許可されたタブのみ表示（社員・マスター管理者は全タブ表示）
   const isRestrictedAdmin = session?.role === 'admin';
   const tabs = isRestrictedAdmin
-    ? allTabs.filter((t) => (session.adminPermissions || []).includes(t.key))
+    ? allTabs.filter((t) => t.key === 'help' || (session.adminPermissions || []).includes(t.key))
     : allTabs;
 
   useEffect(() => {
@@ -4616,11 +4695,372 @@ function EoAdminIncentiveTab({ employeeAccounts, isDesktop }) {
   );
 }
 
-function AdminDashboardTab({ missingCount, correctionCount, leaveCount, performanceCount, gpsAlertCount, contractAlertCount, clockInApprovalCount = 0, employeeCount, onNavigate, isDesktop }) {
+// ---- ヘルプ（操作Q&A） ----
+const HELP_STAFF = [
+  {
+    category: '打刻',
+    items: [
+      { q: '出勤・退勤の打刻はどこからしますか', a: '「勤怠」タブを開くと、画面の中央に大きな打刻ボタンが表示されます。出勤時は「出勤」、退勤時は「退勤」を押してください。押した時刻がそのまま記録されます。' },
+      { q: '打刻を忘れてしまいました', a: '「勤怠」タブの「勤怠一覧」から、該当する日付を選んで修正申請を出してください。正しい時刻と理由を入力して送信すると、管理者の承認後に記録が修正されます。当日中に気づいた場合も同じ手順です。' },
+      { q: '打刻の時刻を間違えました', a: '打刻をやり直すことはできませんが、修正申請を出せば直せます。手順は打刻忘れと同じで、「勤怠一覧」から該当日の修正申請を出してください。' },
+      { q: '休憩時間はどう記録されますか', a: '休憩は原則1時間として自動的に差し引かれます。実際の休憩時間が大きく異なる場合は、管理者にご相談ください。' },
+      { q: '定時より早く帰る／遅くまで残る場合は', a: '退勤打刻時に理由を選ぶ画面が出ます。残業の場合は「残業」を選んでください。管理者の承認が必要になります。早退の場合も、該当する理由を選択してください。' },
+      { q: '打刻した場所は記録されますか', a: '記録されます。不正打刻の防止のため、打刻時の位置情報を取得しています。スマートフォンで位置情報の許可を求められた場合は「許可」を選んでください。許可しないと打刻が記録されても位置情報が空になり、管理者側にアラートが出ます。' },
+    ],
+  },
+  {
+    category: '休暇',
+    items: [
+      { q: '有給休暇の申請方法を教えてください', a: '「勤怠」タブの休暇申請から、種別で「有休」を選び、開始日・終了日・理由を入力して送信します。管理者が承認すると確定します。残日数は申請画面の上部に表示されます。' },
+      { q: '半日だけ休みたいときは', a: '有休を選んで、開始日と終了日を同じ日にすると「半休」の選択肢が出ます。半休を選ぶと0.5日として計算されます。' },
+      { q: '有休の残日数はどこで見られますか', a: '休暇申請の画面上部に「有休残日数」として表示されています。入職日からの勤続期間に応じて、労働基準法の基準で自動計算されています。' },
+      { q: '振替休暇や代休はどう申請しますか', a: '休暇申請の種別で「振休」「代休」「特別休暇」を選んでください。手順は有休と同じです。' },
+      { q: '申請した休暇を取り消したい', a: 'ご自身では取り消せません。管理者にご連絡ください。' },
+    ],
+  },
+  {
+    category: '給与・交通費',
+    items: [
+      { q: '給与明細はどこで見られますか', a: '「給与」タブを開くと、公開済みの給与明細が一覧で表示されます。明細をクリックすると内訳が確認でき、印刷もできます。' },
+      { q: '交通費の申請はいつまでですか', a: '毎月1日が締め切りです。前月分の交通費を、翌月1日までに申請してください。期限までに未提出の場合、打刻時にお知らせが表示されます。' },
+      { q: '交通費の申請方法を教えてください', a: '「給与」タブの交通費精算から、日付・区間・金額を入力して申請します。経路検索のリンクがあるので、運賃の確認に利用してください。複数件をまとめて登録できます。' },
+      { q: '年末調整の書類はどう出しますか', a: '「人材」タブの年末調整から、必要事項を入力して提出します。提出時期になったら管理者からお知らせがあります。' },
+    ],
+  },
+  {
+    category: 'アカウント',
+    items: [
+      { q: 'パスワードを忘れました', a: 'ご自身では再設定できません。管理者に連絡してください。管理者が仮パスワードを再発行します。' },
+      { q: '住所や氏名が変わりました', a: '「人材」タブのプロフィール変更申請から、変更内容を入力して申請してください。管理者が承認すると反映されます。' },
+      { q: 'スマートフォンで使えますか', a: '使えます。ブラウザで同じURLを開いてログインしてください。画面はスマートフォン用に自動で切り替わります。ホーム画面に追加しておくとアプリのように使えます。' },
+    ],
+  },
+];
+
+const HELP_ADMIN = [
+  {
+    category: '社員の登録・管理',
+    items: [
+      { q: '社員アカウントを新しく作るには', a: '「人材」→「スタッフ管理」→「社員一覧・登録」を開くと、右側に登録フォームがあります。姓名・ふりがな・ユーザー名・仮パスワード・入職日を入力して作成します。ユーザー名は短いID（例：tanaka）でもメールアドレスでも構いません。' },
+      { q: '大人数をまとめて登録したい', a: '社員一覧の右上にある「CSV一括登録」を使います。表示される形式にあわせてCSVファイルを用意し、アップロードしてください。' },
+      { q: '退職者の処理はどうしますか', a: '社員の「詳細」を開き、基本タブの退職日を入力して保存します。退職日を入れた社員は、一覧の絞り込みで「在籍のみ」にすると非表示になります。アカウント自体は残るため、過去の勤怠や給与は参照できます。' },
+      { q: 'パスワードを再発行するには', a: '社員一覧の各行にある鍵のアイコンを押すと、仮パスワードを設定できます。設定した仮パスワードは本人に直接お伝えください。' },
+      { q: '管理者権限を与えるには', a: '「人材」→「スタッフ管理」→「管理者権限」から設定します。タブ単位（勤怠・労務・人材・給与）でアクセス範囲を制限できます。マスター管理者のみが操作できます。' },
+    ],
+  },
+  {
+    category: '勤怠の管理',
+    items: [
+      { q: '勤怠修正申請を承認するには', a: '「勤怠」→「休暇・申請管理」に未承認の申請が一覧表示されます。内容を確認して承認または却下してください。承認すると勤怠記録が自動で書き換わります。' },
+      { q: '管理者が直接勤怠を修正できますか', a: 'できます。「勤怠」→「出勤管理」で対象の社員と日付を選び、時刻を直接編集してください。給与に反映させない修正の場合は、控除対象外のフラグを設定できます。' },
+      { q: '打刻漏れはどこで分かりますか', a: 'ダッシュボードのアラート一覧に「打刻漏れ・打刻間違い」として件数が表示されます。クリックすると該当の一覧に移動します。' },
+      { q: '位置情報のアラートとは', a: '打刻時に位置情報が5回以上連続で記録されなかった社員を検知しています。端末の設定で位置情報が拒否されている可能性があるため、本人に確認してください。' },
+      { q: '出勤規定日数の設定はどこですか', a: '「勤怠」→「スタッフ管理」→「出勤規定日数設定」で、グループ別・月別に設定します。給与計算の基礎になる日数です。' },
+    ],
+  },
+  {
+    category: '休暇・有休',
+    items: [
+      { q: '休暇申請を承認するには', a: '「勤怠」→「休暇・申請管理」から承認・却下します。承認すると有休残日数に反映されます。' },
+      { q: '有休の付与日数はどう決まりますか', a: '入職日からの勤続期間に応じて、労働基準法39条の基準で自動計算されます（勤続6ヶ月で10日、以降1年ごとに加算、6年6ヶ月以降は20日）。パート・アルバイトで週の所定労働日数を設定している場合は比例付与の表を使います。' },
+      { q: '自動計算と実態が違う場合は', a: '社員の「詳細」→「業務・契約」タブにある「有休の手動調整」で、日数を加算・減算できます。繰越分の調整などに使ってください。' },
+      { q: '有休の取得状況を集計したい', a: '「労務」タブの「有休取得状況」で確認できます。グループ別・月別の取得日数、社員ごとの取得状況、年間合計が一覧できます。年を切り替えて過去分も見られます。' },
+      { q: '年5日の取得義務のアラートとは', a: '労働基準法により、年10日以上の有休が付与された社員には、付与日から1年以内に5日取得させる義務があります。付与年度の残りが6ヶ月を切り、取得が5日に満たない社員をアラートで表示します。ダッシュボードと労務タブの両方に出ます。' },
+    ],
+  },
+  {
+    category: '給与',
+    items: [
+      { q: '給与計算の流れを教えてください', a: '「給与」タブで対象月を選ぶと、勤怠記録から労働時間と残業時間が自動集計されます。支給項目・控除項目を確認して下書き保存し、内容が確定したら「公開」します。公開すると社員側の画面に明細が表示されます。' },
+      { q: '支給・控除の項目を追加するには', a: '社員の「詳細」→「給与・口座」タブで、社員ごとの固定的な支給項目・控除項目を登録できます。毎月の計算に自動で反映されます。' },
+      { q: '標準報酬月額の設定はどこですか', a: '社員の「詳細」→「社会保険」タブで設定します。等級表から選択でき、健康保険・厚生年金の保険料が自動計算されます。保険料率は別途「保険料率設定」で管理します。' },
+      { q: '交通費精算の承認とExcel出力', a: '「給与」タブの交通費精算一覧から承認・却下します。承認済みのものは月を指定してExcelファイルに出力でき、経理処理に使えます。' },
+      { q: '年末調整の進め方', a: '「人材」タブの年末調整で、社員から提出された内容を確認し、承認します。提出状況は一覧で把握できます。' },
+    ],
+  },
+  {
+    category: 'お知らせ・その他',
+    items: [
+      { q: 'お知らせを投稿するには', a: '「労務」タブの上部にある投稿フォームから、カテゴリ・タイトル・本文を入力して投稿します。ファイルの添付もできます。重要なものは固定表示にすると一番上に表示されます。' },
+      { q: 'データのバックアップを取るには', a: '「人材」→「スタッフ管理」→「社員一覧・登録」の右上にある「データバックアップ」を押すと、全データがExcelファイルでダウンロードされます。マスター管理者のみ利用できます。月1回を目安に実行してください。マイナンバーを含むため、保管場所には十分ご注意ください。' },
+      { q: '監査ログとは何ですか', a: '誰がいつどの操作をしたかの記録です。「人材」→「スタッフ管理」→「監査ログ」で確認できます。承認・却下・アカウント操作などが記録されます。' },
+      { q: '「同期エラー」と表示されました', a: '通信が一時的に不安定な場合に表示されます。画面を再読み込み（Ctrl + Shift + R）すると復帰することが多いです。繰り返し発生する場合は開発者にご相談ください。' },
+    ],
+  },
+];
+
+function HelpTab({ session, isDesktop }) {
+  const isAdmin = session?.role === 'admin' || session?.role === 'master_admin';
+  const [mode, setMode] = useState(isAdmin ? 'admin' : 'staff');
+  const [openKey, setOpenKey] = useState(null);
+  const [keyword, setKeyword] = useState('');
+
+  const source = mode === 'admin' ? HELP_ADMIN : HELP_STAFF;
+  const kw = keyword.trim();
+  const sections = kw
+    ? source
+      .map((sec) => ({ ...sec, items: sec.items.filter((it) => it.q.includes(kw) || it.a.includes(kw)) }))
+      .filter((sec) => sec.items.length > 0)
+    : source;
+
+  return (
+    <div className="space-y-5">
+      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 px-5 py-4">
+        <div className="flex items-center gap-2 mb-3">
+          <HelpCircle size={16} className="text-slate-400" />
+          <h2 className="font-bold text-[14px]">操作ヘルプ</h2>
+        </div>
+        {isAdmin && (
+          <div className="flex items-center bg-slate-100 rounded-xl p-1 text-[12.5px] font-bold mb-3 max-w-sm">
+            <button
+              onClick={() => { setMode('admin'); setOpenKey(null); }}
+              className={`flex-1 py-1.5 rounded-lg transition-colors ${mode === 'admin' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'}`}
+            >
+              管理者向け
+            </button>
+            <button
+              onClick={() => { setMode('staff'); setOpenKey(null); }}
+              className={`flex-1 py-1.5 rounded-lg transition-colors ${mode === 'staff' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'}`}
+            >
+              スタッフ向け
+            </button>
+          </div>
+        )}
+        <input
+          value={keyword}
+          onChange={(e) => setKeyword(e.target.value)}
+          placeholder="キーワードで探す（例：打刻、有休、パスワード）"
+          className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px]"
+        />
+      </div>
+
+      {sections.length === 0 ? (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-6 py-14 text-center text-[12.5px] text-slate-300">
+          「{kw}」に該当する項目が見つかりませんでした
+        </div>
+      ) : (
+        sections.map((sec) => (
+          <div key={sec.category} className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+            <div className="px-5 py-3 border-b border-slate-100 bg-slate-50">
+              <h3 className="font-bold text-[13px] text-slate-700">{sec.category}</h3>
+            </div>
+            <div>
+              {sec.items.map((it) => {
+                const key = `${sec.category}:${it.q}`;
+                const open = openKey === key;
+                return (
+                  <div key={key} className="border-b border-slate-100 last:border-0">
+                    <button
+                      onClick={() => setOpenKey(open ? null : key)}
+                      className="w-full flex items-center justify-between gap-3 px-5 py-3.5 text-left hover:bg-slate-50 transition-colors"
+                    >
+                      <span className="text-[13px] font-semibold text-slate-700">{it.q}</span>
+                      <ChevronDown size={15} className={`text-slate-300 shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
+                    </button>
+                    {open && (
+                      <div className="px-5 pb-4 -mt-1 text-[12.5px] leading-relaxed text-slate-600 whitespace-pre-wrap">{it.a}</div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ))
+      )}
+
+      <div className="text-[11px] text-slate-400 px-1">
+        解決しない場合は、管理者または開発担当者にご連絡ください。
+      </div>
+    </div>
+  );
+}
+
+// ---- 有休取得状況（労務タブ） ----
+const fmtDays = (n) => (Number.isInteger(n) ? String(n) : n.toFixed(1));
+
+function PaidLeaveSummaryTab({ employeeAccounts, leaveRequests, isDesktop }) {
+  const now = new Date();
+  const approvedPaid = (leaveRequests || []).filter((l) => l.type === '有休' && l.status === 'approved');
+  const years = Array.from(new Set(approvedPaid.map((l) => l.startDate.slice(0, 4)))).sort().reverse();
+  if (!years.includes(String(now.getFullYear()))) years.unshift(String(now.getFullYear()));
+  const [year, setYear] = useState(String(now.getFullYear()));
+
+  const groups = Array.from(new Set(employeeAccounts.map((a) => a.mainGroup).filter(Boolean))).sort();
+  const groupKeys = [...groups, '未設定'];
+  const empGroup = {};
+  employeeAccounts.forEach((a) => { empGroup[a.id] = a.mainGroup || '未設定'; });
+
+  // グループ×月の取得日数を集計する
+  const matrix = {};
+  groupKeys.forEach((g) => { matrix[g] = Array(12).fill(0); });
+  approvedPaid.forEach((l) => {
+    if (l.startDate.slice(0, 4) !== year) return;
+    const g = empGroup[l.employeeId] || '未設定';
+    if (!matrix[g]) matrix[g] = Array(12).fill(0);
+    const m = Number(l.startDate.slice(5, 7)) - 1;
+    matrix[g][m] += Number(l.days) || 0;
+  });
+  const monthTotals = Array(12).fill(0);
+  groupKeys.forEach((g) => matrix[g].forEach((v, i) => { monthTotals[i] += v; }));
+  const grandTotal = monthTotals.reduce((a, b) => a + b, 0);
+
+  // 社員ごとの付与年度（付与日から1年）の取得状況
+  const perEmployee = employeeAccounts.map((acc) => {
+    const period = getPaidLeavePeriod(acc.hireDate, now);
+    const isPartTime = acc.staffType === 'パート' || acc.staffType === 'アルバイト';
+    const granted = period
+      ? (isPartTime && acc.scheduledWeeklyDays
+        ? computeProportionalLeaveDays(acc.hireDate, acc.scheduledWeeklyDays, period.start)
+        : computeStatutoryPaidLeaveDays(acc.hireDate, period.start))
+      : 0;
+    const used = period ? sumApprovedPaidLeaveDays(leaveRequests, acc.id, period.startKey, period.endKey) : 0;
+    const yearUsed = approvedPaid
+      .filter((l) => l.employeeId === acc.id && l.startDate.slice(0, 4) === year)
+      .reduce((s, l) => s + (Number(l.days) || 0), 0);
+    return { acc, period, granted, used, yearUsed, obligated: granted >= 10 };
+  });
+
+  const shortages = computePaidLeaveShortages(employeeAccounts, leaveRequests, now);
+
+  return (
+    <div className="space-y-5">
+      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+          <Palmtree size={15} className="text-slate-400" />
+          <h2 className="font-bold text-[13.5px]">有休取得状況</h2>
+          <select value={year} onChange={(e) => setYear(e.target.value)} className="ml-auto border border-slate-200 rounded-lg px-2.5 py-1 text-[12px] font-bold bg-white">
+            {years.map((y) => <option key={y} value={y}>{y}年</option>)}
+          </select>
+        </div>
+        <div className="px-5 py-4 flex flex-wrap gap-6">
+          <div>
+            <div className="text-[11px] text-slate-400">{year}年の取得合計</div>
+            <div className="font-mono text-[22px] font-bold text-slate-800">{fmtDays(grandTotal)}<span className="text-[13px] font-normal ml-0.5">日</span></div>
+          </div>
+          <div>
+            <div className="text-[11px] text-slate-400">対象社員（10日以上付与）</div>
+            <div className="font-mono text-[22px] font-bold text-slate-800">{perEmployee.filter((p) => p.obligated).length}<span className="text-[13px] font-normal ml-0.5">名</span></div>
+          </div>
+          <div>
+            <div className="text-[11px] text-slate-400">5日未達の懸念</div>
+            <div className={`font-mono text-[22px] font-bold ${shortages.length > 0 ? 'text-rose-600' : 'text-slate-800'}`}>{shortages.length}<span className="text-[13px] font-normal ml-0.5">名</span></div>
+          </div>
+        </div>
+      </div>
+
+      {shortages.length > 0 && (
+        <div className="bg-rose-50 border border-rose-200 rounded-2xl px-5 py-4">
+          <div className="flex items-center gap-2 mb-2">
+            <AlertTriangle size={15} className="text-rose-500" />
+            <h3 className="font-bold text-[13px] text-rose-700">年5日の取得義務を満たせないおそれがあります</h3>
+          </div>
+          <div className="space-y-1.5">
+            {shortages.map((s) => (
+              <div key={s.employeeId} className="text-[12.5px] text-rose-700">
+                <b>{s.employeeName}</b>{s.group ? `（${s.group}）` : ''} — 期限 {dateLabel(s.periodEnd)} まで残り{s.monthsLeft}ヶ月／取得 {fmtDays(s.used)}日・<b>あと{fmtDays(s.shortage)}日</b>必要
+              </div>
+            ))}
+          </div>
+          <div className="text-[10.5px] text-rose-500 mt-2">労働基準法39条により、年10日以上の有休が付与された社員に対し、使用者は年5日を取得させる義務があります。</div>
+        </div>
+      )}
+
+      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+          <BarChart3 size={15} className="text-slate-400" />
+          <h2 className="font-bold text-[13.5px]">グループ別・月別の取得日数（{year}年）</h2>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-[12px]">
+            <thead>
+              <tr className="text-left text-[11px] text-slate-400 border-b border-slate-100">
+                <th className="px-3 py-2 font-medium sticky left-0 bg-white">グループ</th>
+                {Array.from({ length: 12 }, (_, i) => <th key={i} className="px-2 py-2 font-medium text-right">{i + 1}月</th>)}
+                <th className="px-3 py-2 font-medium text-right">合計</th>
+              </tr>
+            </thead>
+            <tbody>
+              {groupKeys.map((g) => {
+                const total = matrix[g].reduce((a, b) => a + b, 0);
+                return (
+                  <tr key={g} className="border-b border-slate-100 last:border-0">
+                    <td className="px-3 py-2 font-semibold text-slate-700 sticky left-0 bg-white whitespace-nowrap">{g}</td>
+                    {matrix[g].map((v, i) => (
+                      <td key={i} className={`px-2 py-2 text-right font-mono ${v > 0 ? 'text-slate-800' : 'text-slate-300'}`}>{v > 0 ? fmtDays(v) : '-'}</td>
+                    ))}
+                    <td className="px-3 py-2 text-right font-mono font-bold text-slate-800">{fmtDays(total)}</td>
+                  </tr>
+                );
+              })}
+              <tr className="bg-slate-50">
+                <td className="px-3 py-2 font-bold text-slate-700 sticky left-0 bg-slate-50">全体</td>
+                {monthTotals.map((v, i) => (
+                  <td key={i} className={`px-2 py-2 text-right font-mono font-bold ${v > 0 ? 'text-slate-800' : 'text-slate-300'}`}>{v > 0 ? fmtDays(v) : '-'}</td>
+                ))}
+                <td className="px-3 py-2 text-right font-mono font-bold text-slate-800">{fmtDays(grandTotal)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+          <Users size={15} className="text-slate-400" />
+          <h2 className="font-bold text-[13.5px]">社員別の取得状況</h2>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-[12px]">
+            <thead>
+              <tr className="text-left text-[11px] text-slate-400 border-b border-slate-100">
+                <th className="px-3 py-2 font-medium">氏名</th>
+                <th className="px-3 py-2 font-medium">グループ</th>
+                <th className="px-3 py-2 font-medium text-right">{year}年の取得</th>
+                <th className="px-3 py-2 font-medium">現在の付与年度</th>
+                <th className="px-3 py-2 font-medium text-right">付与</th>
+                <th className="px-3 py-2 font-medium text-right">期間内取得</th>
+                <th className="px-3 py-2 font-medium">5日義務</th>
+              </tr>
+            </thead>
+            <tbody>
+              {perEmployee.map(({ acc, period, granted, used, yearUsed, obligated }) => (
+                <tr key={acc.id} className="border-b border-slate-100 last:border-0">
+                  <td className="px-3 py-2 font-semibold text-slate-800 whitespace-nowrap">{acc.name}</td>
+                  <td className="px-3 py-2 text-slate-500 whitespace-nowrap">{acc.mainGroup || '-'}</td>
+                  <td className="px-3 py-2 text-right font-mono">{yearUsed > 0 ? `${fmtDays(yearUsed)}日` : '-'}</td>
+                  <td className="px-3 py-2 text-slate-500 font-mono whitespace-nowrap text-[11px]">
+                    {period ? `${dateLabel(period.startKey)} 〜 ${dateLabel(period.endKey)}` : '初回付与前'}
+                  </td>
+                  <td className="px-3 py-2 text-right font-mono">{period ? `${granted}日` : '-'}</td>
+                  <td className="px-3 py-2 text-right font-mono">{period ? `${fmtDays(used)}日` : '-'}</td>
+                  <td className="px-3 py-2 whitespace-nowrap">
+                    {!obligated ? (
+                      <span className="text-[11px] text-slate-400">対象外</span>
+                    ) : used >= PAID_LEAVE_MANDATORY_DAYS ? (
+                      <span className="text-[11px] font-bold text-emerald-600">達成</span>
+                    ) : (
+                      <span className="text-[11px] font-bold text-rose-600">あと{fmtDays(PAID_LEAVE_MANDATORY_DAYS - used)}日</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="px-5 py-3 text-[10.5px] text-slate-400 border-t border-slate-100">
+          付与日は入職日から6ヶ月後、以降は1年ごとの応当日として計算しています。繰越分の管理には対応していないため、正確な運用は社労士にご確認ください。
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AdminDashboardTab({ missingCount, correctionCount, leaveCount, performanceCount, gpsAlertCount, contractAlertCount, clockInApprovalCount = 0, employeeCount, todayPresentCount = 0, monthOvertimeMin = 0, paidLeaveShortages = [], announcements = [], notifications = [], onNavigate, onNavigateTop, isDesktop }) {
   const alertRows = [
     { label: '打刻漏れ・打刻間違い', count: missingCount, tab: 'requests', icon: <AlertTriangle size={14} /> },
     { label: '位置情報が5回以上連続で未記録', count: gpsAlertCount, tab: 'attendance', icon: <MapPin size={14} /> },
     { label: '契約更新が必要な社員がいます', count: contractAlertCount, tab: 'accounts', icon: <FileText size={14} /> },
+    { label: '有休の年5日取得が不足しています', count: paidLeaveShortages.length, tab: 'leave', icon: <Palmtree size={14} /> },
   ];
   const unapprovedRows = [
     { label: '未承認の勤怠修正申請', count: correctionCount, tab: 'requests', icon: <FileEdit size={14} /> },
@@ -4632,7 +5072,18 @@ function AdminDashboardTab({ missingCount, correctionCount, leaveCount, performa
     { label: '勤怠一覧', tab: 'attendance', icon: <Clock size={17} /> },
     { label: '社員管理', tab: 'accounts', icon: <Users size={17} /> },
     { label: '休暇申請', tab: 'leave', icon: <Palmtree size={17} /> },
+    { label: '実績報告', tab: 'performance', icon: <ClipboardList size={17} /> },
   ];
+
+  const alertTotal = alertRows.reduce((s, r) => s + r.count, 0);
+  const unapprovedTotal = unapprovedRows.reduce((s, r) => s + r.count, 0);
+  const tiles = [
+    { label: '本日の出勤者', value: todayPresentCount, unit: `／${employeeCount}名`, tone: 'slate' },
+    { label: '未承認の合計', value: unapprovedTotal, unit: '件', tone: unapprovedTotal > 0 ? 'amber' : 'slate' },
+    { label: '要対応アラート', value: alertTotal, unit: '件', tone: alertTotal > 0 ? 'rose' : 'slate' },
+    { label: '今月の残業合計', value: minutesToHHMM(monthOvertimeMin), unit: '', tone: 'slate' },
+  ];
+  const toneClass = { slate: 'text-slate-800', amber: 'text-amber-600', rose: 'text-rose-600' };
 
   const Row = ({ row }) => (
     <button
@@ -4650,13 +5101,99 @@ function AdminDashboardTab({ missingCount, correctionCount, leaveCount, performa
     </button>
   );
 
+  const Card = ({ icon, title, action, children }) => (
+    <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+      <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+        {icon}
+        <h2 className="font-bold text-[13.5px]">{title}</h2>
+        {action}
+      </div>
+      {children}
+    </div>
+  );
+
   return (
     <div className="space-y-5">
-      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-        <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
-          <LayoutGrid size={15} className="text-slate-400" />
-          <h2 className="font-bold text-[13.5px]">機能リンク</h2>
+      <div className={`grid gap-3 ${isDesktop ? 'grid-cols-4' : 'grid-cols-2'}`}>
+        {tiles.map((t) => (
+          <div key={t.label} className="bg-white rounded-2xl shadow-sm border border-slate-200 px-4 py-3.5">
+            <div className="text-[11px] text-slate-400 mb-1">{t.label}</div>
+            <div className={`font-mono text-[26px] leading-none font-bold ${toneClass[t.tone]}`}>
+              {t.value}<span className="text-[12px] font-normal text-slate-400 ml-1">{t.unit}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className={isDesktop ? 'grid grid-cols-2 gap-5 items-start' : 'space-y-5'}>
+        <Card
+          icon={<Bell size={15} className="text-slate-400" />}
+          title="お知らせ"
+          action={onNavigateTop && <button onClick={() => onNavigateTop('labor')} className="ml-auto text-[11px] font-bold text-slate-400 hover:text-slate-700">すべて見る</button>}
+        >
+          {announcements.length === 0 ? (
+            <div className="px-5 py-8 text-center text-[12px] text-slate-300">お知らせはありません</div>
+          ) : (
+            <div>
+              {announcements.slice(0, 5).map((a) => (
+                <div key={a.id} className="px-4 py-2.5 border-b border-slate-100 last:border-0 flex items-start gap-3">
+                  <span className="text-[11px] text-slate-400 font-mono shrink-0 mt-0.5">{a.createdAt ? dateLabel(String(a.createdAt).slice(0, 10)) : ''}</span>
+                  <span className="text-[12.5px] text-slate-700 font-medium line-clamp-1">{a.isPinned ? '📌 ' : ''}{a.title}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+
+        <Card icon={<Mail size={15} className="text-slate-400" />} title="通知履歴">
+          {notifications.length === 0 ? (
+            <div className="px-5 py-8 text-center text-[12px] text-slate-300">通知はありません</div>
+          ) : (
+            <div>
+              {notifications.slice(0, 8).map((n) => (
+                <div key={n.id} className="px-4 py-2.5 border-b border-slate-100 last:border-0 flex items-start gap-3">
+                  <span className="text-[11px] text-slate-400 font-mono shrink-0 mt-0.5">{n.sentAt ? dateLabel(String(n.sentAt).slice(0, 10)) : ''}</span>
+                  <span className="text-[12.5px] text-slate-700 line-clamp-1">{n.subject}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+      </div>
+
+      <div className={isDesktop ? 'grid grid-cols-2 gap-5 items-start' : 'space-y-5'}>
+        <Card icon={<AlertTriangle size={15} className="text-slate-400" />} title="アラート一覧">
+          <div>{alertRows.map((row) => <Row key={row.label} row={row} />)}</div>
+        </Card>
+
+        <Card icon={<ListChecks size={15} className="text-slate-400" />} title="未承認一覧">
+          <div>{unapprovedRows.map((row) => <Row key={row.label} row={row} />)}</div>
+        </Card>
+      </div>
+
+      {paidLeaveShortages.length > 0 && (
+        <div className="bg-rose-50 border border-rose-200 rounded-2xl px-5 py-4">
+          <div className="flex items-center gap-2 mb-2">
+            <Palmtree size={15} className="text-rose-500" />
+            <h3 className="font-bold text-[13px] text-rose-700">有休の年5日取得が不足しています（{paidLeaveShortages.length}名）</h3>
+          </div>
+          <div className="space-y-1">
+            {paidLeaveShortages.slice(0, 5).map((s) => (
+              <div key={s.employeeId} className="text-[12.5px] text-rose-700">
+                <b>{s.employeeName}</b> — 期限 {dateLabel(s.periodEnd)}（残り{s.monthsLeft}ヶ月）／あと<b>{fmtDays(s.shortage)}日</b>必要
+              </div>
+            ))}
+            {paidLeaveShortages.length > 5 && (
+              <div className="text-[11.5px] text-rose-500">ほか{paidLeaveShortages.length - 5}名</div>
+            )}
+          </div>
+          {onNavigateTop && (
+            <button onClick={() => onNavigateTop('labor')} className="mt-2 text-[11.5px] font-bold text-rose-600 underline">労務タブの有休取得状況を開く</button>
+          )}
         </div>
+      )}
+
+      <Card icon={<LayoutGrid size={15} className="text-slate-400" />} title="機能リンク">
         <div className={`p-4 grid gap-3 ${isDesktop ? 'grid-cols-4' : 'grid-cols-2'}`}>
           {quickLinks.map((q) => (
             <button
@@ -4669,39 +5206,7 @@ function AdminDashboardTab({ missingCount, correctionCount, leaveCount, performa
             </button>
           ))}
         </div>
-      </div>
-
-      <div className={isDesktop ? 'grid grid-cols-2 gap-5 items-start' : 'space-y-5'}>
-        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-          <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
-            <AlertTriangle size={15} className="text-slate-400" />
-            <h2 className="font-bold text-[13.5px]">アラート一覧</h2>
-          </div>
-          <div>
-            {alertRows.map((row) => <Row key={row.label} row={row} />)}
-          </div>
-        </div>
-
-        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-          <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
-            <ListChecks size={15} className="text-slate-400" />
-            <h2 className="font-bold text-[13.5px]">未承認一覧</h2>
-          </div>
-          <div>
-            {unapprovedRows.map((row) => <Row key={row.label} row={row} />)}
-          </div>
-        </div>
-      </div>
-
-      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden px-5 py-4 flex items-center gap-3">
-        <div className="w-10 h-10 rounded-xl bg-slate-100 flex items-center justify-center shrink-0">
-          <Users size={18} className="text-slate-500" />
-        </div>
-        <div>
-          <div className="text-[11px] text-slate-400">在籍社員数</div>
-          <div className="font-mono text-[18px] font-bold text-slate-800">{employeeCount}名</div>
-        </div>
-      </div>
+      </Card>
     </div>
   );
 }
@@ -5289,7 +5794,7 @@ function AdminTopNav({ tab, setTab, correctionCount, leaveCount, performanceCoun
   );
 }
 
-function AdminView({ data, employeeAccounts, session, onDecide, onDecideLeave, onDecidePerformance, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
+function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, onDecideLeave, onDecidePerformance, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
   const [tab, setTab] = useState('dashboard'); // dashboard | attendance | requests | leave | performance | accounts
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
@@ -5326,6 +5831,17 @@ function AdminView({ data, employeeAccounts, session, onDecide, onDecideLeave, o
   const notifications = (data.notifications || []).slice(0, 6);
   const isMasterAdmin = session?.role === 'master_admin';
   const adminAccounts = data.accounts.filter((a) => a.role === 'admin' || a.role === 'master_admin');
+
+  // ダッシュボードのサマリー用の集計
+  const todayPresentCount = employeeAccounts.filter((acc) => {
+    const r = (data.records[acc.id] || {})[today];
+    return !!(r && r.clockIn);
+  }).length;
+  const monthOvertimeMin = employeeAccounts.reduce(
+    (sum, acc) => sum + computeMonthlySummary(data.records[acc.id] || {}).overtimeMin,
+    0
+  );
+  const paidLeaveShortages = computePaidLeaveShortages(employeeAccounts, data.leaveRequests);
 
   return (
     <div className="space-y-5">
@@ -5407,7 +5923,13 @@ function AdminView({ data, employeeAccounts, session, onDecide, onDecideLeave, o
           contractAlertCount={contractAlerts.length}
           clockInApprovalCount={clockInApprovalCount}
           employeeCount={employeeAccounts.length}
+          todayPresentCount={todayPresentCount}
+          monthOvertimeMin={monthOvertimeMin}
+          paidLeaveShortages={paidLeaveShortages}
+          announcements={data.announcements}
+          notifications={data.notifications}
           onNavigate={setTab}
+          onNavigateTop={onNavigateTop}
           isDesktop={isDesktop}
         />
       )}
