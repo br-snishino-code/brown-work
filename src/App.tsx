@@ -3569,8 +3569,17 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
     </div>
   );
 
-  // 選んだ月の日付だけを新しい順に並べる
-  const monthHistoryDates = historyDates.filter((k) => k.startsWith(`${viewMonth}-`));
+  // 選んだ月のすべての日を新しい順に並べる（打刻がない日も表示する）。
+  // 今月を見ているときは、まだ来ていない先の日付は出さない。
+  const monthHistoryDates = (() => {
+    const year = Number(viewMonth.slice(0, 4));
+    const month = Number(viewMonth.slice(5, 7));
+    const lastDay = new Date(year, month, 0).getDate();
+    const endDay = isThisMonth ? Math.min(now.getDate(), lastDay) : lastDay;
+    const out = [];
+    for (let d = endDay; d >= 1; d--) out.push(`${viewMonth}-${pad(d)}`);
+    return out;
+  })();
 
   const historySection = (
     <div className="bg-white rounded-[24px] shadow-sm border border-slate-200 overflow-hidden">
@@ -3599,11 +3608,22 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
         {monthHistoryDates.map((dateKey) => {
           const r = records[dateKey]; const dayStatus = computeDayStatus(r); const metrics = computeMetrics(r);
           const pendingForDay = corrections.find((c) => c.date === dateKey && c.status === 'pending');
+          const dayInfo = formatAdminDate(dateKey);
+          const hasRecord = !!(r && (r.clockIn || r.clockOut));
           return (
-            <div key={dateKey} className="px-5 py-4 flex items-center justify-between gap-3 hover:bg-slate-50/70">
+            <div key={dateKey} className={`px-5 py-4 flex items-center justify-between gap-3 hover:bg-slate-50/70 ${hasRecord ? '' : 'bg-slate-50/40'}`}>
               <div className="min-w-0">
-                <div className="flex items-center gap-2"><span className="text-[13px] font-bold text-slate-800">{dateLabel(dateKey)}</span>{dayStatus.tone === 'danger' && <span className="text-[10px] font-bold text-rose-600">未退勤</span>}{pendingForDay && <span className="text-[10px] font-bold text-amber-600">申請中</span>}</div>
-                <div className="mt-1 font-mono text-[12px] text-slate-500">{r?.clockIn ? hhmm(new Date(r.clockIn)) : '--:--'} — {r?.clockOut ? hhmm(new Date(r.clockOut)) : '--:--'}{metrics && <span className="ml-2 text-slate-400">実働 {minutesToHHMM(metrics.workedMin)} / 休憩 {metrics.breakMin}分</span>}</div>
+                <div className="flex items-center gap-2">
+                  <span className={`text-[13px] font-bold ${hasRecord ? 'text-slate-800' : 'text-slate-400'}`}>{dateLabel(dateKey)}</span>
+                  {dayInfo.badgeClass && <span className={`text-[10px] font-bold rounded px-1.5 py-0.5 ${dayInfo.badgeClass}`}>{dayInfo.holidayName || (new Date(dateKey + 'T00:00:00').getDay() === 0 ? '日' : '土')}</span>}
+                  {dayStatus.tone === 'danger' && <span className="text-[10px] font-bold text-rose-600">未退勤</span>}
+                  {pendingForDay && <span className="text-[10px] font-bold text-amber-600">申請中</span>}
+                </div>
+                {hasRecord ? (
+                  <div className="mt-1 font-mono text-[12px] text-slate-500">{r?.clockIn ? hhmm(new Date(r.clockIn)) : '--:--'} — {r?.clockOut ? hhmm(new Date(r.clockOut)) : '--:--'}{metrics && <span className="ml-2 text-slate-400">実働 {minutesToHHMM(metrics.workedMin)} / 休憩 {metrics.breakMin}分</span>}</div>
+                ) : (
+                  <div className="mt-1 text-[12px] text-slate-300">打刻なし</div>
+                )}
                 {r?.clockInStatus && CLOCK_IN_STATUS_LABEL[r.clockInStatus] && (
                   <div className="mt-0.5 text-[10.5px] font-medium text-blue-600">
                     {CLOCK_IN_STATUS_LABEL[r.clockInStatus]}
