@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef, useContext, createContext } from 'react';
 import { createPortal } from 'react-dom';
 import * as XLSX from 'xlsx';
-import { Clock, MapPin, CheckCircle2, XCircle, AlertTriangle, LogIn, LogOut, FileEdit, Users, Bell, Calendar, Mail, LogOut as LogoutIcon, UserPlus, Lock, User, Monitor, Smartphone, Palmtree, Plus, Pencil, CalendarDays, ListChecks, ClipboardList, MessageSquare, Coffee, BarChart3, Home, Download, ChevronRight, LayoutGrid, Wallet, Briefcase, UserCog, Construction, Megaphone, Paperclip, FileText, Pin, Trash2, Key, ShieldCheck, HelpCircle, ChevronDown } from 'lucide-react';
+import { Clock, MapPin, CheckCircle2, XCircle, AlertTriangle, LogIn, LogOut, FileEdit, Users, Bell, Calendar, Mail, LogOut as LogoutIcon, UserPlus, Lock, User, Monitor, Smartphone, Palmtree, Plus, Pencil, CalendarDays, ListChecks, ClipboardList, MessageSquare, Coffee, BarChart3, Home, Download, ChevronRight, LayoutGrid, Wallet, Briefcase, UserCog, Construction, Megaphone, Paperclip, FileText, Pin, Trash2, Key, ShieldCheck, HelpCircle, ChevronDown, ChevronLeft } from 'lucide-react';
 import { supabase, CLOUD_ENABLED, usernameToEmail } from './supabaseClient';
 
 // ---- constants ----
@@ -3419,7 +3419,17 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
   const canClockIn = !todayRecord?.clockIn;
   const canClockOut = todayRecord?.clockIn && !todayRecord?.clockOut;
   const doneToday = todayRecord?.clockIn && todayRecord?.clockOut;
-  const monthly = computeMonthlySummary(records, now);
+  // 勤怠履歴で表示する月（既定は今月。◀▶で過去の月も見られる）
+  const thisMonthKey = `${now.getFullYear()}-${pad(now.getMonth() + 1)}`;
+  const [viewMonth, setViewMonth] = useState(thisMonthKey);
+  const viewMonthDate = new Date(Number(viewMonth.slice(0, 4)), Number(viewMonth.slice(5, 7)) - 1, 1);
+  const isThisMonth = viewMonth === thisMonthKey;
+  const shiftViewMonth = (diff) => {
+    const d = new Date(viewMonthDate);
+    d.setMonth(d.getMonth() + diff);
+    setViewMonth(`${d.getFullYear()}-${pad(d.getMonth() + 1)}`);
+  };
+  const monthly = computeMonthlySummary(records, viewMonthDate);
   const todayBreak = todayRecord ? getRecordedBreakMinutes(todayRecord, now) : 0;
   const todayKeyStr = todayKey();
   // 退勤打刻が漏れている日。ただし修正申請を提出済みの日は、承認を待つ間も出勤できるようにする
@@ -3550,7 +3560,7 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <SummaryTile label="今月の出勤" value={`${monthly.days}日`} icon={<CalendarDays size={16}/>} />
+        <SummaryTile label={isThisMonth ? '今月の出勤' : `${Number(viewMonth.slice(5, 7))}月の出勤`} value={`${monthly.days}日`} icon={<CalendarDays size={16}/>} />
         <SummaryTile label="総実働" value={minutesToHHMM(monthly.workedMin)} icon={<Clock size={16}/>} />
         <SummaryTile label="残業" value={minutesToHHMM(monthly.overtimeMin)} icon={<BarChart3 size={16}/>} />
         <SummaryTile label="遅刻・早退" value={`${monthly.lateMin + monthly.earlyLeaveMin}分`} icon={<AlertTriangle size={16}/>} />
@@ -3559,14 +3569,34 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
     </div>
   );
 
+  // 選んだ月の日付だけを新しい順に並べる
+  const monthHistoryDates = historyDates.filter((k) => k.startsWith(`${viewMonth}-`));
+
   const historySection = (
     <div className="bg-white rounded-[24px] shadow-sm border border-slate-200 overflow-hidden">
       <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
         <div className="flex items-center gap-2"><Calendar size={16} className="text-slate-400"/><h2 className="font-bold text-[14px]">勤怠履歴</h2></div>
         <span className="text-[10.5px] text-slate-400">1分単位で集計</span>
       </div>
+      <div className="px-5 py-2.5 border-b border-slate-100 flex items-center justify-between bg-slate-50">
+        <button onClick={() => shiftViewMonth(-1)} className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-slate-500 hover:bg-slate-100" aria-label="前の月">
+          <ChevronLeft size={15} />
+        </button>
+        <div className="flex items-center gap-2">
+          <span className="font-bold text-[13.5px] text-slate-800">{monthKeyLabel(viewMonth)}</span>
+          {!isThisMonth && (
+            <button onClick={() => setViewMonth(thisMonthKey)} className="text-[10.5px] font-bold text-amber-600 underline">今月に戻る</button>
+          )}
+        </div>
+        <button onClick={() => shiftViewMonth(1)} disabled={isThisMonth} className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-slate-500 disabled:text-slate-200 disabled:bg-slate-50 hover:bg-slate-100" aria-label="次の月">
+          <ChevronRight size={15} />
+        </button>
+      </div>
       <div className={`divide-y divide-slate-100 ${isDesktop ? 'max-h-[650px] overflow-y-auto' : ''}`}>
-        {historyDates.slice(0, 31).map((dateKey) => {
+        {monthHistoryDates.length === 0 && (
+          <div className="px-5 py-12 text-center text-[12.5px] text-slate-300">{monthKeyLabel(viewMonth)}の記録はありません</div>
+        )}
+        {monthHistoryDates.map((dateKey) => {
           const r = records[dateKey]; const dayStatus = computeDayStatus(r); const metrics = computeMetrics(r);
           const pendingForDay = corrections.find((c) => c.date === dateKey && c.status === 'pending');
           return (
