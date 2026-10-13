@@ -3422,9 +3422,17 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
   const monthly = computeMonthlySummary(records, now);
   const todayBreak = todayRecord ? getRecordedBreakMinutes(todayRecord, now) : 0;
   const todayKeyStr = todayKey();
-  const missingDate = historyDates.find((k) => k !== todayKeyStr && records[k]?.clockIn && !records[k]?.clockOut);
-  const missingCount = historyDates.filter((k) => k !== todayKeyStr && records[k]?.clockIn && !records[k]?.clockOut).length;
+  // 退勤打刻が漏れている日。ただし修正申請を提出済みの日は、承認を待つ間も出勤できるようにする
+  const missingDates = historyDates.filter((k) => k !== todayKeyStr && records[k]?.clockIn && !records[k]?.clockOut);
+  const pendingCorrectionDates = new Set(
+    (corrections || []).filter((c) => c.status === 'pending').map((c) => c.date)
+  );
+  const blockingMissingDates = missingDates.filter((k) => !pendingCorrectionDates.has(k));
+  const awaitingApprovalDates = missingDates.filter((k) => pendingCorrectionDates.has(k));
+  const missingDate = blockingMissingDates[0] || missingDates[0];
+  const missingCount = missingDates.length;
   const hasMissingPunch = missingCount > 0;
+  const hasBlockingMissing = blockingMissingDates.length > 0;
   const activePattern = schedulePatterns.find((p) => p.patternNo === activePatternNo) || schedulePatterns[0] || null;
   const standardStartMinutes = activePattern ? toMinutes(activePattern.startTime) : STANDARD_CLOCK_IN_HOUR * 60;
   const standardEndMinutes = activePattern ? toMinutes(activePattern.endTime) : STANDARD_CLOCK_OUT_HOUR * 60;
@@ -3438,7 +3446,7 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
     : canClockOut
       ? () => setClockOutConfirmOpen(true)
       : undefined;
-  const primaryDisabled = doneToday || (canClockIn && hasMissingPunch);
+  const primaryDisabled = doneToday || (canClockIn && hasBlockingMissing);
 
   const patternSection = (schedulePatterns.length > 0 || canClockIn) && (
     <SchedulePatternCard
@@ -3467,10 +3475,18 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
           <div className="font-mono text-[46px] sm:text-[52px] font-bold leading-none tracking-tight tabular-nums text-slate-900">{timeStr(now)}</div>
         </div>
 
-        {canClockIn && hasMissingPunch && (
+        {canClockIn && hasBlockingMissing && (
           <div className="mx-6 mb-3 bg-rose-50 border border-rose-200 rounded-xl px-3.5 py-2.5 text-[11.5px] text-rose-700">
-            {dateLabel(missingDate)}の退勤打刻が漏れています。修正を申請してから出勤を記録してください。
-            <button onClick={() => onOpenCorrection(missingDate)} className="block mt-1 font-bold underline">今すぐ修正申請する</button>
+            {dateLabel(blockingMissingDates[0])}の退勤打刻が漏れています。修正を申請してから出勤を記録してください。
+            <button onClick={() => onOpenCorrection(blockingMissingDates[0])} className="block mt-1 font-bold underline">今すぐ修正申請する</button>
+          </div>
+        )}
+
+        {canClockIn && !hasBlockingMissing && awaitingApprovalDates.length > 0 && (
+          <div className="mx-6 mb-3 bg-amber-50 border border-amber-200 rounded-xl px-3.5 py-2.5 text-[11.5px] text-amber-700">
+            {dateLabel(awaitingApprovalDates[0])}
+            {awaitingApprovalDates.length > 1 ? `ほか${awaitingApprovalDates.length - 1}件` : ''}
+            の修正申請は承認待ちです。管理者の承認をお待ちください。出勤はこのまま記録できます。
           </div>
         )}
 
