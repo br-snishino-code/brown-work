@@ -3618,9 +3618,8 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
     const year = Number(viewMonth.slice(0, 4));
     const month = Number(viewMonth.slice(5, 7));
     const lastDay = new Date(year, month, 0).getDate();
-    const endDay = isThisMonth ? Math.min(now.getDate(), lastDay) : lastDay;
     const out = [];
-    for (let d = endDay; d >= 1; d--) out.push(`${viewMonth}-${pad(d)}`);
+    for (let d = 1; d <= lastDay; d++) out.push(`${viewMonth}-${pad(d)}`);
     return out;
   })();
 
@@ -3686,9 +3685,10 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
             <tbody>
               {monthTableRows.map(({ dateKey, r, dayStatus, metrics, pendingForDay, dayInfo, hasRecord, notes }) => (
                 <React.Fragment key={dateKey}>
-                  <tr className={`border-b border-slate-100 ${hasRecord ? '' : 'bg-slate-50/50'} ${notes.length > 0 ? 'border-b-0' : ''}`}>
+                  <tr className={`border-b border-slate-100 ${dateKey === todayKeyStr ? 'bg-amber-50/60' : hasRecord ? '' : 'bg-slate-50/50'} ${notes.length > 0 ? 'border-b-0' : ''}`}>
                     <td className="px-3 py-2 whitespace-nowrap">
                       <span className={`font-bold ${hasRecord ? 'text-slate-800' : 'text-slate-400'}`}>{dayInfo.label}</span>
+                      {dateKey === todayKeyStr && <span className="ml-1.5 text-[9.5px] font-bold text-amber-700 bg-amber-100 rounded px-1 py-0.5">今日</span>}
                       {dayInfo.holidayName && <div className="text-[9.5px] text-rose-500">{dayInfo.holidayName}</div>}
                     </td>
                     <td className={`px-2 py-2 font-mono whitespace-nowrap ${hasRecord ? 'text-slate-700' : 'text-slate-300'}`}>{r?.clockIn ? hhmm(new Date(r.clockIn)) : '--:--'}</td>
@@ -3712,7 +3712,7 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
                     </td>
                   </tr>
                   {notes.length > 0 && (
-                    <tr className={`border-b border-slate-100 ${hasRecord ? '' : 'bg-slate-50/50'}`}>
+                    <tr className={`border-b border-slate-100 ${dateKey === todayKeyStr ? 'bg-amber-50/60' : hasRecord ? '' : 'bg-slate-50/50'}`}>
                       <td colSpan={9} className="px-3 pb-2 -mt-1">
                         {notes.map((n, i) => (
                           <div key={i} className={`text-[10.5px] ${n.tone}`}>{n.text}</div>
