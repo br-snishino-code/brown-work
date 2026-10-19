@@ -201,6 +201,25 @@ function EmployeeLink({ id, name, className = '' }) {
   );
 }
 
+// スタッフ種別（雇用形態）の選択肢
+const STAFF_TYPES = [
+  '未分類',
+  'スポット',
+  '社員',
+  'SV',
+  '外部',
+  '総務部',
+  '代表取締役',
+  'RSV',
+  '契約社員（週5）',
+  '如意棒（社員）',
+  '如意棒（スポット）',
+  '契約社員（スポット）',
+];
+// 有休の比例付与（週の所定労働日数に応じた付与）を使うスタッフ種別
+const PROPORTIONAL_LEAVE_STAFF_TYPES = ['スポット', '如意棒（スポット）', '契約社員（スポット）'];
+const isProportionalLeaveStaffType = (staffType) => PROPORTIONAL_LEAVE_STAFF_TYPES.includes(staffType);
+
 const LEAVE_TYPES = ['有休', '振休', '代休', '特別休暇'];
 const DEFAULT_PAID_LEAVE_TOTAL = 10;
 const daysBetweenInclusive = (startKey, endKey) => {
@@ -239,7 +258,7 @@ function computeStatutoryPaidLeaveDays(hireDateStr, asOf = new Date()) {
   return granted;
 }
 
-// 労働基準法：週の所定労働日数が少ないパート・アルバイト向けの比例付与表
+// 労働基準法：週の所定労働日数が少ない短時間勤務者向けの比例付与表
 const PROPORTIONAL_LEAVE_TABLE = {
   4: [7, 8, 9, 10, 12, 13, 15],
   3: [5, 6, 6, 8, 9, 10, 11],
@@ -261,11 +280,11 @@ function computeProportionalLeaveDays(hireDateStr, weeklyDays, asOf = new Date()
   return granted;
 }
 
-// スタッフ1人分の有休付与日数（優先順位：パート/アルバイトは比例付与 → 法定自動計算）＋手動調整
+// スタッフ1人分の有休付与日数（優先順位：スポット系の種別は比例付与 → 法定自動計算）＋手動調整
 // ※グループ別の月次規定日数は「出勤規定日数」（給与計算用）に用途変更されたため、有休計算では使用しない
 function computeLeaveTotal(employee, now, groupLeaveSchedules) {
   if (!employee) return 0;
-  const isPartTime = employee.staffType === 'パート' || employee.staffType === 'アルバイト';
+  const isPartTime = isProportionalLeaveStaffType(employee.staffType);
   let base;
   if (isPartTime) {
     base = employee.scheduledWeeklyDays
@@ -318,7 +337,7 @@ function computePaidLeaveShortages(employeeAccounts, leaveRequests, asOf = new D
     if (acc.resignationDate && acc.resignationDate < todayKey(asOf)) return;
     const period = getPaidLeavePeriod(acc.hireDate, asOf);
     if (!period) return;
-    const isPartTime = acc.staffType === 'パート' || acc.staffType === 'アルバイト';
+    const isPartTime = isProportionalLeaveStaffType(acc.staffType);
     const granted = isPartTime && acc.scheduledWeeklyDays
       ? computeProportionalLeaveDays(acc.hireDate, acc.scheduledWeeklyDays, period.start)
       : computeStatutoryPaidLeaveDays(acc.hireDate, period.start);
@@ -5350,7 +5369,7 @@ const HELP_ADMIN = [
     category: '休暇・有休',
     items: [
       { q: '休暇申請を承認するには', a: '「勤怠」→「休暇・申請管理」から承認・却下します。承認すると有休残日数に反映されます。' },
-      { q: '有休の付与日数はどう決まりますか', a: '入職日からの勤続期間に応じて、労働基準法39条の基準で自動計算されます（勤続6ヶ月で10日、以降1年ごとに加算、6年6ヶ月以降は20日）。パート・アルバイトで週の所定労働日数を設定している場合は比例付与の表を使います。' },
+      { q: '有休の付与日数はどう決まりますか', a: '入職日からの勤続期間に応じて、労働基準法39条の基準で自動計算されます（勤続6ヶ月で10日、以降1年ごとに加算、6年6ヶ月以降は20日）。スポット系のスタッフ種別で週の所定労働日数を設定している場合は比例付与の表を使います。' },
       { q: '自動計算と実態が違う場合は', a: 'スタッフの「詳細」→「業務・契約」タブにある「有休の手動調整」で、日数を加算・減算できます。繰越分の調整などに使ってください。' },
       { q: '有休の取得状況を集計したい', a: '「労務」タブの「有休取得状況」で確認できます。その年の取得合計、年5日の取得義務の対象人数、未達の懸念がある人数が表示されます。年を切り替えて過去分も見られます。' },
       { q: '年5日の取得義務のアラートとは', a: '労働基準法により、年10日以上の有休が付与されたスタッフには、付与日から1年以内に5日取得させる義務があります。付与年度の残りが6ヶ月を切り、取得が5日に満たないスタッフをアラートで表示します。ダッシュボードと労務タブの両方に出ます。' },
@@ -5481,7 +5500,7 @@ function PaidLeaveSummaryTab({ employeeAccounts, leaveRequests, isDesktop }) {
   // スタッフごとの付与年度（付与日から1年）の取得状況
   const perEmployee = employeeAccounts.map((acc) => {
     const period = getPaidLeavePeriod(acc.hireDate, now);
-    const isPartTime = acc.staffType === 'パート' || acc.staffType === 'アルバイト';
+    const isPartTime = isProportionalLeaveStaffType(acc.staffType);
     const granted = period
       ? (isPartTime && acc.scheduledWeeklyDays
         ? computeProportionalLeaveDays(acc.hireDate, acc.scheduledWeeklyDays, period.start)
@@ -8559,11 +8578,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
         <Field label="スタッフ種別">
           <select value={listStaffTypeFilter} onChange={(e) => setListStaffTypeFilter(e.target.value)} className="w-full border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white">
             <option value="all">全て</option>
-            <option value="役員">役員</option>
-            <option value="社員">社員</option>
-            <option value="契約社員">契約社員</option>
-            <option value="パート">パート</option>
-            <option value="アルバイト">アルバイト</option>
+            {STAFF_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
           </select>
         </Field>
         <Field label="在籍・退職">
@@ -8708,7 +8723,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
     <div className="space-y-2">
       <div className="flex items-start gap-2 bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 text-[11.5px] text-blue-800">
         <Calendar size={14} className="mt-0.5 shrink-0" />
-        <span>法定有休は、入職日から週5日フルタイム勤務を前提とした労働基準法の付与スケジュール（勤続6ヶ月で10日〜6年6ヶ月以降20日）に基づき自動計算されます。パート・時短勤務者の比例付与や繰越・時効の管理には対応していないため、正確な運用には社労士への確認をおすすめします。</span>
+        <span>法定有休は、入職日から週5日フルタイム勤務を前提とした労働基準法の付与スケジュール（勤続6ヶ月で10日〜6年6ヶ月以降20日）に基づき自動計算されます。短時間勤務者の比例付与や繰越・時効の管理には完全には対応していないため、正確な運用には社労士への確認をおすすめします。</span>
       </div>
       <div className="flex items-start gap-2 bg-emerald-50 border border-emerald-200 rounded-xl px-4 py-3 text-[11.5px] text-emerald-800">
         <Lock size={14} className="mt-0.5 shrink-0" />
@@ -9280,15 +9295,14 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                 </Field>
                 <Field label="スタッフ種別">
                   <select value={form.staffType} onChange={set('staffType')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white">
-                    <option value="役員">役員</option>
-                    <option value="社員">社員</option>
-                    <option value="契約社員">契約社員</option>
-                    <option value="パート">パート</option>
-                    <option value="アルバイト">アルバイト</option>
+                    {STAFF_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+                    {form.staffType && !STAFF_TYPES.includes(form.staffType) && (
+                      <option value={form.staffType}>{form.staffType}（旧区分）</option>
+                    )}
                   </select>
                 </Field>
               </div>
-              {(form.staffType === 'パート' || form.staffType === 'アルバイト') && (
+              {isProportionalLeaveStaffType(form.staffType) && (
                 <Field label="週の所定労働日数（比例付与の計算に使用）">
                   <select value={form.scheduledWeeklyDays} onChange={set('scheduledWeeklyDays')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white">
                     <option value="">未設定（通常の法定計算を使用）</option>
@@ -9389,7 +9403,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                   <input type="date" value={form.contractEnd} onChange={set('contractEnd')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
                 </Field>
               </div>
-              <div className="text-[10.5px] text-slate-400">契約社員・パート・アルバイトなど、契約更新が必要な方はここに終了日を入れておくと、期限が近づいた際にダッシュボードでお知らせします。</div>
+              <div className="text-[10.5px] text-slate-400">契約社員・スポットなど、契約更新が必要な方はここに終了日を入れておくと、期限が近づいた際にダッシュボードでお知らせします。</div>
               <div className="text-[11px] font-bold text-slate-400 pt-2">勤務条件</div>
               <Field label="交通費（月額・円）">
                 <input type="number" value={form.commuteAllowance} onChange={set('commuteAllowance')} placeholder="0" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
