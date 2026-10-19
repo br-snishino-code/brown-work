@@ -3311,7 +3311,7 @@ const PROFILE_SETUP_SECTIONS = [
   {
     title: '基本情報',
     fields: [
-      { key: 'name', label: 'お名前', readOnly: true, note: 'お名前に誤りがある場合は、管理者までご連絡ください。' },
+      { key: 'name', label: 'お名前', placeholder: '例）田中 花子', required: true, note: '管理者が登録した内容が入っています。誤りがあればご修正ください。' },
       { key: 'furigana', label: 'ふりがな', placeholder: '例）たなか はなこ', required: true },
       { key: 'birthDate', label: '生年月日', type: 'date', required: true, autoComplete: 'bday' },
     ],
