@@ -432,9 +432,6 @@ const EO_GROUP_NAME = 'eo業務';
 
 // 新規実績：成約内訳・エンパケ成約内訳・後日成約内訳の共通ポイント表
 const NEW_PERF_POINTS = { net: 5, tvMulti: 2, tvBasic: 1, g10: 2, secpack: 1, mesh: 1 };
-// 新規実績：サービス追加（既存契約への当日追加）のポイント表
-const NEW_PERF_ADD_POINTS = { net: 5, tvMulti: 2, tvBasic: 1, g10: 2 };
-
 const NEW_PERF_CONTRACT_FIELDS = [
   { key: 'net', label: 'ネット' },
   { key: 'tvMulti', label: 'テレビ(多ch)' },
@@ -442,12 +439,6 @@ const NEW_PERF_CONTRACT_FIELDS = [
   { key: 'g10', label: '10G' },
   { key: 'secpack', label: 'セキュパ' },
   { key: 'mesh', label: 'メッシュ' },
-];
-const NEW_PERF_ADD_FIELDS = [
-  { key: 'net', label: 'ネット' },
-  { key: 'tvMulti', label: 'テレビ(多ch)' },
-  { key: 'tvBasic', label: 'テレビ(地デジBS)' },
-  { key: 'g10', label: '10G' },
 ];
 
 const emptyNewPerfDay = () => ({
@@ -457,18 +448,17 @@ const emptyNewPerfDay = () => ({
   empake: { net: '', tvMulti: '', tvBasic: '', g10: '', secpack: '', mesh: '' },
   laterOwnDate: '', laterReceiver: '',
   later: { net: '', tvMulti: '', tvBasic: '', g10: '', secpack: '', mesh: '' },
-  add: { net: '', tvMulti: '', tvBasic: '', g10: '' },
 });
 
 // 新規実績：1日分のポイントを計算
+// ※「サービス追加」は既存実績シート側で入力する運用に変更したため、ここでは集計しない
 function computeNewPerfDayPoints(day) {
   if (!day) return 0;
   const sumGroup = (group, table) => Object.entries(table).reduce((s, [k, p]) => s + (Number(group?.[k]) || 0) * p, 0);
   return (
     sumGroup(day.contract, NEW_PERF_POINTS) +
     sumGroup(day.empake, NEW_PERF_POINTS) +
-    sumGroup(day.later, NEW_PERF_POINTS) +
-    sumGroup(day.add, NEW_PERF_ADD_POINTS)
+    sumGroup(day.later, NEW_PERF_POINTS)
   );
 }
 
@@ -4534,7 +4524,6 @@ const NEW_PERF_COLUMN_GROUPS = [
   { label: 'エンパケご成約内訳', fields: NEW_PERF_CONTRACT_FIELDS, path: 'empake' },
   { label: '後日成約', fields: NEW_PERF_LATER_META_FIELDS, path: null },
   { label: '後日成約内訳', fields: NEW_PERF_CONTRACT_FIELDS, path: 'later' },
-  { label: 'サービス追加', fields: NEW_PERF_ADD_FIELDS, path: 'add' },
 ];
 
 function EoNewPerfCell({ value, onChange, type = 'number' }) {
