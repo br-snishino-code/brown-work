@@ -5352,7 +5352,7 @@ const HELP_ADMIN = [
       { q: '休暇申請を承認するには', a: '「勤怠」→「休暇・申請管理」から承認・却下します。承認すると有休残日数に反映されます。' },
       { q: '有休の付与日数はどう決まりますか', a: '入職日からの勤続期間に応じて、労働基準法39条の基準で自動計算されます（勤続6ヶ月で10日、以降1年ごとに加算、6年6ヶ月以降は20日）。パート・アルバイトで週の所定労働日数を設定している場合は比例付与の表を使います。' },
       { q: '自動計算と実態が違う場合は', a: 'スタッフの「詳細」→「業務・契約」タブにある「有休の手動調整」で、日数を加算・減算できます。繰越分の調整などに使ってください。' },
-      { q: '有休の取得状況を集計したい', a: '「労務」タブの「有休取得状況」で確認できます。スタッフごとの取得状況と年間合計が一覧できます。年を切り替えて過去分も見られます。' },
+      { q: '有休の取得状況を集計したい', a: '「労務」タブの「有休取得状況」で確認できます。その年の取得合計、年5日の取得義務の対象人数、未達の懸念がある人数が表示されます。年を切り替えて過去分も見られます。' },
       { q: '年5日の取得義務のアラートとは', a: '労働基準法により、年10日以上の有休が付与されたスタッフには、付与日から1年以内に5日取得させる義務があります。付与年度の残りが6ヶ月を切り、取得が5日に満たないスタッフをアラートで表示します。ダッシュボードと労務タブの両方に出ます。' },
     ],
   },
@@ -5539,53 +5539,6 @@ function PaidLeaveSummaryTab({ employeeAccounts, leaveRequests, isDesktop }) {
         </div>
       )}
 
-      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-        <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
-          <Users size={15} className="text-slate-400" />
-          <h2 className="font-bold text-[13.5px]">スタッフ別の取得状況</h2>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-[12px]">
-            <thead>
-              <tr className="text-left text-[11px] text-slate-400 border-b border-slate-100">
-                <th className="px-3 py-2 font-medium">氏名</th>
-                <th className="px-3 py-2 font-medium">グループ</th>
-                <th className="px-3 py-2 font-medium text-right">{year}年の取得</th>
-                <th className="px-3 py-2 font-medium">現在の付与年度</th>
-                <th className="px-3 py-2 font-medium text-right">付与</th>
-                <th className="px-3 py-2 font-medium text-right">期間内取得</th>
-                <th className="px-3 py-2 font-medium">5日義務</th>
-              </tr>
-            </thead>
-            <tbody>
-              {perEmployee.map(({ acc, period, granted, used, yearUsed, obligated }) => (
-                <tr key={acc.id} className="border-b border-slate-100 last:border-0">
-                  <td className="px-3 py-2 font-semibold text-slate-800 whitespace-nowrap"><EmployeeLink id={acc.id} name={acc.name} /></td>
-                  <td className="px-3 py-2 text-slate-500 whitespace-nowrap">{acc.mainGroup || '-'}</td>
-                  <td className="px-3 py-2 text-right font-mono">{yearUsed > 0 ? `${fmtDays(yearUsed)}日` : '-'}</td>
-                  <td className="px-3 py-2 text-slate-500 font-mono whitespace-nowrap text-[11px]">
-                    {period ? `${dateLabel(period.startKey)} 〜 ${dateLabel(period.endKey)}` : '初回付与前'}
-                  </td>
-                  <td className="px-3 py-2 text-right font-mono">{period ? `${granted}日` : '-'}</td>
-                  <td className="px-3 py-2 text-right font-mono">{period ? `${fmtDays(used)}日` : '-'}</td>
-                  <td className="px-3 py-2 whitespace-nowrap">
-                    {!obligated ? (
-                      <span className="text-[11px] text-slate-400">対象外</span>
-                    ) : used >= PAID_LEAVE_MANDATORY_DAYS ? (
-                      <span className="text-[11px] font-bold text-emerald-600">達成</span>
-                    ) : (
-                      <span className="text-[11px] font-bold text-rose-600">あと{fmtDays(PAID_LEAVE_MANDATORY_DAYS - used)}日</span>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <div className="px-5 py-3 text-[10.5px] text-slate-400 border-t border-slate-100">
-          付与日は入職日から6ヶ月後、以降は1年ごとの応当日として計算しています。繰越分の管理には対応していないため、正確な運用は社労士にご確認ください。
-        </div>
-      </div>
     </div>
   );
 }
