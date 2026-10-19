@@ -183,58 +183,6 @@ function resolveNotificationTarget(subject = '') {
   return null;
 }
 
-// ---- 36協定の上限チェック ----
-// 原則の上限：月45時間・年360時間。起算月は設定画面から変更でき、既定は4月。
-const OVERTIME_MONTHLY_LIMIT_MIN = 45 * 60;
-const OVERTIME_MONTHLY_CAUTION_MIN = 30 * 60;
-const OVERTIME_YEARLY_LIMIT_MIN = 360 * 60;
-const OVERTIME_START_MONTH_KEY = 'brownwork_overtime_start_month';
-
-function getOvertimeStartMonth() {
-  if (typeof window === 'undefined') return 4;
-  const v = Number(window.localStorage.getItem(OVERTIME_START_MONTH_KEY));
-  return v >= 1 && v <= 12 ? v : 4;
-}
-
-// 36協定の起算月から見た「協定年度」の12ヶ月分のキー（YYYY-MM）を返す
-function getAgreementYearMonths(startMonth, asOf = new Date()) {
-  const y = asOf.getFullYear();
-  const m = asOf.getMonth() + 1;
-  const baseYear = m >= startMonth ? y : y - 1;
-  const months = [];
-  for (let i = 0; i < 12; i++) {
-    const d = new Date(baseYear, startMonth - 1 + i, 1);
-    months.push(`${d.getFullYear()}-${pad(d.getMonth() + 1)}`);
-  }
-  return { baseYear, months };
-}
-
-// スタッフごとに、月別の残業時間と協定年度の累計を集計する
-function computeOvertimeStatus(employeeAccounts, records, startMonth, asOf = new Date()) {
-  const { baseYear, months } = getAgreementYearMonths(startMonth, asOf);
-  const currentKey = `${asOf.getFullYear()}-${pad(asOf.getMonth() + 1)}`;
-  const rows = (employeeAccounts || []).map((acc) => {
-    const recs = records[acc.id] || {};
-    const byMonth = {};
-    months.forEach((mk) => { byMonth[mk] = 0; });
-    Object.entries(recs).forEach(([dateKey, rec]) => {
-      const mk = dateKey.slice(0, 7);
-      if (!(mk in byMonth)) return;
-      const m = computeMetrics(rec);
-      if (m) byMonth[mk] += m.overtimeMin;
-    });
-    const yearTotal = months.reduce((s, mk) => s + byMonth[mk], 0);
-    const currentMonth = byMonth[currentKey] || 0;
-    const overMonths = months.filter((mk) => byMonth[mk] > OVERTIME_MONTHLY_LIMIT_MIN);
-    let level = 'ok';
-    if (currentMonth > OVERTIME_MONTHLY_LIMIT_MIN || yearTotal > OVERTIME_YEARLY_LIMIT_MIN) level = 'warn';
-    else if (currentMonth > OVERTIME_MONTHLY_CAUTION_MIN || yearTotal > OVERTIME_YEARLY_LIMIT_MIN * 0.8) level = 'caution';
-    return { acc, byMonth, yearTotal, currentMonth, overMonths, level };
-  });
-  return { baseYear, months, currentKey, rows };
-}
-
-
 // 画面のどこに表示されている氏名でも、クリックするとそのスタッフの詳細ページに移動できるようにする
 const EmployeeLinkContext = createContext(null);
 
@@ -5642,13 +5590,12 @@ function PaidLeaveSummaryTab({ employeeAccounts, leaveRequests, isDesktop }) {
   );
 }
 
-function AdminDashboardTab({ missingCount, correctionCount, leaveCount, performanceCount, gpsAlertCount, contractAlertCount, clockInApprovalCount = 0, employeeCount, todayPresentCount = 0, monthOvertimeMin = 0, paidLeaveShortages = [], overtimeWarnCount = 0, announcements = [], notifications = [], onNavigate, onNavigateTop, onOpenNotification, isDesktop }) {
+function AdminDashboardTab({ missingCount, correctionCount, leaveCount, performanceCount, gpsAlertCount, contractAlertCount, clockInApprovalCount = 0, employeeCount, todayPresentCount = 0, monthOvertimeMin = 0, paidLeaveShortages = [], announcements = [], notifications = [], onNavigate, onNavigateTop, onOpenNotification, isDesktop }) {
   const alertRows = [
     { label: '打刻漏れ・打刻間違い', count: missingCount, tab: 'requests', icon: <AlertTriangle size={14} /> },
     { label: '位置情報が5回以上連続で未記録', count: gpsAlertCount, tab: 'attendance', icon: <MapPin size={14} /> },
     { label: '契約更新が必要なスタッフがいます', count: contractAlertCount, tab: 'accounts', icon: <FileText size={14} /> },
     { label: '有休の年5日取得が不足しています', count: paidLeaveShortages.length, tab: 'leave', icon: <Palmtree size={14} /> },
-    { label: '36協定の残業上限を超えています', count: overtimeWarnCount, tab: 'attendance', icon: <BarChart3 size={14} /> },
   ];
   const unapprovedRows = [
     { label: '未承認の勤怠修正申請', count: correctionCount, tab: 'requests', icon: <FileEdit size={14} /> },
@@ -6447,8 +6394,6 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, o
     0
   );
   const paidLeaveShortages = computePaidLeaveShortages(employeeAccounts, data.leaveRequests);
-  const overtimeStatus = computeOvertimeStatus(employeeAccounts, data.records, getOvertimeStartMonth());
-  const overtimeWarnCount = overtimeStatus.rows.filter((r) => r.level === 'warn').length;
 
   // 画面のどこかに表示された氏名がクリックされたら、そのスタッフの詳細ページを開く
   const [pendingProfileId, setPendingProfileId] = useState(null);
@@ -6554,7 +6499,6 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, o
           todayPresentCount={todayPresentCount}
           monthOvertimeMin={monthOvertimeMin}
           paidLeaveShortages={paidLeaveShortages}
-          overtimeWarnCount={overtimeWarnCount}
           announcements={data.announcements}
           notifications={data.notifications}
           onNavigate={setTab}
