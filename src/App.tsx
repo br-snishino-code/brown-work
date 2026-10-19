@@ -230,7 +230,17 @@ function buildInviteMail({ name, email, tempPassword }) {
     '【ご利用の流れ】',
     '1. 上記URLを開き、ログインIDと仮パスワードでログインします',
     '2. ご自身の新しいパスワードを設定します（初回のみ必須）',
-    '3. 住所・連絡先などの情報をご入力ください',
+    '3. ご登録情報を入力します（すべて必須です）',
+    '',
+    '【手順3でご入力いただく内容】',
+    '　ふりがな／生年月日',
+    '　連絡用メールアドレス／電話番号／住所',
+    '　緊急連絡先（お名前・電話番号）',
+    '　給与振込先の口座情報（銀行名・支店名・口座番号・口座名義）',
+    '　マイナンバー（12桁）',
+    '',
+    '※ 通帳またはキャッシュカードと、マイナンバーカード（または通知カード）を',
+    '　 お手元にご用意のうえ、ログインしてください。',
     '',
     '【ご注意】',
     '・仮パスワードは初回ログイン専用です。必ずご自身のパスワードに変更してください',
@@ -1860,6 +1870,30 @@ export default function AttendanceApp() {
     }
   };
 
+  // 初回ログイン時に、ご本人がご自身のマイナンバーを登録する。
+  // 本人による登録のみ許可（他人の番号は登録できない）。
+  // 登録後の閲覧はマスター管理者のみ。
+  const saveOwnMyNumber = async (number) => {
+    try {
+      const { error } = await supabase.from('employee_my_numbers').upsert(
+        {
+          employee_id: session.id,
+          my_number_encrypted: number,
+          purposes: MY_NUMBER_PURPOSES,
+          updated_by: session.id,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'employee_id' }
+      );
+      if (error) throw error;
+      try { await logAudit(session, 'マイナンバーを本人登録', '初回登録', session.id); } catch { /* 記録に失敗しても登録は続行 */ }
+      return true;
+    } catch (e) {
+      console.error('マイナンバーの保存に失敗しました', e);
+      return false;
+    }
+  };
+
   const today = todayKey();
   const employeeId = session?.id;
   const employeeRecords = (employeeId && data.records[employeeId]) || {};
@@ -2694,13 +2728,13 @@ export default function AttendanceApp() {
       <ProfileSetupScreen
         session={session}
         toast={toast}
-        onSave={async (patch) => {
-          const ok = await updateEmployeeProfile(session.id, patch);
-          if (ok) show('ご登録ありがとうございます', 'success');
-          return ok;
-        }}
-        onSkip={async () => {
-          await updateEmployeeProfile(session.id, { profileSetupCompleted: true });
+        onSave={async ({ profile, myNumber }) => {
+          const savedNumber = await saveOwnMyNumber(myNumber);
+          if (!savedNumber) return 'マイナンバーの保存に失敗しました。お手数ですが管理者までご連絡ください。';
+          const ok = await updateEmployeeProfile(session.id, profile);
+          if (!ok) return 'ご登録情報の保存に失敗しました。時間をおいて再度お試しください。';
+          show('ご登録ありがとうございます', 'success');
+          return true;
         }}
         onLogout={handleLogout}
       />
@@ -3256,47 +3290,119 @@ function FirstLoginPasswordScreen({ session, toast, onDone, onLogout }) {
 }
 
 // ---- 初回ログイン：個人情報の入力依頼 ----
-const PROFILE_SETUP_FIELDS = [
-  { key: 'furigana', label: 'ふりがな', placeholder: '例）たなか はなこ', required: true },
-  { key: 'birthDate', label: '生年月日', type: 'date', required: true },
-  { key: 'phone', label: '電話番号', placeholder: '例）090-1234-5678', required: true },
-  { key: 'address', label: '住所', placeholder: '例）京都府亀岡市三宅町22-11', required: true },
-  { key: 'nearestStation', label: '最寄り駅', placeholder: '例）亀岡駅' },
-  { key: 'emergencyContactName', label: '緊急連絡先（氏名）', placeholder: '例）田中 太郎' },
-  { key: 'emergencyContactPhone', label: '緊急連絡先（電話番号）', placeholder: '例）090-0000-0000' },
+const onlyDigits = (v) => String(v || '').replace(/[^0-9]/g, '');
+const isEmailLike = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || '').trim());
+const toKatakana = (v) => String(v || '').replace(/[ぁ-ゖ]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) + 0x60));
+
+const PROFILE_SETUP_SECTIONS = [
+  {
+    title: '基本情報',
+    fields: [
+      { key: 'furigana', label: 'ふりがな', placeholder: '例）たなか はなこ', required: true },
+      { key: 'birthDate', label: '生年月日', type: 'date', required: true },
+    ],
+  },
+  {
+    title: 'ご連絡先',
+    fields: [
+      {
+        key: 'contactEmail', label: '連絡用メールアドレス', type: 'email', placeholder: '例）taro@example.com', required: true,
+        check: (v) => (isEmailLike(v) ? '' : 'メールアドレスの形式をご確認ください'),
+      },
+      {
+        key: 'phone', label: '電話番号', type: 'tel', placeholder: '例）090-1234-5678', required: true,
+        check: (v) => (onlyDigits(v).length >= 10 ? '' : '電話番号をご確認ください'),
+      },
+      { key: 'address', label: '住所', placeholder: '例）京都府亀岡市三宅町22-11', required: true },
+      { key: 'nearestStation', label: '最寄り駅', placeholder: '例）亀岡駅' },
+    ],
+  },
+  {
+    title: '緊急連絡先',
+    note: 'ご家族など、勤務中に連絡が取れる方をご記入ください。',
+    fields: [
+      { key: 'emergencyContactName', label: 'お名前', placeholder: '例）田中 太郎', required: true },
+      {
+        key: 'emergencyContactPhone', label: '電話番号', type: 'tel', placeholder: '例）090-0000-0000', required: true,
+        check: (v) => (onlyDigits(v).length >= 10 ? '' : '電話番号をご確認ください'),
+      },
+    ],
+  },
+  {
+    title: '口座情報（給与振込先）',
+    note: 'ご本人名義の口座をご登録ください。通帳またはキャッシュカードをお手元にご用意ください。',
+    fields: [
+      { key: 'bankName', label: '銀行名', placeholder: '例）京都銀行', required: true },
+      { key: 'branchName', label: '支店名', placeholder: '例）亀岡支店', required: true },
+      { key: 'accountType', label: '預金種別', type: 'select', options: ['普通', '当座'], required: true },
+      {
+        key: 'accountNumber', label: '口座番号', placeholder: '例）1234567', mono: true, required: true,
+        digitsOnly: true, maxLength: 10,
+        check: (v) => (onlyDigits(v).length >= 5 ? '' : '口座番号をご確認ください'),
+      },
+      { key: 'accountHolder', label: '口座名義（カナ）', placeholder: '例）タナカ ハナコ', required: true, katakana: true },
+      { key: 'bankCode', label: '銀行コード（4桁）', placeholder: '例）0158', mono: true, digitsOnly: true, maxLength: 4 },
+      { key: 'branchCode', label: '支店コード（3桁）', placeholder: '例）123', mono: true, digitsOnly: true, maxLength: 3 },
+    ],
+  },
 ];
 
-function ProfileSetupScreen({ session, toast, onSave, onSkip, onLogout }) {
+const PROFILE_SETUP_ALL_FIELDS = PROFILE_SETUP_SECTIONS.flatMap((s) => s.fields);
+
+function ProfileSetupScreen({ session, toast, onSave, onLogout }) {
   const [form, setForm] = useState(() => {
     const init = {};
-    PROFILE_SETUP_FIELDS.forEach((f) => { init[f.key] = session[f.key] || ''; });
+    PROFILE_SETUP_ALL_FIELDS.forEach((f) => {
+      init[f.key] = session[f.key] || (f.type === 'select' ? f.options[0] : '');
+    });
     return init;
   });
+  const [myNumber, setMyNumber] = useState('');
+  const [myNumberShown, setMyNumberShown] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
-  const set = (key) => (e) => setForm((prev) => ({ ...prev, [key]: e.target.value }));
+
+  const set = (f) => (e) => {
+    let v = e.target.value;
+    if (f.digitsOnly) v = onlyDigits(v).slice(0, f.maxLength || 20);
+    if (f.katakana) v = toKatakana(v);
+    setForm((prev) => ({ ...prev, [f.key]: v }));
+  };
 
   const submit = async (e) => {
     e.preventDefault();
     setError('');
-    const missing = PROFILE_SETUP_FIELDS.filter((f) => f.required && !String(form[f.key] || '').trim());
+
+    const missing = PROFILE_SETUP_ALL_FIELDS.filter((f) => f.required && !String(form[f.key] || '').trim());
     if (missing.length > 0) {
       setError(`${missing.map((f) => f.label).join('・')} を入力してください`);
       return;
     }
+    for (const f of PROFILE_SETUP_ALL_FIELDS) {
+      const v = String(form[f.key] || '').trim();
+      if (!v || !f.check) continue;
+      const msg = f.check(v);
+      if (msg) { setError(`${f.label}：${msg}`); return; }
+    }
+    if (onlyDigits(myNumber).length !== 12) {
+      setError('マイナンバーは12桁の数字でご入力ください');
+      return;
+    }
+
     setSaving(true);
-    const ok = await onSave({
-      ...form,
-      birthDate: form.birthDate || null,
-      profileSetupCompleted: true,
+    const result = await onSave({
+      profile: { ...form, birthDate: form.birthDate || null, profileSetupCompleted: true },
+      myNumber: onlyDigits(myNumber),
     });
     setSaving(false);
-    if (!ok) setError('保存に失敗しました。時間をおいて再度お試しください。');
+    if (result !== true) {
+      setError(typeof result === 'string' ? result : '保存に失敗しました。時間をおいて再度お試しください。');
+    }
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 font-sans flex items-center justify-center px-4 py-10">
-      <div className="w-full max-w-[460px]">
+    <div className="min-h-screen bg-slate-50 font-sans flex items-start justify-center px-4 py-8">
+      <div className="w-full max-w-[560px]">
         <div className="bg-white rounded-[24px] border border-slate-200 shadow-sm p-7 space-y-5">
           <div className="flex items-center gap-2.5">
             <div className="w-10 h-10 rounded-xl bg-slate-900 flex items-center justify-center shrink-0">
@@ -3309,29 +3415,81 @@ function ProfileSetupScreen({ session, toast, onSave, onSkip, onLogout }) {
           </div>
 
           <div className="bg-blue-50 border border-blue-200 rounded-xl px-3.5 py-3 text-[12px] text-blue-800">
-            パスワードの設定が完了しました。続けて、ご本人の情報をご入力ください。入力後はいつでも変更申請ができます。
+            パスワードの設定が完了しました。続けて、ご本人の情報をご入力ください。<br />
+            すべて入力いただくまで勤怠のご利用を開始できません。入力後の変更は、管理者へ変更申請ができます。
           </div>
 
-          <form onSubmit={submit} className="space-y-3.5">
-            {PROFILE_SETUP_FIELDS.map((f) => (
-              <Field key={f.key} label={`${f.label}${f.required ? '' : '（任意）'}`}>
-                <input
-                  type={f.type || 'text'}
-                  value={form[f.key]}
-                  onChange={set(f.key)}
-                  placeholder={f.placeholder}
-                  className={`w-full border-2 border-slate-200 rounded-xl px-3.5 py-2.5 text-[14px] outline-none focus:border-slate-900 ${f.type === 'date' ? 'font-mono' : ''}`}
-                />
-              </Field>
+          <form onSubmit={submit} className="space-y-6">
+            {PROFILE_SETUP_SECTIONS.map((section) => (
+              <div key={section.title} className="space-y-3.5">
+                <div className="text-[12px] font-bold text-slate-500 border-b border-slate-100 pb-2">{section.title}</div>
+                {section.note && <div className="text-[11.5px] text-slate-400 -mt-1">{section.note}</div>}
+                {section.fields.map((f) => (
+                  <Field key={f.key} label={`${f.label}${f.required ? '' : '（任意）'}`}>
+                    {f.type === 'select' ? (
+                      <select
+                        value={form[f.key]}
+                        onChange={set(f)}
+                        className="w-full border-2 border-slate-200 rounded-xl px-3.5 py-2.5 text-[14px] bg-white outline-none focus:border-slate-900"
+                      >
+                        {f.options.map((o) => <option key={o} value={o}>{o}</option>)}
+                      </select>
+                    ) : (
+                      <input
+                        type={f.type || 'text'}
+                        inputMode={f.digitsOnly ? 'numeric' : undefined}
+                        value={form[f.key]}
+                        onChange={set(f)}
+                        placeholder={f.placeholder}
+                        className={`w-full border-2 border-slate-200 rounded-xl px-3.5 py-2.5 text-[14px] outline-none focus:border-slate-900 ${f.mono || f.type === 'date' ? 'font-mono' : ''}`}
+                      />
+                    )}
+                  </Field>
+                ))}
+              </div>
             ))}
-            {error && <div className="text-[12.5px] text-rose-600">{error}</div>}
+
+            <div className="space-y-3.5">
+              <div className="text-[12px] font-bold text-slate-500 border-b border-slate-100 pb-2">マイナンバー</div>
+              <div className="flex items-start gap-2 bg-rose-50 border border-rose-200 rounded-xl px-3.5 py-3 text-[11.5px] text-rose-700">
+                <ShieldCheck size={14} className="mt-0.5 shrink-0" />
+                <div>
+                  <div className="font-bold mb-1">利用目的</div>
+                  <ul className="list-disc pl-4 space-y-0.5">
+                    {MY_NUMBER_PURPOSES.map((p) => <li key={p}>{p}</li>)}
+                  </ul>
+                  <div className="mt-1.5">上記の手続きのみに使用します。保存後はマスター管理者のみが閲覧でき、閲覧・変更のたびに記録が残ります。</div>
+                </div>
+              </div>
+              <Field label="マイナンバー（12桁）">
+                <div className="flex items-center gap-2">
+                  <input
+                    type={myNumberShown ? 'text' : 'password'}
+                    inputMode="numeric"
+                    autoComplete="off"
+                    value={myNumber}
+                    onChange={(e) => setMyNumber(onlyDigits(e.target.value).slice(0, 12))}
+                    placeholder="123456789012"
+                    className="flex-1 border-2 border-slate-200 rounded-xl px-3.5 py-2.5 font-mono text-[14px] outline-none focus:border-slate-900"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setMyNumberShown((v) => !v)}
+                    className="text-[11px] font-bold text-slate-500 border border-slate-200 rounded-xl px-3 py-2.5 shrink-0"
+                  >
+                    {myNumberShown ? '隠す' : '表示'}
+                  </button>
+                </div>
+              </Field>
+            </div>
+
+            {error && <div className="text-[12.5px] text-rose-600 bg-rose-50 border border-rose-200 rounded-xl px-3.5 py-2.5">{error}</div>}
             <button type="submit" disabled={saving} className="w-full py-3 rounded-xl bg-slate-950 disabled:bg-slate-300 text-white text-[14px] font-bold">
               {saving ? '保存中…' : '登録して利用を開始する'}
             </button>
           </form>
 
-          <div className="flex items-center justify-between">
-            <button onClick={onSkip} className="text-[11.5px] text-slate-400 underline">あとで入力する</button>
+          <div className="flex items-center justify-end">
             <button onClick={onLogout} className="text-[11.5px] text-slate-400">ログアウト</button>
           </div>
         </div>
@@ -5635,7 +5793,7 @@ const HELP_STAFF = [
     category: 'アカウント',
     items: [
       { q: 'パスワードを忘れました', a: 'ログイン画面の「パスワードをお忘れですか？」から再設定できます。うまくいかない場合は管理者に連絡してください。管理者が仮パスワードを再発行します。' },
-      { q: '初めてログインするときの流れは', a: '管理者から届いた案内メールのURLを開き、メールアドレスと仮パスワードでログインします。続けてご自身のパスワードを設定し、住所・連絡先などの情報を入力すると利用開始です。情報の入力は「あとで入力する」で後回しにもできます。' },
+      { q: '初めてログインするときの流れは', a: '管理者から届いた案内メールのURLを開き、メールアドレスと仮パスワードでログインします。続けてご自身のパスワードを設定し、ご登録情報（ふりがな・生年月日・連絡先・住所・緊急連絡先・給与振込先の口座情報・マイナンバー）を入力すると利用開始です。いずれも必須のため、通帳とマイナンバーカードをお手元にご用意ください。' },
       { q: '住所や氏名が変わりました', a: '「人材」タブのプロフィール変更申請から、変更内容を入力して申請してください。管理者が承認すると反映されます。' },
       { q: 'スマートフォンで使えますか', a: '使えます。ブラウザで同じURLを開いてログインしてください。画面はスマートフォン用に自動で切り替わります。ホーム画面に追加しておくとアプリのように使えます。' },
     ],
