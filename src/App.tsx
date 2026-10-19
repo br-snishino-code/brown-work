@@ -3439,9 +3439,6 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
   );
   const blockingMissingDates = missingDates.filter((k) => !pendingCorrectionDates.has(k));
   const awaitingApprovalDates = missingDates.filter((k) => pendingCorrectionDates.has(k));
-  const missingDate = blockingMissingDates[0] || missingDates[0];
-  const missingCount = missingDates.length;
-  const hasMissingPunch = missingCount > 0;
   const hasBlockingMissing = blockingMissingDates.length > 0;
   const activePattern = schedulePatterns.find((p) => p.patternNo === activePatternNo) || schedulePatterns[0] || null;
   const standardStartMinutes = activePattern ? toMinutes(activePattern.startTime) : STANDARD_CLOCK_IN_HOUR * 60;
@@ -3452,7 +3449,7 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
   const [clockOutConfirmOpen, setClockOutConfirmOpen] = useState(false);
   const [commuteReminderOpen, setCommuteReminderOpen] = useState(false);
   const primaryAction = canClockIn
-    ? (hasMissingPunch ? undefined : () => (needsCommuteClaimReminder ? setCommuteReminderOpen(true) : setClockInConfirmOpen(true)))
+    ? (hasBlockingMissing ? undefined : () => (needsCommuteClaimReminder ? setCommuteReminderOpen(true) : setClockInConfirmOpen(true)))
     : canClockOut
       ? () => setClockOutConfirmOpen(true)
       : undefined;
@@ -3524,9 +3521,14 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
 
       <div className="rounded-2xl bg-white border border-slate-200 shadow-sm overflow-hidden">
         <div className="px-5 py-3 bg-slate-100 text-[12.5px] font-bold text-slate-500">以下の項目の確認をお願いいたします</div>
-        <button onClick={() => missingCount > 0 && historyDates[0] && onOpenCorrection(historyDates.find((k) => k !== todayKeyStr && records[k]?.clockIn && !records[k]?.clockOut))} className="w-full px-5 py-3 flex items-center justify-between text-[13px] hover:bg-slate-50 transition-colors">
+        <button onClick={() => blockingMissingDates[0] && onOpenCorrection(blockingMissingDates[0])} className="w-full px-5 py-3 flex items-center justify-between text-[13px] hover:bg-slate-50 transition-colors">
           <span className="text-slate-600">打刻漏れ・打刻間違い</span>
-          <span className={`font-bold ${missingCount > 0 ? 'text-rose-600 underline' : 'text-slate-300'}`}>{missingCount}件</span>
+          <span className="flex items-center gap-1.5">
+            {awaitingApprovalDates.length > 0 && (
+              <span className="text-[10.5px] font-bold text-amber-600">承認待ち{awaitingApprovalDates.length}件</span>
+            )}
+            <span className={`font-bold ${hasBlockingMissing ? 'text-rose-600 underline' : 'text-slate-300'}`}>{blockingMissingDates.length}件</span>
+          </span>
         </button>
       </div>
 
