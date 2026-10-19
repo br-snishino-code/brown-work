@@ -3386,7 +3386,7 @@ function Header({ session, onLogout, pendingCount, missingPunchCount, viewMode, 
           </div>
           <div>
             <div className="font-bold text-[15px] leading-tight tracking-tight">勤怠打刻</div>
-            <div className="text-[10.5px] text-slate-400 leading-tight">{session.name}（{session.role === 'master_admin' ? 'マスター管理者' : session.role === 'admin' ? '管理者' : '社員'}）</div>
+            <div className="text-[10.5px] text-slate-400 leading-tight">{session.name}（{session.role === 'master_admin' ? 'マスター管理者' : session.role === 'admin' ? '管理者' : 'スタッフ'}）</div>
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -8823,7 +8823,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
         <>
           <Field label="役割">
             <select value={role} onChange={(e) => setRole(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px] bg-white">
-              <option value="employee">社員</option>
+              <option value="employee">スタッフ</option>
               <option value="admin">管理者</option>
               <option value="master_admin">マスター管理者</option>
             </select>
