@@ -613,12 +613,17 @@ function computeEoIncentive(staffMonthData, groupFlags, upsellRank) {
   };
 }
 
-function useNow() {
+// 1秒ごとに現在時刻を更新する（打刻画面の時計用）。
+// enabled を false にすると更新を止める。
+// 入力中の画面で毎秒再描画されると、スマートフォンでキーボードが閉じてしまうため。
+function useNow(enabled = true) {
   const [now, setNow] = useState(new Date());
   useEffect(() => {
+    if (!enabled) return;
+    setNow(new Date());
     const t = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(t);
-  }, []);
+  }, [enabled]);
   return now;
 }
 
@@ -1523,7 +1528,10 @@ export default function AttendanceApp() {
   const [schedulePatterns, setSchedulePatterns] = useState([]);
   const [activePatternNo, setActivePatternNo] = useState(1);
   const [passwordRecoveryMode, setPasswordRecoveryMode] = useState(false);
-  const now = useNow();
+  // 初回ログインのパスワード設定・登録情報の入力中は、時計の更新を止める
+  // （毎秒の再描画でスマートフォンのキーボードが閉じてしまうため）
+  const isOnboarding = !!session && (session.mustChangePassword === true || session.profileSetupCompleted === false);
+  const now = useNow(!!session && !isOnboarding && !passwordRecoveryMode);
   const geo = useGeolocation();
   const { toast, show } = useToast();
 
@@ -3256,17 +3264,22 @@ function FirstLoginPasswordScreen({ session, toast, onDone, onLogout }) {
           <form onSubmit={submit} className="space-y-4">
             <Field label="新しいパスワード（6文字以上）">
               <input
+                id="new-password"
+                name="new-password"
                 type="password"
+                autoComplete="new-password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 className="w-full border-2 border-slate-200 rounded-xl px-3.5 py-3 text-[15px] outline-none focus:border-slate-900"
-                autoFocus
                 required
               />
             </Field>
             <Field label="新しいパスワード（確認）">
               <input
+                id="new-password-confirm"
+                name="new-password-confirm"
                 type="password"
+                autoComplete="new-password"
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
                 className="w-full border-2 border-slate-200 rounded-xl px-3.5 py-3 text-[15px] outline-none focus:border-slate-900"
@@ -3299,22 +3312,22 @@ const PROFILE_SETUP_SECTIONS = [
     title: '基本情報',
     fields: [
       { key: 'furigana', label: 'ふりがな', placeholder: '例）たなか はなこ', required: true },
-      { key: 'birthDate', label: '生年月日', type: 'date', required: true },
+      { key: 'birthDate', label: '生年月日', type: 'date', required: true, autoComplete: 'bday' },
     ],
   },
   {
     title: 'ご連絡先',
     fields: [
       {
-        key: 'contactEmail', label: '連絡用メールアドレス', type: 'email', placeholder: '例）taro@example.com', required: true,
+        key: 'contactEmail', label: '連絡用メールアドレス', type: 'email', placeholder: '例）taro@example.com', required: true, autoComplete: 'email',
         sameAsLogin: true,
         check: (v) => (isEmailLike(v) ? '' : 'メールアドレスの形式をご確認ください'),
       },
       {
-        key: 'phone', label: '電話番号', type: 'tel', placeholder: '例）090-1234-5678', required: true,
+        key: 'phone', label: '電話番号', type: 'tel', placeholder: '例）090-1234-5678', required: true, autoComplete: 'tel',
         check: (v) => (onlyDigits(v).length >= 10 ? '' : '電話番号をご確認ください'),
       },
-      { key: 'address', label: '住所', placeholder: '例）京都府亀岡市三宅町22-11', required: true },
+      { key: 'address', label: '住所', placeholder: '例）京都府亀岡市三宅町22-11', required: true, autoComplete: 'street-address' },
       { key: 'nearestStation', label: '最寄り駅', placeholder: '例）亀岡駅' },
     ],
   },
@@ -3453,6 +3466,8 @@ function ProfileSetupScreen({ session, toast, onSave, onLogout }) {
                       <>
                         <input
                           type={f.type || 'text'}
+                          name={f.key}
+                          autoComplete={f.autoComplete || 'off'}
                           inputMode={f.digitsOnly ? 'numeric' : undefined}
                           value={form[f.key]}
                           onChange={set(f)}
@@ -3584,11 +3599,13 @@ function ResetPasswordRecoveryScreen({ toast, onDone }) {
               <div>
                 <label className="block text-[12.5px] font-bold text-slate-800 mb-1.5">新しいパスワード（6文字以上）</label>
                 <input
+                  id="recovery-password"
+                  name="recovery-password"
                   type="password"
+                  autoComplete="new-password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   className="w-full border-2 border-slate-200 rounded-xl px-3.5 py-3 text-[15px] outline-none focus:border-slate-900"
-                  autoFocus
                   required
                 />
               </div>
