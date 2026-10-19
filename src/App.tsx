@@ -3188,40 +3188,49 @@ function GlobalTopTabs({ topTab, setTopTab, session, personalMode, setPersonalMo
     }
   }, [isRestrictedAdmin, topTab, tabs.map((t) => t.key).join(',')]);
 
+  // 管理画面／自分の勤怠 の切り替え（PCはタブの右側、スマホはタブの下に全幅で表示）
+  const showToggle = (session?.role === 'admin' || session?.role === 'master_admin') && !!setPersonalMode;
+  const modeToggle = (fullWidth) => (
+    <div className={`flex items-center bg-white/10 rounded-lg p-0.5 text-[11px] font-bold ${fullWidth ? 'w-full' : ''}`}>
+      <button
+        onClick={() => setPersonalMode(false)}
+        className={`px-2.5 py-1.5 rounded-md transition-colors whitespace-nowrap ${fullWidth ? 'flex-1' : ''} ${!personalMode ? 'bg-white text-slate-900' : 'text-slate-300'}`}
+      >
+        管理画面
+      </button>
+      <button
+        onClick={() => setPersonalMode(true)}
+        className={`px-2.5 py-1.5 rounded-md transition-colors whitespace-nowrap ${fullWidth ? 'flex-1' : ''} ${personalMode ? 'bg-white text-slate-900' : 'text-slate-300'}`}
+      >
+        自分の勤怠
+      </button>
+    </div>
+  );
+
   return (
     <div className="bg-slate-950 text-slate-300">
-      <div className="max-w-6xl mx-auto px-4 flex items-center gap-1">
-        {tabs.map((t) => (
-          <button
-            key={t.key}
-            onClick={() => setTopTab(t.key)}
-            className={`flex items-center gap-1.5 px-4 py-2.5 text-[12.5px] font-bold border-b-2 transition-colors ${
-              topTab === t.key ? 'text-white border-amber-500' : 'text-slate-400 border-transparent hover:text-slate-200'
-            }`}
-          >
-            {t.icon}
-            {t.label}
-          </button>
-        ))}
-        {(session?.role === 'admin' || session?.role === 'master_admin') && setPersonalMode && (
-          <div className="ml-auto flex items-center bg-white/10 rounded-lg p-0.5 text-[11px] font-bold">
-            <button
-              onClick={() => setPersonalMode(false)}
-              className={`px-2.5 py-1 rounded-md transition-colors ${!personalMode ? 'bg-white text-slate-900' : 'text-slate-300 hover:text-white'}`}
-            >
-              管理画面
-            </button>
-            <button
-              onClick={() => setPersonalMode(true)}
-              className={`px-2.5 py-1 rounded-md transition-colors ${personalMode ? 'bg-white text-slate-900' : 'text-slate-300 hover:text-white'}`}
-            >
-              自分の勤怠
-            </button>
+      <div className="max-w-6xl mx-auto px-4">
+        <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1 flex-1 min-w-0 overflow-x-auto">
+            {tabs.map((t) => (
+              <button
+                key={t.key}
+                onClick={() => setTopTab(t.key)}
+                className={`flex items-center gap-1.5 px-2.5 sm:px-4 py-2.5 text-[12.5px] font-bold border-b-2 transition-colors whitespace-nowrap shrink-0 ${
+                  topTab === t.key ? 'text-white border-amber-500' : 'text-slate-400 border-transparent hover:text-slate-200'
+                }`}
+              >
+                {t.icon}
+                {t.label}
+              </button>
+            ))}
           </div>
-        )}
-        {session?.role === 'master_admin' && (
-          <span className={`${(session?.role === 'admin' || session?.role === 'master_admin') ? 'ml-2' : 'ml-auto'} text-[10px] font-bold text-amber-500 bg-amber-500/10 px-2 py-1 rounded-full whitespace-nowrap`}>マスター管理者</span>
-        )}
+          {showToggle && <div className="hidden sm:block shrink-0">{modeToggle(false)}</div>}
+          {session?.role === 'master_admin' && (
+            <span className="hidden sm:inline shrink-0 ml-2 text-[10px] font-bold text-amber-500 bg-amber-500/10 px-2 py-1 rounded-full whitespace-nowrap">マスター管理者</span>
+          )}
+        </div>
+        {showToggle && <div className="sm:hidden pb-2">{modeToggle(true)}</div>}
       </div>
     </div>
   );
