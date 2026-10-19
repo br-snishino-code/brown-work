@@ -3624,6 +3624,26 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
     return out;
   })();
 
+  // 勤怠履歴：選択中の月を1行1日の一覧表で表示する
+  const monthTableRows = monthHistoryDates.map((dateKey) => {
+    const r = records[dateKey];
+    const dayStatus = computeDayStatus(r);
+    const metrics = computeMetrics(r);
+    const pendingForDay = corrections.find((c) => c.date === dateKey && c.status === 'pending');
+    const dayInfo = formatAdminDate(dateKey);
+    const hasRecord = !!(r && (r.clockIn || r.clockOut));
+    const notes = [];
+    if (r?.clockInStatus && CLOCK_IN_STATUS_LABEL[r.clockInStatus]) {
+      notes.push({ tone: 'text-blue-600', text: `出勤：${CLOCK_IN_STATUS_LABEL[r.clockInStatus]}${r.clockInActual && r.clockInActual !== r.clockIn ? `（実打刻 ${hhmm(new Date(r.clockInActual))}）` : ''}${r.clockInNote ? `・${r.clockInNote}` : ''}` });
+    }
+    if (r?.clockOutStatus && CLOCK_OUT_STATUS_LABEL[r.clockOutStatus]) {
+      notes.push({ tone: 'text-purple-600', text: `退勤：${CLOCK_OUT_STATUS_LABEL[r.clockOutStatus]}${r.clockOutActual && r.clockOutActual !== r.clockOut ? `（実打刻 ${hhmm(new Date(r.clockOutActual))}）` : ''}${r.clockOutNote ? `・${r.clockOutNote}` : ''}` });
+    }
+    if (r?.clockInPayDeduction) notes.push({ tone: 'text-rose-600 font-bold', text: `減給あり（出勤）${r.clockInPayDeductionNote ? `・${r.clockInPayDeductionNote}` : ''}` });
+    if (r?.clockOutPayDeduction) notes.push({ tone: 'text-rose-600 font-bold', text: `減給あり（退勤）${r.clockOutPayDeductionNote ? `・${r.clockOutPayDeductionNote}` : ''}` });
+    return { dateKey, r, dayStatus, metrics, pendingForDay, dayInfo, hasRecord, notes };
+  });
+
   const historySection = (
     <div className="bg-white rounded-[24px] shadow-sm border border-slate-200 overflow-hidden">
       <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
@@ -3644,60 +3664,68 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
           <ChevronRight size={15} />
         </button>
       </div>
-      <div className={`divide-y divide-slate-100 ${isDesktop ? 'max-h-[650px] overflow-y-auto' : ''}`}>
-        {monthHistoryDates.length === 0 && (
-          <div className="px-5 py-12 text-center text-[12.5px] text-slate-300">{monthKeyLabel(viewMonth)}の記録はありません</div>
-        )}
-        {monthHistoryDates.map((dateKey) => {
-          const r = records[dateKey]; const dayStatus = computeDayStatus(r); const metrics = computeMetrics(r);
-          const pendingForDay = corrections.find((c) => c.date === dateKey && c.status === 'pending');
-          const dayInfo = formatAdminDate(dateKey);
-          const hasRecord = !!(r && (r.clockIn || r.clockOut));
-          return (
-            <div key={dateKey} className={`px-5 py-4 flex items-center justify-between gap-3 hover:bg-slate-50/70 ${hasRecord ? '' : 'bg-slate-50/40'}`}>
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <span className={`text-[13px] font-bold ${hasRecord ? 'text-slate-800' : 'text-slate-400'}`}>{dateLabel(dateKey)}</span>
-                  {dayInfo.badgeClass && <span className={`text-[10px] font-bold rounded px-1.5 py-0.5 ${dayInfo.badgeClass}`}>{dayInfo.holidayName || (new Date(dateKey + 'T00:00:00').getDay() === 0 ? '日' : '土')}</span>}
-                  {dayStatus.tone === 'danger' && <span className="text-[10px] font-bold text-rose-600">未退勤</span>}
-                  {pendingForDay && <span className="text-[10px] font-bold text-amber-600">申請中</span>}
-                </div>
-                {hasRecord ? (
-                  <div className="mt-1 font-mono text-[12px] text-slate-500">{r?.clockIn ? hhmm(new Date(r.clockIn)) : '--:--'} — {r?.clockOut ? hhmm(new Date(r.clockOut)) : '--:--'}{metrics && <span className="ml-2 text-slate-400">実働 {minutesToHHMM(metrics.workedMin)} / 休憩 {metrics.breakMin}分</span>}</div>
-                ) : (
-                  <div className="mt-1 text-[12px] text-slate-300">打刻なし</div>
-                )}
-                {r?.clockInStatus && CLOCK_IN_STATUS_LABEL[r.clockInStatus] && (
-                  <div className="mt-0.5 text-[10.5px] font-medium text-blue-600">
-                    {CLOCK_IN_STATUS_LABEL[r.clockInStatus]}
-                    {r.clockInActual && r.clockInActual !== r.clockIn && <span className="text-slate-400 font-normal">（実打刻 {hhmm(new Date(r.clockInActual))}）</span>}
-                    {r.clockInNote && <span className="text-slate-400 font-normal">・{r.clockInNote}</span>}
-                  </div>
-                )}
-                {r?.clockOutStatus && CLOCK_OUT_STATUS_LABEL[r.clockOutStatus] && (
-                  <div className="mt-0.5 text-[10.5px] font-medium text-purple-600">
-                    {CLOCK_OUT_STATUS_LABEL[r.clockOutStatus]}
-                    {r.clockOutActual && r.clockOutActual !== r.clockOut && <span className="text-slate-400 font-normal">（実打刻 {hhmm(new Date(r.clockOutActual))}）</span>}
-                    {r.clockOutNote && <span className="text-slate-400 font-normal">・{r.clockOutNote}</span>}
-                  </div>
-                )}
-                {metrics && (metrics.lateMin > 0 || metrics.earlyLeaveMin > 0 || metrics.overtimeMin > 0) && <div className="mt-1 text-[10.5px] font-medium"><span className="text-rose-500">{metrics.lateMin > 0 ? `遅刻 ${metrics.lateMin}分 ` : ''}{metrics.earlyLeaveMin > 0 ? `早退 ${metrics.earlyLeaveMin}分` : ''}</span>{metrics.overtimeMin > 0 && <span className="ml-2 text-amber-600">残業 {minutesToHHMM(metrics.overtimeMin)}</span>}</div>}
-                {r?.clockInPayDeduction && (
-                  <div className="mt-0.5 text-[10.5px] font-bold text-rose-600">
-                    減給あり（出勤）{r.clockInPayDeductionNote && <span className="text-slate-400 font-normal">・{r.clockInPayDeductionNote}</span>}
-                  </div>
-                )}
-                {r?.clockOutPayDeduction && (
-                  <div className="mt-0.5 text-[10.5px] font-bold text-rose-600">
-                    減給あり（退勤）{r.clockOutPayDeductionNote && <span className="text-slate-400 font-normal">・{r.clockOutPayDeductionNote}</span>}
-                  </div>
-                )}
-              </div>
-              <button onClick={() => onOpenCorrection(dateKey)} className="shrink-0 rounded-xl border border-slate-200 p-2.5 text-slate-500 hover:bg-white"><FileEdit size={15}/></button>
-            </div>
-          );
-        })}
-      </div>
+
+      {monthTableRows.length === 0 ? (
+        <div className="px-5 py-12 text-center text-[12.5px] text-slate-300">{monthKeyLabel(viewMonth)}の記録はありません</div>
+      ) : (
+        <div className={`overflow-x-auto ${isDesktop ? 'max-h-[650px] overflow-y-auto' : ''}`}>
+          <table className="w-full min-w-[560px] text-[12px]">
+            <thead className="sticky top-0 bg-slate-50 z-10">
+              <tr className="text-left text-[10.5px] text-slate-400 border-b border-slate-200">
+                <th className="px-3 py-2 font-medium whitespace-nowrap">日付</th>
+                <th className="px-2 py-2 font-medium whitespace-nowrap">出勤</th>
+                <th className="px-2 py-2 font-medium whitespace-nowrap">退勤</th>
+                <th className="px-2 py-2 font-medium whitespace-nowrap text-right">休憩</th>
+                <th className="px-2 py-2 font-medium whitespace-nowrap text-right">実働</th>
+                <th className="px-2 py-2 font-medium whitespace-nowrap text-right">残業</th>
+                <th className="px-2 py-2 font-medium whitespace-nowrap text-right">遅刻/早退</th>
+                <th className="px-2 py-2 font-medium whitespace-nowrap">状態</th>
+                <th className="px-2 py-2 font-medium whitespace-nowrap">修正</th>
+              </tr>
+            </thead>
+            <tbody>
+              {monthTableRows.map(({ dateKey, r, dayStatus, metrics, pendingForDay, dayInfo, hasRecord, notes }) => (
+                <React.Fragment key={dateKey}>
+                  <tr className={`border-b border-slate-100 ${hasRecord ? '' : 'bg-slate-50/50'} ${notes.length > 0 ? 'border-b-0' : ''}`}>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      <span className={`font-bold ${hasRecord ? 'text-slate-800' : 'text-slate-400'}`}>{dayInfo.label}</span>
+                      {dayInfo.holidayName && <div className="text-[9.5px] text-rose-500">{dayInfo.holidayName}</div>}
+                    </td>
+                    <td className={`px-2 py-2 font-mono whitespace-nowrap ${hasRecord ? 'text-slate-700' : 'text-slate-300'}`}>{r?.clockIn ? hhmm(new Date(r.clockIn)) : '--:--'}</td>
+                    <td className={`px-2 py-2 font-mono whitespace-nowrap ${hasRecord ? 'text-slate-700' : 'text-slate-300'}`}>{r?.clockOut ? hhmm(new Date(r.clockOut)) : '--:--'}</td>
+                    <td className="px-2 py-2 font-mono text-right text-slate-500 whitespace-nowrap">{metrics ? `${metrics.breakMin}分` : '-'}</td>
+                    <td className="px-2 py-2 font-mono text-right font-bold text-slate-800 whitespace-nowrap">{metrics ? minutesToHHMM(metrics.workedMin) : '-'}</td>
+                    <td className={`px-2 py-2 font-mono text-right whitespace-nowrap ${metrics && metrics.overtimeMin > 0 ? 'text-amber-600 font-bold' : 'text-slate-300'}`}>{metrics && metrics.overtimeMin > 0 ? minutesToHHMM(metrics.overtimeMin) : '-'}</td>
+                    <td className={`px-2 py-2 font-mono text-right whitespace-nowrap ${metrics && (metrics.lateMin > 0 || metrics.earlyLeaveMin > 0) ? 'text-rose-500 font-bold' : 'text-slate-300'}`}>
+                      {metrics && (metrics.lateMin > 0 || metrics.earlyLeaveMin > 0) ? `${metrics.lateMin + metrics.earlyLeaveMin}分` : '-'}
+                    </td>
+                    <td className="px-2 py-2 whitespace-nowrap">
+                      <div className="flex items-center gap-1">
+                        {dayInfo.badgeClass && <span className={`text-[9.5px] font-bold rounded px-1 py-0.5 ${dayInfo.badgeClass}`}>{dayInfo.holidayName ? '祝' : (new Date(dateKey + 'T00:00:00').getDay() === 0 ? '日' : '土')}</span>}
+                        {dayStatus.tone === 'danger' && <span className="text-[9.5px] font-bold text-rose-600 bg-rose-50 rounded px-1 py-0.5">未退勤</span>}
+                        {pendingForDay && <span className="text-[9.5px] font-bold text-amber-600 bg-amber-50 rounded px-1 py-0.5">申請中</span>}
+                        {!hasRecord && !pendingForDay && <span className="text-[9.5px] text-slate-300">打刻なし</span>}
+                      </div>
+                    </td>
+                    <td className="px-2 py-2">
+                      <button onClick={() => onOpenCorrection(dateKey)} className="rounded-lg border border-slate-200 p-1.5 text-slate-400 hover:text-amber-600 hover:border-amber-400 transition-colors" aria-label="修正を申請する"><FileEdit size={13}/></button>
+                    </td>
+                  </tr>
+                  {notes.length > 0 && (
+                    <tr className={`border-b border-slate-100 ${hasRecord ? '' : 'bg-slate-50/50'}`}>
+                      <td colSpan={9} className="px-3 pb-2 -mt-1">
+                        {notes.map((n, i) => (
+                          <div key={i} className={`text-[10.5px] ${n.tone}`}>{n.text}</div>
+                        ))}
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 
