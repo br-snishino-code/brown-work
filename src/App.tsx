@@ -3307,6 +3307,7 @@ const PROFILE_SETUP_SECTIONS = [
     fields: [
       {
         key: 'contactEmail', label: '連絡用メールアドレス', type: 'email', placeholder: '例）taro@example.com', required: true,
+        sameAsLogin: true,
         check: (v) => (isEmailLike(v) ? '' : 'メールアドレスの形式をご確認ください'),
       },
       {
@@ -3362,11 +3363,25 @@ function ProfileSetupScreen({ session, toast, onSave, onLogout }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
+  // ログイン案内を送ったアドレス（ログインID）
+  const loginEmail = String(session.username || '').includes('@') ? session.username : '';
+  const [useLoginEmail, setUseLoginEmail] = useState(() => !!loginEmail && session.contactEmail === loginEmail);
+  const toggleLoginEmail = (checked) => {
+    setUseLoginEmail(checked);
+    setForm((prev) => ({ ...prev, contactEmail: checked ? loginEmail : '' }));
+  };
+
   const set = (f) => (e) => {
     let v = e.target.value;
     if (f.digitsOnly) v = onlyDigits(v).slice(0, f.maxLength || 20);
-    if (f.katakana) v = toKatakana(v);
     setForm((prev) => ({ ...prev, [f.key]: v }));
+  };
+
+  // ひらがなで入力された場合は、入力が確定してからカタカナへ変換する
+  // （変換中に書き換えると、文字が二重に入力されてしまうため）
+  const convertOnBlur = (f) => () => {
+    if (!f.katakana) return;
+    setForm((prev) => ({ ...prev, [f.key]: toKatakana(prev[f.key]) }));
   };
 
   const submit = async (e) => {
@@ -3435,14 +3450,32 @@ function ProfileSetupScreen({ session, toast, onSave, onLogout }) {
                         {f.options.map((o) => <option key={o} value={o}>{o}</option>)}
                       </select>
                     ) : (
-                      <input
-                        type={f.type || 'text'}
-                        inputMode={f.digitsOnly ? 'numeric' : undefined}
-                        value={form[f.key]}
-                        onChange={set(f)}
-                        placeholder={f.placeholder}
-                        className={`w-full border-2 border-slate-200 rounded-xl px-3.5 py-2.5 text-[14px] outline-none focus:border-slate-900 ${f.mono || f.type === 'date' ? 'font-mono' : ''}`}
-                      />
+                      <>
+                        <input
+                          type={f.type || 'text'}
+                          inputMode={f.digitsOnly ? 'numeric' : undefined}
+                          value={form[f.key]}
+                          onChange={set(f)}
+                          onBlur={convertOnBlur(f)}
+                          readOnly={f.sameAsLogin && useLoginEmail}
+                          placeholder={f.placeholder}
+                          className={`w-full border-2 border-slate-200 rounded-xl px-3.5 py-2.5 text-[14px] outline-none focus:border-slate-900 ${f.mono || f.type === 'date' ? 'font-mono' : ''} ${f.sameAsLogin && useLoginEmail ? 'bg-slate-100 text-slate-500' : ''}`}
+                        />
+                        {f.sameAsLogin && loginEmail && (
+                          <label className="flex items-start gap-2 mt-2 text-[12px] text-slate-600 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={useLoginEmail}
+                              onChange={(e) => toggleLoginEmail(e.target.checked)}
+                              className="mt-0.5"
+                            />
+                            <span>
+                              ログインID（この案内メールが届いたアドレス）と同じにする
+                              <span className="block text-[11px] text-slate-400 font-mono break-all">{loginEmail}</span>
+                            </span>
+                          </label>
+                        )}
+                      </>
                     )}
                   </Field>
                 ))}
