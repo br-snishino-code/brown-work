@@ -8392,9 +8392,20 @@ function AdminPermissionsTab({ adminAccounts, staffAccounts = [], currentUserId,
 
   const roleLabel = (role) => (role === 'master_admin' ? 'マスター管理者' : role === 'admin' ? '管理者' : 'スタッフ');
 
+  // マスター管理者が1人もいなくなると誰も権限を変更できなくなるため、最後の1人は降格させない
+  const masterAdminCount = adminAccounts.filter((a) => a.role === 'master_admin').length;
+
   const changeRole = (acc, newRole) => {
     if (newRole === acc.role) return;
-    if (!window.confirm(`${acc.name}さんの役割を「${roleLabel(acc.role)}」から「${roleLabel(newRole)}」に変更します。よろしいですか？`)) return;
+    if (acc.role === 'master_admin' && newRole !== 'master_admin' && masterAdminCount <= 1) {
+      window.alert('マスター管理者が他にいないため、役割を変更できません。\n先に別の方をマスター管理者にしてから、もう一度お試しください。');
+      return;
+    }
+    const isSelfChange = acc.id === currentUserId;
+    const warning = isSelfChange
+      ? `\n\n※ ご自身の役割を変更します。変更後は「管理者権限」の画面を開けなくなり、元に戻すには他のマスター管理者に依頼する必要があります。`
+      : '';
+    if (!window.confirm(`${acc.name}さんの役割を「${roleLabel(acc.role)}」から「${roleLabel(newRole)}」に変更します。よろしいですか？${warning}`)) return;
     const patch = { role: newRole };
     if (newRole === 'admin' && (!acc.adminPermissions || acc.adminPermissions.length === 0)) {
       patch.adminPermissions = ['attendance', 'labor', 'hr', 'payroll'];
@@ -8425,7 +8436,7 @@ function AdminPermissionsTab({ adminAccounts, staffAccounts = [], currentUserId,
     <div className="space-y-5">
       <div className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 text-[11.5px] text-blue-800 flex items-start gap-2">
         <ShieldCheck size={14} className="mt-0.5 shrink-0" />
-        <span>マスター管理者は常に全タブを利用できます（権限の変更はできません）。「管理者」は、チェックしたタブのみ利用できます。役割・権限の変更はマスター管理者のみ行えます。スタッフを管理者にする場合は、下の「スタッフを管理者にする」からお選びください。</span>
+        <span>役割・権限を変更できるのはマスター管理者のみです。マスター管理者は常に全タブを利用でき、タブの制限はかけられません。「管理者」はチェックしたタブのみ利用できます。役割はプルダウンでスタッフ・管理者・マスター管理者のいずれにも変更できます（マスター管理者が最後の1人になる場合を除く）。スタッフを管理者にする場合は、下の「スタッフを管理者にする」からお選びください。</span>
       </div>
 
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
@@ -8452,7 +8463,6 @@ function AdminPermissionsTab({ adminAccounts, staffAccounts = [], currentUserId,
                     <select
                       value={acc.role}
                       onChange={(e) => changeRole(acc, e.target.value)}
-                      disabled={isSelf}
                       className={`text-[12px] font-bold border rounded-lg px-2.5 py-1.5 ${isMaster ? 'bg-amber-50 border-amber-200 text-amber-700' : 'bg-slate-50 border-slate-200 text-slate-600'}`}
                     >
                       <option value="employee">スタッフ</option>
@@ -8479,7 +8489,10 @@ function AdminPermissionsTab({ adminAccounts, staffAccounts = [], currentUserId,
                   </div>
                 )}
                 {isSelf && (
-                  <div className="text-[10.5px] text-slate-400 mt-2">自分自身の役割は変更できません（誤って権限を失わないための制限です）。</div>
+                  <div className="text-[10.5px] text-slate-400 mt-2">
+                    ご自身のアカウントです。役割を下げると、この「管理者権限」の画面を開けなくなります。
+                    {masterAdminCount <= 1 && acc.role === 'master_admin' && ' 現在マスター管理者はあなたのみのため、役割は変更できません。'}
+                  </div>
                 )}
               </div>
             );
