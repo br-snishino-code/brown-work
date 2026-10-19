@@ -1476,7 +1476,7 @@ export default function AttendanceApp() {
     window.scrollTo({ top: 0, behavior: 'auto' });
     if (CLOUD_ENABLED && session) refreshData({ showIndicator: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [topTab, employeeTab]);
+  }, [topTab, employeeTab, personalMode]);
 
   // 今月の規定勤怠時間パターンを取得（管理者も自分の打刻画面で使うため全員分取得する）
   useEffect(() => {
@@ -6793,6 +6793,11 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
   const gpsAlertIds = new Set(gpsAlerts.map((g) => g.employeeId));
   const groups = Array.from(new Set(employeeAccounts.map((a) => a.mainGroup).filter(Boolean)));
 
+  // 月間ページを開いた／一覧に戻ったときは、前の画面のスクロール位置を引き継がない
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: 'auto' });
+  }, [monthlyViewTarget?.employeeId, monthlyViewTarget?.month]);
+
   if (monthlyViewTarget) {
     return (
       <EmployeeMonthlyPage
@@ -8411,6 +8416,11 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
   const [resetPasswordTarget, setResetPasswordTarget] = useState(null);
   const [backingUp, setBackingUp] = useState(false);
   const isMasterAdmin = session?.role === 'master_admin';
+
+  // 詳細を開いたとき・一覧に戻ったときは、前の画面のスクロール位置を引き継がない
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: 'auto' });
+  }, [profileModalAccount?.id]);
 
   // 他の画面で氏名がクリックされた場合、そのスタッフの詳細を自動で開く
   useEffect(() => {
