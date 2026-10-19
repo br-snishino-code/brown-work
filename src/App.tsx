@@ -478,12 +478,13 @@ function computeNewPerfMonthPoints(daily) {
 }
 
 // 既存実績（アップセルLTV）：項目とポイント表（2026年度アップセルポイント一覧表に準拠）
+// countsAsNew: true の項目は、既存（アップセルLTV）ではなく新規獲得ポイントに計上する
 const EXISTING_PERF_FIELDS = [
-  { key: 'netAdd', label: 'ネット追加', points: 5 },
-  { key: 'g10', label: '10G', points: 2 },
+  { key: 'netAdd', label: 'ネット追加', points: 5, countsAsNew: true },
+  { key: 'g10', label: '10G', points: 2, countsAsNew: true },
   { key: 'phoneAdd', label: '電話追加', points: 40 },
-  { key: 'tvMultiAdd', label: 'テレビ多ch追加', points: 2 },
-  { key: 'tvBasicAdd', label: 'テレビ地デジBS追加', points: 1 },
+  { key: 'tvMultiAdd', label: 'テレビ多ch追加', points: 2, countsAsNew: true },
+  { key: 'tvBasicAdd', label: 'テレビ地デジBS追加', points: 1, countsAsNew: true },
   { key: 'choki', label: '長割', points: 15 },
   { key: 'wirelessRt', label: '無線RT機能', points: 5 },
   { key: 'extender', label: '無線LAN中継器', points: 10 },
@@ -514,13 +515,31 @@ const EXISTING_PERF_FIELDS = [
 
 const emptyExistingPerfDay = () => Object.fromEntries(EXISTING_PERF_FIELDS.map((f) => [f.key, '']));
 
+// 既存実績シートのうち、アップセルLTVとして計上する分のポイント
 function computeExistingPerfDayPoints(day) {
   if (!day) return 0;
-  return EXISTING_PERF_FIELDS.reduce((sum, f) => sum + (Number(day[f.key]) || 0) * f.points, 0);
+  return EXISTING_PERF_FIELDS.reduce(
+    (sum, f) => (f.countsAsNew ? sum : sum + (Number(day[f.key]) || 0) * f.points),
+    0
+  );
 }
 
 function computeExistingPerfMonthPoints(daily) {
   return Object.values(daily || {}).reduce((sum, day) => sum + computeExistingPerfDayPoints(day), 0);
+}
+
+// 既存実績シートのうち、新規獲得ポイントとして計上する分
+// （ネット追加・10G・テレビ多ch追加・テレビ地デジBS追加）
+function computeExistingPerfDayNewPoints(day) {
+  if (!day) return 0;
+  return EXISTING_PERF_FIELDS.reduce(
+    (sum, f) => (f.countsAsNew ? sum + (Number(day[f.key]) || 0) * f.points : sum),
+    0
+  );
+}
+
+function computeExistingPerfMonthNewPoints(daily) {
+  return Object.values(daily || {}).reduce((sum, day) => sum + computeExistingPerfDayNewPoints(day), 0);
 }
 
 // 新規実績：月間エンパケ配布枚数の合計（インセンティブの3枚以上／4枚以上判定に使用）
@@ -4585,20 +4604,25 @@ function EoExistingPerfTable({ year, month, daily, onUpdateDay }) {
           <tr className="bg-slate-50">
             <th className="sticky left-0 bg-slate-50 border-b border-r border-slate-200 px-2 py-1 z-10">日</th>
             {EXISTING_PERF_FIELDS.map((f) => (
-              <th key={f.key} className="border-b border-r border-slate-200 px-1.5 py-1 font-normal text-slate-500 whitespace-nowrap">{f.label}<div className="text-[9.5px] text-slate-300">{f.points}P</div></th>
+              <th key={f.key} className={`border-b border-r border-slate-200 px-1.5 py-1 font-normal whitespace-nowrap ${f.countsAsNew ? 'bg-amber-50 text-amber-700' : 'text-slate-500'}`}>
+                {f.label}
+                <div className={`text-[9.5px] ${f.countsAsNew ? 'text-amber-500' : 'text-slate-300'}`}>{f.points}P{f.countsAsNew ? '・新規' : ''}</div>
+              </th>
             ))}
-            <th className="border-b border-slate-200 px-2 py-1 whitespace-nowrap">Pt</th>
+            <th className="border-b border-r border-slate-200 px-2 py-1 whitespace-nowrap bg-amber-50 text-amber-700">新規Pt</th>
+            <th className="border-b border-slate-200 px-2 py-1 whitespace-nowrap">既存Pt</th>
           </tr>
         </thead>
         <tbody>
           {days.map((d) => {
             const day = daily[d] || emptyExistingPerfDay();
             const pt = computeExistingPerfDayPoints(day);
+            const newPt = computeExistingPerfDayNewPoints(day);
             return (
               <tr key={d} className="border-b border-slate-100 last:border-0">
                 <td className="sticky left-0 bg-white border-r border-slate-200 px-2 py-1 font-bold text-slate-500 whitespace-nowrap">{d}日</td>
                 {EXISTING_PERF_FIELDS.map((f) => (
-                  <td key={f.key} className="border-r border-slate-100 px-1 py-1">
+                  <td key={f.key} className={`border-r border-slate-100 px-1 py-1 ${f.countsAsNew ? 'bg-amber-50/40' : ''}`}>
                     <input
                       type="number"
                       value={day[f.key] ?? ''}
@@ -4607,6 +4631,7 @@ function EoExistingPerfTable({ year, month, daily, onUpdateDay }) {
                     />
                   </td>
                 ))}
+                <td className="border-r border-slate-100 px-2 py-1 font-mono font-bold text-amber-700 text-right whitespace-nowrap bg-amber-50/40">{newPt}</td>
                 <td className="px-2 py-1 font-mono font-bold text-slate-700 text-right whitespace-nowrap">{pt}</td>
               </tr>
             );
@@ -4650,7 +4675,9 @@ function EoPerformanceSection({ employeeId, isDesktop }) {
     setExistingDaily((prev) => ({ ...prev, [d]: { ...(prev[d] || emptyExistingPerfDay()), [key]: value } }));
   };
 
-  const monthNewPoints = computeNewPerfMonthPoints(newDaily);
+  // 既存実績シートのネット追加・10G・テレビ多ch追加・テレビ地デジBS追加は新規獲得Ptに合算する
+  const existingSheetNewPoints = computeExistingPerfMonthNewPoints(existingDaily);
+  const monthNewPoints = computeNewPerfMonthPoints(newDaily) + existingSheetNewPoints;
   const monthExistingPoints = computeExistingPerfMonthPoints(existingDaily);
   const empakeTotal = computeMonthEmpakeCount(newDaily);
   const approxG10Rate = computeApproxG10Rate(newDaily);
@@ -4695,6 +4722,11 @@ function EoPerformanceSection({ employeeId, isDesktop }) {
         <PayrollMetric label="既存(アップセルLTV)Pt" value={`${monthExistingPoints}P`} />
         <PayrollMetric label="エンパケ配布(月合計)" value={`${empakeTotal}枚`} />
       </div>
+      {existingSheetNewPoints > 0 && (
+        <div className="px-5 pb-3 -mt-2 text-[11px] text-slate-400">
+          新規獲得Ptのうち {existingSheetNewPoints}P は、既存実績シートのネット追加・10G・テレビ多ch追加・テレビ地デジBS追加分です。
+        </div>
+      )}
 
       {sheet === 'new' && (
         <div className="px-5 pb-3 grid grid-cols-2 gap-3">
@@ -4782,7 +4814,8 @@ function EoAdminIncentiveTab({ employeeAccounts, isDesktop }) {
     const existingRow = existingRows.find((r) => r.employee_id === a.id);
     const daily = newRow?.daily || {};
     const existingDaily = existingRow?.daily || {};
-    const newPoints = computeNewPerfMonthPoints(daily);
+    // 既存実績シートのネット追加・10G・テレビ多ch追加・テレビ地デジBS追加は新規獲得Ptに合算する
+    const newPoints = computeNewPerfMonthPoints(daily) + computeExistingPerfMonthNewPoints(existingDaily);
     const existingPoints = computeExistingPerfMonthPoints(existingDaily);
     const empakeCount = computeMonthEmpakeCount(daily);
     const approxG10Rate = computeApproxG10Rate(daily);
