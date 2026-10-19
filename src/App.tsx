@@ -2669,13 +2669,6 @@ export default function AttendanceApp() {
               isDesktop={isDesktop}
             />
             {!showStaffScreens && (
-              <OvertimeLimitTab
-                employeeAccounts={employeeAccounts}
-                records={data.records}
-                isDesktop={isDesktop}
-              />
-            )}
-            {!showStaffScreens && (
               <PaidLeaveSummaryTab
                 employeeAccounts={employeeAccounts}
                 leaveRequests={data.leaveRequests}
@@ -4968,118 +4961,6 @@ function EoAdminIncentiveTab({ employeeAccounts, isDesktop }) {
   );
 }
 
-// ---- 36協定の残業上限チェック（労務タブ） ----
-function OvertimeLimitTab({ employeeAccounts, records, isDesktop }) {
-  const [startMonth, setStartMonth] = useState(getOvertimeStartMonth());
-  const saveStartMonth = (v) => {
-    setStartMonth(v);
-    try { window.localStorage.setItem(OVERTIME_START_MONTH_KEY, String(v)); } catch (e) { /* 保存できなくても表示は動く */ }
-  };
-
-  const { baseYear, months, currentKey, rows } = computeOvertimeStatus(employeeAccounts, records, startMonth);
-  const warnRows = rows.filter((r) => r.level === 'warn');
-  const cautionRows = rows.filter((r) => r.level === 'caution');
-
-  const hm = (min) => (min > 0 ? minutesToHHMM(min) : '-');
-  const cellClass = (min) => {
-    if (min > OVERTIME_MONTHLY_LIMIT_MIN) return 'text-rose-600 font-bold';
-    if (min > OVERTIME_MONTHLY_CAUTION_MIN) return 'text-amber-600 font-bold';
-    if (min > 0) return 'text-slate-700';
-    return 'text-slate-300';
-  };
-
-  return (
-    <div className="space-y-5">
-      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-        <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
-          <BarChart3 size={15} className="text-slate-400" />
-          <h2 className="font-bold text-[13.5px]">36協定 残業時間チェック</h2>
-          <div className="ml-auto flex items-center gap-2">
-            <span className="text-[11px] text-slate-400">起算月</span>
-            <select value={startMonth} onChange={(e) => saveStartMonth(Number(e.target.value))} className="border border-slate-200 rounded-lg px-2 py-1 text-[12px] font-bold bg-white">
-              {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => <option key={m} value={m}>{m}月</option>)}
-            </select>
-          </div>
-        </div>
-        <div className={`grid gap-4 px-5 py-4 ${isDesktop ? 'grid-cols-3' : 'grid-cols-1'}`}>
-          <div>
-            <div className="text-[11px] text-slate-400 mb-1">警告（上限超過）</div>
-            <div className={`font-mono text-[24px] leading-none font-bold ${warnRows.length > 0 ? 'text-rose-600' : 'text-slate-800'}`}>{warnRows.length}<span className="text-[12px] font-normal text-slate-400 ml-0.5">名</span></div>
-          </div>
-          <div>
-            <div className="text-[11px] text-slate-400 mb-1">注意（月30時間超）</div>
-            <div className={`font-mono text-[24px] leading-none font-bold ${cautionRows.length > 0 ? 'text-amber-600' : 'text-slate-800'}`}>{cautionRows.length}<span className="text-[12px] font-normal text-slate-400 ml-0.5">名</span></div>
-          </div>
-          <div>
-            <div className="text-[11px] text-slate-400 mb-1">対象期間</div>
-            <div className="font-mono text-[15px] font-bold text-slate-800 pt-1.5">{baseYear}年{startMonth}月 〜 {startMonth === 1 ? baseYear : baseYear + 1}年{startMonth === 1 ? 12 : startMonth - 1}月</div>
-          </div>
-        </div>
-      </div>
-
-      {(warnRows.length > 0 || cautionRows.length > 0) && (
-        <div className={`rounded-2xl border px-5 py-4 ${warnRows.length > 0 ? 'bg-rose-50 border-rose-200' : 'bg-amber-50 border-amber-200'}`}>
-          <div className="flex items-center gap-2 mb-2">
-            <AlertTriangle size={15} className={warnRows.length > 0 ? 'text-rose-500' : 'text-amber-500'} />
-            <h3 className={`font-bold text-[13px] ${warnRows.length > 0 ? 'text-rose-700' : 'text-amber-700'}`}>残業時間の確認が必要なスタッフがいます</h3>
-          </div>
-          <div className="space-y-1.5">
-            {warnRows.map((r) => (
-              <div key={r.acc.id} className="text-[12.5px] text-rose-700">
-                <b><EmployeeLink id={r.acc.id} name={r.acc.name} /></b> — 今月 {hm(r.currentMonth)}／年度累計 {hm(r.yearTotal)}
-                {r.currentMonth > OVERTIME_MONTHLY_LIMIT_MIN && <span className="ml-1.5 text-[11px] bg-rose-600 text-white rounded px-1.5 py-0.5 font-bold">月45時間超</span>}
-                {r.yearTotal > OVERTIME_YEARLY_LIMIT_MIN && <span className="ml-1.5 text-[11px] bg-rose-600 text-white rounded px-1.5 py-0.5 font-bold">年360時間超</span>}
-              </div>
-            ))}
-            {cautionRows.map((r) => (
-              <div key={r.acc.id} className="text-[12.5px] text-amber-700">
-                <b><EmployeeLink id={r.acc.id} name={r.acc.name} /></b> — 今月 {hm(r.currentMonth)}／年度累計 {hm(r.yearTotal)}
-                <span className="ml-1.5 text-[11px] bg-amber-500 text-white rounded px-1.5 py-0.5 font-bold">注意</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-        <div className="px-5 py-3.5 border-b border-slate-100">
-          <h3 className="font-bold text-[13px]">スタッフ別・月別の残業時間</h3>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-[12px]">
-            <thead>
-              <tr className="text-left text-[11px] text-slate-400 border-b border-slate-100">
-                <th className="px-3 py-2 font-medium sticky left-0 bg-white">氏名</th>
-                {months.map((mk) => (
-                  <th key={mk} className={`px-2 py-2 font-medium text-right whitespace-nowrap ${mk === currentKey ? 'text-slate-700' : ''}`}>{Number(mk.slice(5, 7))}月</th>
-                ))}
-                <th className="px-3 py-2 font-medium text-right">年度累計</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r) => (
-                <tr key={r.acc.id} className="border-b border-slate-100 last:border-0">
-                  <td className="px-3 py-2 font-semibold text-slate-800 sticky left-0 bg-white whitespace-nowrap">
-                    <EmployeeLink id={r.acc.id} name={r.acc.name} />
-                  </td>
-                  {months.map((mk) => (
-                    <td key={mk} className={`px-2 py-2 text-right font-mono ${cellClass(r.byMonth[mk])}`}>{hm(r.byMonth[mk])}</td>
-                  ))}
-                  <td className={`px-3 py-2 text-right font-mono font-bold ${r.yearTotal > OVERTIME_YEARLY_LIMIT_MIN ? 'text-rose-600' : r.yearTotal > OVERTIME_YEARLY_LIMIT_MIN * 0.8 ? 'text-amber-600' : 'text-slate-800'}`}>{hm(r.yearTotal)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <div className="px-5 py-3 text-[10.5px] text-slate-400 border-t border-slate-100 space-y-1">
-          <div>赤＝月45時間超（36協定の原則上限を超過）／橙＝月30時間超（注意）。年度累計が360時間を超えると赤で表示されます。</div>
-          <div>特別条項付きの協定を締結している場合は上限が異なります。この画面は原則の上限（月45時間・年360時間）のみで判定しています。</div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ---- 退職理由マスタの設定（マスター管理者） ----
 const RESIGNATION_CATEGORIES = ['自己都合', '会社都合', '契約満了', '定年', 'その他'];
 
@@ -5523,7 +5404,7 @@ const HELP_ADMIN = [
       { q: '休暇申請を承認するには', a: '「勤怠」→「休暇・申請管理」から承認・却下します。承認すると有休残日数に反映されます。' },
       { q: '有休の付与日数はどう決まりますか', a: '入職日からの勤続期間に応じて、労働基準法39条の基準で自動計算されます（勤続6ヶ月で10日、以降1年ごとに加算、6年6ヶ月以降は20日）。パート・アルバイトで週の所定労働日数を設定している場合は比例付与の表を使います。' },
       { q: '自動計算と実態が違う場合は', a: 'スタッフの「詳細」→「業務・契約」タブにある「有休の手動調整」で、日数を加算・減算できます。繰越分の調整などに使ってください。' },
-      { q: '有休の取得状況を集計したい', a: '「労務」タブの「有休取得状況」で確認できます。グループ別・月別の取得日数、スタッフごとの取得状況、年間合計が一覧できます。年を切り替えて過去分も見られます。' },
+      { q: '有休の取得状況を集計したい', a: '「労務」タブの「有休取得状況」で確認できます。スタッフごとの取得状況と年間合計が一覧できます。年を切り替えて過去分も見られます。' },
       { q: '年5日の取得義務のアラートとは', a: '労働基準法により、年10日以上の有休が付与されたスタッフには、付与日から1年以内に5日取得させる義務があります。付与年度の残りが6ヶ月を切り、取得が5日に満たないスタッフをアラートで表示します。ダッシュボードと労務タブの両方に出ます。' },
     ],
   },
@@ -5644,24 +5525,10 @@ function PaidLeaveSummaryTab({ employeeAccounts, leaveRequests, isDesktop }) {
   if (!years.includes(String(now.getFullYear()))) years.unshift(String(now.getFullYear()));
   const [year, setYear] = useState(String(now.getFullYear()));
 
-  const groups = Array.from(new Set(employeeAccounts.map((a) => a.mainGroup).filter(Boolean))).sort();
-  const groupKeys = [...groups, '未設定'];
-  const empGroup = {};
-  employeeAccounts.forEach((a) => { empGroup[a.id] = a.mainGroup || '未設定'; });
-
-  // グループ×月の取得日数を集計する
-  const matrix = {};
-  groupKeys.forEach((g) => { matrix[g] = Array(12).fill(0); });
-  approvedPaid.forEach((l) => {
-    if (l.startDate.slice(0, 4) !== year) return;
-    const g = empGroup[l.employeeId] || '未設定';
-    if (!matrix[g]) matrix[g] = Array(12).fill(0);
-    const m = Number(l.startDate.slice(5, 7)) - 1;
-    matrix[g][m] += Number(l.days) || 0;
-  });
-  const monthTotals = Array(12).fill(0);
-  groupKeys.forEach((g) => matrix[g].forEach((v, i) => { monthTotals[i] += v; }));
-  const grandTotal = monthTotals.reduce((a, b) => a + b, 0);
+  // 選択中の年に取得された有休の合計日数
+  const grandTotal = approvedPaid
+    .filter((l) => l.startDate.slice(0, 4) === year)
+    .reduce((sum, l) => sum + (Number(l.days) || 0), 0);
 
   // スタッフごとの付与年度（付与日から1年）の取得状況
   const perEmployee = employeeAccounts.map((acc) => {
@@ -5723,45 +5590,6 @@ function PaidLeaveSummaryTab({ employeeAccounts, leaveRequests, isDesktop }) {
           <div className="text-[10.5px] text-rose-500 mt-2">労働基準法39条により、年10日以上の有休が付与されたスタッフに対し、使用者は年5日を取得させる義務があります。</div>
         </div>
       )}
-
-      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-        <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
-          <BarChart3 size={15} className="text-slate-400" />
-          <h2 className="font-bold text-[13.5px]">グループ別・月別の取得日数（{year}年）</h2>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-[12px]">
-            <thead>
-              <tr className="text-left text-[11px] text-slate-400 border-b border-slate-100">
-                <th className="px-3 py-2 font-medium sticky left-0 bg-white">グループ</th>
-                {Array.from({ length: 12 }, (_, i) => <th key={i} className="px-2 py-2 font-medium text-right">{i + 1}月</th>)}
-                <th className="px-3 py-2 font-medium text-right">合計</th>
-              </tr>
-            </thead>
-            <tbody>
-              {groupKeys.map((g) => {
-                const total = matrix[g].reduce((a, b) => a + b, 0);
-                return (
-                  <tr key={g} className="border-b border-slate-100 last:border-0">
-                    <td className="px-3 py-2 font-semibold text-slate-700 sticky left-0 bg-white whitespace-nowrap">{g}</td>
-                    {matrix[g].map((v, i) => (
-                      <td key={i} className={`px-2 py-2 text-right font-mono ${v > 0 ? 'text-slate-800' : 'text-slate-300'}`}>{v > 0 ? fmtDays(v) : '-'}</td>
-                    ))}
-                    <td className="px-3 py-2 text-right font-mono font-bold text-slate-800">{fmtDays(total)}</td>
-                  </tr>
-                );
-              })}
-              <tr className="bg-slate-50">
-                <td className="px-3 py-2 font-bold text-slate-700 sticky left-0 bg-slate-50">全体</td>
-                {monthTotals.map((v, i) => (
-                  <td key={i} className={`px-2 py-2 text-right font-mono font-bold ${v > 0 ? 'text-slate-800' : 'text-slate-300'}`}>{v > 0 ? fmtDays(v) : '-'}</td>
-                ))}
-                <td className="px-3 py-2 text-right font-mono font-bold text-slate-800">{fmtDays(grandTotal)}</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
 
       <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
         <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
