@@ -164,7 +164,7 @@ const formatAdminDate = (key) => {
 // ---- Leave (休暇) ----
 // ---- 通知の件名から、確認すべき画面を判定する ----
 // topTab は画面上部のタブ、adminTab は「勤怠」タブ内のサブ画面を指す
-// 「承認」「却下」「差し戻し」を含む件名は、管理者が処理した結果を社員へ知らせるものなので、
+// 「承認」「却下」「差し戻し」を含む件名は、管理者が処理した結果をスタッフへ知らせるものなので、
 // 改めて開く必要がない。リンクにせず、処理済みとして薄く表示する。
 const NOTIFICATION_DONE_KEYWORDS = ['承認', '却下', '差し戻し'];
 function isNotificationDone(subject = '') {
@@ -209,7 +209,7 @@ function getAgreementYearMonths(startMonth, asOf = new Date()) {
   return { baseYear, months };
 }
 
-// 社員ごとに、月別の残業時間と協定年度の累計を集計する
+// スタッフごとに、月別の残業時間と協定年度の累計を集計する
 function computeOvertimeStatus(employeeAccounts, records, startMonth, asOf = new Date()) {
   const { baseYear, months } = getAgreementYearMonths(startMonth, asOf);
   const currentKey = `${asOf.getFullYear()}-${pad(asOf.getMonth() + 1)}`;
@@ -235,7 +235,7 @@ function computeOvertimeStatus(employeeAccounts, records, startMonth, asOf = new
 }
 
 
-// 画面のどこに表示されている氏名でも、クリックするとその社員の詳細ページに移動できるようにする
+// 画面のどこに表示されている氏名でも、クリックするとそのスタッフの詳細ページに移動できるようにする
 const EmployeeLinkContext = createContext(null);
 
 function EmployeeLink({ id, name, className = '' }) {
@@ -246,7 +246,7 @@ function EmployeeLink({ id, name, className = '' }) {
       type="button"
       onClick={(e) => { e.stopPropagation(); openEmployee(id); }}
       className={`hover:text-amber-600 hover:underline underline-offset-2 transition-colors text-left ${className}`}
-      title="クリックすると社員詳細を開きます"
+      title="クリックするとスタッフ詳細を開きます"
     >
       {name}
     </button>
@@ -313,7 +313,7 @@ function computeProportionalLeaveDays(hireDateStr, weeklyDays, asOf = new Date()
   return granted;
 }
 
-// 社員1人分の有休付与日数（優先順位：パート/アルバイトは比例付与 → 法定自動計算）＋手動調整
+// スタッフ1人分の有休付与日数（優先順位：パート/アルバイトは比例付与 → 法定自動計算）＋手動調整
 // ※グループ別の月次規定日数は「出勤規定日数」（給与計算用）に用途変更されたため、有休計算では使用しない
 function computeLeaveTotal(employee, now, groupLeaveSchedules) {
   if (!employee) return 0;
@@ -360,8 +360,8 @@ function sumApprovedPaidLeaveDays(leaveRequests, employeeId, startKey, endKey) {
     .reduce((sum, l) => sum + (Number(l.days) || 0), 0);
 }
 
-// 年5日の取得義務を満たせないおそれがある社員を抽出する。
-// 対象は「その付与年度に10日以上付与された社員」で、残り6ヶ月を切って取得5日未満の場合に警告する。
+// 年5日の取得義務を満たせないおそれがあるスタッフを抽出する。
+// 対象は「その付与年度に10日以上付与されたスタッフ」で、残り6ヶ月を切って取得5日未満の場合に警告する。
 const PAID_LEAVE_MANDATORY_DAYS = 5;
 const PAID_LEAVE_ALERT_MONTHS_LEFT = 6;
 function computePaidLeaveShortages(employeeAccounts, leaveRequests, asOf = new Date()) {
@@ -395,7 +395,7 @@ function computePaidLeaveShortages(employeeAccounts, leaveRequests, asOf = new D
 }
 
 
-// 優先順位：社員にメイングループが設定されていればグループ規定 → 未設定なら個人別の月次設定
+// 優先順位：スタッフにメイングループが設定されていればグループ規定 → 未設定なら個人別の月次設定
 function getPrescribedAttendanceDays(employee, month, groupAttendanceSchedules, employeeAttendanceSchedules) {
   if (!employee) return null;
   if (employee.mainGroup) {
@@ -1044,7 +1044,7 @@ const rowToAnnouncement = (row) => ({
 });
 
 // ---- 現在ログイン中のユーザーが見える範囲のデータを全テーブルから取得 ----
-// （RLSが自動でフィルタしてくれるため、社員は自分の行だけ、管理者は全行が返る）
+// （RLSが自動でフィルタしてくれるため、スタッフは自分の行だけ、管理者は全行が返る）
 async function fetchAllData() {
   const [
     employeesRes,
@@ -1099,7 +1099,7 @@ async function fetchAllData() {
     groupLeaveSchedules[row.group_name][row.month] = Number(row.days);
   });
 
-  // 個人別「出勤規定日数」（グループ未設定の社員が対象・月ごと）
+  // 個人別「出勤規定日数」（グループ未設定のスタッフが対象・月ごと）
   const employeeAttendanceSchedules = {};
   (employeeAttendanceRes.data || []).forEach((row) => {
     employeeAttendanceSchedules[row.employee_id] = employeeAttendanceSchedules[row.employee_id] || {};
@@ -1431,7 +1431,7 @@ async function saveInsuranceRateSettings(payload) {
   return true;
 }
 
-// ---- 月ごとの規定勤怠時間パターン（社員が月初に自分で設定） ----
+// ---- 月ごとの規定勤怠時間パターン（スタッフが月初に自分で設定） ----
 async function fetchSchedulePatterns(employeeId, year, month) {
   const { data, error } = await supabase
     .from('employee_schedule_patterns')
@@ -1510,7 +1510,7 @@ export default function AttendanceApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [topTab, employeeTab]);
 
-  // 今月の規定勤怠時間パターンを取得（社員のみ）
+  // 今月の規定勤怠時間パターンを取得（スタッフのみ）
   useEffect(() => {
     if (!session || session.role !== 'employee') return;
     const y = now.getFullYear();
@@ -1640,7 +1640,7 @@ export default function AttendanceApp() {
     if (admin) await sendEmailBestEffort(admin.contactEmail, subject, body);
   };
 
-  // 特定社員への通知（アプリ内通知＋実メール）
+  // 特定スタッフへの通知（アプリ内通知＋実メール）
   const notifyEmployeeUser = async (targetEmployeeId, subject, body, relatedId) => {
     await notify(subject, body, relatedId, targetEmployeeId, 'employee');
     const emp = data.accounts.find((a) => a.id === targetEmployeeId);
@@ -1704,7 +1704,7 @@ export default function AttendanceApp() {
         return false;
       }
       await refreshData();
-      await logAudit(session, '社員アカウントを作成', `username: ${payload.username}`, fnData?.id || null, payload.name);
+      await logAudit(session, 'スタッフアカウントを作成', `username: ${payload.username}`, fnData?.id || null, payload.name);
       show(`${payload.name}さんのアカウントを作成しました`, 'success');
       return true;
     } catch (e) {
@@ -1727,7 +1727,7 @@ export default function AttendanceApp() {
         return false;
       }
       await refreshData();
-      await logAudit(session, '社員アカウントを削除', `username: ${account.username}`, null, account.name);
+      await logAudit(session, 'スタッフアカウントを削除', `username: ${account.username}`, null, account.name);
       show(`${account.name}さんのアカウントを削除しました`, 'success');
       return true;
     } catch (e) {
@@ -2218,14 +2218,14 @@ export default function AttendanceApp() {
     });
     const { error } = await supabase.from('employees').update(dbPatch).eq('id', targetEmployeeId);
     if (error) {
-      show('社員情報の更新に失敗しました', 'warn');
+      show('スタッフ情報の更新に失敗しました', 'warn');
       return false;
     }
     await refreshData();
     if (session && session.id === targetEmployeeId) {
       setSession((prev) => ({ ...prev, ...patch }));
     }
-    show('社員情報を更新しました', 'success');
+    show('スタッフ情報を更新しました', 'success');
     return true;
   };
   // 過去の呼び出し名との互換用エイリアス
@@ -2411,7 +2411,7 @@ export default function AttendanceApp() {
     show(`「${groupName}」の出勤規定日数を保存しました`, 'success');
   };
 
-  // グループ未設定の社員向け：個人別の出勤規定日数（月ごと）を保存
+  // グループ未設定のスタッフ向け：個人別の出勤規定日数（月ごと）を保存
   const saveEmployeeAttendanceSchedule = async (employeeId, monthlyDays) => {
     const rows = Object.entries(monthlyDays).map(([month, days]) => ({
       employee_id: employeeId,
@@ -3169,7 +3169,7 @@ function GlobalTopTabs({ topTab, setTopTab, session }) {
     { key: 'payroll', label: '給与', icon: <Wallet size={14} /> },
     { key: 'help', label: 'ヘルプ', icon: <HelpCircle size={14} /> },
   ];
-  // 権限を制限された管理者は、許可されたタブのみ表示（社員・マスター管理者は全タブ表示）
+  // 権限を制限された管理者は、許可されたタブのみ表示（スタッフ・マスター管理者は全タブ表示）
   const isRestrictedAdmin = session?.role === 'admin';
   const tabs = isRestrictedAdmin
     ? allTabs.filter((t) => t.key === 'help' || (session.adminPermissions || []).includes(t.key))
@@ -4862,14 +4862,14 @@ function EoAdminIncentiveTab({ employeeAccounts, isDesktop }) {
         </div>
 
         <div className="text-[11px] text-slate-400 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
-          10G付帯率（40%未満で半額）は自動では正確に判定できないため、参考値をもとに社員側の画面で表示のみ行っています。個別に上書きが必要な場合は開発者にご相談ください。
+          10G付帯率（40%未満で半額）は自動では正確に判定できないため、参考値をもとにスタッフ側の画面で表示のみ行っています。個別に上書きが必要な場合は開発者にご相談ください。
         </div>
       </div>
 
       {loading ? (
         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-6 py-14 text-center text-[12.5px] text-slate-300">読み込み中…</div>
       ) : rows.length === 0 ? (
-        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-6 py-14 text-center text-[12.5px] text-slate-300">eo業務グループの社員が登録されていません</div>
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-6 py-14 text-center text-[12.5px] text-slate-300">eo業務グループのスタッフが登録されていません</div>
       ) : (
         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
           <div className="overflow-x-auto">
@@ -4961,7 +4961,7 @@ function OvertimeLimitTab({ employeeAccounts, records, isDesktop }) {
         <div className={`rounded-2xl border px-5 py-4 ${warnRows.length > 0 ? 'bg-rose-50 border-rose-200' : 'bg-amber-50 border-amber-200'}`}>
           <div className="flex items-center gap-2 mb-2">
             <AlertTriangle size={15} className={warnRows.length > 0 ? 'text-rose-500' : 'text-amber-500'} />
-            <h3 className={`font-bold text-[13px] ${warnRows.length > 0 ? 'text-rose-700' : 'text-amber-700'}`}>残業時間の確認が必要な社員がいます</h3>
+            <h3 className={`font-bold text-[13px] ${warnRows.length > 0 ? 'text-rose-700' : 'text-amber-700'}`}>残業時間の確認が必要なスタッフがいます</h3>
           </div>
           <div className="space-y-1.5">
             {warnRows.map((r) => (
@@ -4983,7 +4983,7 @@ function OvertimeLimitTab({ employeeAccounts, records, isDesktop }) {
 
       <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
         <div className="px-5 py-3.5 border-b border-slate-100">
-          <h3 className="font-bold text-[13px]">社員別・月別の残業時間</h3>
+          <h3 className="font-bold text-[13px]">スタッフ別・月別の残業時間</h3>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-[12px]">
@@ -5064,7 +5064,7 @@ function ResignationReasonSettings({ reasons = [], onRefresh, isDesktop }) {
   };
 
   const remove = async (r) => {
-    if (!window.confirm(`「${r.label}」を削除しますか？\nすでにこの理由で登録された社員がいる場合は削除できません。その場合は「無効にする」をお使いください。`)) return;
+    if (!window.confirm(`「${r.label}」を削除しますか？\nすでにこの理由で登録されたスタッフがいる場合は削除できません。その場合は「無効にする」をお使いください。`)) return;
     setSaving(true); setError('');
     const { error: e } = await supabase.from('resignation_reasons').delete().eq('id', r.id);
     if (e) setError('削除できませんでした。すでに使用されている理由は削除できません。「無効にする」をご利用ください。');
@@ -5438,12 +5438,12 @@ const HELP_STAFF = [
 
 const HELP_ADMIN = [
   {
-    category: '社員の登録・管理',
+    category: 'スタッフの登録・管理',
     items: [
-      { q: '社員アカウントを新しく作るには', a: '「人材」→「スタッフ管理」→「社員一覧・登録」を開くと、右側に登録フォームがあります。姓名・ふりがな・ユーザー名・仮パスワード・入職日を入力して作成します。ユーザー名は短いID（例：tanaka）でもメールアドレスでも構いません。' },
-      { q: '大人数をまとめて登録したい', a: '社員一覧の右上にある「CSV一括登録」を使います。表示される形式にあわせてCSVファイルを用意し、アップロードしてください。' },
-      { q: '退職者の処理はどうしますか', a: '社員の「詳細」を開き、基本タブの退職日を入力して保存します。退職日を入れた社員は、一覧の絞り込みで「在籍のみ」にすると非表示になります。アカウント自体は残るため、過去の勤怠や給与は参照できます。' },
-      { q: 'パスワードを再発行するには', a: '社員一覧の各行にある鍵のアイコンを押すと、仮パスワードを設定できます。設定した仮パスワードは本人に直接お伝えください。' },
+      { q: 'スタッフアカウントを新しく作るには', a: '「人材」→「スタッフ管理」→「スタッフ一覧・登録」を開くと、右側に登録フォームがあります。姓名・ふりがな・ユーザー名・仮パスワード・入職日を入力して作成します。ユーザー名は短いID（例：tanaka）でもメールアドレスでも構いません。' },
+      { q: '大人数をまとめて登録したい', a: 'スタッフ一覧の右上にある「CSV一括登録」を使います。表示される形式にあわせてCSVファイルを用意し、アップロードしてください。' },
+      { q: '退職者の処理はどうしますか', a: 'スタッフの「詳細」を開き、基本タブの退職日を入力して保存します。退職日を入れたスタッフは、一覧の絞り込みで「在籍のみ」にすると非表示になります。アカウント自体は残るため、過去の勤怠や給与は参照できます。' },
+      { q: 'パスワードを再発行するには', a: 'スタッフ一覧の各行にある鍵のアイコンを押すと、仮パスワードを設定できます。設定した仮パスワードは本人に直接お伝えください。' },
       { q: '管理者権限を与えるには', a: '「人材」→「スタッフ管理」→「管理者権限」から設定します。タブ単位（勤怠・労務・人材・給与）でアクセス範囲を制限できます。マスター管理者のみが操作できます。' },
     ],
   },
@@ -5451,9 +5451,9 @@ const HELP_ADMIN = [
     category: '勤怠の管理',
     items: [
       { q: '勤怠修正申請を承認するには', a: '「勤怠」→「休暇・申請管理」に未承認の申請が一覧表示されます。内容を確認して承認または却下してください。承認すると勤怠記録が自動で書き換わります。' },
-      { q: '管理者が直接勤怠を修正できますか', a: 'できます。「勤怠」→「出勤管理」で対象の社員と日付を選び、時刻を直接編集してください。給与に反映させない修正の場合は、控除対象外のフラグを設定できます。' },
+      { q: '管理者が直接勤怠を修正できますか', a: 'できます。「勤怠」→「出勤管理」で対象のスタッフと日付を選び、時刻を直接編集してください。給与に反映させない修正の場合は、控除対象外のフラグを設定できます。' },
       { q: '打刻漏れはどこで分かりますか', a: 'ダッシュボードのアラート一覧に「打刻漏れ・打刻間違い」として件数が表示されます。クリックすると該当の一覧に移動します。' },
-      { q: '位置情報のアラートとは', a: '打刻時に位置情報が5回以上連続で記録されなかった社員を検知しています。端末の設定で位置情報が拒否されている可能性があるため、本人に確認してください。' },
+      { q: '位置情報のアラートとは', a: '打刻時に位置情報が5回以上連続で記録されなかったスタッフを検知しています。端末の設定で位置情報が拒否されている可能性があるため、本人に確認してください。' },
       { q: '出勤規定日数の設定はどこですか', a: '「勤怠」→「スタッフ管理」→「出勤規定日数設定」で、グループ別・月別に設定します。給与計算の基礎になる日数です。' },
     ],
   },
@@ -5462,26 +5462,26 @@ const HELP_ADMIN = [
     items: [
       { q: '休暇申請を承認するには', a: '「勤怠」→「休暇・申請管理」から承認・却下します。承認すると有休残日数に反映されます。' },
       { q: '有休の付与日数はどう決まりますか', a: '入職日からの勤続期間に応じて、労働基準法39条の基準で自動計算されます（勤続6ヶ月で10日、以降1年ごとに加算、6年6ヶ月以降は20日）。パート・アルバイトで週の所定労働日数を設定している場合は比例付与の表を使います。' },
-      { q: '自動計算と実態が違う場合は', a: '社員の「詳細」→「業務・契約」タブにある「有休の手動調整」で、日数を加算・減算できます。繰越分の調整などに使ってください。' },
-      { q: '有休の取得状況を集計したい', a: '「労務」タブの「有休取得状況」で確認できます。グループ別・月別の取得日数、社員ごとの取得状況、年間合計が一覧できます。年を切り替えて過去分も見られます。' },
-      { q: '年5日の取得義務のアラートとは', a: '労働基準法により、年10日以上の有休が付与された社員には、付与日から1年以内に5日取得させる義務があります。付与年度の残りが6ヶ月を切り、取得が5日に満たない社員をアラートで表示します。ダッシュボードと労務タブの両方に出ます。' },
+      { q: '自動計算と実態が違う場合は', a: 'スタッフの「詳細」→「業務・契約」タブにある「有休の手動調整」で、日数を加算・減算できます。繰越分の調整などに使ってください。' },
+      { q: '有休の取得状況を集計したい', a: '「労務」タブの「有休取得状況」で確認できます。グループ別・月別の取得日数、スタッフごとの取得状況、年間合計が一覧できます。年を切り替えて過去分も見られます。' },
+      { q: '年5日の取得義務のアラートとは', a: '労働基準法により、年10日以上の有休が付与されたスタッフには、付与日から1年以内に5日取得させる義務があります。付与年度の残りが6ヶ月を切り、取得が5日に満たないスタッフをアラートで表示します。ダッシュボードと労務タブの両方に出ます。' },
     ],
   },
   {
     category: '給与',
     items: [
-      { q: '給与計算の流れを教えてください', a: '「給与」タブで対象月を選ぶと、勤怠記録から労働時間と残業時間が自動集計されます。支給項目・控除項目を確認して下書き保存し、内容が確定したら「公開」します。公開すると社員側の画面に明細が表示されます。' },
-      { q: '支給・控除の項目を追加するには', a: '社員の「詳細」→「給与・口座」タブで、社員ごとの固定的な支給項目・控除項目を登録できます。毎月の計算に自動で反映されます。' },
-      { q: '標準報酬月額の設定はどこですか', a: '社員の「詳細」→「社会保険」タブで設定します。等級表から選択でき、健康保険・厚生年金の保険料が自動計算されます。保険料率は別途「保険料率設定」で管理します。' },
+      { q: '給与計算の流れを教えてください', a: '「給与」タブで対象月を選ぶと、勤怠記録から労働時間と残業時間が自動集計されます。支給項目・控除項目を確認して下書き保存し、内容が確定したら「公開」します。公開するとスタッフ側の画面に明細が表示されます。' },
+      { q: '支給・控除の項目を追加するには', a: 'スタッフの「詳細」→「給与・口座」タブで、スタッフごとの固定的な支給項目・控除項目を登録できます。毎月の計算に自動で反映されます。' },
+      { q: '標準報酬月額の設定はどこですか', a: 'スタッフの「詳細」→「社会保険」タブで設定します。等級表から選択でき、健康保険・厚生年金の保険料が自動計算されます。保険料率は別途「保険料率設定」で管理します。' },
       { q: '交通費精算の承認とExcel出力', a: '「給与」タブの交通費精算一覧から承認・却下します。承認済みのものは月を指定してExcelファイルに出力でき、経理処理に使えます。' },
-      { q: '年末調整の進め方', a: '「人材」タブの年末調整で、社員から提出された内容を確認し、承認します。提出状況は一覧で把握できます。' },
+      { q: '年末調整の進め方', a: '「人材」タブの年末調整で、スタッフから提出された内容を確認し、承認します。提出状況は一覧で把握できます。' },
     ],
   },
   {
     category: 'お知らせ・その他',
     items: [
       { q: 'お知らせを投稿するには', a: '「労務」タブの上部にある投稿フォームから、カテゴリ・タイトル・本文を入力して投稿します。ファイルの添付もできます。重要なものは固定表示にすると一番上に表示されます。' },
-      { q: 'データのバックアップを取るには', a: '「人材」→「スタッフ管理」→「社員一覧・登録」の右上にある「データバックアップ」を押すと、全データがExcelファイルでダウンロードされます。マスター管理者のみ利用できます。月1回を目安に実行してください。マイナンバーを含むため、保管場所には十分ご注意ください。' },
+      { q: 'データのバックアップを取るには', a: '「人材」→「スタッフ管理」→「スタッフ一覧・登録」の右上にある「データバックアップ」を押すと、全データがExcelファイルでダウンロードされます。マスター管理者のみ利用できます。月1回を目安に実行してください。マイナンバーを含むため、保管場所には十分ご注意ください。' },
       { q: '監査ログとは何ですか', a: '誰がいつどの操作をしたかの記録です。「人材」→「スタッフ管理」→「監査ログ」で確認できます。承認・却下・アカウント操作などが記録されます。' },
       { q: '「同期エラー」と表示されました', a: '通信が一時的に不安定な場合に表示されます。画面を再読み込み（Ctrl + Shift + R）すると復帰することが多いです。繰り返し発生する場合は開発者にご相談ください。' },
     ],
@@ -5603,7 +5603,7 @@ function PaidLeaveSummaryTab({ employeeAccounts, leaveRequests, isDesktop }) {
   groupKeys.forEach((g) => matrix[g].forEach((v, i) => { monthTotals[i] += v; }));
   const grandTotal = monthTotals.reduce((a, b) => a + b, 0);
 
-  // 社員ごとの付与年度（付与日から1年）の取得状況
+  // スタッフごとの付与年度（付与日から1年）の取得状況
   const perEmployee = employeeAccounts.map((acc) => {
     const period = getPaidLeavePeriod(acc.hireDate, now);
     const isPartTime = acc.staffType === 'パート' || acc.staffType === 'アルバイト';
@@ -5637,7 +5637,7 @@ function PaidLeaveSummaryTab({ employeeAccounts, leaveRequests, isDesktop }) {
             <div className="font-mono text-[22px] font-bold text-slate-800">{fmtDays(grandTotal)}<span className="text-[13px] font-normal ml-0.5">日</span></div>
           </div>
           <div>
-            <div className="text-[11px] text-slate-400">対象社員（10日以上付与）</div>
+            <div className="text-[11px] text-slate-400">対象スタッフ（10日以上付与）</div>
             <div className="font-mono text-[22px] font-bold text-slate-800">{perEmployee.filter((p) => p.obligated).length}<span className="text-[13px] font-normal ml-0.5">名</span></div>
           </div>
           <div>
@@ -5660,7 +5660,7 @@ function PaidLeaveSummaryTab({ employeeAccounts, leaveRequests, isDesktop }) {
               </div>
             ))}
           </div>
-          <div className="text-[10.5px] text-rose-500 mt-2">労働基準法39条により、年10日以上の有休が付与された社員に対し、使用者は年5日を取得させる義務があります。</div>
+          <div className="text-[10.5px] text-rose-500 mt-2">労働基準法39条により、年10日以上の有休が付与されたスタッフに対し、使用者は年5日を取得させる義務があります。</div>
         </div>
       )}
 
@@ -5706,7 +5706,7 @@ function PaidLeaveSummaryTab({ employeeAccounts, leaveRequests, isDesktop }) {
       <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
         <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
           <Users size={15} className="text-slate-400" />
-          <h2 className="font-bold text-[13.5px]">社員別の取得状況</h2>
+          <h2 className="font-bold text-[13.5px]">スタッフ別の取得状況</h2>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-[12px]">
@@ -5758,7 +5758,7 @@ function AdminDashboardTab({ missingCount, correctionCount, leaveCount, performa
   const alertRows = [
     { label: '打刻漏れ・打刻間違い', count: missingCount, tab: 'requests', icon: <AlertTriangle size={14} /> },
     { label: '位置情報が5回以上連続で未記録', count: gpsAlertCount, tab: 'attendance', icon: <MapPin size={14} /> },
-    { label: '契約更新が必要な社員がいます', count: contractAlertCount, tab: 'accounts', icon: <FileText size={14} /> },
+    { label: '契約更新が必要なスタッフがいます', count: contractAlertCount, tab: 'accounts', icon: <FileText size={14} /> },
     { label: '有休の年5日取得が不足しています', count: paidLeaveShortages.length, tab: 'leave', icon: <Palmtree size={14} /> },
     { label: '36協定の残業上限を超えています', count: overtimeWarnCount, tab: 'attendance', icon: <BarChart3 size={14} /> },
   ];
@@ -5770,7 +5770,7 @@ function AdminDashboardTab({ missingCount, correctionCount, leaveCount, performa
   ];
   const quickLinks = [
     { label: '勤怠一覧', tab: 'attendance', icon: <Clock size={17} /> },
-    { label: '社員管理', tab: 'accounts', icon: <Users size={17} /> },
+    { label: 'スタッフ管理', tab: 'accounts', icon: <Users size={17} /> },
     { label: '休暇申請', tab: 'leave', icon: <Palmtree size={17} /> },
     { label: '実績報告', tab: 'performance', icon: <ClipboardList size={17} /> },
   ];
@@ -6156,7 +6156,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, groupAtten
     setMonthlySalary(String(employee.monthlySalary || 0));
   }, [employeeId]);
 
-  // 社員の固定支給・控除項目、通勤経路を取得（毎月同じ内容を自動で候補に出すため）
+  // スタッフの固定支給・控除項目、通勤経路を取得（毎月同じ内容を自動で候補に出すため）
   useEffect(() => {
     if (!employeeId) return;
     (async () => {
@@ -6184,7 +6184,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, groupAtten
     actualDays: monthly.days,
   }) : null;
 
-  // 社員・年月・下書きの有無が変わったら、支給・控除項目を初期化する
+  // スタッフ・年月・下書きの有無が変わったら、支給・控除項目を初期化する
   useEffect(() => {
     if (!employee || !preview) return;
     if (existing?.paymentItems) {
@@ -6212,7 +6212,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, groupAtten
   }, [employeeId, year, month, existing?.id, employeeSalaryItems]);
 
   if (!employee) {
-    return <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-6 py-14 text-center text-[12.5px] text-slate-300">社員が登録されていません</div>;
+    return <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-6 py-14 text-center text-[12.5px] text-slate-300">スタッフが登録されていません</div>;
   }
 
   const paymentTotal = sumItems(paymentItems);
@@ -6260,7 +6260,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, groupAtten
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
         <h2 className="font-bold text-[14px] text-slate-800 flex items-center gap-2"><Wallet size={16} className="text-slate-400" />給与計算</h2>
         <div className={`grid gap-3 ${isDesktop ? 'grid-cols-3' : 'grid-cols-1'}`}>
-          <Field label="社員">
+          <Field label="スタッフ">
             <EmployeeSearchSelect employeeAccounts={employeeAccounts} value={employeeId} onChange={setEmployeeId} showAllOption={false} />
           </Field>
           <Field label="年">
@@ -6290,7 +6290,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, groupAtten
               <input type="number" value={monthlySalary} onChange={(e) => setMonthlySalary(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px] bg-white" />
             </Field>
           )}
-          <button onClick={saveWageSettings} className="text-[11.5px] font-bold text-amber-600">この給与形態を社員情報に保存</button>
+          <button onClick={saveWageSettings} className="text-[11.5px] font-bold text-amber-600">この給与形態をスタッフ情報に保存</button>
         </div>
 
         {wageType === 'monthly' && (
@@ -6303,7 +6303,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, groupAtten
           <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-[11.5px] text-amber-800">
             {employee.mainGroup
               ? `「${employee.mainGroup}」の${month}月の出勤規定日数が未設定のため、月給を満額（日割りなし）で計算しています。出勤規定日数設定タブから設定してください。`
-              : `${employee.name}さんの出勤規定日数が未設定のため、月給を満額（日割りなし）で計算しています。社員アカウント編集画面の「グループ」タブから設定してください。`}
+              : `${employee.name}さんの出勤規定日数が未設定のため、月給を満額（日割りなし）で計算しています。スタッフアカウント編集画面の「グループ」タブから設定してください。`}
           </div>
         )}
 
@@ -6326,10 +6326,10 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, groupAtten
         </div>
 
         {commuteRouteTotal > 0 && (
-          <div className="text-[11px] text-slate-400 -mt-1">通勤手当は、社員詳細で登録された経路（合計 {formatYen(commuteRouteTotal)}）を初期値にしています。金額は下の支給項目欄で調整できます。</div>
+          <div className="text-[11px] text-slate-400 -mt-1">通勤手当は、スタッフ詳細で登録された経路（合計 {formatYen(commuteRouteTotal)}）を初期値にしています。金額は下の支給項目欄で調整できます。</div>
         )}
         {employeeSalaryItems.length > 0 && (
-          <div className="text-[11px] text-slate-400 -mt-1">社員詳細で登録された固定支給・控除項目（{employeeSalaryItems.length}件）を初期値として含めています。</div>
+          <div className="text-[11px] text-slate-400 -mt-1">スタッフ詳細で登録された固定支給・控除項目（{employeeSalaryItems.length}件）を初期値として含めています。</div>
         )}
         <PayrollItemsEditor title="支給項目" items={paymentItems} onChange={setPaymentItems} addLabel="支給項目を追加" />
         <PayrollItemsEditor title="控除項目" items={deductionItems} onChange={setDeductionItems} addLabel="控除項目を追加" />
@@ -6434,7 +6434,7 @@ function AdminTopNav({ tab, setTab, correctionCount, leaveCount, performanceCoun
       tabs: isMasterAdmin ? ['accounts', 'groupleave', 'eoincentive', 'auditlog', 'adminperms', 'resignreasons'] : ['accounts', 'groupleave', 'eoincentive', 'auditlog'],
       items: isMasterAdmin
         ? [
-            { tab: 'accounts', label: '社員一覧・登録', sub: '入退職日・有休管理' },
+            { tab: 'accounts', label: 'スタッフ一覧・登録', sub: '入退職日・有休管理' },
             { tab: 'groupleave', label: '出勤規定日数設定', sub: 'グループ別・月別日数' },
             { tab: 'eoincentive', label: 'eo業務インセンティブ', sub: '新規実績・既存実績・支給額' },
             { tab: 'auditlog', label: '監査ログ', sub: '承認・操作の履歴' },
@@ -6442,7 +6442,7 @@ function AdminTopNav({ tab, setTab, correctionCount, leaveCount, performanceCoun
             { tab: 'resignreasons', label: '退職理由の設定', sub: '選択肢の追加・編集' },
           ]
         : [
-            { tab: 'accounts', label: '社員一覧・登録', sub: '入退職日・有休管理' },
+            { tab: 'accounts', label: 'スタッフ一覧・登録', sub: '入退職日・有休管理' },
             { tab: 'groupleave', label: '出勤規定日数設定', sub: 'グループ別・月別日数' },
             { tab: 'eoincentive', label: 'eo業務インセンティブ', sub: '新規実績・既存実績・支給額' },
             { tab: 'auditlog', label: '監査ログ', sub: '承認・操作の履歴' },
@@ -6562,7 +6562,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, o
   const overtimeStatus = computeOvertimeStatus(employeeAccounts, data.records, getOvertimeStartMonth());
   const overtimeWarnCount = overtimeStatus.rows.filter((r) => r.level === 'warn').length;
 
-  // 画面のどこかに表示された氏名がクリックされたら、その社員の詳細ページを開く
+  // 画面のどこかに表示された氏名がクリックされたら、そのスタッフの詳細ページを開く
   const [pendingProfileId, setPendingProfileId] = useState(null);
   const openEmployee = useCallback((id) => {
     setPendingProfileId(id);
@@ -6622,7 +6622,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, o
             )}
           </button>
           <button onClick={() => setTab('accounts')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'accounts' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
-            社員管理
+            スタッフ管理
           </button>
           <button onClick={() => setTab('groupleave')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'groupleave' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
             出勤規定日数設定
@@ -6919,7 +6919,7 @@ function PerformanceAdminTab({ pending, decided, onDecide, isDesktop }) {
                 value={memos[r.id] ?? ''}
                 onChange={(e) => setMemo(r.id, e.target.value)}
                 rows={2}
-                placeholder="社員に送るコメント（任意）"
+                placeholder="スタッフに送るコメント（任意）"
                 className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[12.5px] resize-none mb-2"
               />
               <div className="flex gap-2">
@@ -7009,7 +7009,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
     return true;
   });
 
-  // 承認待ちの出勤・退勤（日付・社員フィルターに関係なく、全期間から探す）
+  // 承認待ちの出勤・退勤（日付・スタッフフィルターに関係なく、全期間から探す）
   const pendingApprovals = [];
   employeeAccounts.forEach((acc) => {
     const recs = data.records[acc.id] || {};
@@ -7105,7 +7105,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
 
   const escapeCsv = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
   const exportCsv = () => {
-    const header = ['社員名','日付','出勤','実打刻','出勤区分','退勤','実打刻','退勤区分','休憩(分)','実働','残業','遅刻(分)','早退(分)','状態'];
+    const header = ['スタッフ名','日付','出勤','実打刻','出勤区分','退勤','実打刻','退勤区分','休憩(分)','実働','残業','遅刻(分)','早退(分)','状態'];
     const body = rows.map((r) => [r.employeeName,r.date,r.clockIn,r.clockInActual,r.clockInStatusLabel,r.clockOut,r.clockOutActual,r.clockOutStatusLabel,r.breakMin,minutesToHHMM(r.workedMin),minutesToHHMM(r.overtimeMin),r.lateMin,r.earlyLeaveMin,r.status]);
     const csv = '\uFEFF' + [header, ...body].map((line) => line.map(escapeCsv).join(',')).join('\r\n');
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
@@ -7190,7 +7190,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
             </select>
           </Field>
         )}
-        <Field label="社員">
+        <Field label="スタッフ">
           <EmployeeSearchSelect employeeAccounts={employeeAccounts} value={employeeFilter} onChange={setEmployeeFilter} />
         </Field>
         <button onClick={exportCsv} disabled={rows.length === 0} className="ml-auto flex items-center gap-1.5 rounded-lg bg-slate-900 disabled:bg-slate-200 text-white px-4 py-2.5 text-[12.5px] font-bold">
@@ -7199,7 +7199,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
       </div>
 
       <div className={`grid gap-3 ${isDesktop ? 'grid-cols-3' : 'grid-cols-3'}`}>
-        <StatMini label="対象社員" value={`${summaryByEmployee.length}名`} />
+        <StatMini label="対象スタッフ" value={`${summaryByEmployee.length}名`} />
         <StatMini label="出勤者数" value={`${summaryByEmployee.reduce((s, x) => s + x.days, 0)}名`} />
         <StatMini label="総実働" value={minutesToHHMM(summaryByEmployee.reduce((s, x) => s + x.workedMin, 0))} />
       </div>
@@ -7217,7 +7217,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
           <div className="overflow-x-auto">
             <table className="w-full text-[12px]">
               <thead><tr className="text-left text-[10px] text-slate-400 border-b border-slate-100">
-                {(employeeFilter === 'all' ? ['社員','日付','出勤','退勤','休憩(分)','実働','残業','遅刻/早退','状態','承認','月間'] : ['日付','出勤','退勤','休憩(分)','実働','残業','遅刻/早退','状態','承認','月間']).map((h, i) => <th key={h + i} className="px-2 py-2 font-medium">{h}</th>)}
+                {(employeeFilter === 'all' ? ['スタッフ','日付','出勤','退勤','休憩(分)','実働','残業','遅刻/早退','状態','承認','月間'] : ['日付','出勤','退勤','休憩(分)','実働','残業','遅刻/早退','状態','承認','月間']).map((h, i) => <th key={h + i} className="px-2 py-2 font-medium">{h}</th>)}
               </tr></thead>
               <tbody>{rows.map((r) => {
                 const key = `${r.employeeId}|${r.date}`;
@@ -7493,8 +7493,8 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
   );
 }
 
-// 社員数が多い場合に備えた、1文字入力するごとに絞り込まれる検索付きセレクト
-function EmployeeSearchSelect({ employeeAccounts, value, onChange, allLabel = '全社員', showAllOption = true, placeholder = '名前で検索…' }) {
+// スタッフ数が多い場合に備えた、1文字入力するごとに絞り込まれる検索付きセレクト
+function EmployeeSearchSelect({ employeeAccounts, value, onChange, allLabel = '全スタッフ', showAllOption = true, placeholder = '名前で検索…' }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const wrapRef = useRef(null);
@@ -7542,7 +7542,7 @@ function EmployeeSearchSelect({ employeeAccounts, value, onChange, allLabel = '�
             </button>
           )}
           {filtered.length === 0 ? (
-            <div className="px-3 py-2 text-[12.5px] text-slate-300">該当する社員がいません</div>
+            <div className="px-3 py-2 text-[12.5px] text-slate-300">該当するスタッフがいません</div>
           ) : (
             filtered.map((a) => (
               <button
@@ -7953,7 +7953,7 @@ function AdminCommuteExpenseClaimsTab({ claims, onDecide, isDesktop }) {
       c.items.forEach((r) => {
         const amount = r.calcMethod === 'within_pass' ? 0 : r.calcMethod === 'excess' ? (Number(r.excessAmount) || 0) : r.calcMethod === 'pass_fare' ? (Number(r.passFare) || 0) : (Number(r.unitPrice) || 0);
         rows.push({
-          '社員名': c.employeeName,
+          'スタッフ名': c.employeeName,
           '対象月': c.targetMonth ? monthKeyLabel(c.targetMonth) : '',
           '提出日': c.submittedDate,
           '利用日': r.date,
@@ -8223,7 +8223,7 @@ function AdminProfileRequestsTab({ requests, onDecide, isDesktop }) {
                 value={memos[r.id] ?? ''}
                 onChange={(e) => setMemo(r.id, e.target.value)}
                 rows={2}
-                placeholder="社員に送るコメント（任意）"
+                placeholder="スタッフに送るコメント（任意）"
                 className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[12.5px] resize-none mb-2"
               />
               <div className="flex gap-2">
@@ -8302,7 +8302,7 @@ function GroupLeaveScheduleTab({ employeeAccounts, groupLeaveSchedules, onSave, 
   return (
     <div className="space-y-5">
       <div className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 text-[11.5px] text-blue-800">
-        メイングループごとに、月ごとの「出勤規定日数」（所定労働日数）を設定できます。ここで設定した日数は、そのグループに所属する社員の月給日割り計算（給与タブ）に使われます。グループを設定していない社員は、社員アカウント編集画面の「グループ」タブで個人別に出勤規定日数を入力してください。
+        メイングループごとに、月ごとの「出勤規定日数」（所定労働日数）を設定できます。ここで設定した日数は、そのグループに所属するスタッフの月給日割り計算（給与タブ）に使われます。グループを設定していないスタッフは、スタッフアカウント編集画面の「グループ」タブで個人別に出勤規定日数を入力してください。
       </div>
 
       <div className={isDesktop ? 'grid grid-cols-[240px_1fr] gap-5 items-start' : 'space-y-4'}>
@@ -8471,7 +8471,7 @@ function AdminAuditLogTab({ logs, isDesktop }) {
               <th className="px-5 py-2 font-medium">日時</th>
               <th className="px-5 py-2 font-medium">操作者</th>
               <th className="px-5 py-2 font-medium">操作内容</th>
-              <th className="px-5 py-2 font-medium">対象社員</th>
+              <th className="px-5 py-2 font-medium">対象スタッフ</th>
               <th className="px-5 py-2 font-medium">詳細</th>
             </tr>
           </thead>
@@ -8538,7 +8538,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
   const [backingUp, setBackingUp] = useState(false);
   const isMasterAdmin = session?.role === 'master_admin';
 
-  // 他の画面で氏名がクリックされた場合、その社員の詳細を自動で開く
+  // 他の画面で氏名がクリックされた場合、そのスタッフの詳細を自動で開く
   useEffect(() => {
     if (!initialProfileId) return;
     const target = employeeAccounts.find((a) => a.id === initialProfileId);
@@ -8667,7 +8667,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
     <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
       <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2 flex-wrap">
         <Users size={15} className="text-slate-400" />
-        <h2 className="font-bold text-[13.5px]">社員一覧</h2>
+        <h2 className="font-bold text-[13.5px]">スタッフ一覧</h2>
         <span className="text-[11px] text-slate-400">{filteredEmployeeAccounts.length}名 / 全{employeeAccounts.length}名</span>
         <button onClick={() => setCsvModalOpen(true)} className="ml-auto flex items-center gap-1 text-[12px] font-bold text-slate-500 border border-slate-200 rounded-lg px-2.5 py-1.5">
           <Download size={13} className="rotate-180" /> CSV一括登録
@@ -8754,7 +8754,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
               );
             })}
             {filteredEmployeeAccounts.length === 0 && (
-              <tr><td colSpan={5} className="px-5 py-8 text-center text-[12.5px] text-slate-300">該当する社員がいません</td></tr>
+              <tr><td colSpan={5} className="px-5 py-8 text-center text-[12.5px] text-slate-300">該当するスタッフがいません</td></tr>
             )}
           </tbody>
         </table>
@@ -8783,7 +8783,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
             );
           })}
           {filteredEmployeeAccounts.length === 0 && (
-            <div className="px-5 py-8 text-center text-[12.5px] text-slate-300">該当する社員がいません</div>
+            <div className="px-5 py-8 text-center text-[12.5px] text-slate-300">該当するスタッフがいません</div>
           )}
         </div>
       )}
@@ -8792,7 +8792,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
 
   const formCard = (showForm || isDesktop) && (
     <form onSubmit={submit} className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 space-y-3.5 h-fit">
-      <h3 className="font-bold text-[13.5px] mb-1">新しい社員アカウントを作成</h3>
+      <h3 className="font-bold text-[13.5px] mb-1">新しいアカウントを作成</h3>
       <div className="grid grid-cols-2 gap-3">
         <Field label="姓">
           <input value={sei} onChange={(e) => setSei(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" placeholder="例）田中" />
@@ -8977,7 +8977,7 @@ function DeleteAccountModal({ account, onClose, onConfirm }) {
         <div className="px-5 py-4 space-y-3">
           <div className="bg-rose-50 border border-rose-200 rounded-lg px-3 py-3 text-[12.5px] text-rose-700">
             <p className="font-bold mb-1">{account.name}（ID: {account.username}）を削除します。</p>
-            <p>この操作は元に戻せません。この社員の勤怠記録・申請・給与明細などのデータもすべて削除されます。</p>
+            <p>この操作は元に戻せません。このスタッフの勤怠記録・申請・給与明細などのデータもすべて削除されます。</p>
           </div>
           <Field label={`確認のため「${account.name}」と入力してください`}>
             <input value={confirmText} onChange={(e) => setConfirmText(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" />
@@ -9047,7 +9047,7 @@ function CsvImportModal({ onClose, onAddAccount }) {
     <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-40 p-0 sm:p-4">
       <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg max-h-[92vh] overflow-y-auto">
         <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white">
-          <h3 className="font-bold text-[15px]">CSVで社員を一括登録</h3>
+          <h3 className="font-bold text-[15px]">CSVでスタッフを一括登録</h3>
           <button onClick={onClose} className="text-slate-400 text-xl leading-none px-1">×</button>
         </div>
         <div className="px-5 py-4 space-y-3">
@@ -9653,7 +9653,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                 <button onClick={() => addSalaryItem('deduction')} className="text-[11px] font-bold text-amber-600 flex items-center gap-1"><Plus size={12} />控除項目を追加</button>
                 <button onClick={saveSalaryItemsNow} disabled={savingSalaryItems} className="text-[11px] font-bold text-white bg-slate-800 disabled:bg-slate-300 rounded-lg px-3 py-1.5">{savingSalaryItems ? '保存中…' : '固定項目を保存'}</button>
               </div>
-              <div className="text-[10.5px] text-slate-400">ここで登録した項目は、「給与」タブでその社員の給与を新規作成する際に、毎回自動で候補として追加されます。</div>
+              <div className="text-[10.5px] text-slate-400">ここで登録した項目は、「給与」タブでそのスタッフの給与を新規作成する際に、毎回自動で候補として追加されます。</div>
 
               {/* 標準報酬月額（月別履歴） */}
               <div className="text-[11px] font-bold text-slate-400 pt-4 flex items-center justify-between">
