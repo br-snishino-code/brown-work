@@ -10,13 +10,12 @@
 //   supabase secrets set SMTP_HOST=smtp.gmail.com
 //   supabase secrets set SMTP_PORT=465
 //   supabase secrets set SMTP_USER=送信元のメールアドレス
-//   supabase secrets set SMTP_PASS=Googleで発行したアプリパスワード（16桁）
-//   supabase secrets set SMTP_FROM_NAME=Brown Work
+//   supabase secrets set SMTP_PASS=Googleで発行したアプリパスワード（16桁・スペースなし）
+//   supabase secrets set SMTP_FROM_NAME="Brown Work"
 //
-// ※ SMTP_PASS は通常のログインパスワードではなく「アプリパスワード」を使う。
-//    Googleアカウント → セキュリティ → 2段階認証 → アプリパスワード から発行する。
+// ※ 日本語の件名・本文を正しく扱うため nodemailer を使用している。
 
-import { SMTPClient } from 'https://deno.land/x/denomailer@1.6.0/mod.ts';
+import nodemailer from 'npm:nodemailer@6.9.14';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -28,6 +27,13 @@ const json = (body: unknown, status = 200) =>
     status,
     headers: { ...corsHeaders, 'Content-Type': 'application/json' },
   });
+
+// 改行をそのまま活かした簡易HTMLを作る（テキスト版と併せて送る）
+const escapeHtml = (s: string) =>
+  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+const textToHtml = (text: string) =>
+  `<div style="font-family:'Hiragino Sans','Yu Gothic',Meiryo,sans-serif;font-size:14px;line-height:1.8;color:#1e293b;white-space:pre-wrap;">${escapeHtml(text)}</div>`;
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -51,27 +57,24 @@ Deno.serve(async (req) => {
       return json({ error: 'to と subject は必須です' }, 400);
     }
 
-    const client = new SMTPClient({
-      connection: {
-        hostname: host,
-        port,
-        tls: port === 465,
-        auth: { username: user, password: pass },
-      },
+    const transporter = nodemailer.createTransport({
+      host,
+      port,
+      secure: port === 465,
+      auth: { user, pass },
     });
 
-    await client.send({
-      from: `${fromName} <${user}>`,
+    await transporter.sendMail({
+      from: { name: fromName, address: user },
       to,
       subject,
-      content: text || '',
-      html: html || undefined,
+      text: text || '',
+      html: html || (text ? textToHtml(text) : undefined),
     });
-    await client.close();
 
     return json({ ok: true });
   } catch (e) {
     console.error('メール送信に失敗しました', e);
-    return json({ error: String(e?.message || e) }, 500);
+    return json({ error: String((e as Error)?.message || e) }, 500);
   }
 });
