@@ -1495,6 +1495,8 @@ export default function AttendanceApp() {
   const [performanceModal, setPerformanceModal] = useState(null);
   const [employeeTab, setEmployeeTab] = useState('attendance');
   const [topTab, setTopTab] = useState('attendance'); // attendance | labor | hr | payroll
+  // 管理者が自分の打刻・申請画面を開いているかどうか
+  const [personalMode, setPersonalMode] = useState(false);
   const [viewMode, setViewMode] = useState(() => (typeof window !== 'undefined' && window.matchMedia('(min-width: 1024px)').matches ? 'desktop' : 'mobile'));
   const [schedulePatterns, setSchedulePatterns] = useState([]);
   const [activePatternNo, setActivePatternNo] = useState(1);
@@ -1510,9 +1512,9 @@ export default function AttendanceApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [topTab, employeeTab]);
 
-  // 今月の規定勤怠時間パターンを取得（スタッフのみ）
+  // 今月の規定勤怠時間パターンを取得（管理者も自分の打刻画面で使うため全員分取得する）
   useEffect(() => {
-    if (!session || session.role !== 'employee') return;
+    if (!session) return;
     const y = now.getFullYear();
     const m = now.getMonth() + 1;
     fetchSchedulePatterns(session.id, y, m).then((patterns) => {
@@ -2628,7 +2630,11 @@ export default function AttendanceApp() {
     .reduce((sum, l) => sum + l.days, 0);
   const myPerformanceReports = data.performanceReports.filter((r) => r.employeeId === employeeId);
 
-  const employeeAccounts = data.accounts.filter((a) => a.role === 'employee');
+  // 管理者・マスター管理者も「働く人」として勤怠・給与の対象に含める
+  const employeeAccounts = data.accounts;
+  // 管理者は「管理画面」と「自分の画面（打刻・申請）」を切り替えて使う
+  const isAdminRole = session.role === 'admin' || session.role === 'master_admin';
+  const showStaffScreens = !isAdminRole || personalMode;
   const pendingCorrectionCount = data.corrections.filter((c) => c.status === 'pending').length;
   const pendingLeaveCount = data.leaveRequests.filter((l) => l.status === 'pending').length;
   const pendingPerformanceCount = data.performanceReports.filter((r) => r.status === 'pending').length;
@@ -2640,7 +2646,7 @@ export default function AttendanceApp() {
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-900">
       <div style={{ paddingTop: 'env(safe-area-inset-top)' }} className="bg-slate-950">
-        <GlobalTopTabs topTab={topTab} setTopTab={setTopTab} session={session} />
+        <GlobalTopTabs topTab={topTab} setTopTab={setTopTab} session={session} personalMode={personalMode} setPersonalMode={setPersonalMode} />
       </div>
       <Header
         session={session}
@@ -2662,21 +2668,21 @@ export default function AttendanceApp() {
               onGetFileUrl={getAnnouncementFileUrl}
               isDesktop={isDesktop}
             />
-            {(session.role === 'admin' || session.role === 'master_admin') && (
+            {!showStaffScreens && (
               <OvertimeLimitTab
                 employeeAccounts={employeeAccounts}
                 records={data.records}
                 isDesktop={isDesktop}
               />
             )}
-            {(session.role === 'admin' || session.role === 'master_admin') && (
+            {!showStaffScreens && (
               <PaidLeaveSummaryTab
                 employeeAccounts={employeeAccounts}
                 leaveRequests={data.leaveRequests}
                 isDesktop={isDesktop}
               />
             )}
-            {(session.role === 'admin' || session.role === 'master_admin') && (
+            {!showStaffScreens && (
               <TurnoverAnalysisTab
                 employeeAccounts={employeeAccounts}
                 resignationReasons={data.resignationReasons}
@@ -2689,7 +2695,7 @@ export default function AttendanceApp() {
           <HelpTab session={session} isDesktop={isDesktop} />
         )}
         {topTab === 'hr' && (
-          session.role === 'employee' ? (
+          showStaffScreens ? (
             <div className="space-y-5">
               <YearEndAdjustmentSection
                 session={session}
@@ -2718,7 +2724,7 @@ export default function AttendanceApp() {
           )
         )}
         {topTab === 'payroll' && (
-          session.role === 'employee' ? (
+          showStaffScreens ? (
             <div className="space-y-5">
               <PayslipView records={data.payrollRecords.filter((p) => p.employeeId === employeeId && p.status === 'published')} employeeName={session.name} />
               <CommuteExpenseClaimSection
@@ -2748,7 +2754,7 @@ export default function AttendanceApp() {
             </div>
           )
         )}
-        {topTab === 'attendance' && (session.role === 'employee' ? (
+        {topTab === 'attendance' && (showStaffScreens ? (
           <div className="space-y-5">
             {isDesktop && (
               <div className="flex items-center bg-white rounded-2xl border border-slate-200 p-1.5 text-[12px] font-bold max-w-2xl shadow-sm">
@@ -2852,7 +2858,7 @@ export default function AttendanceApp() {
           onSubmit={submitPerformanceReport}
         />
       )}
-      {session.role === 'employee' && !isDesktop && (
+      {showStaffScreens && !isDesktop && (
         <nav className="fixed inset-x-3 bottom-3 z-40 mx-auto max-w-md rounded-[22px] border border-slate-200/80 bg-white/95 p-1.5 shadow-2xl backdrop-blur">
           <div className="grid grid-cols-4 gap-1">
             {[
@@ -3161,7 +3167,7 @@ function ResetPasswordRecoveryScreen({ toast, onDone }) {
   );
 }
 
-function GlobalTopTabs({ topTab, setTopTab, session }) {
+function GlobalTopTabs({ topTab, setTopTab, session, personalMode, setPersonalMode }) {
   const allTabs = [
     { key: 'attendance', label: '勤怠', icon: <Clock size={14} /> },
     { key: 'labor', label: '労務', icon: <Briefcase size={14} /> },
@@ -3169,8 +3175,9 @@ function GlobalTopTabs({ topTab, setTopTab, session }) {
     { key: 'payroll', label: '給与', icon: <Wallet size={14} /> },
     { key: 'help', label: 'ヘルプ', icon: <HelpCircle size={14} /> },
   ];
-  // 権限を制限された管理者は、許可されたタブのみ表示（スタッフ・マスター管理者は全タブ表示）
-  const isRestrictedAdmin = session?.role === 'admin';
+  // 権限を制限された管理者は、許可されたタブのみ表示（スタッフ・マスター管理者は全タブ表示）。
+  // ただし「自分の勤怠」表示中は本人の画面なので、タブ制限はかけない。
+  const isRestrictedAdmin = session?.role === 'admin' && !personalMode;
   const tabs = isRestrictedAdmin
     ? allTabs.filter((t) => t.key === 'help' || (session.adminPermissions || []).includes(t.key))
     : allTabs;
@@ -3196,8 +3203,24 @@ function GlobalTopTabs({ topTab, setTopTab, session }) {
             {t.label}
           </button>
         ))}
+        {(session?.role === 'admin' || session?.role === 'master_admin') && setPersonalMode && (
+          <div className="ml-auto flex items-center bg-white/10 rounded-lg p-0.5 text-[11px] font-bold">
+            <button
+              onClick={() => setPersonalMode(false)}
+              className={`px-2.5 py-1 rounded-md transition-colors ${!personalMode ? 'bg-white text-slate-900' : 'text-slate-300 hover:text-white'}`}
+            >
+              管理画面
+            </button>
+            <button
+              onClick={() => setPersonalMode(true)}
+              className={`px-2.5 py-1 rounded-md transition-colors ${personalMode ? 'bg-white text-slate-900' : 'text-slate-300 hover:text-white'}`}
+            >
+              自分の勤怠
+            </button>
+          </div>
+        )}
         {session?.role === 'master_admin' && (
-          <span className="ml-auto text-[10px] font-bold text-amber-500 bg-amber-500/10 px-2 py-1 rounded-full">マスター管理者</span>
+          <span className={`${(session?.role === 'admin' || session?.role === 'master_admin') ? 'ml-2' : 'ml-auto'} text-[10px] font-bold text-amber-500 bg-amber-500/10 px-2 py-1 rounded-full whitespace-nowrap`}>マスター管理者</span>
         )}
       </div>
     </div>
@@ -6711,7 +6734,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, o
       {tab === 'adminperms' && isMasterAdmin && (
         <AdminPermissionsTab
           adminAccounts={adminAccounts}
-          staffAccounts={employeeAccounts.filter((a) => !a.resignationDate)}
+          staffAccounts={employeeAccounts.filter((a) => a.role === 'employee' && !a.resignationDate)}
           currentUserId={session.id}
           onUpdateAccess={onUpdateAdminAccess}
           onResetPassword={onResetPassword}
