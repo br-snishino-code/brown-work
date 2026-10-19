@@ -6711,6 +6711,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, o
       {tab === 'adminperms' && isMasterAdmin && (
         <AdminPermissionsTab
           adminAccounts={adminAccounts}
+          staffAccounts={employeeAccounts.filter((a) => !a.resignationDate)}
           currentUserId={session.id}
           onUpdateAccess={onUpdateAdminAccess}
           onResetPassword={onResetPassword}
@@ -8353,18 +8354,34 @@ function GroupLeaveScheduleTab({ employeeAccounts, groupLeaveSchedules, onSave, 
   );
 }
 
-function AdminPermissionsTab({ adminAccounts, currentUserId, onUpdateAccess, onResetPassword, isDesktop }) {
+function AdminPermissionsTab({ adminAccounts, staffAccounts = [], currentUserId, onUpdateAccess, onResetPassword, isDesktop }) {
   const [resetTarget, setResetTarget] = useState(null);
+  const [staffQuery, setStaffQuery] = useState('');
 
-  const roleLabel = (role) => (role === 'master_admin' ? 'マスター管理者' : '管理者');
+  const roleLabel = (role) => (role === 'master_admin' ? 'マスター管理者' : role === 'admin' ? '管理者' : 'スタッフ');
 
   const changeRole = (acc, newRole) => {
+    if (newRole === acc.role) return;
+    if (!window.confirm(`${acc.name}さんの役割を「${roleLabel(acc.role)}」から「${roleLabel(newRole)}」に変更します。よろしいですか？`)) return;
     const patch = { role: newRole };
     if (newRole === 'admin' && (!acc.adminPermissions || acc.adminPermissions.length === 0)) {
       patch.adminPermissions = ['attendance', 'labor', 'hr', 'payroll'];
     }
+    // スタッフに戻す場合は管理者用の権限を空にしておく
+    if (newRole === 'employee') patch.adminPermissions = [];
     onUpdateAccess(acc.id, patch);
   };
+
+  // スタッフを管理者にする（既定では4タブすべて利用可）
+  const promoteToAdmin = (acc) => {
+    if (!window.confirm(`${acc.name}さんを「管理者」にします。よろしいですか？\n\n※ 管理者になると打刻画面がなくなり、勤怠一覧・給与計算の対象からも外れます。ご本人が打刻を続ける必要がある場合は、スタッフのままにしてください。\n※ 利用できるタブは後から変更できます。`)) return;
+    onUpdateAccess(acc.id, { role: 'admin', adminPermissions: ['attendance', 'labor', 'hr', 'payroll'] });
+  };
+
+  const q = staffQuery.trim();
+  const filteredStaff = q
+    ? staffAccounts.filter((a) => (a.name || '').includes(q) || (a.furigana || '').includes(q) || (a.username || '').includes(q))
+    : staffAccounts;
 
   const togglePermission = (acc, key) => {
     const current = acc.adminPermissions || [];
@@ -8376,7 +8393,7 @@ function AdminPermissionsTab({ adminAccounts, currentUserId, onUpdateAccess, onR
     <div className="space-y-5">
       <div className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 text-[11.5px] text-blue-800 flex items-start gap-2">
         <ShieldCheck size={14} className="mt-0.5 shrink-0" />
-        <span>マスター管理者は常に全タブを利用できます（権限の変更はできません）。「管理者」は、チェックしたタブのみ利用できます。役割・権限の変更はマスター管理者のみ行えます。</span>
+        <span>マスター管理者は常に全タブを利用できます（権限の変更はできません）。「管理者」は、チェックしたタブのみ利用できます。役割・権限の変更はマスター管理者のみ行えます。スタッフを管理者にする場合は、下の「スタッフを管理者にする」からお選びください。</span>
       </div>
 
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
@@ -8406,6 +8423,7 @@ function AdminPermissionsTab({ adminAccounts, currentUserId, onUpdateAccess, onR
                       disabled={isSelf}
                       className={`text-[12px] font-bold border rounded-lg px-2.5 py-1.5 ${isMaster ? 'bg-amber-50 border-amber-200 text-amber-700' : 'bg-slate-50 border-slate-200 text-slate-600'}`}
                     >
+                      <option value="employee">スタッフ</option>
                       <option value="admin">管理者</option>
                       <option value="master_admin">マスター管理者</option>
                     </select>
@@ -8437,6 +8455,46 @@ function AdminPermissionsTab({ adminAccounts, currentUserId, onUpdateAccess, onR
           {adminAccounts.length === 0 && (
             <div className="px-5 py-10 text-center text-[12.5px] text-slate-300">管理者アカウントがありません</div>
           )}
+        </div>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2 flex-wrap">
+          <Users size={15} className="text-slate-400" />
+          <h2 className="font-bold text-[13.5px]">スタッフを管理者にする</h2>
+          <span className="text-[11px] text-slate-400">{filteredStaff.length}名 / 全{staffAccounts.length}名</span>
+        </div>
+        <div className="px-5 py-3 border-b border-slate-100">
+          <input
+            value={staffQuery}
+            onChange={(e) => setStaffQuery(e.target.value)}
+            placeholder="氏名・ふりがな・IDで検索"
+            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[12.5px]"
+          />
+        </div>
+        <div className={`divide-y divide-slate-100 ${isDesktop ? 'max-h-[420px] overflow-y-auto' : ''}`}>
+          {filteredStaff.map((acc) => (
+            <div key={acc.id} className="px-5 py-3 flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-[13px] font-semibold text-slate-800">{acc.name}</div>
+                <div className="text-[11px] text-slate-400 font-mono">ID: {acc.username}</div>
+              </div>
+              <button
+                onClick={() => promoteToAdmin(acc)}
+                className="shrink-0 text-[12px] font-bold text-slate-600 border border-slate-200 rounded-lg px-3 py-1.5 hover:border-amber-500 hover:text-amber-600 transition-colors"
+              >
+                管理者にする
+              </button>
+            </div>
+          ))}
+          {filteredStaff.length === 0 && (
+            <div className="px-5 py-10 text-center text-[12.5px] text-slate-300">
+              {staffAccounts.length === 0 ? 'スタッフのアカウントがありません' : '該当するスタッフがいません'}
+            </div>
+          )}
+        </div>
+        <div className="px-5 py-3 text-[10.5px] text-slate-400 border-t border-slate-100">
+          管理者にすると、既定で4タブ（勤怠・労務・人材・給与）すべてが利用できます。利用できるタブは上の「管理者アカウント」で変更できます。管理者からスタッフに戻す場合も、上の一覧の役割プルダウンから行えます。
         </div>
       </div>
 
