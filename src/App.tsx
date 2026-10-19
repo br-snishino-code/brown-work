@@ -201,6 +201,49 @@ function EmployeeLink({ id, name, className = '' }) {
   );
 }
 
+// ---- アカウント招待 ----
+const APP_LOGIN_URL = 'https://brown-work.vercel.app';
+
+// 仮パスワードの自動生成（紛らわしい文字 O/0/I/l/1 は使わない）
+function generateTempPassword() {
+  const chars = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let out = '';
+  for (let i = 0; i < 10; i++) out += chars[Math.floor(Math.random() * chars.length)];
+  return out;
+}
+
+// 招待メールの本文（件名と本文をここで組み立てる）
+function buildInviteMail({ name, email, tempPassword }) {
+  const subject = '【Brown Work】勤怠システムのご利用開始について';
+  const text = [
+    `${name} 様`,
+    '',
+    'お疲れさまです。',
+    '勤怠管理システム「Brown Work」のアカウントを作成しましたので、下記よりログインしてください。',
+    '',
+    '────────────────────',
+    `ログインURL： ${APP_LOGIN_URL}`,
+    `ログインID　： ${email}`,
+    `仮パスワード： ${tempPassword}`,
+    '────────────────────',
+    '',
+    '【ご利用の流れ】',
+    '1. 上記URLを開き、ログインIDと仮パスワードでログインします',
+    '2. ご自身の新しいパスワードを設定します（初回のみ必須）',
+    '3. 住所・連絡先などの情報をご入力ください',
+    '',
+    '【ご注意】',
+    '・仮パスワードは初回ログイン専用です。必ずご自身のパスワードに変更してください',
+    '・このメールは第三者に転送しないでください',
+    '・スマートフォンでもご利用いただけます。ブラウザのメニューから「ホーム画面に追加」をしておくと便利です',
+    '',
+    'ご不明な点がありましたら、担当者までお問い合わせください。',
+    '',
+    '株式会社Brown',
+  ].join('\n');
+  return { subject, text };
+}
+
 // スタッフ種別（雇用形態）の選択肢
 const STAFF_TYPES = [
   '社員',
@@ -724,6 +767,9 @@ const rowToAccount = (row) => ({
   adminPermissions: Array.isArray(row.admin_permissions) ? row.admin_permissions : ['attendance', 'labor', 'hr', 'payroll'],
   hireDate: row.hire_date,
   resignationDate: row.resignation_date,
+  mustChangePassword: !!row.must_change_password,
+  profileSetupCompleted: row.profile_setup_completed !== false,
+  invitedAt: row.invited_at || null,
   resignationReasonId: row.resignation_reason_id || '',
   resignationNote: row.resignation_note || '',
   contactEmail: row.contact_email || '',
@@ -1690,9 +1736,30 @@ export default function AttendanceApp() {
         show(detail || 'アカウント作成に失敗しました', 'warn');
         return false;
       }
+      // 初回ログイン時のパスワード変更と、個人情報入力の案内を有効にする
+      const newId = fnData?.id || null;
+      if (newId) {
+        await supabase
+          .from('employees')
+          .update({
+            must_change_password: true,
+            profile_setup_completed: false,
+            invited_at: new Date().toISOString(),
+          })
+          .eq('id', newId);
+      }
+
+      // ログイン案内メールを送る（SMTP未設定の場合は届かないが、作成自体は成功扱い）
+      const mail = buildInviteMail({
+        name: payload.name,
+        email: payload.username,
+        tempPassword: payload.password,
+      });
+      await sendEmailBestEffort(payload.username, mail.subject, mail.text);
+
       await refreshData();
-      await logAudit(session, 'スタッフアカウントを作成', `username: ${payload.username}`, fnData?.id || null, payload.name);
-      show(`${payload.name}さんのアカウントを作成しました`, 'success');
+      await logAudit(session, 'スタッフアカウントを作成', `username: ${payload.username}`, newId, payload.name);
+      show(`${payload.name}さんのアカウントを作成し、ログイン案内を送信しました`, 'success');
       return true;
     } catch (e) {
       console.error('アカウント作成エラー:', e);
@@ -1735,6 +1802,9 @@ export default function AttendanceApp() {
         show(fnData?.error || 'パスワードのリセットに失敗しました', 'warn');
         return false;
       }
+      // リセット後は本人に変更してもらう
+      await supabase.from('employees').update({ must_change_password: true }).eq('id', account.id);
+      await refreshData();
       await logAudit(session, 'パスワードをリセット', `対象: ${account.username}`, account.id, account.name);
       show(`${account.name}さんのパスワードをリセットしました`, 'success');
       return true;
@@ -2163,6 +2233,8 @@ export default function AttendanceApp() {
       jobTitle: 'job_title',
       contractStart: 'contract_start',
       contractEnd: 'contract_end',
+      mustChangePassword: 'must_change_password',
+      profileSetupCompleted: 'profile_setup_completed',
       resignationReasonId: 'resignation_reason_id',
       resignationNote: 'resignation_note',
       bankCode: 'bank_code',
@@ -2596,6 +2668,41 @@ export default function AttendanceApp() {
           setPasswordRecoveryMode(false);
           await supabase.auth.signOut();
         }}
+      />
+    );
+  }
+
+  // 初回ログイン：仮パスワードのままならパスワード変更を必須にする
+  if (session && session.mustChangePassword) {
+    return (
+      <FirstLoginPasswordScreen
+        session={session}
+        toast={toast}
+        onDone={async () => {
+          setSession((prev) => ({ ...prev, mustChangePassword: false }));
+          await refreshData();
+          show('パスワードを変更しました', 'success');
+        }}
+        onLogout={handleLogout}
+      />
+    );
+  }
+
+  // パスワード変更後、個人情報の入力をご案内する
+  if (session && session.profileSetupCompleted === false) {
+    return (
+      <ProfileSetupScreen
+        session={session}
+        toast={toast}
+        onSave={async (patch) => {
+          const ok = await updateEmployeeProfile(session.id, patch);
+          if (ok) show('ご登録ありがとうございます', 'success');
+          return ok;
+        }}
+        onSkip={async () => {
+          await updateEmployeeProfile(session.id, { profileSetupCompleted: true });
+        }}
+        onLogout={handleLogout}
       />
     );
   }
@@ -3061,6 +3168,176 @@ function StandardRemunerationTablePicker({ onClose, onPick }) {
       </div>
     </div>,
     document.body
+  );
+}
+
+// ---- 初回ログイン：パスワード変更（必須） ----
+function FirstLoginPasswordScreen({ session, toast, onDone, onLogout }) {
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setError('');
+    if (password.length < 6) {
+      setError('パスワードは6文字以上にしてください');
+      return;
+    }
+    if (password !== confirmPassword) {
+      setError('確認用のパスワードが一致しません');
+      return;
+    }
+    setSaving(true);
+    const { error: updateError } = await supabase.auth.updateUser({ password });
+    if (updateError) {
+      setError('パスワードの変更に失敗しました。時間をおいて再度お試しください。');
+      setSaving(false);
+      return;
+    }
+    await supabase.from('employees').update({ must_change_password: false }).eq('id', session.id);
+    setSaving(false);
+    await onDone();
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 font-sans flex items-center justify-center px-4 py-10">
+      <div className="w-full max-w-[400px]">
+        <div className="bg-white rounded-[24px] border border-slate-200 shadow-sm p-7 space-y-5">
+          <div className="flex items-center gap-2.5">
+            <div className="w-10 h-10 rounded-xl bg-slate-900 flex items-center justify-center shrink-0">
+              <Lock size={18} className="text-white" />
+            </div>
+            <div>
+              <h1 className="font-bold text-[16px] leading-tight">パスワードの設定</h1>
+              <div className="text-[11.5px] text-slate-400">{session.name} 様</div>
+            </div>
+          </div>
+
+          <div className="bg-amber-50 border border-amber-200 rounded-xl px-3.5 py-3 text-[12px] text-amber-800">
+            仮パスワードでログインしています。安全にご利用いただくため、ご自身のパスワードを設定してください。
+          </div>
+
+          <form onSubmit={submit} className="space-y-4">
+            <Field label="新しいパスワード（6文字以上）">
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="w-full border-2 border-slate-200 rounded-xl px-3.5 py-3 text-[15px] outline-none focus:border-slate-900"
+                autoFocus
+                required
+              />
+            </Field>
+            <Field label="新しいパスワード（確認）">
+              <input
+                type="password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                className="w-full border-2 border-slate-200 rounded-xl px-3.5 py-3 text-[15px] outline-none focus:border-slate-900"
+                required
+              />
+            </Field>
+            {error && <div className="text-[12.5px] text-rose-600">{error}</div>}
+            <button type="submit" disabled={saving} className="w-full py-3 rounded-xl bg-slate-950 disabled:bg-slate-300 text-white text-[14px] font-bold">
+              {saving ? '設定中…' : 'このパスワードに変更する'}
+            </button>
+          </form>
+
+          <button onClick={onLogout} className="w-full text-[11.5px] text-slate-400">
+            ログアウトする
+          </button>
+        </div>
+      </div>
+      <ToastView toast={toast} />
+    </div>
+  );
+}
+
+// ---- 初回ログイン：個人情報の入力依頼 ----
+const PROFILE_SETUP_FIELDS = [
+  { key: 'furigana', label: 'ふりがな', placeholder: '例）たなか はなこ', required: true },
+  { key: 'birthDate', label: '生年月日', type: 'date', required: true },
+  { key: 'phone', label: '電話番号', placeholder: '例）090-1234-5678', required: true },
+  { key: 'address', label: '住所', placeholder: '例）京都府亀岡市三宅町22-11', required: true },
+  { key: 'nearestStation', label: '最寄り駅', placeholder: '例）亀岡駅' },
+  { key: 'emergencyContactName', label: '緊急連絡先（氏名）', placeholder: '例）田中 太郎' },
+  { key: 'emergencyContactPhone', label: '緊急連絡先（電話番号）', placeholder: '例）090-0000-0000' },
+];
+
+function ProfileSetupScreen({ session, toast, onSave, onSkip, onLogout }) {
+  const [form, setForm] = useState(() => {
+    const init = {};
+    PROFILE_SETUP_FIELDS.forEach((f) => { init[f.key] = session[f.key] || ''; });
+    return init;
+  });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const set = (key) => (e) => setForm((prev) => ({ ...prev, [key]: e.target.value }));
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setError('');
+    const missing = PROFILE_SETUP_FIELDS.filter((f) => f.required && !String(form[f.key] || '').trim());
+    if (missing.length > 0) {
+      setError(`${missing.map((f) => f.label).join('・')} を入力してください`);
+      return;
+    }
+    setSaving(true);
+    const ok = await onSave({
+      ...form,
+      birthDate: form.birthDate || null,
+      profileSetupCompleted: true,
+    });
+    setSaving(false);
+    if (!ok) setError('保存に失敗しました。時間をおいて再度お試しください。');
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 font-sans flex items-center justify-center px-4 py-10">
+      <div className="w-full max-w-[460px]">
+        <div className="bg-white rounded-[24px] border border-slate-200 shadow-sm p-7 space-y-5">
+          <div className="flex items-center gap-2.5">
+            <div className="w-10 h-10 rounded-xl bg-slate-900 flex items-center justify-center shrink-0">
+              <User size={18} className="text-white" />
+            </div>
+            <div>
+              <h1 className="font-bold text-[16px] leading-tight">ご登録情報の入力</h1>
+              <div className="text-[11.5px] text-slate-400">{session.name} 様</div>
+            </div>
+          </div>
+
+          <div className="bg-blue-50 border border-blue-200 rounded-xl px-3.5 py-3 text-[12px] text-blue-800">
+            パスワードの設定が完了しました。続けて、ご本人の情報をご入力ください。入力後はいつでも変更申請ができます。
+          </div>
+
+          <form onSubmit={submit} className="space-y-3.5">
+            {PROFILE_SETUP_FIELDS.map((f) => (
+              <Field key={f.key} label={`${f.label}${f.required ? '' : '（任意）'}`}>
+                <input
+                  type={f.type || 'text'}
+                  value={form[f.key]}
+                  onChange={set(f.key)}
+                  placeholder={f.placeholder}
+                  className={`w-full border-2 border-slate-200 rounded-xl px-3.5 py-2.5 text-[14px] outline-none focus:border-slate-900 ${f.type === 'date' ? 'font-mono' : ''}`}
+                />
+              </Field>
+            ))}
+            {error && <div className="text-[12.5px] text-rose-600">{error}</div>}
+            <button type="submit" disabled={saving} className="w-full py-3 rounded-xl bg-slate-950 disabled:bg-slate-300 text-white text-[14px] font-bold">
+              {saving ? '保存中…' : '登録して利用を開始する'}
+            </button>
+          </form>
+
+          <div className="flex items-center justify-between">
+            <button onClick={onSkip} className="text-[11.5px] text-slate-400 underline">あとで入力する</button>
+            <button onClick={onLogout} className="text-[11.5px] text-slate-400">ログアウト</button>
+          </div>
+        </div>
+      </div>
+      <ToastView toast={toast} />
+    </div>
   );
 }
 
@@ -5357,7 +5634,8 @@ const HELP_STAFF = [
   {
     category: 'アカウント',
     items: [
-      { q: 'パスワードを忘れました', a: 'ご自身では再設定できません。管理者に連絡してください。管理者が仮パスワードを再発行します。' },
+      { q: 'パスワードを忘れました', a: 'ログイン画面の「パスワードをお忘れですか？」から再設定できます。うまくいかない場合は管理者に連絡してください。管理者が仮パスワードを再発行します。' },
+      { q: '初めてログインするときの流れは', a: '管理者から届いた案内メールのURLを開き、メールアドレスと仮パスワードでログインします。続けてご自身のパスワードを設定し、住所・連絡先などの情報を入力すると利用開始です。情報の入力は「あとで入力する」で後回しにもできます。' },
       { q: '住所や氏名が変わりました', a: '「人材」タブのプロフィール変更申請から、変更内容を入力して申請してください。管理者が承認すると反映されます。' },
       { q: 'スマートフォンで使えますか', a: '使えます。ブラウザで同じURLを開いてログインしてください。画面はスマートフォン用に自動で切り替わります。ホーム画面に追加しておくとアプリのように使えます。' },
     ],
@@ -5368,10 +5646,10 @@ const HELP_ADMIN = [
   {
     category: 'スタッフの登録・管理',
     items: [
-      { q: 'スタッフアカウントを新しく作るには', a: '「人材」→「スタッフ管理」→「スタッフ一覧・登録」を開くと、右側に登録フォームがあります。姓名・ふりがな・ユーザー名・仮パスワード・入職日を入力して作成します。ユーザー名は短いID（例：tanaka）でもメールアドレスでも構いません。' },
+      { q: 'スタッフアカウントを新しく作るには', a: '「人材」→「スタッフ管理」→「スタッフ一覧・登録」を開くと、右側に登録フォームがあります。姓名・ふりがな・メールアドレス・仮パスワード・入職日・役割を入力して作成します。作成すると、そのメールアドレス宛にログインURLと仮パスワードを記載した案内メールが自動で送られます。仮パスワードは「自動生成」ボタンでも作れます。' },
       { q: '大人数をまとめて登録したい', a: 'スタッフ一覧の右上にある「CSV一括登録」を使います。表示される形式にあわせてCSVファイルを用意し、アップロードしてください。' },
       { q: '退職者の処理はどうしますか', a: 'スタッフの「詳細」を開き、基本タブの退職日を入力して保存します。退職日を入れたスタッフは、一覧の絞り込みで「在籍のみ」にすると非表示になります。アカウント自体は残るため、過去の勤怠や給与は参照できます。' },
-      { q: 'パスワードを再発行するには', a: 'スタッフ一覧の各行にある鍵のアイコンを押すと、仮パスワードを設定できます。設定した仮パスワードは本人に直接お伝えください。' },
+      { q: 'パスワードを再発行するには', a: 'スタッフ一覧の各行にある鍵のアイコンを押すと、仮パスワードを設定できます。設定した仮パスワードは本人に直接お伝えください。本人が次にログインした際、新しいパスワードの設定画面が表示されます。' },
       { q: '管理者権限を与えるには', a: '「人材」→「スタッフ管理」→「管理者権限」から設定します。タブ単位（勤怠・労務・人材・給与）でアクセス範囲を制限できます。マスター管理者のみが操作できます。' },
     ],
   },
@@ -8517,7 +8795,8 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
     );
   }
 
-  const canSubmit = sei.trim() && mei.trim() && username.trim() && password.trim().length >= 6 && hireDate;
+  // ログイン案内メールを送るため、ログインIDはメールアドレス形式を必須にする
+  const canSubmit = sei.trim() && mei.trim() && username.trim().includes('@') && password.trim().length >= 6 && hireDate;
 
   const filteredEmployeeAccounts = employeeAccounts
     .filter((acc) => {
@@ -8710,12 +8989,16 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
           <input value={meiKana} onChange={(e) => setMeiKana(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" placeholder="例）はなこ" />
         </Field>
       </div>
-      <Field label="ユーザー名（ログインID・メールアドレス）">
-        <input value={username} onChange={(e) => setUsername(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" placeholder="tanaka（または example@ezweb.ne.jp）" />
-        <div className="text-[10.5px] text-slate-400 mt-1">短いID（例：tanaka）でも、実際のメールアドレスでもログイン用に使えます。メールアドレスの場合、連絡用メールアドレスにも自動で設定されます。</div>
+      <Field label="メールアドレス（ログインID）">
+        <input type="email" value={username} onChange={(e) => setUsername(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" placeholder="例）tanaka@example.com" />
+        <div className="text-[10.5px] text-slate-400 mt-1">このアドレスがログインIDになり、ログイン案内のメールもここへ届きます。</div>
       </Field>
-      <Field label="パスワード（6文字以上）">
-        <input type="text" value={password} onChange={(e) => setPassword(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" placeholder="仮パスワードを入力" />
+      <Field label="仮パスワード（6文字以上）">
+        <div className="flex gap-2">
+          <input type="text" value={password} onChange={(e) => setPassword(e.target.value)} className="flex-1 border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" placeholder="仮パスワードを入力" />
+          <button type="button" onClick={() => setPassword(generateTempPassword())} className="shrink-0 text-[12px] font-bold text-slate-500 border border-slate-200 rounded-lg px-3">自動生成</button>
+        </div>
+        <div className="text-[10.5px] text-slate-400 mt-1">初回ログイン時に、本人がパスワードを変更します。</div>
       </Field>
       <Field label="入職日">
         <input type="date" value={hireDate} onChange={(e) => setHireDate(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
