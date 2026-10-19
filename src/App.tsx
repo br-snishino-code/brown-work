@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef, useContext, createContext } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef, useContext, createContext } from 'react';
 import { createPortal } from 'react-dom';
 import * as XLSX from 'xlsx';
 import { Clock, MapPin, CheckCircle2, XCircle, AlertTriangle, LogIn, LogOut, FileEdit, Users, Bell, Calendar, Mail, LogOut as LogoutIcon, UserPlus, Lock, User, Monitor, Smartphone, Palmtree, Plus, Pencil, CalendarDays, ListChecks, ClipboardList, MessageSquare, Coffee, BarChart3, Home, Download, ChevronRight, LayoutGrid, Wallet, Briefcase, UserCog, Construction, Megaphone, Paperclip, FileText, Pin, Trash2, Key, ShieldCheck, HelpCircle, ChevronDown, ChevronLeft } from 'lucide-react';
@@ -3311,6 +3311,7 @@ const PROFILE_SETUP_SECTIONS = [
   {
     title: '基本情報',
     fields: [
+      { key: 'name', label: 'お名前', readOnly: true, note: 'お名前に誤りがある場合は、管理者までご連絡ください。' },
       { key: 'furigana', label: 'ふりがな', placeholder: '例）たなか はなこ', required: true },
       { key: 'birthDate', label: '生年月日', type: 'date', required: true, autoComplete: 'bday' },
     ],
@@ -3342,26 +3343,207 @@ const PROFILE_SETUP_SECTIONS = [
       },
     ],
   },
-  {
-    title: '口座情報（給与振込先）',
-    note: 'ご本人名義の口座をご登録ください。通帳またはキャッシュカードをお手元にご用意ください。',
-    fields: [
-      { key: 'bankName', label: '銀行名', placeholder: '例）京都銀行', required: true },
-      { key: 'branchName', label: '支店名', placeholder: '例）亀岡支店', required: true },
-      { key: 'accountType', label: '預金種別', type: 'select', options: ['普通', '当座'], required: true },
-      {
-        key: 'accountNumber', label: '口座番号', placeholder: '例）1234567', mono: true, required: true,
-        digitsOnly: true, maxLength: 10,
-        check: (v) => (onlyDigits(v).length >= 5 ? '' : '口座番号をご確認ください'),
-      },
-      { key: 'accountHolder', label: '口座名義（カナ）', placeholder: '例）タナカ ハナコ', required: true, katakana: true },
-      { key: 'bankCode', label: '銀行コード（4桁）', placeholder: '例）0158', mono: true, digitsOnly: true, maxLength: 4 },
-      { key: 'branchCode', label: '支店コード（3桁）', placeholder: '例）123', mono: true, digitsOnly: true, maxLength: 3 },
-    ],
-  },
+];
+
+// 口座情報は専用の入力欄（銀行コードと銀行名を相互に補完する）で扱う
+const BANK_ACCOUNT_FIELDS = [
+  { key: 'bankName', label: '銀行名' },
+  { key: 'branchName', label: '支店名' },
+  { key: 'accountType', label: '預金種別' },
+  { key: 'accountNumber', label: '口座番号' },
+  { key: 'accountHolder', label: '口座名義（カナ）' },
 ];
 
 const PROFILE_SETUP_ALL_FIELDS = PROFILE_SETUP_SECTIONS.flatMap((s) => s.fields);
+
+// ---- 金融機関マスター（全国銀行協会のコード表）----
+// public/zengin/ に置いた一覧を、必要になった時だけ読み込む。
+const zenginCache = { banks: null, branches: null, banksPromise: null, branchesPromise: null };
+
+const loadZenginBanks = () => {
+  if (zenginCache.banks) return Promise.resolve(zenginCache.banks);
+  if (!zenginCache.banksPromise) {
+    zenginCache.banksPromise = fetch('/zengin/banks.json')
+      .then((r) => r.json())
+      .then((j) => { zenginCache.banks = j; return j; })
+      .catch(() => ({}));
+  }
+  return zenginCache.banksPromise;
+};
+
+const loadZenginBranches = () => {
+  if (zenginCache.branches) return Promise.resolve(zenginCache.branches);
+  if (!zenginCache.branchesPromise) {
+    zenginCache.branchesPromise = fetch('/zengin/branches.json')
+      .then((r) => r.json())
+      .then((j) => { zenginCache.branches = j; return j; })
+      .catch(() => ({}));
+  }
+  return zenginCache.branchesPromise;
+};
+
+// 表記ゆれを吸収して比較するためのキー（全角半角・空白・株式会社の有無）
+const bankKey = (v) => String(v || '').normalize('NFKC').replace(/[\s　]/g, '').replace(/^株式会社/, '').replace(/株式会社$/, '').toLowerCase();
+// 「京都銀行」→「京都」のように、種別を外した短い名前
+const bankShortKey = (v) => bankKey(v).replace(/(銀行|信用金庫|信用組合|農業協同組合連合会|農業協同組合|労働金庫|漁業協同組合連合会|漁業協同組合|中央金庫)$/, '');
+const branchShortKey = (v) => bankKey(v).replace(/(支店|出張所|営業部|営業所|支所|本所|代理店)$/, '');
+
+// 名前からコードを引く。候補が1つに絞れた時だけ返す。
+function lookupCode(entries, input, shortKeyOf) {
+  const key = bankKey(input);
+  if (!key) return '';
+  const exact = entries.filter(([, name]) => bankKey(name) === key);
+  if (exact.length === 1) return exact[0][0];
+  if (exact.length > 1) return '';
+  const short = shortKeyOf(input);
+  if (!short) return '';
+  const loose = entries.filter(([, name]) => shortKeyOf(name) === short);
+  return loose.length === 1 ? loose[0][0] : '';
+}
+
+function BankAccountFields({ form, setForm }) {
+  const [banks, setBanks] = useState(null);
+  const [branches, setBranches] = useState(null);
+
+  useEffect(() => { loadZenginBanks().then(setBanks); }, []);
+  useEffect(() => {
+    if (!form.bankCode || branches) return;
+    loadZenginBranches().then(setBranches);
+  }, [form.bankCode, branches]);
+
+  const bankEntries = useMemo(() => (banks ? Object.entries(banks) : []), [banks]);
+  const branchEntries = useMemo(() => {
+    const map = branches && form.bankCode ? branches[form.bankCode] : null;
+    return map ? Object.entries(map) : [];
+  }, [branches, form.bankCode]);
+
+  const patch = (next) => setForm((prev) => ({ ...prev, ...next }));
+
+  const onBankCode = (raw) => {
+    const code = onlyDigits(raw).slice(0, 4);
+    const name = banks && banks[code] ? banks[code] : '';
+    const bankChanged = code !== form.bankCode;
+    patch({
+      bankCode: code,
+      ...(name ? { bankName: name } : {}),
+      ...(bankChanged ? { branchCode: '', branchName: '' } : {}),
+    });
+    if (name) loadZenginBranches().then(setBranches);
+  };
+
+  const onBankName = (raw) => {
+    const code = bankEntries.length > 0 ? lookupCode(bankEntries, raw, bankShortKey) : '';
+    const bankChanged = code && code !== form.bankCode;
+    patch({
+      bankName: raw,
+      ...(code ? { bankCode: code } : {}),
+      ...(bankChanged ? { branchCode: '', branchName: '' } : {}),
+    });
+    if (code) loadZenginBranches().then(setBranches);
+  };
+
+  const onBranchCode = (raw) => {
+    const code = onlyDigits(raw).slice(0, 3);
+    const map = branches && form.bankCode ? branches[form.bankCode] : null;
+    const name = map && map[code] ? map[code] : '';
+    patch({ branchCode: code, ...(name ? { branchName: name } : {}) });
+  };
+
+  const onBranchName = (raw) => {
+    const code = branchEntries.length > 0 ? lookupCode(branchEntries, raw, branchShortKey) : '';
+    patch({ branchName: raw, ...(code ? { branchCode: code } : {}) });
+  };
+
+  const inputClass = 'w-full border-2 border-slate-200 rounded-xl px-3.5 py-2.5 text-[14px] outline-none focus:border-slate-900';
+  const monoClass = `${inputClass} font-mono`;
+  const bankResolved = !!(form.bankCode && banks && banks[form.bankCode]);
+  const branchResolved = !!(form.branchCode && branchEntries.some(([c]) => c === form.branchCode));
+
+  return (
+    <div className="space-y-3.5">
+      <div className="text-[12px] font-bold text-slate-500 border-b border-slate-100 pb-2">口座情報（給与振込先）</div>
+      <div className="text-[11.5px] text-slate-400 -mt-1">
+        ご本人名義の口座をご登録ください。コードと名称は、どちらか一方を入力すると、もう一方が自動で入ります。
+      </div>
+
+      <div className="grid grid-cols-[110px_1fr] gap-3">
+        <Field label="銀行コード">
+          <input
+            name="bankCode" autoComplete="off" inputMode="numeric"
+            value={form.bankCode} onChange={(e) => onBankCode(e.target.value)}
+            placeholder="0158" className={monoClass}
+          />
+        </Field>
+        <Field label="銀行名">
+          <input
+            name="bankName" autoComplete="off" list="zengin-banks"
+            value={form.bankName} onChange={(e) => onBankName(e.target.value)}
+            placeholder="例）京都銀行" className={inputClass}
+          />
+        </Field>
+      </div>
+      {form.bankName && !bankResolved && (
+        <div className="text-[11.5px] text-amber-700">銀行が特定できませんでした。候補から選ぶか、銀行コード（4桁）をご入力ください。</div>
+      )}
+
+      <div className="grid grid-cols-[110px_1fr] gap-3">
+        <Field label="支店コード">
+          <input
+            name="branchCode" autoComplete="off" inputMode="numeric"
+            value={form.branchCode} onChange={(e) => onBranchCode(e.target.value)}
+            placeholder="111" className={monoClass}
+          />
+        </Field>
+        <Field label="支店名">
+          <input
+            name="branchName" autoComplete="off" list="zengin-branches"
+            value={form.branchName} onChange={(e) => onBranchName(e.target.value)}
+            placeholder={bankResolved ? '例）四条支店' : '先に銀行をご入力ください'}
+            className={inputClass}
+          />
+        </Field>
+      </div>
+      {form.branchName && !branchResolved && (
+        <div className="text-[11.5px] text-amber-700">支店が特定できませんでした。候補から選ぶか、支店コード（3桁）をご入力ください。</div>
+      )}
+
+      <datalist id="zengin-banks">
+        {bankEntries.map(([code, name]) => <option key={code} value={name}>{code}</option>)}
+      </datalist>
+      <datalist id="zengin-branches">
+        {branchEntries.map(([code, name]) => <option key={code} value={name}>{code}</option>)}
+      </datalist>
+
+      <Field label="預金種別">
+        <select
+          name="accountType" value={form.accountType}
+          onChange={(e) => patch({ accountType: e.target.value })}
+          className={`${inputClass} bg-white`}
+        >
+          <option value="普通">普通</option>
+          <option value="当座">当座</option>
+        </select>
+      </Field>
+      <Field label="口座番号">
+        <input
+          name="accountNumber" autoComplete="off" inputMode="numeric"
+          value={form.accountNumber}
+          onChange={(e) => patch({ accountNumber: onlyDigits(e.target.value).slice(0, 10) })}
+          placeholder="例）1234567" className={monoClass}
+        />
+      </Field>
+      <Field label="口座名義（カナ）">
+        <input
+          name="accountHolder" autoComplete="off"
+          value={form.accountHolder}
+          onChange={(e) => patch({ accountHolder: e.target.value })}
+          onBlur={() => setForm((prev) => ({ ...prev, accountHolder: toKatakana(prev.accountHolder) }))}
+          placeholder="例）タナカ ハナコ" className={inputClass}
+        />
+      </Field>
+    </div>
+  );
+}
 
 function ProfileSetupScreen({ session, toast, onSave, onLogout }) {
   const [form, setForm] = useState(() => {
@@ -3369,6 +3551,13 @@ function ProfileSetupScreen({ session, toast, onSave, onLogout }) {
     PROFILE_SETUP_ALL_FIELDS.forEach((f) => {
       init[f.key] = session[f.key] || (f.type === 'select' ? f.options[0] : '');
     });
+    init.bankCode = session.bankCode || '';
+    init.bankName = session.bankName || '';
+    init.branchCode = session.branchCode || '';
+    init.branchName = session.branchName || '';
+    init.accountType = session.accountType || '普通';
+    init.accountNumber = session.accountNumber || '';
+    init.accountHolder = session.accountHolder || '';
     return init;
   });
   const [myNumber, setMyNumber] = useState('');
@@ -3412,6 +3601,15 @@ function ProfileSetupScreen({ session, toast, onSave, onLogout }) {
       const msg = f.check(v);
       if (msg) { setError(`${f.label}：${msg}`); return; }
     }
+    const missingBank = BANK_ACCOUNT_FIELDS.filter((f) => !String(form[f.key] || '').trim());
+    if (missingBank.length > 0) {
+      setError(`${missingBank.map((f) => f.label).join('・')} を入力してください`);
+      return;
+    }
+    if (onlyDigits(form.accountNumber).length < 5) {
+      setError('口座番号：口座番号をご確認ください');
+      return;
+    }
     if (onlyDigits(myNumber).length !== 12) {
       setError('マイナンバーは12桁の数字でご入力ください');
       return;
@@ -3453,7 +3651,7 @@ function ProfileSetupScreen({ session, toast, onSave, onLogout }) {
                 <div className="text-[12px] font-bold text-slate-500 border-b border-slate-100 pb-2">{section.title}</div>
                 {section.note && <div className="text-[11.5px] text-slate-400 -mt-1">{section.note}</div>}
                 {section.fields.map((f) => (
-                  <Field key={f.key} label={`${f.label}${f.required ? '' : '（任意）'}`}>
+                  <Field key={f.key} label={`${f.label}${f.required || f.readOnly ? '' : '（任意）'}`}>
                     {f.type === 'select' ? (
                       <select
                         value={form[f.key]}
@@ -3472,10 +3670,11 @@ function ProfileSetupScreen({ session, toast, onSave, onLogout }) {
                           value={form[f.key]}
                           onChange={set(f)}
                           onBlur={convertOnBlur(f)}
-                          readOnly={f.sameAsLogin && useLoginEmail}
+                          readOnly={f.readOnly || (f.sameAsLogin && useLoginEmail)}
                           placeholder={f.placeholder}
-                          className={`w-full border-2 border-slate-200 rounded-xl px-3.5 py-2.5 text-[14px] outline-none focus:border-slate-900 ${f.mono || f.type === 'date' ? 'font-mono' : ''} ${f.sameAsLogin && useLoginEmail ? 'bg-slate-100 text-slate-500' : ''}`}
+                          className={`w-full border-2 border-slate-200 rounded-xl px-3.5 py-2.5 text-[14px] outline-none focus:border-slate-900 ${f.mono || f.type === 'date' ? 'font-mono' : ''} ${f.readOnly || (f.sameAsLogin && useLoginEmail) ? 'bg-slate-100 text-slate-500' : ''}`}
                         />
+                        {f.note && <div className="mt-1 text-[11px] text-slate-400">{f.note}</div>}
                         {f.sameAsLogin && loginEmail && (
                           <label className="flex items-start gap-2 mt-2 text-[12px] text-slate-600 cursor-pointer">
                             <input
@@ -3496,6 +3695,8 @@ function ProfileSetupScreen({ session, toast, onSave, onLogout }) {
                 ))}
               </div>
             ))}
+
+            <BankAccountFields form={form} setForm={setForm} />
 
             <div className="space-y-3.5">
               <div className="text-[12px] font-bold text-slate-500 border-b border-slate-100 pb-2">マイナンバー</div>
