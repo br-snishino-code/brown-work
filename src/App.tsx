@@ -1471,6 +1471,25 @@ export default function AttendanceApp() {
   const geo = useGeolocation();
   const { toast, show } = useToast();
 
+  // 上部メニューの高さをCSS変数にしておき、全画面表示の詳細ページがメニューを隠さないようにする
+  const appHeaderRef = useRef(null);
+  useEffect(() => {
+    const el = appHeaderRef.current;
+    if (!el) return;
+    const update = () => document.documentElement.style.setProperty('--app-header-h', `${el.offsetHeight}px`);
+    update();
+    let ro = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(update);
+      ro.observe(el);
+    }
+    window.addEventListener('resize', update);
+    return () => {
+      if (ro) ro.disconnect();
+      window.removeEventListener('resize', update);
+    };
+  });
+
   // カテゴリー（上部タブ・下部ナビ）を切り替えたら画面を一番上に戻し、最新データを取得し直す
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
@@ -2611,18 +2630,20 @@ export default function AttendanceApp() {
 
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-900">
-      <div style={{ paddingTop: 'env(safe-area-inset-top)' }} className="bg-slate-950">
-        <GlobalTopTabs topTab={topTab} setTopTab={setTopTab} session={session} personalMode={personalMode} setPersonalMode={setPersonalMode} />
+      <div ref={appHeaderRef} className="sticky top-0 z-20">
+        <div style={{ paddingTop: 'env(safe-area-inset-top)' }} className="bg-slate-950">
+          <GlobalTopTabs topTab={topTab} setTopTab={setTopTab} session={session} personalMode={personalMode} setPersonalMode={setPersonalMode} />
+        </div>
+        <Header
+          session={session}
+          onLogout={handleLogout}
+          pendingCount={pendingCorrectionCount + pendingLeaveCount + pendingPerformanceCount}
+          missingPunchCount={missingPunchCount}
+          viewMode={viewMode}
+          cloudStatusLabel={cloudStatusLabel}
+          cloudStatusClass={cloudStatusClass}
+        />
       </div>
-      <Header
-        session={session}
-        onLogout={handleLogout}
-        pendingCount={pendingCorrectionCount + pendingLeaveCount + pendingPerformanceCount}
-        missingPunchCount={missingPunchCount}
-        viewMode={viewMode}
-        cloudStatusLabel={cloudStatusLabel}
-        cloudStatusClass={cloudStatusClass}
-      />
       <main className={isDesktop ? 'max-w-6xl mx-auto px-6 pb-16 pt-8' : 'max-w-3xl mx-auto px-4 pb-24 pt-6'}>
         {topTab === 'labor' && (
           <div className="space-y-5">
@@ -3369,7 +3390,7 @@ function Header({ session, onLogout, pendingCount, missingPunchCount, viewMode, 
   const alertCount = pendingCount + missingPunchCount;
   const isDesktop = viewMode === 'desktop';
   return (
-    <header className="bg-slate-800 text-white sticky top-0 z-30 shadow-sm">
+    <header className="bg-slate-800 text-white shadow-sm">
       <div className={`${isDesktop ? 'max-w-6xl px-6' : 'max-w-3xl px-4'} mx-auto py-3.5 flex items-center justify-between`}>
         <div className="flex items-center gap-2.5">
           <div className="w-8 h-8 rounded-md bg-slate-950 flex items-center justify-center">
@@ -9240,7 +9261,10 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
   const tabs = isMasterAdmin ? [...PROFILE_MODAL_TABS, { key: 'mynumber', label: 'マイナンバー' }] : PROFILE_MODAL_TABS;
 
   return (
-    <div className={isDesktop ? 'fixed inset-0 z-50 bg-slate-100 p-4 overflow-hidden' : ''}>
+    <div
+      className={isDesktop ? 'fixed inset-x-0 bottom-0 z-10 bg-slate-100 p-4 overflow-hidden' : ''}
+      style={isDesktop ? { top: 'var(--app-header-h, 110px)' } : undefined}
+    >
     <div className={isDesktop ? 'h-full max-w-[1700px] mx-auto space-y-0' : 'max-w-2xl mx-auto space-y-0'}>
       <div ref={containerRef} onScroll={handleScroll} className={`bg-white rounded-2xl border border-slate-200 shadow-sm overflow-y-auto ${isDesktop ? 'h-full' : 'max-h-[88vh]'}`}>
         <div className="px-6 pt-6 pb-4 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white z-10">
