@@ -1620,7 +1620,6 @@ function AttendanceApp() {
   const [correctionModal, setCorrectionModal] = useState(null);
   const [leaveModalOpen, setLeaveModalOpen] = useState(false);
   const [performanceModal, setPerformanceModal] = useState(null);
-  const [employeeTab, setEmployeeTab] = useState('attendance');
   const [topTab, setTopTab] = useState('attendance'); // attendance | labor | requests(スタッフ) | hr(管理) | payroll | help
   // 各種申請タブの中でいま開いている申請（null = 候補の一覧）
   const [requestTab, setRequestTab] = useState(null);
@@ -1658,12 +1657,12 @@ function AttendanceApp() {
     };
   });
 
-  // カテゴリー（上部タブ・下部ナビ）を切り替えたら画面を一番上に戻し、最新データを取得し直す
+  // 画面を切り替えたら一番上に戻し、最新データを取得し直す
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
     if (CLOUD_ENABLED && session) refreshData({ showIndicator: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [topTab, employeeTab, personalMode]);
+  }, [topTab, requestTab, personalMode]);
 
   // 今月の規定勤怠時間パターンを取得（管理者も自分の打刻画面で使うため全員分取得する）
   useEffect(() => {
@@ -3426,7 +3425,7 @@ function AttendanceApp() {
           />
         </div>
       </div>
-      <main className={isDesktop ? 'max-w-6xl mx-auto px-6 pb-16 pt-8' : `max-w-3xl mx-auto px-4 pt-6 ${showStaffScreens && effectiveTopTab === 'attendance' ? 'pb-24' : 'pb-10'}`}>
+      <main className={isDesktop ? 'max-w-6xl mx-auto px-6 pb-16 pt-8' : 'max-w-3xl mx-auto px-4 pt-6 pb-10'}>
         {effectiveTopTab === 'labor' && (
           <div className="space-y-5">
             {!showStaffScreens && session.role === 'master_admin' && (
@@ -3563,20 +3562,13 @@ function AttendanceApp() {
         )}
         {effectiveTopTab === 'attendance' && (showStaffScreens ? (
           <div className="space-y-5">
-            {isDesktop && (
-              <div className="flex items-center bg-white rounded-2xl border border-slate-200 p-1.5 text-[12px] font-bold max-w-md shadow-sm">
-                {[
-                  ['attendance','勤怠'],['performance','実績']
-                ].map(([key,label]) => <button key={key} onClick={() => setEmployeeTab(key)} className={`flex-1 py-2.5 rounded-xl transition-colors ${employeeTab === key ? 'bg-slate-950 text-white' : 'text-slate-500 hover:bg-slate-50'}`}>{label}</button>)}
-              </div>
-            )}
-            {employeeTab !== 'performance' && needsMonthlyConfirm && (
+            {needsMonthlyConfirm && (
               <MonthlyConfirmReminderCard
                 targetMonth={commuteClaimTargetMonthKey}
                 onOpen={() => openRequest('monthly')}
               />
             )}
-            {employeeTab !== 'performance' && (
+            {(
               <EmployeeView
                 now={now}
                 todayRecord={todayRecord}
@@ -3598,13 +3590,6 @@ function AttendanceApp() {
                 needsCommuteClaimReminder={needsCommuteClaimReminder}
                 commuteClaimTargetMonth={commuteClaimTargetMonthKey}
                 onGoToCommuteClaim={() => openRequest('commute')}
-                isDesktop={isDesktop}
-              />
-            )}
-            {employeeTab === 'performance' && (
-              <PerformanceView
-                reports={myPerformanceReports}
-                onOpenModal={(type) => setPerformanceModal(type)}
                 isDesktop={isDesktop}
               />
             )}
@@ -3661,15 +3646,6 @@ function AttendanceApp() {
           onClose={() => setPerformanceModal(null)}
           onSubmit={submitPerformanceReport}
         />
-      )}
-      {showStaffScreens && !isDesktop && effectiveTopTab === 'attendance' && (
-        <nav className="fixed inset-x-3 bottom-3 z-40 mx-auto max-w-md rounded-[22px] border border-slate-200/80 bg-white/95 p-1.5 shadow-2xl backdrop-blur">
-          <div className="grid grid-cols-2 gap-1">
-            {[
-              ['attendance','勤怠',Clock],['performance','実績',BarChart3]
-            ].map(([key,label,Icon]) => <button key={key} onClick={() => setEmployeeTab(key)} className={`flex flex-col items-center gap-1 rounded-2xl py-2 text-[10px] font-bold transition ${employeeTab === key ? 'bg-slate-950 text-white' : 'text-slate-400'}`}><Icon size={17}/>{label}</button>)}
-          </div>
-        </nav>
       )}
       <ToastView toast={toast} />
     </div>
@@ -7200,7 +7176,7 @@ const HELP_STAFF = [
   {
     category: '画面の構成',
     items: [
-      { q: '画面の上のタブはどう分かれていますか', a: '「勤怠」＝打刻と勤怠一覧・実績、「労務」＝会社からのお知らせ、「各種申請」＝申請の入口、「給与」＝給与明細、「ヘルプ」＝この画面です。スマートフォンでも同じ並びです。' },
+      { q: '画面の上のタブはどう分かれていますか', a: '「勤怠」＝打刻と勤怠履歴、「労務」＝会社からのお知らせ、「各種申請」＝申請の入口、「給与」＝給与明細、「ヘルプ」＝この画面です。スマートフォンでも同じ並びです。' },
       { q: '申請はどこからしますか', a: 'すべて「各種申請」タブからです。押すと「休暇申請」「月次勤怠申請」「交通費申請」「年末調整」「個人情報の変更申請」の候補が出るので、必要なものを選んでください。eo業務の方は「eo業務 実績入力」も同じ場所にあります。未提出のものがあるときはタブに印が付きます。' },
       { q: 'eo業務の実績はどこで入力しますか', a: '「各種申請」→「eo業務 実績入力」です。対象の年月を選び、新規実績・既存実績（アップセルLTV）を日ごとに入力します。入力の途中でも「実績の内容を保存する」で保存でき、新規・既存の両方がまとめて保存されます。保存していない入力があるときは「未保存」と表示され、対象月を切り替えようとすると確認が出ます。' },
       { q: '月次勤怠申請とは', a: '前月分の勤怠を確認して提出する手続きです。「各種申請」→「月次勤怠申請」から、交通費とまとめて提出できます。提出すると管理者が確認し、最後にマスター管理者が最終承認して確定します。確定後にその月の給与明細が公開されます。未提出のときは「勤怠」タブにもお知らせが出ます。' },
