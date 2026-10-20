@@ -2861,6 +2861,39 @@ function AttendanceApp() {
     return true;
   };
 
+  // 交通費の承認内容が変わったとき、作成済みの給与明細の「交通費精算」も合わせる
+  const syncCommuteAmountInPayroll = async (targetEmployeeId, targetMonth, newAmount) => {
+    if (!targetMonth) return false;
+    const [y, m] = targetMonth.split('-').map(Number);
+    const record = (data.payrollRecords || []).find(
+      (r) => r.employeeId === targetEmployeeId && r.year === y && r.month === m
+    );
+    if (!record || !Array.isArray(record.paymentItems)) return false;
+    const label = `交通費精算（${m}月分）`;
+    const without = record.paymentItems.filter((it) => !String(it.label || '').startsWith('交通費精算'));
+    const nextItems = newAmount > 0 ? [...without, { label, amount: newAmount }] : without;
+    const before = record.paymentItems.reduce((sum, it) => sum + (Number(it.amount) || 0), 0);
+    const after = nextItems.reduce((sum, it) => sum + (Number(it.amount) || 0), 0);
+    if (before === after && nextItems.length === record.paymentItems.length) return false;
+    const deductionTotal = (record.deductionItems || []).reduce((sum, it) => sum + (Number(it.amount) || 0), 0);
+    const { error } = await supabase
+      .from('payroll_records')
+      .update({ payment_items: nextItems, base_amount: after, total_amount: after - deductionTotal })
+      .eq('id', record.id);
+    if (error) {
+      console.error('給与明細の交通費の更新に失敗しました', error);
+      return false;
+    }
+    const previous = Number(record.paymentItems.find((it) => String(it.label || '').startsWith('交通費精算'))?.amount) || 0;
+    await logAudit(
+      session,
+      '給与明細の交通費を更新',
+      `${y}年${m}月：${formatYen(previous)} → ${formatYen(newAmount)}`,
+      targetEmployeeId
+    );
+    return true;
+  };
+
   // 承認済みの交通費精算の取り消し（マスター管理者のみ）。差し戻し扱いに戻す
   const cancelCommuteExpenseApproval = async (id, reason) => {
     if (session.role !== 'master_admin') {
@@ -2882,10 +2915,11 @@ function AttendanceApp() {
       show(`承認の取り消しに失敗しました：${error.message || ''}`, 'warn');
       return false;
     }
+    const payrollChanged = await syncCommuteAmountInPayroll(claim.employeeId, claim.targetMonth, 0);
     await notifyEmployeeUser(
       claim.employeeId,
       '【交通費精算・承認の取り消し】',
-      `交通費精算書（合計 ${formatYen(claim.totalAmount)}）の承認が取り消されました。${reason ? `理由：${reason}` : ''}内容をご確認のうえ、修正して再度ご提出ください。`,
+      `交通費精算書（合計 ${formatYen(claim.totalAmount)}）の承認が取り消されました。${reason ? `理由：${reason}` : ''}${payrollChanged ? '給与明細の交通費も取り下げました。' : ''}内容をご確認のうえ、修正して再度ご提出ください。`,
       id
     );
     await refreshData();
@@ -2894,26 +2928,60 @@ function AttendanceApp() {
     return true;
   };
 
-  const decideCommuteExpenseClaim = async (id, decision, comment) => {
+  // editedItems を渡すと、その内容に直してから承認する（マスター管理者の修正承認）
+  const decideCommuteExpenseClaim = async (id, decision, comment, editedItems) => {
     const claim = data.commuteExpenseClaims.find((c) => c.id === id);
     if (!claim) return;
-    const { error } = await supabase
-      .from('commute_expense_claims')
-      .update({ status: decision, admin_comment: comment || null, decided_at: new Date().toISOString() })
-      .eq('id', id);
+    const useEdited = decision === 'approved' && Array.isArray(editedItems);
+    const nextItems = useEdited ? editedItems : claim.items;
+    const nextTotal = useEdited
+      ? editedItems.reduce((sum, r) => sum + (Number(r.subtotal) || 0), 0)
+      : claim.totalAmount;
+    const changes = useEdited ? describeCommuteItemChanges(claim.items, editedItems) : [];
+
+    const patch = { status: decision, admin_comment: comment || null, decided_at: new Date().toISOString() };
+    if (useEdited) {
+      patch.items = editedItems;
+      patch.total_amount = nextTotal;
+    }
+    const { error } = await supabase.from('commute_expense_claims').update(patch).eq('id', id);
     if (error) {
-      show('処理に失敗しました', 'warn');
+      console.error('交通費精算の処理に失敗しました', error);
+      show(`処理に失敗しました：${error.message || ''}`, 'warn');
       return;
     }
+
+    // 承認・差し戻しに合わせて、作成済みの給与明細の交通費も更新する
+    const payrollChanged = await syncCommuteAmountInPayroll(
+      claim.employeeId,
+      claim.targetMonth,
+      decision === 'approved' ? nextTotal : 0
+    );
+
+    const lines = [
+      `交通費精算書（合計 ${formatYen(nextTotal)}）が${decision === 'approved' ? '承認されました' : '差し戻されました'}。`,
+    ];
+    if (changes.length > 0) {
+      lines.push('', '【管理者による修正箇所】', ...changes.map((t) => `・${t}`));
+    }
+    if (comment) lines.push('', `管理者コメント：${comment}`);
+    if (payrollChanged) lines.push('', '給与明細の交通費も更新しました。');
+
     await notifyEmployeeUser(
       claim.employeeId,
-      `【交通費精算${decision === 'approved' ? '承認' : '差し戻し'}】`,
-      `交通費精算書（合計 ${formatYen(claim.totalAmount)}）が${decision === 'approved' ? '承認されました' : '差し戻されました'}。${comment ? `管理者コメント：${comment}` : ''}`,
+      `【交通費精算${decision === 'approved' ? (changes.length > 0 ? '修正のうえ承認' : '承認') : '差し戻し'}】`,
+      lines.join('\n'),
       id
     );
     await refreshData();
-    await logAudit(session, decision === 'approved' ? '交通費精算を承認' : '交通費精算を差し戻し', formatYen(claim.totalAmount), claim.employeeId, claim.employeeName);
-    show(decision === 'approved' ? '承認しました' : '差し戻しました', decision === 'approved' ? 'success' : 'warn');
+    await logAudit(
+      session,
+      decision === 'approved' ? (changes.length > 0 ? '交通費精算を修正して承認' : '交通費精算を承認') : '交通費精算を差し戻し',
+      `${formatYen(nextTotal)}${changes.length > 0 ? `／修正 ${changes.length}件` : ''}`,
+      claim.employeeId,
+      claim.employeeName
+    );
+    show(decision === 'approved' ? (changes.length > 0 ? '修正して承認しました' : '承認しました') : '差し戻しました', decision === 'approved' ? 'success' : 'warn');
   };
 
   const saveGroupLeaveSchedule = async (groupName, monthlyDays) => {
@@ -6820,7 +6888,7 @@ const HELP_ADMIN = [
       { q: '月次勤怠の確定とは', a: 'スタッフが前月分の勤怠を確認して確定申請し、管理者が内容を確認して承認、最後にマスター管理者が最終承認する流れです。マスター管理者が最初に確認した場合は、その承認だけで確定します。管理者ご本人の申請は、マスター管理者の承認のみで確定します。最終承認が済むと、その月の給与明細を公開できるようになります。「勤怠」→「月次勤怠の確定」で処理します。確定後に修正が必要になった場合は、マスター管理者が「確定を取り消す」で差し戻しに戻せます。取り消すとスタッフへ通知され、給与明細の公開も止まります。' },
       { q: '支給・控除の項目を追加するには', a: 'スタッフの「詳細」→「給与・口座」タブで、スタッフごとの固定的な支給項目・控除項目を登録できます。毎月の計算に自動で反映されます。' },
       { q: '標準報酬月額の設定はどこですか', a: 'スタッフの「詳細」→「社会保険」タブで設定します。等級表から選択でき、健康保険・厚生年金の保険料が自動計算されます。保険料率は別途「保険料率設定」で管理します。' },
-      { q: '交通費精算の承認とExcel出力', a: '「給与」タブの交通費精算一覧から承認・却下します。承認できるのはマスター管理者のみです。承認待ちの左側にあるチェックを入れると、まとめて承認できます。承認済みのものは月を指定してExcelファイルに出力でき、経理処理に使えます。承認した金額は、同じ対象月の給与を新規作成する際に支給項目「交通費精算」として自動で入ります。承認後に修正が必要になった場合は、マスター管理者が「承認を取り消す」で差し戻しに戻せます。給与明細に反映済みの場合は、給与側の金額もあわせてご確認ください。' },
+      { q: '交通費精算の承認とExcel出力', a: '「給与」タブの交通費精算一覧から承認・却下します。承認できるのはマスター管理者のみです。承認待ちの左側にあるチェックを入れると、まとめて承認できます。承認済みのものは月を指定してExcelファイルに出力でき、経理処理に使えます。承認した金額は、同じ対象月の給与を新規作成する際に支給項目「交通費精算」として自動で入ります。承認する前に「内容を修正して承認」を選ぶと、金額や区間を直してから承認できます。修正した箇所は本人への通知に一覧で記載されます。承認後に修正が必要になった場合は、マスター管理者が「承認を取り消す」で差し戻しに戻せます。いずれの場合も、作成済みの給与明細の「交通費精算」の金額は自動で更新されます。' },
       { q: '年末調整の進め方', a: '「人材」タブの年末調整で、スタッフから提出された内容を確認し、承認します。提出状況は一覧で把握できます。' },
     ],
   },
@@ -9435,6 +9503,33 @@ const COMMUTE_CALC_METHODS = [
   { key: 'within_pass', label: '定期代の範囲内（追加費用なし）' },
   { key: 'excess', label: '定期代を超える差額分' },
 ];
+// 管理者が修正した箇所を、本人へ伝えるための文章にする
+function describeCommuteItemChanges(before = [], after = []) {
+  const label = (r) => `${r?.date || '日付未入力'} ${r?.fromStation || ''}→${r?.toStation || ''}`.trim();
+  const methodLabel = (k) => COMMUTE_CALC_METHODS.find((m) => m.key === k)?.label || k;
+  const out = [];
+  const max = Math.max(before.length, after.length);
+  for (let i = 0; i < max; i += 1) {
+    const b = before[i];
+    const a = after[i];
+    if (b && !a) { out.push(`${label(b)}：削除（${formatYen(b.subtotal || 0)}）`); continue; }
+    if (!b && a) { out.push(`${label(a)}：追加（${formatYen(a.subtotal || 0)}）`); continue; }
+    if (!b || !a) continue;
+    const diffs = [];
+    if ((b.date || '') !== (a.date || '')) diffs.push(`利用日 ${b.date || '未入力'} → ${a.date || '未入力'}`);
+    if ((b.fromStation || '') !== (a.fromStation || '') || (b.toStation || '') !== (a.toStation || '')) {
+      diffs.push(`区間 ${b.fromStation || ''}→${b.toStation || ''} を ${a.fromStation || ''}→${a.toStation || ''} に変更`);
+    }
+    if ((b.transport || '') !== (a.transport || '')) diffs.push(`乗物 ${b.transport || '未入力'} → ${a.transport || '未入力'}`);
+    if ((b.workplace || '') !== (a.workplace || '')) diffs.push(`勤務先 ${b.workplace || '未入力'} → ${a.workplace || '未入力'}`);
+    if ((b.calcMethod || '') !== (a.calcMethod || '')) diffs.push(`算出方法 ${methodLabel(b.calcMethod)} → ${methodLabel(a.calcMethod)}`);
+    if ((Number(b.subtotal) || 0) !== (Number(a.subtotal) || 0)) diffs.push(`小計 ${formatYen(b.subtotal || 0)} → ${formatYen(a.subtotal || 0)}`);
+    if ((b.note || '') !== (a.note || '')) diffs.push(`備考 ${b.note || '（なし）'} → ${a.note || '（なし）'}`);
+    if (diffs.length > 0) out.push(`${label(a)}：${diffs.join('、')}`);
+  }
+  return out;
+}
+
 const emptyCommuteRow = () => ({ date: '', workplace: '', transport: '', fromStation: '', toStation: '', calcMethod: 'round_trip', unitPrice: '', passFare: '', excessAmount: '', note: '' });
 const computeCommuteRowSubtotal = (row) => {
   switch (row.calcMethod) {
@@ -9669,18 +9764,52 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate }) {
   );
 }
 
+// マスター管理者が内容を直してから承認するための入力欄
+function CommuteApproveEditor({ claim, onCancel, onApprove, comment, onCommentChange, running }) {
+  const editor = useCommuteRows([], [...(claim.items || []).map((r) => ({ ...emptyCommuteRow(), ...r })), emptyCommuteRow()]);
+  return (
+    <div className="space-y-2 border border-amber-200 bg-amber-50/40 rounded-xl p-3">
+      <div className="flex items-center gap-2">
+        <Pencil size={13} className="text-amber-600" />
+        <span className="text-[12px] font-bold text-amber-800">内容を修正して承認します</span>
+        <button onClick={onCancel} className="ml-auto text-[11.5px] font-bold text-slate-500 underline">やめる</button>
+      </div>
+      <div className="text-[11.5px] text-slate-500">修正した箇所は、本人への通知に一覧で記載されます。</div>
+      <CommuteRowsEditor editor={editor} />
+      <div className="flex items-center justify-between bg-slate-900 text-white rounded-lg px-3 py-2">
+        <span className="text-[12px] font-bold">修正後の合計</span>
+        <span className="font-mono text-[15px] font-bold">{formatYen(editor.total)}</span>
+      </div>
+      <input
+        value={comment}
+        onChange={(e) => onCommentChange(e.target.value)}
+        placeholder="修正の理由・コメント（任意）"
+        className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-[12.5px] bg-white"
+      />
+      <button
+        onClick={() => onApprove(editor.toItems())}
+        disabled={running}
+        className="w-full py-1.5 rounded-lg bg-emerald-600 disabled:bg-slate-200 text-white text-[12px] font-bold"
+      >
+        修正して承認する
+      </button>
+    </div>
+  );
+}
+
 function AdminCommuteExpenseClaimsTab({ claims, isMasterAdmin = false, onDecide, onCancelApproval, isDesktop }) {
   const [comment, setComment] = useState({});
   const [exportMonth, setExportMonth] = useState('all');
   const [selected, setSelected] = useState([]);
   const [bulkRunning, setBulkRunning] = useState(false);
+  const [editingId, setEditingId] = useState(null);
   const pending = claims.filter((c) => c.status === 'pending');
 
   const toggleSelected = (id) => setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   const allSelected = pending.length > 0 && selected.length === pending.length;
   const toggleAll = () => setSelected(allSelected ? [] : pending.map((c) => c.id));
   const cancelApproval = async (id) => {
-    if (!window.confirm('この交通費精算の承認を取り消します。スタッフへ通知され、差し戻しに戻ります。給与明細に反映済みの場合は、給与側の金額もご確認ください。よろしいですか。')) return;
+    if (!window.confirm('この交通費精算の承認を取り消します。スタッフへ通知され、差し戻しに戻ります。作成済みの給与明細がある場合は、交通費の金額も自動で取り下げます。よろしいですか。')) return;
     setBulkRunning(true);
     await onCancelApproval(id, comment[id]);
     setBulkRunning(false);
@@ -9786,18 +9915,35 @@ function AdminCommuteExpenseClaimsTab({ claims, isMasterAdmin = false, onDecide,
       </div>
       {c.status === 'pending' ? (
         isMasterAdmin ? (
-          <div className="space-y-2">
-            <input
-              value={comment[c.id] || ''}
-              onChange={(e) => setComment((prev) => ({ ...prev, [c.id]: e.target.value }))}
-              placeholder="コメント（任意）"
-              className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-[12.5px]"
+          editingId === c.id ? (
+            <CommuteApproveEditor
+              claim={c}
+              comment={comment[c.id] || ''}
+              onCommentChange={(v) => setComment((prev) => ({ ...prev, [c.id]: v }))}
+              onCancel={() => setEditingId(null)}
+              running={bulkRunning}
+              onApprove={async (items) => {
+                setBulkRunning(true);
+                await onDecide(c.id, 'approved', comment[c.id], items);
+                setBulkRunning(false);
+                setEditingId(null);
+              }}
             />
-            <div className="flex gap-2">
-              <button onClick={() => onDecide(c.id, 'rejected', comment[c.id])} className="flex-1 py-1.5 rounded-lg border border-slate-200 text-[12px] font-bold text-slate-500">差し戻す</button>
-              <button onClick={() => onDecide(c.id, 'approved', comment[c.id])} className="flex-1 py-1.5 rounded-lg bg-emerald-600 text-white text-[12px] font-bold">承認する</button>
+          ) : (
+            <div className="space-y-2">
+              <input
+                value={comment[c.id] || ''}
+                onChange={(e) => setComment((prev) => ({ ...prev, [c.id]: e.target.value }))}
+                placeholder="コメント（任意）"
+                className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-[12.5px]"
+              />
+              <div className="flex gap-2 flex-wrap">
+                <button onClick={() => onDecide(c.id, 'rejected', comment[c.id])} className="flex-1 py-1.5 rounded-lg border border-slate-200 text-[12px] font-bold text-slate-500">差し戻す</button>
+                <button onClick={() => setEditingId(c.id)} className="flex-1 py-1.5 rounded-lg border border-amber-300 text-[12px] font-bold text-amber-700">内容を修正して承認</button>
+                <button onClick={() => onDecide(c.id, 'approved', comment[c.id])} className="flex-1 py-1.5 rounded-lg bg-emerald-600 text-white text-[12px] font-bold">承認する</button>
+              </div>
             </div>
-          </div>
+          )
         ) : (
           <div className="text-[11.5px] text-slate-400">交通費精算の承認はマスター管理者のみが行えます。</div>
         )
