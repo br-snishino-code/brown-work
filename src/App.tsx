@@ -150,13 +150,13 @@ const getHolidayName = (dateStr) => {
   return getJapaneseHolidays(year)[dateStr] || null;
 };
 
-// 管理者向け一覧用：YYYY-MM-DD → MM-DD(曜) ／ 土=水色・日祝=ピンクの表示情報も返す
+// 一覧用：YYYY-MM-DD → M/D(曜) ／ 土=水色・日祝=ピンクの表示情報も返す
 const formatAdminDate = (key) => {
   const d = new Date(key + 'T00:00:00');
   const days = ['日', '月', '火', '水', '木', '金', '土'];
   const wd = d.getDay();
   const holidayName = getHolidayName(key);
-  const label = `${pad(d.getMonth() + 1)}-${pad(d.getDate())}(${days[wd]}${holidayName ? '・祝' : ''})`;
+  const label = `${d.getMonth() + 1}/${d.getDate()}(${days[wd]}${holidayName ? '・祝' : ''})`;
   const badgeClass = (wd === 0 || holidayName) ? 'bg-rose-100 text-rose-700' : wd === 6 ? 'bg-sky-100 text-sky-700' : '';
   return { label, badgeClass, holidayName };
 };
