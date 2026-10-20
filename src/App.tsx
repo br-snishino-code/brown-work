@@ -2963,7 +2963,7 @@ function AttendanceApp() {
           cloudStatusClass={cloudStatusClass}
         />
       </div>
-      <main className={isDesktop ? 'max-w-6xl mx-auto px-6 pb-16 pt-8' : 'max-w-3xl mx-auto px-4 pb-24 pt-6'}>
+      <main className={isDesktop ? 'max-w-6xl mx-auto px-6 pb-16 pt-8' : `max-w-3xl mx-auto px-4 pt-6 ${showStaffScreens && topTab === 'attendance' ? 'pb-24' : 'pb-10'}`}>
         {topTab === 'labor' && (
           <div className="space-y-5">
             {!showStaffScreens && session.role === 'master_admin' && (
@@ -3166,7 +3166,7 @@ function AttendanceApp() {
           onSubmit={submitPerformanceReport}
         />
       )}
-      {showStaffScreens && !isDesktop && (
+      {showStaffScreens && !isDesktop && topTab === 'attendance' && (
         <nav className="fixed inset-x-3 bottom-3 z-40 mx-auto max-w-md rounded-[22px] border border-slate-200/80 bg-white/95 p-1.5 shadow-2xl backdrop-blur">
           <div className="grid grid-cols-4 gap-1">
             {[
