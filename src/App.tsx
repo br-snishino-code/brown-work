@@ -2861,6 +2861,39 @@ function AttendanceApp() {
     return true;
   };
 
+  // 承認済みの交通費精算の取り消し（マスター管理者のみ）。差し戻し扱いに戻す
+  const cancelCommuteExpenseApproval = async (id, reason) => {
+    if (session.role !== 'master_admin') {
+      show('承認を取り消せるのはマスター管理者のみです', 'warn');
+      return false;
+    }
+    const claim = (data.commuteExpenseClaims || []).find((c) => c.id === id);
+    if (!claim) return false;
+    const { error } = await supabase
+      .from('commute_expense_claims')
+      .update({
+        status: 'rejected',
+        admin_comment: reason ? `承認を取り消しました：${reason}` : '承認を取り消しました',
+        decided_at: new Date().toISOString(),
+      })
+      .eq('id', id);
+    if (error) {
+      console.error('承認の取り消しに失敗しました', error);
+      show(`承認の取り消しに失敗しました：${error.message || ''}`, 'warn');
+      return false;
+    }
+    await notifyEmployeeUser(
+      claim.employeeId,
+      '【交通費精算・承認の取り消し】',
+      `交通費精算書（合計 ${formatYen(claim.totalAmount)}）の承認が取り消されました。${reason ? `理由：${reason}` : ''}内容をご確認のうえ、修正して再度ご提出ください。`,
+      id
+    );
+    await refreshData();
+    await logAudit(session, '交通費精算の承認を取り消し', `${formatYen(claim.totalAmount)}${reason ? `／理由：${reason}` : ''}`, claim.employeeId, claim.employeeName);
+    show('承認を取り消しました。スタッフへ通知しています', 'warn');
+    return true;
+  };
+
   const decideCommuteExpenseClaim = async (id, decision, comment) => {
     const claim = data.commuteExpenseClaims.find((c) => c.id === id);
     if (!claim) return;
@@ -3278,6 +3311,7 @@ function AttendanceApp() {
               <AdminCommuteExpenseClaimsTab
                 isMasterAdmin={session.role === 'master_admin'}
                 claims={data.commuteExpenseClaims}
+                onCancelApproval={cancelCommuteExpenseApproval}
                 onDecide={decideCommuteExpenseClaim}
                 isDesktop={isDesktop}
               />
@@ -6786,7 +6820,7 @@ const HELP_ADMIN = [
       { q: '月次勤怠の確定とは', a: 'スタッフが前月分の勤怠を確認して確定申請し、管理者が内容を確認して承認、最後にマスター管理者が最終承認する流れです。マスター管理者が最初に確認した場合は、その承認だけで確定します。管理者ご本人の申請は、マスター管理者の承認のみで確定します。最終承認が済むと、その月の給与明細を公開できるようになります。「勤怠」→「月次勤怠の確定」で処理します。確定後に修正が必要になった場合は、マスター管理者が「確定を取り消す」で差し戻しに戻せます。取り消すとスタッフへ通知され、給与明細の公開も止まります。' },
       { q: '支給・控除の項目を追加するには', a: 'スタッフの「詳細」→「給与・口座」タブで、スタッフごとの固定的な支給項目・控除項目を登録できます。毎月の計算に自動で反映されます。' },
       { q: '標準報酬月額の設定はどこですか', a: 'スタッフの「詳細」→「社会保険」タブで設定します。等級表から選択でき、健康保険・厚生年金の保険料が自動計算されます。保険料率は別途「保険料率設定」で管理します。' },
-      { q: '交通費精算の承認とExcel出力', a: '「給与」タブの交通費精算一覧から承認・却下します。承認できるのはマスター管理者のみです。承認待ちの左側にあるチェックを入れると、まとめて承認できます。承認済みのものは月を指定してExcelファイルに出力でき、経理処理に使えます。承認した金額は、同じ対象月の給与を新規作成する際に支給項目「交通費精算」として自動で入ります。' },
+      { q: '交通費精算の承認とExcel出力', a: '「給与」タブの交通費精算一覧から承認・却下します。承認できるのはマスター管理者のみです。承認待ちの左側にあるチェックを入れると、まとめて承認できます。承認済みのものは月を指定してExcelファイルに出力でき、経理処理に使えます。承認した金額は、同じ対象月の給与を新規作成する際に支給項目「交通費精算」として自動で入ります。承認後に修正が必要になった場合は、マスター管理者が「承認を取り消す」で差し戻しに戻せます。給与明細に反映済みの場合は、給与側の金額もあわせてご確認ください。' },
       { q: '年末調整の進め方', a: '「人材」タブの年末調整で、スタッフから提出された内容を確認し、承認します。提出状況は一覧で把握できます。' },
     ],
   },
@@ -9635,7 +9669,7 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate }) {
   );
 }
 
-function AdminCommuteExpenseClaimsTab({ claims, isMasterAdmin = false, onDecide, isDesktop }) {
+function AdminCommuteExpenseClaimsTab({ claims, isMasterAdmin = false, onDecide, onCancelApproval, isDesktop }) {
   const [comment, setComment] = useState({});
   const [exportMonth, setExportMonth] = useState('all');
   const [selected, setSelected] = useState([]);
@@ -9645,6 +9679,13 @@ function AdminCommuteExpenseClaimsTab({ claims, isMasterAdmin = false, onDecide,
   const toggleSelected = (id) => setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   const allSelected = pending.length > 0 && selected.length === pending.length;
   const toggleAll = () => setSelected(allSelected ? [] : pending.map((c) => c.id));
+  const cancelApproval = async (id) => {
+    if (!window.confirm('この交通費精算の承認を取り消します。スタッフへ通知され、差し戻しに戻ります。給与明細に反映済みの場合は、給与側の金額もご確認ください。よろしいですか。')) return;
+    setBulkRunning(true);
+    await onCancelApproval(id, comment[id]);
+    setBulkRunning(false);
+  };
+
   const approveSelected = async () => {
     if (selected.length === 0) return;
     if (!window.confirm(`選択した ${selected.length} 件を承認します。よろしいですか。`)) return;
@@ -9761,7 +9802,26 @@ function AdminCommuteExpenseClaimsTab({ claims, isMasterAdmin = false, onDecide,
           <div className="text-[11.5px] text-slate-400">交通費精算の承認はマスター管理者のみが行えます。</div>
         )
       ) : (
-        c.adminComment && <div className="text-[11.5px] text-slate-400">管理者コメント：{c.adminComment}</div>
+        <>
+          {c.adminComment && <div className="text-[11.5px] text-slate-400">管理者コメント：{c.adminComment}</div>}
+          {c.status === 'approved' && isMasterAdmin && (
+            <div className="space-y-2 border-t border-slate-100 pt-2.5 mt-2">
+              <input
+                value={comment[c.id] || ''}
+                onChange={(e) => setComment((prev) => ({ ...prev, [c.id]: e.target.value }))}
+                placeholder="取り消しの理由（任意・本人に通知されます）"
+                className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-[12.5px]"
+              />
+              <button
+                onClick={() => cancelApproval(c.id)}
+                disabled={bulkRunning}
+                className="w-full py-1.5 rounded-lg border border-rose-200 text-[12px] font-bold text-rose-600 disabled:text-slate-300"
+              >
+                承認を取り消す
+              </button>
+            </div>
+          )}
+        </>
       )}
     </div>
   );
