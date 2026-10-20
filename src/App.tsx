@@ -3639,7 +3639,7 @@ function BankAccountFields({ form, setForm }) {
     patch({ branchName: raw, ...(code ? { branchCode: code } : {}) });
   };
 
-  const inputClass = 'w-full border-2 border-slate-200 rounded-xl px-3.5 py-2.5 text-[14px] outline-none focus:border-slate-900';
+  const inputClass = 'w-full h-[44px] leading-[20px] border-2 border-slate-200 rounded-xl px-3.5 text-[14px] bg-white outline-none focus:border-slate-900';
   const monoClass = `${inputClass} font-mono`;
   const bankResolved = !!(form.bankCode && banks && banks[form.bankCode]);
   const branchResolved = !!(form.branchCode && branchEntries.some(([c]) => c === form.branchCode));
@@ -3695,7 +3695,7 @@ function BankAccountFields({ form, setForm }) {
         <select
           name="accountType" value={form.accountType}
           onChange={(e) => patch({ accountType: e.target.value })}
-          className={`${inputClass} bg-white`}
+          className={inputClass}
         >
           <option value="普通">普通</option>
           <option value="当座">当座</option>
@@ -3874,7 +3874,7 @@ function ProfileSetupScreen({ session, toast, onSave, onLogout }) {
                         name={f.key}
                         value={form[f.key]}
                         onChange={(e) => setValue(f)(e.target.value)}
-                        className="w-full border-2 border-slate-200 rounded-xl px-3.5 py-2.5 text-[14px] bg-white outline-none focus:border-slate-900"
+                        className="w-full h-[44px] border-2 border-slate-200 rounded-xl px-3.5 text-[14px] bg-white outline-none focus:border-slate-900"
                       >
                         {!form[f.key] && <option value="">選択してください</option>}
                         {f.options.map((o) => <option key={o} value={o}>{o}</option>)}
@@ -3892,7 +3892,8 @@ function ProfileSetupScreen({ session, toast, onSave, onLogout }) {
                           blurFormat={blurFormatField(f)}
                           readOnly={f.readOnly || (f.sameAsLogin && useLoginEmail) || (f.sameAsAddress && useSameAddress) || ((f.sameAsSelf || f.lockedWhenSelf) && householderIsSelf)}
                           placeholder={f.placeholder}
-                          className={`w-full border-2 border-slate-200 rounded-xl px-3.5 py-2.5 text-[14px] outline-none focus:border-slate-900 ${f.mono || f.type === 'date' ? 'font-mono' : ''} ${f.readOnly || (f.sameAsLogin && useLoginEmail) || (f.sameAsAddress && useSameAddress) || ((f.sameAsSelf || f.lockedWhenSelf) && householderIsSelf) ? 'bg-slate-100 text-slate-500' : ''}`}
+                          style={{ WebkitAppearance: 'none', appearance: 'none' }}
+                          className={`w-full h-[44px] leading-[20px] border-2 border-slate-200 rounded-xl px-3.5 text-[14px] outline-none focus:border-slate-900 ${f.mono || f.type === 'date' ? 'font-mono' : ''} ${f.readOnly || (f.sameAsLogin && useLoginEmail) || (f.sameAsAddress && useSameAddress) || ((f.sameAsSelf || f.lockedWhenSelf) && householderIsSelf) ? 'bg-slate-100 text-slate-500' : 'bg-white'}`}
                         />
                         {f.note && <div className="mt-1 text-[11px] text-slate-400">{f.note}</div>}
                         {f.postal && postalNotice && <div className="mt-1 text-[11.5px] text-amber-700">{postalNotice}</div>}
@@ -3961,12 +3962,12 @@ function ProfileSetupScreen({ session, toast, onSave, onLogout }) {
                     onValueChange={setMyNumber}
                     format={(v) => onlyDigits(v).slice(0, 12)}
                     placeholder="123456789012"
-                    className="flex-1 border-2 border-slate-200 rounded-xl px-3.5 py-2.5 font-mono text-[14px] outline-none focus:border-slate-900"
+                    className="flex-1 h-[44px] leading-[20px] border-2 border-slate-200 rounded-xl px-3.5 font-mono text-[14px] bg-white outline-none focus:border-slate-900"
                   />
                   <button
                     type="button"
                     onClick={() => setMyNumberShown((v) => !v)}
-                    className="text-[11px] font-bold text-slate-500 border border-slate-200 rounded-xl px-3 py-2.5 shrink-0"
+                    className="text-[11px] font-bold text-slate-500 border border-slate-200 rounded-xl px-3 h-[44px] shrink-0"
                   >
                     {myNumberShown ? '隠す' : '表示'}
                   </button>
