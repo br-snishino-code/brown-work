@@ -2628,7 +2628,8 @@ function AttendanceApp() {
       .select()
       .single();
     if (error) {
-      show('交通費精算書の提出に失敗しました', 'warn');
+      console.error('交通費精算書の提出に失敗しました', error);
+      show(`交通費精算書の提出に失敗しました：${error.message || error.code || ''}`, 'warn');
       return false;
     }
     await notifyAdmin(
@@ -2663,7 +2664,7 @@ function AttendanceApp() {
       .eq('id', id);
     if (error) {
       console.error('交通費精算書の修正に失敗しました', error);
-      show('交通費精算書の修正に失敗しました', 'warn');
+      show(`交通費精算書の修正に失敗しました：${error.message || error.code || ''}`, 'warn');
       return false;
     }
     await notifyAdmin(
