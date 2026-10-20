@@ -3610,6 +3610,7 @@ function AttendanceApp() {
             onDecide={decideCorrection}
             onDecideLeave={decideLeaveRequest}
             onDecidePerformance={decidePerformanceReport}
+            onDecideCommute={decideCommuteExpenseClaim}
             onAddAccount={handleAddAccount}
             onDeleteAccount={handleDeleteAccount}
             onResetPassword={handleResetPassword}
@@ -7470,6 +7471,177 @@ function PaidLeaveSummaryTab({ employeeAccounts, leaveRequests, isDesktop }) {
   );
 }
 
+// ---- 承認：種類をまたいで未処理をまとめて処理する画面 ----
+const APPROVAL_KIND_META = {
+  correction: { label: '勤怠修正', cls: 'bg-blue-50 text-blue-700' },
+  leave: { label: '休暇', cls: 'bg-emerald-50 text-emerald-700' },
+  monthly: { label: '月次確定', cls: 'bg-violet-50 text-violet-700' },
+  commute: { label: '交通費', cls: 'bg-amber-50 text-amber-700' },
+};
+
+function relativeTimeLabel(value) {
+  if (!value) return '';
+  const t = new Date(value).getTime();
+  if (Number.isNaN(t)) return '';
+  const min = Math.floor((Date.now() - t) / 60000);
+  if (min < 1) return 'たった今';
+  if (min < 60) return `${min}分前`;
+  const hour = Math.floor(min / 60);
+  if (hour < 24) return `${hour}時間前`;
+  return `${Math.floor(hour / 24)}日前`;
+}
+
+function ApprovalHubTab({ items, isMasterAdmin, onApprove, onReject, onOpenDetail, isDesktop }) {
+  const [filter, setFilter] = useState('all');
+  const [selected, setSelected] = useState([]);
+  const [working, setWorking] = useState(false);
+
+  const visible = filter === 'all' ? items : items.filter((it) => it.kind === filter);
+  const visibleKeys = visible.map((it) => it.key);
+  const selectedVisible = selected.filter((k) => visibleKeys.includes(k));
+  const allChecked = visible.length > 0 && selectedVisible.length === visible.length;
+
+  const toggle = (key) => {
+    setSelected((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
+  };
+  const toggleAll = () => {
+    setSelected(allChecked ? [] : visibleKeys);
+  };
+
+  // 選んだものを順に処理する（種類が違っても同じ操作でまとめられる）
+  const runBatch = async (decision) => {
+    const targets = items.filter((it) => selectedVisible.includes(it.key));
+    if (targets.length === 0) return;
+    const verb = decision === 'approved' ? '承認' : '却下';
+    if (!window.confirm(`選択した${targets.length}件を${verb}します。よろしいですか？`)) return;
+    setWorking(true);
+    for (const it of targets) {
+      // eslint-disable-next-line no-await-in-loop
+      await (decision === 'approved' ? onApprove(it) : onReject(it));
+    }
+    setWorking(false);
+    setSelected([]);
+  };
+
+  const counts = {
+    all: items.length,
+    correction: items.filter((it) => it.kind === 'correction').length,
+    leave: items.filter((it) => it.kind === 'leave').length,
+    monthly: items.filter((it) => it.kind === 'monthly').length,
+    commute: items.filter((it) => it.kind === 'commute').length,
+  };
+  const chips = [
+    ['all', 'すべて'],
+    ['correction', '勤怠修正'],
+    ['leave', '休暇'],
+    ['monthly', '月次確定'],
+    ...(isMasterAdmin ? [['commute', '交通費']] : []),
+  ];
+
+  // 1行の描画。再描画で作り直されないよう、関数として呼び出す
+  const renderRow = (it) => {
+    const meta = APPROVAL_KIND_META[it.kind];
+    const checked = selected.includes(it.key);
+    return (
+      <div
+        key={it.key}
+        className={`flex items-start gap-3 px-4 py-3 border-b border-slate-100 last:border-0 ${it.highlight ? 'bg-amber-50/60' : ''}`}
+      >
+        <input
+          type="checkbox"
+          checked={checked}
+          onChange={() => toggle(it.key)}
+          aria-label={`${meta.label}の申請を選択`}
+          className="mt-0.5 w-4 h-4 accent-amber-600 shrink-0"
+        />
+        <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold ${meta.cls}`} style={{ minWidth: '4.2rem', textAlign: 'center' }}>
+          {meta.label}
+        </span>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-[12.5px] font-bold text-slate-800">
+              <EmployeeLink id={it.employeeId} name={it.employeeName} />
+            </span>
+            {it.badge && <span className="text-[10.5px] font-bold text-amber-700">{it.badge}</span>}
+          </div>
+          <div className="text-[12px] text-slate-600 mt-0.5">{it.summary}</div>
+          {it.note && <div className="text-[11.5px] text-slate-400 mt-0.5">{it.note}</div>}
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <span className="hidden sm:inline text-[11px] text-slate-400">{relativeTimeLabel(it.at)}</span>
+          <button
+            onClick={() => onOpenDetail(it)}
+            className="rounded-lg border border-slate-200 px-2.5 py-1 text-[11px] font-bold text-slate-500 hover:bg-slate-50"
+          >
+            詳細
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-2 flex-wrap">
+        {chips.map(([key, label]) => (
+          <button
+            key={key}
+            onClick={() => setFilter(key)}
+            className={`rounded-full px-3 py-1.5 text-[11.5px] font-bold border transition-colors ${
+              filter === key ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'
+            }`}
+          >
+            {label} {counts[key]}
+          </button>
+        ))}
+      </div>
+
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="flex items-center gap-2.5 px-4 py-2.5 bg-slate-50 border-b border-slate-200 flex-wrap">
+          <input
+            type="checkbox"
+            checked={allChecked}
+            onChange={toggleAll}
+            aria-label="表示中のすべてを選択"
+            disabled={visible.length === 0}
+            className="w-4 h-4 accent-amber-600"
+          />
+          <span className="text-[11.5px] font-bold text-slate-500">
+            {selectedVisible.length > 0 ? `${selectedVisible.length}件を選択中` : '承認するものを選んでください'}
+          </span>
+          <div className="ml-auto flex gap-2">
+            <button
+              onClick={() => runBatch('approved')}
+              disabled={working || selectedVisible.length === 0}
+              className="rounded-lg bg-emerald-600 disabled:bg-slate-200 px-3.5 py-1.5 text-[11.5px] font-bold text-white"
+            >
+              {working ? '処理中…' : 'まとめて承認'}
+            </button>
+            <button
+              onClick={() => runBatch('rejected')}
+              disabled={working || selectedVisible.length === 0}
+              className="rounded-lg border border-slate-300 disabled:border-slate-200 disabled:text-slate-300 px-3 py-1.5 text-[11.5px] font-bold text-slate-600"
+            >
+              却下
+            </button>
+          </div>
+        </div>
+
+        {visible.length === 0 ? (
+          <div className="px-5 py-12 text-center text-[12.5px] text-slate-300">承認待ちの申請はありません</div>
+        ) : (
+          <div>{visible.map((it) => renderRow(it))}</div>
+        )}
+      </div>
+
+      <div className="text-[11.5px] text-slate-400">
+        同じ内容はこれまでどおり各画面にも表示されます。金額の修正や差し戻しの理由を入れる場合は「詳細」から元の画面で操作してください。
+        {!isMasterAdmin && ' 交通費と月次勤怠の最終承認はマスター管理者のみが行えます。'}
+      </div>
+    </div>
+  );
+}
+
 function AdminDashboardTab({ missingCount, correctionCount, leaveCount, performanceCount, gpsAlertCount, contractAlertCount, clockInApprovalCount = 0, employeeCount, todayPresentCount = 0, monthOvertimeMin = 0, paidLeaveShortages = [], announcements = [], notifications = [], onNavigate, onNavigateTop, onOpenNotification, isDesktop }) {
   const alertRows = [
     { label: '打刻漏れ・打刻間違い', count: missingCount, tab: 'requests', icon: <AlertTriangle size={14} /> },
@@ -8145,7 +8317,7 @@ function PayrollMetric({ label, value }) {
   );
 }
 
-function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveCount, performanceCount, monthlyConfirmCount = 0, isMasterAdmin }) {
+function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveCount, performanceCount, monthlyConfirmCount = 0, approvalCount = 0, isMasterAdmin }) {
   const [open, setOpen] = useState(null);
   const wrapRef = useRef(null);
 
@@ -8205,11 +8377,11 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
   // 残りは「その他」にまとめる。
   const primaryItems = [
     { tab: 'dashboard', label: 'ダッシュボード', icon: <LayoutGrid size={14} /> },
+    { tab: 'approvals', label: '承認', badge: approvalCount },
     { tab: 'attendance', label: '勤怠一覧', badge: attendanceCount },
     { tab: 'requests', label: '勤怠修正', badge: correctionCount },
     { tab: 'monthlyconfirm', label: '月次確定', badge: monthlyConfirmCount },
     { tab: 'leave', label: '休暇申請', badge: leaveCount },
-    { tab: 'performance', label: '実績報告', badge: performanceCount },
     { tab: 'accounts', label: 'スタッフ一覧' },
   ];
   const primaryTabs = primaryItems.map((i) => i.tab);
@@ -8277,7 +8449,7 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
   );
 }
 
-function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAdminTab = null, onConsumeRequestedAdminTab, onDecide, onDecideLeave, onDecidePerformance, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onChangeLoginEmail, onDecideMonthlyConfirm, onCancelMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
+function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAdminTab = null, onConsumeRequestedAdminTab, onDecide, onDecideLeave, onDecidePerformance, onDecideCommute, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onChangeLoginEmail, onDecideMonthlyConfirm, onCancelMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
   const [tab, setTab] = useState('dashboard'); // dashboard | attendance | requests | leave | performance | accounts
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
@@ -8360,6 +8532,85 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [requestedAdminTab]);
 
+  // ---- 承認タブ：種類をまたいだ未処理の一覧 ----
+  const monthlyPendingForMe = monthlyConfirmations.filter((c) => {
+    const submitterRole = data.accounts.find((a) => a.id === c.employeeId)?.role;
+    const bySelfAdmin = submitterRole === 'admin' || submitterRole === 'master_admin';
+    if (c.status === 'pending') return isMasterAdmin ? true : !bySelfAdmin;
+    if (c.status === 'admin_approved') return isMasterAdmin;
+    return false;
+  });
+  const commutePending = isMasterAdmin
+    ? (data.commuteExpenseClaims || []).filter((c) => c.status === 'pending')
+    : [];
+  const nameOf = (id) => data.accounts.find((a) => a.id === id)?.name || '';
+
+  const approvalItems = [
+    ...pending.map((c) => ({
+      key: `correction:${c.id}`,
+      kind: 'correction',
+      id: c.id,
+      employeeId: c.employeeId,
+      employeeName: c.employeeName,
+      summary: `${dateLabel(c.date)} 出勤 ${c.requested?.clockIn || '変更なし'}／退勤 ${c.requested?.clockOut || '変更なし'}／休憩 ${c.requested?.breakMinutes ?? 0}分`,
+      note: c.reason ? `理由：${c.reason}` : '',
+      at: c.submittedAt,
+    })),
+    ...leavePending.map((l) => ({
+      key: `leave:${l.id}`,
+      kind: 'leave',
+      id: l.id,
+      employeeId: l.employeeId,
+      employeeName: l.employeeName,
+      summary: `${l.type}${l.halfDay ? '（半休）' : ''} ${l.startDate === l.endDate ? dateLabel(l.startDate) : `${dateLabel(l.startDate)}〜${dateLabel(l.endDate)}`}（${l.days}日間）`,
+      note: l.reason ? `理由：${l.reason}` : '',
+      at: l.submittedAt,
+    })),
+    ...monthlyPendingForMe.map((c) => ({
+      key: `monthly:${c.id}`,
+      kind: 'monthly',
+      id: c.id,
+      employeeId: c.employeeId,
+      employeeName: nameOf(c.employeeId),
+      summary: `${monthKeyLabel(c.targetMonth)}分 出勤${c.summary?.days ?? 0}日／労働 ${minutesToHHMM(c.summary?.workedMin || 0)}／残業 ${minutesToHHMM(c.summary?.overtimeMin || 0)}`,
+      note: c.staffNote ? `メモ：${c.staffNote}` : '',
+      badge: c.status === 'admin_approved' ? '最終承認' : '',
+      highlight: c.status === 'admin_approved',
+      at: c.submittedAt,
+      stage: c.status === 'admin_approved' ? 'master' : 'admin',
+    })),
+    ...commutePending.map((c) => ({
+      key: `commute:${c.id}`,
+      kind: 'commute',
+      id: c.id,
+      employeeId: c.employeeId,
+      employeeName: nameOf(c.employeeId),
+      summary: `${c.targetMonth ? `${monthKeyLabel(c.targetMonth)}分 ` : ''}${formatYen(c.totalAmount)}／${(c.items || []).length}件`,
+      at: c.submittedAt || c.createdAt,
+    })),
+  ].sort((a, b) => new Date(a.at || 0).getTime() - new Date(b.at || 0).getTime());
+
+  const approveApprovalItem = async (it) => {
+    if (it.kind === 'correction') return onDecide(it.id, 'approved');
+    if (it.kind === 'leave') return onDecideLeave(it.id, 'approved');
+    if (it.kind === 'monthly') return onDecideMonthlyConfirm(it.id, it.stage, 'approved', '');
+    if (it.kind === 'commute') return onDecideCommute(it.id, 'approved', '');
+    return false;
+  };
+  const rejectApprovalItem = async (it) => {
+    if (it.kind === 'correction') return onDecide(it.id, 'rejected');
+    if (it.kind === 'leave') return onDecideLeave(it.id, 'rejected');
+    if (it.kind === 'monthly') return onDecideMonthlyConfirm(it.id, it.stage, 'rejected', '');
+    if (it.kind === 'commute') return onDecideCommute(it.id, 'rejected', '');
+    return false;
+  };
+  const openApprovalDetail = (it) => {
+    if (it.kind === 'correction') setTab('requests');
+    else if (it.kind === 'leave') setTab('leave');
+    else if (it.kind === 'monthly') setTab('monthlyconfirm');
+    else if (it.kind === 'commute' && onNavigateTop) onNavigateTop('payroll');
+  };
+
   // 通知履歴の項目をクリックしたとき、その内容を確認できる画面へ移動する
   const openNotification = useCallback((notif) => {
     const target = resolveNotificationTarget(notif?.subject || '');
@@ -8385,12 +8636,21 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
           leaveCount={leavePending.length}
           performanceCount={performancePending.length}
           monthlyConfirmCount={monthlyConfirmCount}
+          approvalCount={approvalItems.length}
           isMasterAdmin={isMasterAdmin}
         />
       ) : (
         <div className="flex items-center bg-white rounded-xl border border-slate-200 p-1 text-[11.5px] font-medium overflow-x-auto">
           <button onClick={() => setTab('dashboard')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'dashboard' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
             ホーム
+          </button>
+          <button onClick={() => setTab('approvals')} className={`relative flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'approvals' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
+            承認
+            {approvalItems.length > 0 && tab !== 'approvals' && (
+              <span className="absolute -top-1 -right-0.5 w-4 h-4 bg-amber-600 rounded-full text-[9px] flex items-center justify-center text-white font-bold">
+                {approvalItems.length}
+              </span>
+            )}
           </button>
           <button onClick={() => setTab('attendance')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'attendance' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
             勤怠一覧
@@ -8455,6 +8715,17 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
             ))}
           </div>
         </div>
+      )}
+
+      {tab === 'approvals' && (
+        <ApprovalHubTab
+          items={approvalItems}
+          isMasterAdmin={isMasterAdmin}
+          onApprove={approveApprovalItem}
+          onReject={rejectApprovalItem}
+          onOpenDetail={openApprovalDetail}
+          isDesktop={isDesktop}
+        />
       )}
 
       {tab === 'dashboard' && (
