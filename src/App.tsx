@@ -2676,11 +2676,14 @@ function AttendanceApp() {
       show(`勤怠の確定申請に失敗しました：${error.message || ''}`, 'warn');
       return false;
     }
-    await notifyAdmin(
-      `【勤怠確定申請】${session.name} - ${monthKeyLabel(targetMonth)}分`,
-      `${session.name}さんより ${monthKeyLabel(targetMonth)}分の勤怠確定申請が届きました。内容をご確認のうえ承認してください。`,
-      saved?.id
-    );
+    const subject = `【勤怠確定申請】${session.name} - ${monthKeyLabel(targetMonth)}分`;
+    const body = `${session.name}さんより ${monthKeyLabel(targetMonth)}分の勤怠確定申請が届きました。内容をご確認のうえ承認してください。`;
+    if (session.role === 'admin' || session.role === 'master_admin') {
+      // 管理者ご本人の申請は、マスター管理者の承認のみで確定する
+      await notify(subject, body, saved?.id, null, 'master_admin');
+    } else {
+      await notifyAdmin(subject, body, saved?.id);
+    }
     await refreshData();
     show(`${monthKeyLabel(targetMonth)}分の勤怠を確定申請しました`, 'success');
     return true;
@@ -6776,7 +6779,7 @@ const HELP_ADMIN = [
     category: '給与',
     items: [
       { q: '給与計算の流れを教えてください', a: 'まず「勤怠」→「月次勤怠の確定」で、その月の勤怠を最終承認まで進めます。次に「給与」タブで対象月を選ぶと、勤怠記録から労働時間と残業時間が自動集計されます。承認済みの交通費精算も支給項目に自動で入ります。支給項目・控除項目を確認して下書き保存し、内容が確定したら「公開」します。公開するとスタッフ側の画面に明細が表示されます。勤怠が最終承認されるまで公開はできません。' },
-      { q: '月次勤怠の確定とは', a: 'スタッフが前月分の勤怠を確認して確定申請し、管理者が内容を確認して承認、最後にマスター管理者が最終承認する流れです。マスター管理者が最初に確認した場合は、その承認だけで確定します。最終承認が済むと、その月の給与明細を公開できるようになります。「勤怠」→「月次勤怠の確定」で処理します。確定後に修正が必要になった場合は、マスター管理者が「確定を取り消す」で差し戻しに戻せます。取り消すとスタッフへ通知され、給与明細の公開も止まります。' },
+      { q: '月次勤怠の確定とは', a: 'スタッフが前月分の勤怠を確認して確定申請し、管理者が内容を確認して承認、最後にマスター管理者が最終承認する流れです。マスター管理者が最初に確認した場合は、その承認だけで確定します。管理者ご本人の申請は、マスター管理者の承認のみで確定します。最終承認が済むと、その月の給与明細を公開できるようになります。「勤怠」→「月次勤怠の確定」で処理します。確定後に修正が必要になった場合は、マスター管理者が「確定を取り消す」で差し戻しに戻せます。取り消すとスタッフへ通知され、給与明細の公開も止まります。' },
       { q: '支給・控除の項目を追加するには', a: 'スタッフの「詳細」→「給与・口座」タブで、スタッフごとの固定的な支給項目・控除項目を登録できます。毎月の計算に自動で反映されます。' },
       { q: '標準報酬月額の設定はどこですか', a: 'スタッフの「詳細」→「社会保険」タブで設定します。等級表から選択でき、健康保険・厚生年金の保険料が自動計算されます。保険料率は別途「保険料率設定」で管理します。' },
       { q: '交通費精算の承認とExcel出力', a: '「給与」タブの交通費精算一覧から承認・却下します。承認待ちの左側にあるチェックを入れると、まとめて承認できます。承認済みのものは月を指定してExcelファイルに出力でき、経理処理に使えます。承認した金額は、同じ対象月の給与を新規作成する際に支給項目「交通費精算」として自動で入ります。' },
@@ -7789,9 +7792,13 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, o
   const adminAccounts = data.accounts.filter((a) => a.role === 'admin' || a.role === 'master_admin');
   // 月次勤怠の確定：自分が処理すべき件数（管理者は1次、マスター管理者は1次と最終の両方）
   const monthlyConfirmations = data.monthlyConfirmations || [];
-  const monthlyConfirmCount = monthlyConfirmations.filter(
-    (c) => c.status === 'pending' || (isMasterAdmin && c.status === 'admin_approved')
-  ).length;
+  const monthlyConfirmCount = monthlyConfirmations.filter((c) => {
+    const submitterRole = data.accounts.find((a) => a.id === c.employeeId)?.role;
+    const bySelfAdmin = submitterRole === 'admin' || submitterRole === 'master_admin';
+    if (c.status === 'pending') return isMasterAdmin ? true : !bySelfAdmin;
+    if (c.status === 'admin_approved') return isMasterAdmin;
+    return false;
+  }).length;
 
   // ダッシュボードのサマリー用の集計
   const todayPresentCount = employeeAccounts.filter((acc) => {
@@ -8054,6 +8061,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, o
       {tab === 'monthlyconfirm' && (
         <AdminMonthlyConfirmTab
           confirmations={monthlyConfirmations}
+          accounts={data.accounts}
           isMasterAdmin={isMasterAdmin}
           onDecide={onDecideMonthlyConfirm}
           onCancel={onCancelMonthlyConfirm}
@@ -9161,13 +9169,21 @@ function MonthlyAttendanceConfirmSection({ records, confirmations, onSubmit }) {
 }
 
 // ---- 月次勤怠の確定（管理者側）----
-function AdminMonthlyConfirmTab({ confirmations, isMasterAdmin, onDecide, onCancel, isDesktop }) {
+function AdminMonthlyConfirmTab({ confirmations, accounts = [], isMasterAdmin, onDecide, onCancel, isDesktop }) {
   const [comment, setComment] = useState({});
   const [running, setRunning] = useState(false);
   const setMemo = (id, v) => setComment((prev) => ({ ...prev, [id]: v }));
 
-  const waitingAdmin = confirmations.filter((c) => c.status === 'pending');
-  const waitingMaster = confirmations.filter((c) => c.status === 'admin_approved');
+  // 管理者・マスター管理者本人の申請は、管理者による1次確認を挟まず
+  // マスター管理者の承認のみで確定させる
+  const isAdminSubmitter = (c) => {
+    const role = accounts.find((a) => a.id === c.employeeId)?.role;
+    return role === 'admin' || role === 'master_admin';
+  };
+  const waitingAdmin = confirmations.filter((c) => c.status === 'pending' && !isAdminSubmitter(c));
+  const waitingMaster = confirmations.filter(
+    (c) => c.status === 'admin_approved' || (c.status === 'pending' && isAdminSubmitter(c))
+  );
   const others = confirmations.filter((c) => c.status === 'confirmed' || c.status === 'rejected').slice(0, 20);
 
   const decide = async (id, stage, decision) => {
@@ -9206,6 +9222,9 @@ function AdminMonthlyConfirmTab({ confirmations, isMasterAdmin, onDecide, onCanc
           </div>
         ))}
       </div>
+      {isAdminSubmitter(c) && c.status !== 'confirmed' && (
+        <div className="text-[11.5px] text-blue-700 mb-2">管理者ご本人の申請のため、マスター管理者の承認のみで確定します。</div>
+      )}
       {c.staffNote && <div className="text-[11.5px] text-slate-500 mb-2">本人メモ：{c.staffNote}</div>}
       {c.adminComment && <div className="text-[11.5px] text-slate-400 mb-2">管理者コメント：{c.adminComment}</div>}
       {c.masterComment && <div className="text-[11.5px] text-slate-400 mb-2">マスター管理者コメント：{c.masterComment}</div>}
@@ -9249,7 +9268,7 @@ function AdminMonthlyConfirmTab({ confirmations, isMasterAdmin, onDecide, onCanc
               disabled={running}
               className="flex-1 py-1.5 rounded-lg bg-emerald-600 disabled:bg-slate-200 text-white text-[12px] font-bold"
             >
-              {stage === 'master' ? '最終承認する' : isMasterAdmin ? '承認して確定する' : '承認する'}
+              {stage === 'master' ? (c.status === 'pending' ? '承認して確定する' : '最終承認する') : isMasterAdmin ? '承認して確定する' : '承認する'}
             </button>
           </div>
         </div>
@@ -9279,15 +9298,15 @@ function AdminMonthlyConfirmTab({ confirmations, isMasterAdmin, onDecide, onCanc
         title={isMasterAdmin ? '管理者の確認待ち' : 'あなたの確認待ち'}
         note={isMasterAdmin
           ? 'スタッフから届いた確定申請です。マスター管理者が承認すると、その場で確定し給与計算に進めます。'
-          : 'スタッフから届いた確定申請です。内容を確認して承認すると、マスター管理者へ最終承認の依頼が届きます。'}
+          : 'スタッフから届いた確定申請です。内容を確認して承認すると、マスター管理者へ最終承認の依頼が届きます。管理者ご自身の申請はここには並びません。'}
         list={waitingAdmin}
         stage="admin"
       />
       <Section
         title={isMasterAdmin ? 'あなたの最終承認待ち' : 'マスター管理者の最終承認待ち'}
         note={isMasterAdmin
-          ? '管理者が1次確認を済ませたものです。最終承認すると勤怠が確定し、その月の給与計算に進めます。'
-          : '管理者の確認は完了しています。マスター管理者の最終承認をお待ちください。'}
+          ? '管理者が1次確認を済ませたもの、および管理者ご本人の申請です。承認すると勤怠が確定し、その月の給与計算に進めます。'
+          : '管理者の確認が済んだもの、および管理者ご本人の申請です。マスター管理者の承認をお待ちください。'}
         list={waitingMaster}
         stage={isMasterAdmin ? 'master' : null}
       />
