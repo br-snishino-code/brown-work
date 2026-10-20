@@ -2733,7 +2733,10 @@ export default function AttendanceApp() {
         session={session}
         toast={toast}
         onDone={async () => {
-          setSession((prev) => ({ ...prev, mustChangePassword: false }));
+          // 保存されている内容を読み直して、次に表示する画面を判定する
+          const { data: row } = await supabase.from('employees').select('*').eq('id', session.id).maybeSingle();
+          if (row) setSession({ ...rowToAccount(row), mustChangePassword: false });
+          else setSession((prev) => ({ ...prev, mustChangePassword: false }));
           await refreshData();
           show('パスワードを変更しました', 'success');
         }}
@@ -3302,8 +3305,16 @@ function FirstLoginPasswordScreen({ session, toast, onDone, onLogout }) {
       setSaving(false);
       return;
     }
-    await supabase.from('employees').update({ must_change_password: false }).eq('id', session.id);
+    const { error: flagError } = await supabase
+      .from('employees')
+      .update({ must_change_password: false })
+      .eq('id', session.id);
     setSaving(false);
+    if (flagError) {
+      console.error('must_change_password の更新に失敗しました', flagError);
+      setError(`パスワードは変更できましたが、設定の保存に失敗しました：${flagError.message}`);
+      return;
+    }
     await onDone();
   };
 
