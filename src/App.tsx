@@ -1704,7 +1704,10 @@ function AttendanceApp() {
   // 管理者への通知（アプリ内通知＋実メール、メールはResend設定済みの場合のみ実際に届く）
   const notifyAdmin = async (subject, body, relatedId) => {
     await notify(subject, body, relatedId, null, 'admin');
-    const admin = data.accounts.find((a) => a.role === 'admin' && a.contactEmail);
+    // 通知メールはマスター管理者を優先して送る
+    const admin =
+      data.accounts.find((a) => a.role === 'master_admin' && a.contactEmail) ||
+      data.accounts.find((a) => a.role === 'admin' && a.contactEmail);
     if (admin) await sendEmailBestEffort(admin.contactEmail, subject, body);
   };
 
@@ -2828,6 +2831,13 @@ function AttendanceApp() {
       <main className={isDesktop ? 'max-w-6xl mx-auto px-6 pb-16 pt-8' : 'max-w-3xl mx-auto px-4 pb-24 pt-6'}>
         {topTab === 'labor' && (
           <div className="space-y-5">
+            {!showStaffScreens && session.role === 'master_admin' && (
+              <ProfileChangeNoticeCard
+                requests={data.profileUpdateRequests}
+                accounts={data.accounts}
+                onOpen={() => setTopTab('hr')}
+              />
+            )}
             <AnnouncementsView
               announcements={data.announcements}
               isAdmin={session.role === 'admin' || session.role === 'master_admin'}
@@ -9015,6 +9025,39 @@ function ProfileRequestModal({ session, onClose, onSubmit }) {
       </div>
     </div>,
     document.body
+  );
+}
+
+// 労務画面に出す「個人情報の変更申請が届いています」のお知らせ
+function ProfileChangeNoticeCard({ requests, accounts, onOpen }) {
+  const pending = (requests || []).filter((r) => r.status === 'pending');
+  if (pending.length === 0) return null;
+  const nameOf = (r) => r.employeeName || (accounts || []).find((a) => a.id === r.employeeId)?.name || '';
+  return (
+    <button
+      onClick={onOpen}
+      className="w-full text-left bg-amber-50 border border-amber-200 rounded-2xl px-5 py-4 hover:bg-amber-100 transition-colors"
+    >
+      <div className="flex items-center gap-2">
+        <UserCog size={16} className="text-amber-600 shrink-0" />
+        <span className="font-bold text-[13.5px] text-amber-900">個人情報の変更申請が {pending.length} 件届いています</span>
+        <ChevronRight size={16} className="ml-auto text-amber-600 shrink-0" />
+      </div>
+      <div className="mt-2 space-y-1">
+        {pending.slice(0, 5).map((r) => (
+          <div key={r.id} className="text-[12px] text-amber-800">
+            {nameOf(r)}
+            <span className="ml-1.5 text-amber-700">
+              {Object.keys(r.requestedChanges || {})
+                .map((k) => PROFILE_EDITABLE_FIELDS.find((f) => f.key === k)?.label || k)
+                .join('、')}
+            </span>
+          </div>
+        ))}
+        {pending.length > 5 && <div className="text-[11.5px] text-amber-700">ほか {pending.length - 5} 件</div>}
+      </div>
+      <div className="mt-2 text-[11.5px] text-amber-700">押すと「人材」タブの承認画面へ移動します。</div>
+    </button>
   );
 }
 
