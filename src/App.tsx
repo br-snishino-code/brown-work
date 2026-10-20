@@ -4906,14 +4906,11 @@ function GlobalTopTabs({
   staffMode = false, requestItems = [], requestBadges = {}, onSelectRequest, wide = false,
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
-  const [requestMenuOpen, setRequestMenuOpen] = useState(false);
   const menuRef = useRef(null);
-  const requestMenuRef = useRef(null);
 
   useEffect(() => {
     const onClickOutside = (e) => {
       if (menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(false);
-      if (requestMenuRef.current && !requestMenuRef.current.contains(e.target)) setRequestMenuOpen(false);
     };
     document.addEventListener('mousedown', onClickOutside);
     return () => document.removeEventListener('mousedown', onClickOutside);
@@ -4924,7 +4921,7 @@ function GlobalTopTabs({
     ? [
         { key: 'attendance', label: '勤怠', icon: <Clock size={14} /> },
         { key: 'labor', label: '労務', icon: <Briefcase size={14} /> },
-        { key: 'requests', label: '各種申請', icon: <ClipboardList size={14} />, hasMenu: true },
+        { key: 'requests', label: '各種申請', icon: <ClipboardList size={14} /> },
         { key: 'payroll', label: '給与', icon: <Wallet size={14} /> },
         { key: 'help', label: 'ヘルプ', icon: <HelpCircle size={14} /> },
       ]
@@ -4989,13 +4986,9 @@ function GlobalTopTabs({
               <button
                 key={t.key}
                 onClick={() => {
-                  if (t.hasMenu) {
-                    setTopTab(t.key);
-                    setRequestMenuOpen((v) => !(v && topTab === t.key));
-                  } else {
-                    setTopTab(t.key);
-                    setRequestMenuOpen(false);
-                  }
+                  setTopTab(t.key);
+                  // 「各種申請」はいつでも候補の一覧から始める
+                  if (t.key === 'requests' && onSelectRequest) onSelectRequest(null);
                 }}
                 className={`relative flex items-center gap-1.5 px-2.5 sm:px-3.5 py-3 text-[12.5px] font-bold border-b-2 transition-colors whitespace-nowrap shrink-0 ${
                   topTab === t.key ? 'text-white border-amber-500' : 'text-slate-400 border-transparent hover:text-slate-200'
@@ -5003,8 +4996,7 @@ function GlobalTopTabs({
               >
                 {t.icon}
                 {t.label}
-                {t.hasMenu && <ChevronDown size={12} className="opacity-70" />}
-                {t.hasMenu && hasRequestBadge && (
+                {t.key === 'requests' && hasRequestBadge && (
                   <span className="absolute top-2 right-0 w-1.5 h-1.5 rounded-full bg-amber-500" />
                 )}
               </button>
@@ -5080,38 +5072,6 @@ function GlobalTopTabs({
         )}
       </div>
 
-      {/* 「各種申請」を押したときに出る申請の候補 */}
-      {requestMenuOpen && requestItems.length > 0 && (
-        <div ref={requestMenuRef} className="absolute inset-x-0 top-full z-50">
-          <div className={`${wide ? 'max-w-[1400px]' : 'max-w-6xl'} mx-auto px-4`}>
-            <div className="mt-1.5 w-full sm:w-[360px] sm:ml-24 lg:ml-[9.5rem] bg-white rounded-2xl border border-slate-200 shadow-2xl overflow-hidden">
-              <div className="px-4 pt-3 pb-1.5 text-[10.5px] font-bold tracking-wide text-slate-400">申請する</div>
-              {requestItems.map((it) => {
-                const Icon = it.icon;
-                const badge = requestBadges[it.key];
-                return (
-                  <button
-                    key={it.key}
-                    onClick={() => { setRequestMenuOpen(false); if (onSelectRequest) onSelectRequest(it.key); }}
-                    className="flex w-full items-start gap-2.5 px-4 py-2.5 text-left hover:bg-slate-50 border-l-[3px] border-transparent hover:border-amber-600 transition-colors"
-                  >
-                    <Icon size={16} className="mt-0.5 text-amber-600 shrink-0" />
-                    <span className="flex-1 min-w-0">
-                      <span className="flex items-center gap-1.5">
-                        <span className="text-[13px] font-bold text-slate-800">{it.label}</span>
-                        {badge && (
-                          <span className="rounded-full bg-amber-600 px-1.5 py-[1px] text-[10px] font-bold text-white">{badge}</span>
-                        )}
-                      </span>
-                      <span className="block text-[11px] text-slate-500 mt-0.5">{it.desc}</span>
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -7551,7 +7511,7 @@ const HELP_STAFF = [
     category: '画面の構成',
     items: [
       { q: '画面の上のタブはどう分かれていますか', a: '「勤怠」＝打刻と勤怠履歴、「労務」＝会社からのお知らせ、「各種申請」＝申請の入口、「給与」＝給与明細、「ヘルプ」＝この画面です。スマートフォンでも同じ並びです。' },
-      { q: '申請はどこからしますか', a: 'すべて「各種申請」タブからです。押すと「休暇申請」「月次勤怠申請」「交通費申請」「年末調整」「個人情報の変更申請」の候補が出るので、必要なものを選んでください。eo業務など、実績を入力する業務の方は「実績入力」も同じ場所にあります。未提出のものがあるときはタブに印が付きます。' },
+      { q: '申請はどこからしますか', a: 'すべて「各種申請」タブからです。開くと「休暇申請」「月次勤怠申請」「交通費申請」「年末調整」「個人情報の変更申請」が一覧で並ぶので、必要なものを選んでください。eo業務など、実績を入力する業務の方は「実績入力」も同じ場所にあります。未提出のものがあるときはタブに印が付きます。' },
       { q: 'シフト希望はどこから出しますか', a: '受付が始まると「各種申請」に「シフト希望」が出ます。1日ごとに「●（出勤可能）」「×（希望休）」「有給（SVへ報告済み）」から選び、すべての日を選ぶと提出できます。★が付いている日は出勤依頼日（土日祝）です。「残りを●にする」で未選択の日をまとめて●にできます。締切前であれば、提出後も同じ画面から出し直せます。受付が終わると項目は表示されなくなります。' },
       { q: '実績はどこで入力しますか', a: '「各種申請」→「実績入力」です。入力する項目は、所属している業務によって自動で切り替わります。対象の年月を選び、新規実績・既存実績（アップセルLTV）を日ごとに入力します。入力の途中でも「実績の内容を保存する」で保存でき、新規・既存の両方がまとめて保存されます。保存していない入力があるときは「未保存」と表示され、対象月を切り替えようとすると確認が出ます。' },
       { q: '月次勤怠申請とは', a: '前月分の勤怠を確認して提出する手続きです。「各種申請」→「月次勤怠申請」から、交通費とまとめて提出できます。提出すると管理者が確認し、最後にマスター管理者が最終承認して確定します。確定後にその月の給与明細が公開されます。未提出のときは「勤怠」タブにもお知らせが出ます。' },
