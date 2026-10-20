@@ -1197,6 +1197,25 @@ async function fetchAllData() {
   };
 }
 
+// 管理者宛の通知メールの送信先を求める。
+// 設定があればそれを使い、無ければマスター管理者（居なければ管理者）のアドレスを使う。
+// 連絡用メールアドレスが未登録の場合は、ログインIDのアドレスで代用する。
+function resolveAdminNotifyAddresses(data) {
+  const configured = (data?.settings?.[SETTING_ADMIN_NOTIFY_EMAIL] || '').trim();
+  if (configured) {
+    return configured.split(/[,、\s]+/).map((v) => v.trim()).filter((v) => v.includes('@'));
+  }
+  const addressOf = (a) => {
+    if ((a.contactEmail || '').includes('@')) return a.contactEmail;
+    if ((a.username || '').includes('@')) return a.username;
+    return '';
+  };
+  const accounts = (data?.accounts || []).filter((a) => !a.resignationDate);
+  const masters = accounts.filter((a) => a.role === 'master_admin').map(addressOf).filter(Boolean);
+  if (masters.length > 0) return masters;
+  return accounts.filter((a) => a.role === 'admin').map(addressOf).filter(Boolean);
+}
+
 // 通知はベストエフォート（失敗してもメイン処理は止めない）
 async function notify(subject, body, relatedId, toEmployeeId = null, toRole = 'admin') {
   try {
@@ -1734,14 +1753,11 @@ function AttendanceApp() {
   const notifyAdmin = async (subject, body, relatedId, options = {}) => {
     await notify(subject, body, relatedId, null, 'admin');
     if (!options.email) return;
-    // 送信先が設定されていればそこへ、未設定ならマスター管理者を優先して送る
-    const configured = (data.settings?.[SETTING_ADMIN_NOTIFY_EMAIL] || '').trim();
-    const addresses = configured
-      ? configured.split(/[,、\s]+/).map((v) => v.trim()).filter((v) => v.includes('@'))
-      : [(
-          data.accounts.find((a) => a.role === 'master_admin' && a.contactEmail) ||
-          data.accounts.find((a) => a.role === 'admin' && a.contactEmail)
-        )?.contactEmail].filter(Boolean);
+    const addresses = resolveAdminNotifyAddresses(data);
+    if (addresses.length === 0) {
+      console.warn('通知メールの送信先が見つかりませんでした');
+      return;
+    }
     for (const address of addresses) {
       await sendEmailBestEffort(address, subject, body);
     }
@@ -7608,6 +7624,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, o
         <div className="space-y-5">
         <AdminNotifyEmailCard
           value={data.settings?.[SETTING_ADMIN_NOTIFY_EMAIL] || ''}
+          current={resolveAdminNotifyAddresses(data)}
           onSave={onSaveAdminNotifyEmail}
         />
         <AdminPermissionsTab
@@ -9318,7 +9335,7 @@ function GroupLeaveScheduleTab({ employeeAccounts, groupLeaveSchedules, onSave, 
 }
 
 // 管理者宛の通知メールの送信先を設定するカード（マスター管理者のみ）
-function AdminNotifyEmailCard({ value, onSave }) {
+function AdminNotifyEmailCard({ value, current = [], onSave }) {
   const [input, setInput] = useState(value || '');
   const [saving, setSaving] = useState(false);
   useEffect(() => { setInput(value || ''); }, [value]);
@@ -9366,6 +9383,13 @@ function AdminNotifyEmailCard({ value, onSave }) {
           </button>
           {addresses.length > 0 && invalid.length === 0 && (
             <span className="text-[11.5px] text-slate-400">{addresses.length}件の宛先に送信します</span>
+          )}
+        </div>
+        <div className={`rounded-lg px-3 py-2.5 text-[11.5px] ${current.length > 0 ? 'bg-slate-50 text-slate-600' : 'bg-rose-50 text-rose-700 border border-rose-200'}`}>
+          {current.length > 0 ? (
+            <>現在の送信先：<span className="font-mono">{current.join('、')}</span></>
+          ) : (
+            '現在、送信先が決まっていません。上の欄にアドレスを入力して保存してください。'
           )}
         </div>
       </div>
