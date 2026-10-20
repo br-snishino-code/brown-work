@@ -772,7 +772,10 @@ function ToastView({ toast }) {
 // 以降のコンポーネント（LoginScreenなど）は一切変更していません。
 // ============================================================
 
-const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, performanceReports: [], payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, employeeAttendanceSchedules: {}, announcements: [], yearEndAdjustments: [], commuteExpenseClaims: [], resignationReasons: [] };
+const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, performanceReports: [], payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, employeeAttendanceSchedules: {}, announcements: [], yearEndAdjustments: [], commuteExpenseClaims: [], resignationReasons: [], settings: {} };
+
+// 管理者宛の通知メールの送信先（app_settings の key）
+const SETTING_ADMIN_NOTIFY_EMAIL = 'admin_notify_email';
 
 // ---- row(snake_case) → app(camelCase) 変換 ----
 const rowToAccount = (row) => ({
@@ -1106,6 +1109,7 @@ async function fetchAllData() {
     yearEndRes,
     commuteClaimsRes,
     resignationReasonsRes,
+    appSettingsRes,
   ] = await Promise.all([
     supabase.from('employees').select('*'),
     supabase.from('attendance_records').select('*'),
@@ -1122,6 +1126,7 @@ async function fetchAllData() {
     supabase.from('year_end_adjustments').select('*, employees(name)').order('submitted_at', { ascending: false }),
     supabase.from('commute_expense_claims').select('*, employees(name)').order('created_at', { ascending: false }),
     supabase.from('resignation_reasons').select('*').order('sort_order', { ascending: true }),
+    supabase.from('app_settings').select('*'),
   ]);
 
   for (const res of [employeesRes, recordsRes, correctionsRes, leaveRes, perfRes, notifRes, payrollRes, auditRes, profileReqRes, groupLeaveRes, employeeAttendanceRes, announcementsRes, yearEndRes, commuteClaimsRes]) {
@@ -1129,6 +1134,12 @@ async function fetchAllData() {
   }
   // 退職理由マスタはSQL未実行でも画面が落ちないよう、エラー時は空扱いにする
   const resignationReasons = resignationReasonsRes?.error ? [] : (resignationReasonsRes?.data || []).map(rowToResignationReason);
+
+  // アプリ全体の設定（SQL未実行でも画面が落ちないよう、エラー時は空扱いにする）
+  const settings = {};
+  if (!appSettingsRes?.error) {
+    (appSettingsRes?.data || []).forEach((row) => { settings[row.key] = row.value || ''; });
+  }
 
   const records = {};
   (recordsRes.data || []).forEach((row) => {
@@ -1167,6 +1178,7 @@ async function fetchAllData() {
     yearEndAdjustments: (yearEndRes.data || []).map(rowToYearEndAdjustment),
     commuteExpenseClaims: (commuteClaimsRes.data || []).map(rowToCommuteClaim),
     resignationReasons,
+    settings,
   };
 }
 
@@ -1704,11 +1716,17 @@ function AttendanceApp() {
   // 管理者への通知（アプリ内通知＋実メール、メールはResend設定済みの場合のみ実際に届く）
   const notifyAdmin = async (subject, body, relatedId) => {
     await notify(subject, body, relatedId, null, 'admin');
-    // 通知メールはマスター管理者を優先して送る
-    const admin =
-      data.accounts.find((a) => a.role === 'master_admin' && a.contactEmail) ||
-      data.accounts.find((a) => a.role === 'admin' && a.contactEmail);
-    if (admin) await sendEmailBestEffort(admin.contactEmail, subject, body);
+    // 送信先が設定されていればそこへ、未設定ならマスター管理者を優先して送る
+    const configured = (data.settings?.[SETTING_ADMIN_NOTIFY_EMAIL] || '').trim();
+    const addresses = configured
+      ? configured.split(/[,、\s]+/).map((v) => v.trim()).filter((v) => v.includes('@'))
+      : [(
+          data.accounts.find((a) => a.role === 'master_admin' && a.contactEmail) ||
+          data.accounts.find((a) => a.role === 'admin' && a.contactEmail)
+        )?.contactEmail].filter(Boolean);
+    for (const address of addresses) {
+      await sendEmailBestEffort(address, subject, body);
+    }
   };
 
   // 特定スタッフへの通知（アプリ内通知＋実メール）
@@ -1901,6 +1919,29 @@ function AttendanceApp() {
       show('マイナンバーの保存に失敗しました', 'warn');
       return false;
     }
+  };
+
+  // 管理者宛の通知メールの送信先を保存する（マスター管理者のみ）
+  const saveAdminNotifyEmail = async (value) => {
+    const trimmed = String(value || '').trim();
+    const { error } = await supabase.from('app_settings').upsert(
+      {
+        key: SETTING_ADMIN_NOTIFY_EMAIL,
+        value: trimmed,
+        updated_by: session.id,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'key' }
+    );
+    if (error) {
+      console.error('通知先の保存に失敗しました', error);
+      show('通知先の保存に失敗しました', 'warn');
+      return false;
+    }
+    await logAudit(session, '通知メールの送信先を変更', trimmed || '（未設定）');
+    await refreshData();
+    show('通知メールの送信先を保存しました', 'success');
+    return true;
   };
 
   // 初回ログイン時に、ご本人がご自身のマイナンバーを登録する。
@@ -2998,6 +3039,7 @@ function AttendanceApp() {
             onSaveMyNumber={saveMyNumber}
             onUpdateDates={updateEmployeeDates}
             onUpdateAdminAccess={updateAdminAccess}
+            onSaveAdminNotifyEmail={saveAdminNotifyEmail}
             onSaveGroupLeave={saveGroupLeaveSchedule}
             onSaveEmployeeAttendance={saveEmployeeAttendanceSchedule}
             onAdminUpdateAttendance={adminUpdateAttendance}
@@ -6380,6 +6422,7 @@ const HELP_ADMIN = [
       { q: '郵便番号から住所は入りますか', a: '郵便番号を7桁まで入力すると、都道府県・市区町村・町名までが住所欄に自動で入ります。続けて番地・建物名をご入力ください。郵便番号を入れ直した場合も、番地はそのまま残して住所の前半だけが入れ替わります。住所を手入力済みの場合は自動入力されません。' },
       { q: '退職者の処理はどうしますか', a: 'スタッフの「詳細」を開き、基本タブの退職日を入力して保存します。退職日を入れたスタッフは、一覧の絞り込みで「在籍のみ」にすると非表示になります。アカウント自体は残るため、過去の勤怠や給与は参照できます。' },
       { q: 'パスワードを再発行するには', a: 'スタッフ一覧の各行にある鍵のアイコンを押すと、仮パスワードを設定できます。設定した仮パスワードは本人に直接お伝えください。本人が次にログインした際、新しいパスワードの設定画面が表示されます。' },
+      { q: '通知メールの送信先を変えるには', a: '「勤怠」→「スタッフ管理」→「管理者権限」の一番上にある「通知メールの送信先」で指定します。勤怠修正・休暇申請・個人情報の変更申請などの通知が、この宛先に届きます。カンマ区切りで複数指定できます。未設定の場合はマスター管理者の連絡用メールアドレスに届きます。マスター管理者のみが設定できます。' },
       { q: '管理者権限を与えるには', a: '「勤怠」→「スタッフ管理」→「管理者権限」から設定します。タブ単位（勤怠・労務・人材・給与）でアクセス範囲を制限できます。マスター管理者のみが操作できます。' },
     ],
   },
@@ -7346,7 +7389,7 @@ function AdminTopNav({ tab, setTab, correctionCount, leaveCount, performanceCoun
   );
 }
 
-function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, onDecideLeave, onDecidePerformance, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
+function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, onDecideLeave, onDecidePerformance, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
   const [tab, setTab] = useState('dashboard'); // dashboard | attendance | requests | leave | performance | accounts
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
@@ -7541,6 +7584,11 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, o
       )}
 
       {tab === 'adminperms' && isMasterAdmin && (
+        <div className="space-y-5">
+        <AdminNotifyEmailCard
+          value={data.settings?.[SETTING_ADMIN_NOTIFY_EMAIL] || ''}
+          onSave={onSaveAdminNotifyEmail}
+        />
         <AdminPermissionsTab
           adminAccounts={adminAccounts}
           staffAccounts={employeeAccounts.filter((a) => a.role === 'employee' && !a.resignationDate)}
@@ -7549,6 +7597,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, o
           onResetPassword={onResetPassword}
           isDesktop={isDesktop}
         />
+        </div>
       )}
 
       {tab === 'groupleave' && (
@@ -9219,6 +9268,61 @@ function GroupLeaveScheduleTab({ employeeAccounts, groupLeaveSchedules, onSave, 
             左のリストからグループを選ぶか、新しいグループ名を追加してください
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// 管理者宛の通知メールの送信先を設定するカード（マスター管理者のみ）
+function AdminNotifyEmailCard({ value, onSave }) {
+  const [input, setInput] = useState(value || '');
+  const [saving, setSaving] = useState(false);
+  useEffect(() => { setInput(value || ''); }, [value]);
+
+  const addresses = input.split(/[,、\s]+/).map((v) => v.trim()).filter(Boolean);
+  const invalid = addresses.filter((v) => !v.includes('@'));
+
+  const save = async () => {
+    setSaving(true);
+    await onSave(input);
+    setSaving(false);
+  };
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+      <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+        <Mail size={15} className="text-slate-400" />
+        <h2 className="font-bold text-[13.5px]">通知メールの送信先</h2>
+      </div>
+      <div className="px-5 py-4 space-y-3">
+        <div className="text-[11.5px] text-slate-500">
+          勤怠修正・休暇申請・個人情報の変更申請など、管理者向けの通知メールを送る宛先です。
+          複数指定する場合はカンマで区切ってください。
+          未設定の場合は、マスター管理者の連絡用メールアドレス宛に送られます。
+        </div>
+        <input
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          placeholder="例）soumu@brownkyoto.com, br-s.nishino@brownkyoto.com"
+          className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]"
+        />
+        {invalid.length > 0 && (
+          <div className="text-[11.5px] text-rose-600">
+            メールアドレスの形式ではない指定があります：{invalid.join('、')}
+          </div>
+        )}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={save}
+            disabled={saving || invalid.length > 0}
+            className="py-2 px-4 rounded-lg bg-slate-950 disabled:bg-slate-200 text-white text-[13px] font-bold"
+          >
+            {saving ? '保存中…' : '保存する'}
+          </button>
+          {addresses.length > 0 && invalid.length === 0 && (
+            <span className="text-[11.5px] text-slate-400">{addresses.length}件の宛先に送信します</span>
+          )}
+        </div>
       </div>
     </div>
   );
