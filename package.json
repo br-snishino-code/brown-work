@@ -7,7 +7,7 @@
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
-    "check-names": "tsc --noEmit --jsx preserve --target es2020 --lib es2020,dom --moduleResolution bundler --skipLibCheck --noImplicitAny false src/App.tsx | grep 'Cannot find name' || true",
+    "check-names": "tsc --noEmit --jsx preserve --target es2020 --lib es2020,dom --moduleResolution bundler --skipLibCheck --noImplicitAny false src/App.tsx | grep -E 'Cannot find name|used before its declaration|Block-scoped variable' || true",
     "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {
@@ -15,8 +15,8 @@
     "lucide-react": "^0.468.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-        "xlsx": "^0.18.5"
-    },
+    "xlsx": "^0.18.5"
+  },
   "devDependencies": {
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",

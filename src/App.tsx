@@ -3500,6 +3500,11 @@ function AttendanceApp() {
     (c) => c.employeeId === employeeId && c.targetMonth === commuteClaimTargetMonthKey
   );
   const needsMonthlyConfirm = !myMonthlyConfirm || myMonthlyConfirm.status === 'draft' || myMonthlyConfirm.status === 'rejected';
+  // シフト希望：受付中の月があるときだけ各種申請に出す
+  const openShiftPeriod = (data.shiftPeriods || []).find((p) => p.isOpen) || null;
+  const myShiftRequest = openShiftPeriod
+    ? (data.shiftRequests || []).find((r) => r.employeeId === employeeId && r.targetMonth === openShiftPeriod.targetMonth) || null
+    : null;
   const requestBadges = {
     monthly: needsMonthlyConfirm ? '未提出' : null,
     commute: needsCommuteClaimReminder ? '未提出' : null,
@@ -3509,11 +3514,6 @@ function AttendanceApp() {
   // 定義がない業務の方には「実績入力」自体を出さない。
   const perfFormat = performanceFormatFor(session.mainGroup);
   const PerformanceFormatSection = perfFormat?.Component || null;
-  // シフト希望：受付中の月があるときだけ各種申請に出す
-  const openShiftPeriod = (data.shiftPeriods || []).find((p) => p.isOpen) || null;
-  const myShiftRequest = openShiftPeriod
-    ? (data.shiftRequests || []).find((r) => r.employeeId === employeeId && r.targetMonth === openShiftPeriod.targetMonth) || null
-    : null;
   const staffRequestItems = STAFF_REQUEST_ITEMS
     .filter((it) => (!it.byGroup || !!perfFormat) && (!it.shiftOnly || !!openShiftPeriod))
     .map((it) => {
