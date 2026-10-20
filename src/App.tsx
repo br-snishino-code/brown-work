@@ -3013,12 +3013,14 @@ function AttendanceApp() {
       note: note || null,
       submitted_at: new Date().toISOString(),
     };
-    const { error } = existing
-      ? await supabase.from('shift_requests').update(row).eq('id', existing.id)
-      : await supabase.from('shift_requests').insert(row);
+    // 同じ月の行がすでにあっても確実に書き込めるよう、まとめて upsert する
+    const { error } = await supabase
+      .from('shift_requests')
+      .upsert(row, { onConflict: 'employee_id,target_month' });
     if (error) {
       console.error('シフト希望の提出に失敗しました', error);
-      show(`提出に失敗しました：${error.message || ''}`, 'warn');
+      const detail = [error.message, error.details, error.hint, error.code].filter(Boolean).join(' / ');
+      show(`提出に失敗しました：${detail || '原因不明'}`, 'warn');
       return false;
     }
     await notifyAdmin(
