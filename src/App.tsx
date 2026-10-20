@@ -236,7 +236,7 @@ function buildInviteMail({ name, email, tempPassword }) {
     '　ふりがな／生年月日',
     '　連絡用メールアドレス／電話番号',
     '　郵便番号／現住所／住民票の住所',
-    '　配偶者の有無／世帯主の氏名',
+    '　配偶者の有無／世帯主の氏名・続柄',
     '　緊急連絡先（お名前・電話番号）',
     '　給与振込先の口座情報（銀行名・支店名・口座番号・口座名義）',
     '　マイナンバー（12桁）',
@@ -795,6 +795,7 @@ const rowToAccount = (row) => ({
   address: row.address || '',
   residentAddress: row.resident_address || '',
   householderName: row.householder_name || '',
+  householderRelation: row.householder_relation || '',
   phone: row.phone || '',
   emergencyContactName: row.emergency_contact_name || '',
   emergencyContactPhone: row.emergency_contact_phone || '',
@@ -975,6 +976,7 @@ const PROFILE_EDITABLE_FIELDS = [
   { key: 'residentAddress', label: '住民票の住所' },
   { key: 'spouseStatus', label: '配偶者の有無' },
   { key: 'householderName', label: '世帯主の氏名' },
+  { key: 'householderRelation', label: '世帯主との続柄' },
   { key: 'nearestStation', label: '最寄り駅' },
   { key: 'phone', label: '電話番号' },
   { key: 'emergencyContactName', label: '緊急連絡先（氏名）' },
@@ -2313,6 +2315,7 @@ function AttendanceApp() {
       employmentInsuranceLostDate: 'employment_insurance_lost_date',
       spouseStatus: 'spouse_status',
       householderName: 'householder_name',
+      householderRelation: 'householder_relation',
       spouseAnnualIncome: 'spouse_annual_income',
       spouseMonthlyIncome: 'spouse_monthly_income',
       familyMembers: 'family_members',
@@ -3375,6 +3378,9 @@ const onlyDigits = (v) => String(v || '').replace(/[^0-9]/g, '');
 const isEmailLike = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || '').trim());
 const toKatakana = (v) => String(v || '').replace(/[ぁ-ゖ]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) + 0x60));
 
+// 世帯主との続柄（ご本人から見た関係）
+const HOUSEHOLDER_RELATIONS = ['本人', '配偶者', '父', '母', '子', '祖父', '祖母', '兄弟姉妹', 'その他'];
+
 const PROFILE_SETUP_SECTIONS = [
   {
     title: '基本情報',
@@ -3416,6 +3422,10 @@ const PROFILE_SETUP_SECTIONS = [
       {
         key: 'householderName', label: '世帯主の氏名', placeholder: '例）田中 太郎', required: true,
         sameAsSelf: true,
+      },
+      {
+        key: 'householderRelation', label: '世帯主との続柄', type: 'select', required: true,
+        options: HOUSEHOLDER_RELATIONS, lockedWhenSelf: true,
       },
     ],
   },
@@ -3692,9 +3702,10 @@ function ProfileSetupScreen({ session, toast, onSave, onLogout }) {
   const [form, setForm] = useState(() => {
     const init = {};
     PROFILE_SETUP_ALL_FIELDS.forEach((f) => {
-      init[f.key] = session[f.key] || (f.type === 'select' ? f.options[0] : '');
+      init[f.key] = session[f.key] || (f.type === 'select' && !f.lockedWhenSelf ? f.options[0] : '');
     });
     init.spouseStatus = session.spouseStatus || '無';
+    init.householderRelation = session.householderRelation || '';
     init.bankCode = session.bankCode || '';
     init.bankName = session.bankName || '';
     init.branchCode = session.branchCode || '';
@@ -3726,7 +3737,11 @@ function ProfileSetupScreen({ session, toast, onSave, onLogout }) {
   );
   const toggleHouseholderSelf = (checked) => {
     setHouseholderIsSelf(checked);
-    setForm((prev) => ({ ...prev, householderName: checked ? prev.name : '' }));
+    setForm((prev) => ({
+      ...prev,
+      householderName: checked ? prev.name : '',
+      householderRelation: checked ? '本人' : '',
+    }));
   };
   // 「本人」にしている間は、お名前の変更を世帯主にも反映する
   useEffect(() => {
@@ -3833,8 +3848,10 @@ function ProfileSetupScreen({ session, toast, onSave, onLogout }) {
                         name={f.key}
                         value={form[f.key]}
                         onChange={(e) => setValue(f)(e.target.value)}
-                        className="w-full border-2 border-slate-200 rounded-xl px-3.5 py-2.5 text-[14px] bg-white outline-none focus:border-slate-900"
+                        disabled={f.lockedWhenSelf && householderIsSelf}
+                        className={`w-full border-2 border-slate-200 rounded-xl px-3.5 py-2.5 text-[14px] outline-none focus:border-slate-900 ${f.lockedWhenSelf && householderIsSelf ? 'bg-slate-100 text-slate-500' : 'bg-white'}`}
                       >
+                        {!form[f.key] && <option value="">選択してください</option>}
                         {f.options.map((o) => <option key={o} value={o}>{o}</option>)}
                       </select>
                     ) : (
@@ -10063,6 +10080,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
     address: account.address || '',
     residentAddress: account.residentAddress || '',
     householderName: account.householderName || '',
+    householderRelation: account.householderRelation || '',
     phone: account.phone || '',
     emergencyContactName: account.emergencyContactName || '',
     emergencyContactPhone: account.emergencyContactPhone || '',
@@ -10265,9 +10283,17 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
               <Field label="住民票の住所">
                 <input value={form.residentAddress} onChange={set('residentAddress')} placeholder="現住所と異なる場合にご入力ください" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" />
               </Field>
-              <Field label="世帯主の氏名">
-                <input value={form.householderName} onChange={set('householderName')} placeholder="例）田中 太郎" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" />
-              </Field>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="世帯主の氏名">
+                  <input value={form.householderName} onChange={set('householderName')} placeholder="例）田中 太郎" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
+                </Field>
+                <Field label="世帯主との続柄">
+                  <select value={form.householderRelation} onChange={set('householderRelation')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white">
+                    <option value="">未設定</option>
+                    {HOUSEHOLDER_RELATIONS.map((r) => <option key={r} value={r}>{r}</option>)}
+                  </select>
+                </Field>
+              </div>
               <Field label="最寄り駅">
                 <input value={form.nearestStation} onChange={set('nearestStation')} placeholder="例）京都駅" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" />
               </Field>
