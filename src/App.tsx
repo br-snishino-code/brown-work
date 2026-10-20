@@ -5540,7 +5540,29 @@ function EoNewPerfCell({ value, onChange, type = 'number' }) {
     return <input value={value} onChange={(e) => onChange(e.target.value)} className="w-16 border border-slate-200 rounded px-1 py-1 text-[11px]" />;
   }
   if (type === 'date') {
-    return <input type="date" value={value} onChange={(e) => onChange(e.target.value)} className="w-28 border border-slate-200 rounded px-1 py-1 font-mono text-[10.5px]" />;
+    // スマートフォンでは日付を空に戻せないため、消すためのボタンを添える
+    return (
+      <div className="flex items-center gap-1">
+        <input
+          type="date"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          style={{ WebkitAppearance: 'none', appearance: 'none' }}
+          className="w-28 border border-slate-200 rounded px-1 py-1 font-mono text-[10.5px] bg-white"
+        />
+        {value && (
+          <button
+            type="button"
+            onClick={() => onChange('')}
+            title="日付を消す"
+            aria-label="日付を消す"
+            className="shrink-0 w-6 h-6 rounded border border-slate-200 text-slate-400 text-[13px] leading-none"
+          >
+            ×
+          </button>
+        )}
+      </div>
+    );
   }
   return <input type="number" value={value} onChange={(e) => onChange(e.target.value)} className="w-12 border border-slate-200 rounded px-1 py-1 font-mono text-[11px] text-right" />;
 }
