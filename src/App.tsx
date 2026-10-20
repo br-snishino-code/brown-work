@@ -213,6 +213,20 @@ function generateTempPassword() {
 }
 
 // 招待メールの本文（件名と本文をここで組み立てる）
+// スタッフ宛メールの体裁をそろえる（宛名・本文・ログインURL・署名）
+function buildStaffMailText(name, lines) {
+  return [
+    `${name} 様`,
+    '',
+    'お疲れさまです。',
+    ...lines,
+    '',
+    APP_LOGIN_URL,
+    '',
+    '株式会社Brown',
+  ].join('\n');
+}
+
 function buildInviteMail({ name, email, tempPassword }) {
   const subject = '【Brown Work】勤怠システムのご利用開始について';
   const text = [
@@ -1804,10 +1818,13 @@ function AttendanceApp() {
   };
 
   // 特定スタッフへの通知（アプリ内通知＋実メール）
-  const notifyEmployeeUser = async (targetEmployeeId, subject, body, relatedId) => {
+  // mailLines を渡すと、宛名と署名を付けたメール本文を組み立てて送る
+  const notifyEmployeeUser = async (targetEmployeeId, subject, body, relatedId, mailLines) => {
     await notify(subject, body, relatedId, targetEmployeeId, 'employee');
     const emp = data.accounts.find((a) => a.id === targetEmployeeId);
-    if (emp?.contactEmail) await sendEmailBestEffort(emp.contactEmail, subject, body);
+    if (!emp?.contactEmail) return;
+    const text = mailLines ? buildStaffMailText(emp.name, mailLines) : body;
+    await sendEmailBestEffort(emp.contactEmail, subject, text);
   };
 
   // 特定スタッフへの通知（アプリ内のお知らせのみ。メールは送らない）
@@ -2653,7 +2670,14 @@ function AttendanceApp() {
       request.employeeId,
       `【年末調整${decision === 'approved' ? '承認' : '差し戻し'}】${request.year}年分`,
       `${request.year}年分の年末調整申告が${decision === 'approved' ? '承認されました' : '差し戻されました'}。${comment ? `管理者コメント：${comment}` : ''}`,
-      id
+      id,
+      [
+        `${request.year}年分の年末調整申告が${decision === 'approved' ? '承認されました' : '差し戻されました'}。`,
+        ...(comment ? ['', `管理者コメント：${comment}`] : []),
+        ...(decision === 'approved'
+          ? ['下記よりご確認ください。']
+          : ['', '内容をご確認のうえ、修正して再度ご提出ください。']),
+      ]
     );
     await refreshData();
     await logAudit(session, decision === 'approved' ? '年末調整を承認' : '年末調整を差し戻し', `${request.year}年分`, request.employeeId, request.employeeName);
@@ -3199,7 +3223,11 @@ function AttendanceApp() {
         record.employeeId,
         `【給与明細】${record.year}年${record.month}月分`,
         `${record.year}年${record.month}月分の給与明細が公開されました。ご確認ください。`,
-        id
+        id,
+        [
+          `${record.year}年${record.month}月分の給与明細を公開しました。`,
+          '下記よりご確認ください。',
+        ]
       );
     }
     await refreshData();
@@ -8729,7 +8757,12 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
           await onNotifyEmployee(
             acc.id,
             `【ご提出のお願い】${monthKeyLabel(closingMonth)}分の月次勤怠申請`,
-            `${monthKeyLabel(closingMonth)}分の月次勤怠申請がまだ提出されていません。「各種申請」→「月次勤怠申請」からご提出をお願いいたします。`
+            `${monthKeyLabel(closingMonth)}分の月次勤怠申請がまだ提出されていません。「各種申請」→「月次勤怠申請」からご提出をお願いいたします。`,
+            null,
+            [
+              `${monthKeyLabel(closingMonth)}分の月次勤怠申請がまだ提出されていません。`,
+              '「各種申請」→「月次勤怠申請」からご提出をお願いいたします。',
+            ]
           );
         }
         setReminding(false);
