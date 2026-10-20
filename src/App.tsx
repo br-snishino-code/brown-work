@@ -3215,14 +3215,18 @@ function StandardRemunerationTablePicker({ onClose, onPick }) {
 
 // ---- 初回ログイン：パスワード変更（必須） ----
 function FirstLoginPasswordScreen({ session, toast, onDone, onLogout }) {
-  const [password, setPassword] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
+  // 入力欄はReactで値を持たない（非制御）。
+  // 1文字ごとに再描画すると、スマートフォンでキーボードが閉じてしまうため。
+  const passwordRef = useRef(null);
+  const confirmRef = useRef(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
   const submit = async (e) => {
     e.preventDefault();
     setError('');
+    const password = passwordRef.current?.value || '';
+    const confirmPassword = confirmRef.current?.value || '';
     if (password.length < 6) {
       setError('パスワードは6文字以上にしてください');
       return;
@@ -3244,7 +3248,7 @@ function FirstLoginPasswordScreen({ session, toast, onDone, onLogout }) {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 font-sans flex items-center justify-center px-4 py-10">
+    <div className="min-h-screen bg-slate-50 font-sans flex items-start justify-center px-4 py-8">
       <div className="w-full max-w-[400px]">
         <div className="bg-white rounded-[24px] border border-slate-200 shadow-sm p-7 space-y-5">
           <div className="flex items-center gap-2.5">
@@ -3264,25 +3268,25 @@ function FirstLoginPasswordScreen({ session, toast, onDone, onLogout }) {
           <form onSubmit={submit} className="space-y-4">
             <Field label="新しいパスワード（6文字以上）">
               <input
+                ref={passwordRef}
                 id="new-password"
                 name="new-password"
                 type="password"
-                autoComplete="new-password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="w-full border-2 border-slate-200 rounded-xl px-3.5 py-3 text-[15px] outline-none focus:border-slate-900"
+                autoComplete="off"
+                defaultValue=""
+                className="w-full border-2 border-slate-200 rounded-xl px-3.5 py-3 text-[16px] outline-none focus:border-slate-900"
                 required
               />
             </Field>
             <Field label="新しいパスワード（確認）">
               <input
+                ref={confirmRef}
                 id="new-password-confirm"
                 name="new-password-confirm"
                 type="password"
-                autoComplete="new-password"
-                value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
-                className="w-full border-2 border-slate-200 rounded-xl px-3.5 py-3 text-[15px] outline-none focus:border-slate-900"
+                autoComplete="off"
+                defaultValue=""
+                className="w-full border-2 border-slate-200 rounded-xl px-3.5 py-3 text-[16px] outline-none focus:border-slate-900"
                 required
               />
             </Field>
@@ -3728,8 +3732,8 @@ function ProfileSetupScreen({ session, toast, onSave, onLogout }) {
 }
 
 function ResetPasswordRecoveryScreen({ toast, onDone }) {
-  const [password, setPassword] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
+  const passwordRef = useRef(null);
+  const confirmRef = useRef(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [done, setDone] = useState(false);
@@ -3737,6 +3741,8 @@ function ResetPasswordRecoveryScreen({ toast, onDone }) {
   const submit = async (e) => {
     e.preventDefault();
     setError('');
+    const password = passwordRef.current?.value || '';
+    const confirmPassword = confirmRef.current?.value || '';
     if (password.length < 6) {
       setError('パスワードは6文字以上にしてください');
       return;
@@ -3779,23 +3785,26 @@ function ResetPasswordRecoveryScreen({ toast, onDone }) {
               <div>
                 <label className="block text-[12.5px] font-bold text-slate-800 mb-1.5">新しいパスワード（6文字以上）</label>
                 <input
+                  ref={passwordRef}
                   id="recovery-password"
                   name="recovery-password"
                   type="password"
-                  autoComplete="new-password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="w-full border-2 border-slate-200 rounded-xl px-3.5 py-3 text-[15px] outline-none focus:border-slate-900"
+                  autoComplete="off"
+                  defaultValue=""
+                  className="w-full border-2 border-slate-200 rounded-xl px-3.5 py-3 text-[16px] outline-none focus:border-slate-900"
                   required
                 />
               </div>
               <div>
                 <label className="block text-[12.5px] font-bold text-slate-800 mb-1.5">新しいパスワード（確認）</label>
                 <input
+                  ref={confirmRef}
+                  id="recovery-password-confirm"
+                  name="recovery-password-confirm"
                   type="password"
-                  value={confirmPassword}
-                  onChange={(e) => setConfirmPassword(e.target.value)}
-                  className="w-full border-2 border-slate-200 rounded-xl px-3.5 py-3 text-[15px] outline-none focus:border-slate-900"
+                  autoComplete="off"
+                  defaultValue=""
+                  className="w-full border-2 border-slate-200 rounded-xl px-3.5 py-3 text-[16px] outline-none focus:border-slate-900"
                   required
                 />
               </div>
