@@ -3341,10 +3341,13 @@ function AttendanceApp() {
     const recs = data.records[acc.id] || {};
     return sum + Object.keys(recs).filter((k) => k !== today && recs[k]?.clockIn && !recs[k]?.clockOut).length;
   }, 0);
-  // 遅刻・早出などで承認待ちになっている出勤・退勤
+  // 遅刻・早出などで承認待ちになっている出勤・退勤（それぞれ1件として数える）
   const clockInApprovalCount = employeeAccounts.reduce((sum, acc) => {
     const recs = data.records[acc.id] || {};
-    return sum + Object.values(recs).filter((r) => r?.clockInApproval === 'pending' || r?.clockOutApproval === 'pending').length;
+    return sum + Object.values(recs).reduce(
+      (n, r) => n + (r?.clockInApproval === 'pending' ? 1 : 0) + (r?.clockOutApproval === 'pending' ? 1 : 0),
+      0
+    );
   }, 0);
   // 月次勤怠の確定：自分が処理すべき件数（管理者は1次、マスター管理者は両方）
   const monthlyConfirmPendingCount = (data.monthlyConfirmations || []).filter((c) => {
@@ -8063,9 +8066,13 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
   const contractAlertKey = todayKey(contractAlertDate);
   const contractAlerts = employeeAccounts.filter((acc) => acc.contractEnd && acc.contractEnd <= contractAlertKey);
 
+  // 出勤と退勤はそれぞれ1件として数える（「承認待ちの出勤」の一覧と同じ数え方）
   const clockInApprovalCount = employeeAccounts.reduce((sum, acc) => {
     const recs = data.records[acc.id] || {};
-    return sum + Object.values(recs).filter((r) => r?.clockInApproval === 'pending' || r?.clockOutApproval === 'pending').length;
+    return sum + Object.values(recs).reduce(
+      (n, r) => n + (r?.clockInApproval === 'pending' ? 1 : 0) + (r?.clockOutApproval === 'pending' ? 1 : 0),
+      0
+    );
   }, 0);
 
   const notifications = (data.notifications || []).slice(0, 6);
