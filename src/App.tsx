@@ -772,7 +772,7 @@ function ToastView({ toast }) {
 // 以降のコンポーネント（LoginScreenなど）は一切変更していません。
 // ============================================================
 
-const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, performanceReports: [], payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, employeeAttendanceSchedules: {}, announcements: [], yearEndAdjustments: [], commuteExpenseClaims: [], resignationReasons: [], settings: {} };
+const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, performanceReports: [], payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, employeeAttendanceSchedules: {}, announcements: [], yearEndAdjustments: [], commuteExpenseClaims: [], resignationReasons: [], monthlyConfirmations: [], settings: {} };
 
 // 管理者宛の通知メールの送信先（app_settings の key）
 const SETTING_ADMIN_NOTIFY_EMAIL = 'admin_notify_email';
@@ -1054,6 +1054,35 @@ const rowToCommuteClaim = (row) => ({
   decidedAt: row.decided_at,
 });
 
+// 月次勤怠の確定
+const MONTHLY_CONFIRM_STATUS_LABEL = {
+  pending: '管理者の確認待ち',
+  admin_approved: 'マスター管理者の最終承認待ち',
+  confirmed: '確定済み',
+  rejected: '差し戻し',
+};
+const MONTHLY_CONFIRM_STATUS_CLASS = {
+  pending: 'bg-amber-50 text-amber-600',
+  admin_approved: 'bg-blue-50 text-blue-600',
+  confirmed: 'bg-emerald-50 text-emerald-600',
+  rejected: 'bg-rose-50 text-rose-600',
+};
+
+const rowToMonthlyConfirm = (row) => ({
+  id: row.id,
+  employeeId: row.employee_id,
+  employeeName: row.employees?.name || '',
+  targetMonth: row.target_month || '',
+  status: row.status || 'pending',
+  summary: row.summary || {},
+  staffNote: row.staff_note || '',
+  adminComment: row.admin_comment || '',
+  adminDecidedAt: row.admin_decided_at,
+  masterComment: row.master_comment || '',
+  masterDecidedAt: row.master_decided_at,
+  submittedAt: row.submitted_at,
+});
+
 const ANNOUNCEMENT_CATEGORIES = ['お知らせ', '制度・インセンティブ', '資料・料金表', 'キャンペーン', 'その他'];
 
 // 全データバックアップの対象テーブル（employee_my_numbers を含む＝マイナンバーも書き出される）
@@ -1124,6 +1153,7 @@ async function fetchAllData() {
     commuteClaimsRes,
     resignationReasonsRes,
     appSettingsRes,
+    monthlyConfirmRes,
   ] = await Promise.all([
     supabase.from('employees').select('*'),
     supabase.from('attendance_records').select('*'),
@@ -1141,6 +1171,7 @@ async function fetchAllData() {
     supabase.from('commute_expense_claims').select('*, employees(name)').order('created_at', { ascending: false }),
     supabase.from('resignation_reasons').select('*').order('sort_order', { ascending: true }),
     supabase.from('app_settings').select('*'),
+    supabase.from('monthly_attendance_confirmations').select('*, employees(name)').order('target_month', { ascending: false }),
   ]);
 
   for (const res of [employeesRes, recordsRes, correctionsRes, leaveRes, perfRes, notifRes, payrollRes, auditRes, profileReqRes, groupLeaveRes, employeeAttendanceRes, announcementsRes, yearEndRes, commuteClaimsRes]) {
@@ -1148,6 +1179,9 @@ async function fetchAllData() {
   }
   // 退職理由マスタはSQL未実行でも画面が落ちないよう、エラー時は空扱いにする
   const resignationReasons = resignationReasonsRes?.error ? [] : (resignationReasonsRes?.data || []).map(rowToResignationReason);
+
+  // 月次勤怠の確定（SQL未実行でも画面が落ちないよう、エラー時は空扱いにする）
+  const monthlyConfirmations = monthlyConfirmRes?.error ? [] : (monthlyConfirmRes?.data || []).map(rowToMonthlyConfirm);
 
   // アプリ全体の設定（SQL未実行でも画面が落ちないよう、エラー時は空扱いにする）
   const settings = {};
@@ -1192,6 +1226,7 @@ async function fetchAllData() {
     yearEndAdjustments: (yearEndRes.data || []).map(rowToYearEndAdjustment),
     commuteExpenseClaims: (commuteClaimsRes.data || []).map(rowToCommuteClaim),
     resignationReasons,
+    monthlyConfirmations,
     settings,
   };
 }
@@ -2611,6 +2646,108 @@ function AttendanceApp() {
     show(decision === 'approved' ? '承認しました' : '差し戻しました', decision === 'approved' ? 'success' : 'warn');
   };
 
+  // ---- 月次勤怠の確定フロー ----
+  // スタッフが前月分を確定申請 → 管理者が承認 → マスター管理者が最終承認
+  const submitMonthlyAttendanceConfirmation = async (targetMonth, summary, staffNote) => {
+    const existing = (data.monthlyConfirmations || []).find(
+      (c) => c.employeeId === employeeId && c.targetMonth === targetMonth
+    );
+    if (existing && existing.status === 'confirmed') {
+      show('この月の勤怠はすでに確定しています', 'warn');
+      return false;
+    }
+    const payload = {
+      employee_id: employeeId,
+      target_month: targetMonth,
+      status: 'pending',
+      summary,
+      staff_note: staffNote || null,
+      admin_comment: null,
+      admin_decided_at: null,
+      master_comment: null,
+      master_decided_at: null,
+      submitted_at: new Date().toISOString(),
+    };
+    const { data: saved, error } = existing
+      ? await supabase.from('monthly_attendance_confirmations').update(payload).eq('id', existing.id).select().single()
+      : await supabase.from('monthly_attendance_confirmations').insert(payload).select().single();
+    if (error) {
+      console.error('勤怠の確定申請に失敗しました', error);
+      show(`勤怠の確定申請に失敗しました：${error.message || ''}`, 'warn');
+      return false;
+    }
+    await notifyAdmin(
+      `【勤怠確定申請】${session.name} - ${monthKeyLabel(targetMonth)}分`,
+      `${session.name}さんより ${monthKeyLabel(targetMonth)}分の勤怠確定申請が届きました。内容をご確認のうえ承認してください。`,
+      saved?.id
+    );
+    await refreshData();
+    show(`${monthKeyLabel(targetMonth)}分の勤怠を確定申請しました`, 'success');
+    return true;
+  };
+
+  // 管理者による1次承認（stage: 'admin'）とマスター管理者による最終承認（stage: 'master'）
+  const decideMonthlyAttendanceConfirmation = async (id, stage, decision, comment) => {
+    const target = (data.monthlyConfirmations || []).find((c) => c.id === id);
+    if (!target) return false;
+    const now = new Date().toISOString();
+    const patch = decision === 'rejected'
+      ? { status: 'rejected' }
+      : { status: stage === 'master' ? 'confirmed' : 'admin_approved' };
+    if (stage === 'master') {
+      patch.master_comment = comment || null;
+      patch.master_decided_by = session.id;
+      patch.master_decided_at = now;
+    } else {
+      patch.admin_comment = comment || null;
+      patch.admin_decided_by = session.id;
+      patch.admin_decided_at = now;
+    }
+    const { error } = await supabase.from('monthly_attendance_confirmations').update(patch).eq('id', id);
+    if (error) {
+      console.error('勤怠確定の処理に失敗しました', error);
+      show(`処理に失敗しました：${error.message || ''}`, 'warn');
+      return false;
+    }
+    const monthLabel = monthKeyLabel(target.targetMonth);
+    if (decision === 'rejected') {
+      await notifyEmployeeUser(
+        target.employeeId,
+        `【勤怠確定・差し戻し】${monthLabel}分`,
+        `${monthLabel}分の勤怠確定申請が差し戻されました。${comment ? `コメント：${comment}` : ''}内容をご確認のうえ、修正して再度ご提出ください。`,
+        id
+      );
+      show('差し戻しました', 'warn');
+    } else if (stage === 'admin') {
+      // マスター管理者へ最終承認を依頼する
+      await notify(
+        `【最終承認のお願い】${target.employeeName} - ${monthLabel}分`,
+        `${target.employeeName}さんの ${monthLabel}分の勤怠について、管理者の確認が完了しました。最終承認をお願いします。`,
+        id,
+        null,
+        'master_admin'
+      );
+      show('承認しました。マスター管理者へ最終承認を依頼しました', 'success');
+    } else {
+      await notifyEmployeeUser(
+        target.employeeId,
+        `【勤怠確定】${monthLabel}分`,
+        `${monthLabel}分の勤怠が確定しました。この内容をもとに給与計算を行います。`,
+        id
+      );
+      show('最終承認しました。給与計算に進めます', 'success');
+    }
+    await refreshData();
+    await logAudit(
+      session,
+      decision === 'rejected' ? '勤怠確定を差し戻し' : stage === 'master' ? '勤怠を最終承認' : '勤怠確定を承認',
+      monthLabel,
+      target.employeeId,
+      target.employeeName
+    );
+    return true;
+  };
+
   // 交通費精算書の申請を提出
   const submitCommuteExpenseClaim = async (payload) => {
     const { data: inserted, error } = await supabase
@@ -3081,6 +3218,7 @@ function AttendanceApp() {
                 records={data.records}
                 payrollRecords={data.payrollRecords}
                 commuteExpenseClaims={data.commuteExpenseClaims}
+                monthlyConfirmations={data.monthlyConfirmations}
                 groupAttendanceSchedules={data.groupLeaveSchedules}
                 employeeAttendanceSchedules={data.employeeAttendanceSchedules}
                 onSaveDraft={savePayrollDraft}
@@ -3104,6 +3242,13 @@ function AttendanceApp() {
                   ['attendance','勤怠'],['leave','休暇申請'],['performance','実績']
                 ].map(([key,label]) => <button key={key} onClick={() => setEmployeeTab(key)} className={`flex-1 py-2.5 rounded-xl transition-colors ${employeeTab === key ? 'bg-slate-950 text-white' : 'text-slate-500 hover:bg-slate-50'}`}>{label}</button>)}
               </div>
+            )}
+            {employeeTab === 'attendance' && (
+              <MonthlyAttendanceConfirmSection
+                records={employeeRecords}
+                confirmations={(data.monthlyConfirmations || []).filter((c) => c.employeeId === employeeId)}
+                onSubmit={submitMonthlyAttendanceConfirmation}
+              />
             )}
             {employeeTab === 'attendance' && (
               <EmployeeView
@@ -3171,6 +3316,7 @@ function AttendanceApp() {
             onUpdateAdminAccess={updateAdminAccess}
             onSaveAdminNotifyEmail={saveAdminNotifyEmail}
             onChangeLoginEmail={handleChangeLoginEmail}
+            onDecideMonthlyConfirm={decideMonthlyAttendanceConfirmation}
             onSaveGroupLeave={saveGroupLeaveSchedule}
             onSaveEmployeeAttendance={saveEmployeeAttendanceSchedule}
             onAdminUpdateAttendance={adminUpdateAttendance}
@@ -6582,7 +6728,8 @@ const HELP_ADMIN = [
   {
     category: '給与',
     items: [
-      { q: '給与計算の流れを教えてください', a: '「給与」タブで対象月を選ぶと、勤怠記録から労働時間と残業時間が自動集計されます。支給項目・控除項目を確認して下書き保存し、内容が確定したら「公開」します。公開するとスタッフ側の画面に明細が表示されます。' },
+      { q: '給与計算の流れを教えてください', a: 'まず「勤怠」→「月次勤怠の確定」で、その月の勤怠を最終承認まで進めます。次に「給与」タブで対象月を選ぶと、勤怠記録から労働時間と残業時間が自動集計されます。承認済みの交通費精算も支給項目に自動で入ります。支給項目・控除項目を確認して下書き保存し、内容が確定したら「公開」します。公開するとスタッフ側の画面に明細が表示されます。勤怠が最終承認されるまで公開はできません。' },
+      { q: '月次勤怠の確定とは', a: 'スタッフが前月分の勤怠を確認して確定申請し、管理者が内容を確認して承認、最後にマスター管理者が最終承認する流れです。最終承認が済むと、その月の給与明細を公開できるようになります。「勤怠」→「月次勤怠の確定」で処理します。' },
       { q: '支給・控除の項目を追加するには', a: 'スタッフの「詳細」→「給与・口座」タブで、スタッフごとの固定的な支給項目・控除項目を登録できます。毎月の計算に自動で反映されます。' },
       { q: '標準報酬月額の設定はどこですか', a: 'スタッフの「詳細」→「社会保険」タブで設定します。等級表から選択でき、健康保険・厚生年金の保険料が自動計算されます。保険料率は別途「保険料率設定」で管理します。' },
       { q: '交通費精算の承認とExcel出力', a: '「給与」タブの交通費精算一覧から承認・却下します。承認待ちの左側にあるチェックを入れると、まとめて承認できます。承認済みのものは月を指定してExcelファイルに出力でき、経理処理に使えます。承認した金額は、同じ対象月の給与を新規作成する際に支給項目「交通費精算」として自動で入ります。' },
@@ -7141,7 +7288,7 @@ function PayrollItemsEditor({ title, items, onChange, addLabel = '項目を追�
   );
 }
 
-function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExpenseClaims = [], groupAttendanceSchedules = {}, employeeAttendanceSchedules = {}, onSaveDraft, onPublish, onUpdateWage, isDesktop }) {
+function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExpenseClaims = [], monthlyConfirmations = [], groupAttendanceSchedules = {}, employeeAttendanceSchedules = {}, onSaveDraft, onPublish, onUpdateWage, isDesktop }) {
   const now = new Date();
   const [employeeId, setEmployeeId] = useState(employeeAccounts[0]?.id || '');
   const [year, setYear] = useState(now.getFullYear());
@@ -7188,6 +7335,12 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     (c) => c.employeeId === employeeId && c.status === 'approved' && c.targetMonth === payrollMonthKey
   );
   const approvedCommuteTotal = approvedCommuteClaims.reduce((sum, c) => sum + (Number(c.totalAmount) || 0), 0);
+
+  // その月の勤怠が最終承認まで終わっているか
+  const monthlyConfirm = (monthlyConfirmations || []).find(
+    (c) => c.employeeId === employeeId && c.targetMonth === payrollMonthKey
+  );
+  const attendanceConfirmed = monthlyConfirm?.status === 'confirmed';
 
   const monthly = computeMonthlySummary(records[employeeId] || {}, new Date(year, month - 1, 1));
   const attendanceDays = employee ? getPrescribedAttendanceDays(employee, month, groupAttendanceSchedules, employeeAttendanceSchedules) : null;
@@ -7347,6 +7500,15 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
         {commuteRouteTotal > 0 && (
           <div className="text-[11px] text-slate-400 -mt-1">通勤手当は、スタッフ詳細で登録された経路（合計 {formatYen(commuteRouteTotal)}）を初期値にしています。金額は下の支給項目欄で調整できます。</div>
         )}
+        <div className={`rounded-xl px-3.5 py-2.5 text-[11.5px] border ${attendanceConfirmed ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-amber-50 border-amber-200 text-amber-800'}`}>
+          {attendanceConfirmed ? (
+            <>この月の勤怠は最終承認済みです。この内容をもとに給与計算を行えます。</>
+          ) : monthlyConfirm ? (
+            <>この月の勤怠はまだ確定していません（現在：{MONTHLY_CONFIRM_STATUS_LABEL[monthlyConfirm.status]}）。「勤怠」→「月次勤怠の確定」で承認を進めてください。</>
+          ) : (
+            <>この月の勤怠はまだ確定申請されていません。確定後の給与計算をおすすめします。</>
+          )}
+        </div>
         {approvedCommuteTotal > 0 && (
           <div className="text-[11px] text-emerald-700 -mt-1">
             承認済みの交通費精算 {approvedCommuteClaims.length}件（合計 {formatYen(approvedCommuteTotal)}）を、支給項目「交通費精算（{month}月分）」として反映しています。
@@ -7378,8 +7540,13 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
             {existing ? 'この内容で再計算・保存' : 'この内容で給与明細を作成'}
           </button>
           {existing && existing.status === 'draft' && (
-            <button onClick={() => onPublish(existing.id)} className="flex-1 py-2.5 rounded-lg bg-emerald-600 text-white text-[13px] font-bold">
-              確定して公開する
+            <button
+              onClick={() => onPublish(existing.id)}
+              disabled={!attendanceConfirmed}
+              title={attendanceConfirmed ? '' : 'この月の勤怠が最終承認されると公開できます'}
+              className="flex-1 py-2.5 rounded-lg bg-emerald-600 disabled:bg-slate-200 text-white text-[13px] font-bold"
+            >
+              {attendanceConfirmed ? '確定して公開する' : '勤怠の確定待ち'}
             </button>
           )}
           {existing && existing.status === 'published' && (
@@ -7421,7 +7588,7 @@ function PayrollMetric({ label, value }) {
   );
 }
 
-function AdminTopNav({ tab, setTab, correctionCount, leaveCount, performanceCount, isMasterAdmin }) {
+function AdminTopNav({ tab, setTab, correctionCount, leaveCount, performanceCount, monthlyConfirmCount = 0, isMasterAdmin }) {
   const [open, setOpen] = useState(null);
   const wrapRef = useRef(null);
 
@@ -7437,10 +7604,11 @@ function AdminTopNav({ tab, setTab, correctionCount, leaveCount, performanceCoun
     {
       key: 'attendance-group',
       label: '出勤管理',
-      tabs: ['attendance', 'requests'],
+      tabs: ['attendance', 'requests', 'monthlyconfirm'],
       items: [
         { tab: 'attendance', label: '勤怠一覧', sub: '月次一覧・CSV出力' },
         { tab: 'requests', label: '勤怠修正申請', sub: '承認・却下', badge: correctionCount },
+        { tab: 'monthlyconfirm', label: '月次勤怠の確定', sub: '承認・最終承認', badge: monthlyConfirmCount },
       ],
     },
     {
@@ -7474,7 +7642,7 @@ function AdminTopNav({ tab, setTab, correctionCount, leaveCount, performanceCoun
     },
   ];
 
-  const totalBadge = correctionCount + leaveCount + performanceCount;
+  const totalBadge = correctionCount + leaveCount + performanceCount + monthlyConfirmCount;
 
   return (
     <div ref={wrapRef} className="relative bg-white rounded-2xl border border-slate-200 shadow-sm">
@@ -7535,7 +7703,7 @@ function AdminTopNav({ tab, setTab, correctionCount, leaveCount, performanceCoun
   );
 }
 
-function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, onDecideLeave, onDecidePerformance, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onChangeLoginEmail, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
+function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, onDecideLeave, onDecidePerformance, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onChangeLoginEmail, onDecideMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
   const [tab, setTab] = useState('dashboard'); // dashboard | attendance | requests | leave | performance | accounts
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
@@ -7572,6 +7740,11 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, o
   const notifications = (data.notifications || []).slice(0, 6);
   const isMasterAdmin = session?.role === 'master_admin';
   const adminAccounts = data.accounts.filter((a) => a.role === 'admin' || a.role === 'master_admin');
+  // 月次勤怠の確定：自分が処理すべき件数（管理者は1次、マスター管理者は1次と最終の両方）
+  const monthlyConfirmations = data.monthlyConfirmations || [];
+  const monthlyConfirmCount = monthlyConfirmations.filter(
+    (c) => c.status === 'pending' || (isMasterAdmin && c.status === 'admin_approved')
+  ).length;
 
   // ダッシュボードのサマリー用の集計
   const todayPresentCount = employeeAccounts.filter((acc) => {
@@ -7614,6 +7787,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, o
           correctionCount={pending.length}
           leaveCount={leavePending.length}
           performanceCount={performancePending.length}
+          monthlyConfirmCount={monthlyConfirmCount}
           isMasterAdmin={isMasterAdmin}
         />
       ) : (
@@ -7654,6 +7828,9 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, o
           </button>
           <button onClick={() => setTab('auditlog')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'auditlog' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
             監査ログ
+          </button>
+          <button onClick={() => setTab('monthlyconfirm')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'monthlyconfirm' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
+            月次勤怠の確定{monthlyConfirmCount > 0 ? `（${monthlyConfirmCount}）` : ''}
           </button>
           {isMasterAdmin && (
             <button onClick={() => setTab('adminperms')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'adminperms' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
@@ -7825,6 +8002,15 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, o
             </div>
           )}
         </div>
+      )}
+
+      {tab === 'monthlyconfirm' && (
+        <AdminMonthlyConfirmTab
+          confirmations={monthlyConfirmations}
+          isMasterAdmin={isMasterAdmin}
+          onDecide={onDecideMonthlyConfirm}
+          isDesktop={isDesktop}
+        />
       )}
 
       {tab === 'requests' && (
@@ -8806,6 +8992,231 @@ function AdminYearEndAdjustmentTab({ requests, onDecide, isDesktop }) {
           {decided.map((r) => <Card key={r.id} r={r} />)}
         </div>
       )}
+    </div>
+  );
+}
+
+// ---- 月次勤怠の確定（スタッフ側）----
+function MonthlyAttendanceConfirmSection({ records, confirmations, onSubmit }) {
+  const [targetMonth, setTargetMonth] = useState(() => prevMonthKey());
+  const [note, setNote] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const [y, m] = targetMonth.split('-').map(Number);
+  const summary = useMemo(
+    () => computeMonthlySummary(records || {}, new Date(y, (m || 1) - 1, 1)),
+    [records, y, m]
+  );
+  const current = (confirmations || []).find((c) => c.targetMonth === targetMonth) || null;
+  const locked = current && (current.status === 'pending' || current.status === 'admin_approved' || current.status === 'confirmed');
+
+  const submit = async () => {
+    setSaving(true);
+    const ok = await onSubmit(targetMonth, {
+      days: summary.days,
+      workedMin: summary.workedMin,
+      overtimeMin: summary.overtimeMin,
+      lateMin: summary.lateMin,
+      earlyLeaveMin: summary.earlyLeaveMin,
+    }, note);
+    setSaving(false);
+    if (ok) setNote('');
+  };
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+      <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2 flex-wrap">
+        <CheckCircle2 size={15} className="text-slate-400" />
+        <h2 className="font-bold text-[13.5px]">月次勤怠の確定申請</h2>
+        {current && (
+          <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full ${MONTHLY_CONFIRM_STATUS_CLASS[current.status]}`}>
+            {MONTHLY_CONFIRM_STATUS_LABEL[current.status]}
+          </span>
+        )}
+      </div>
+
+      <div className="px-5 py-4 space-y-3">
+        <div className="text-[11.5px] text-slate-500">
+          前月分の勤怠を確認し、内容に間違いがなければ確定申請してください。
+          管理者とマスター管理者の承認を経て確定し、その内容をもとに給与計算が行われます。
+        </div>
+
+        <Field label="対象月">
+          <input
+            type="month"
+            value={targetMonth}
+            onChange={(e) => { setTargetMonth(e.target.value); setNote(''); }}
+            className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]"
+          />
+        </Field>
+
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          {[
+            ['出勤日数', `${summary.days}日`],
+            ['労働時間', minutesToHHMM(summary.workedMin)],
+            ['残業時間', minutesToHHMM(summary.overtimeMin)],
+            ['遅刻・早退', minutesToHHMM(summary.lateMin + summary.earlyLeaveMin)],
+          ].map(([label, value]) => (
+            <div key={label} className="border border-slate-200 rounded-xl px-3 py-2.5">
+              <div className="text-[10.5px] text-slate-400">{label}</div>
+              <div className="font-mono text-[15px] font-bold text-slate-800">{value}</div>
+            </div>
+          ))}
+        </div>
+
+        {current?.adminComment && (
+          <div className="bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-[11.5px] text-slate-600">
+            管理者コメント：{current.adminComment}
+          </div>
+        )}
+        {current?.masterComment && (
+          <div className="bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-[11.5px] text-slate-600">
+            マスター管理者コメント：{current.masterComment}
+          </div>
+        )}
+
+        {current?.status === 'confirmed' ? (
+          <div className="bg-emerald-50 border border-emerald-200 rounded-xl px-3.5 py-3 text-[12px] text-emerald-800">
+            {monthKeyLabel(targetMonth)}分の勤怠は確定済みです。修正が必要な場合は管理者にご相談ください。
+          </div>
+        ) : (
+          <>
+            <Field label="管理者へのメモ（任意）">
+              <textarea
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                rows={2}
+                placeholder="例）15日は直行直帰でした"
+                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px] resize-none"
+              />
+            </Field>
+            {locked && (
+              <div className="text-[11.5px] text-amber-700">
+                すでに申請済みです。内容を直して送信すると、もう一度はじめから承認を受けます。
+              </div>
+            )}
+            <button
+              onClick={submit}
+              disabled={saving || summary.days === 0}
+              className="w-full py-2.5 rounded-lg bg-amber-600 disabled:bg-slate-200 text-white text-[13.5px] font-bold"
+            >
+              {saving ? '送信中…' : locked ? 'この内容で出し直す' : 'この内容で確定申請する'}
+            </button>
+            {summary.days === 0 && (
+              <div className="text-[11.5px] text-slate-400">この月の出勤記録がありません。対象月をご確認ください。</div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---- 月次勤怠の確定（管理者側）----
+function AdminMonthlyConfirmTab({ confirmations, isMasterAdmin, onDecide, isDesktop }) {
+  const [comment, setComment] = useState({});
+  const [running, setRunning] = useState(false);
+  const setMemo = (id, v) => setComment((prev) => ({ ...prev, [id]: v }));
+
+  const waitingAdmin = confirmations.filter((c) => c.status === 'pending');
+  const waitingMaster = confirmations.filter((c) => c.status === 'admin_approved');
+  const others = confirmations.filter((c) => c.status === 'confirmed' || c.status === 'rejected').slice(0, 20);
+
+  const decide = async (id, stage, decision) => {
+    setRunning(true);
+    await onDecide(id, stage, decision, comment[id]);
+    setRunning(false);
+  };
+
+  const Card = ({ c, stage }) => (
+    <div className="px-5 py-3.5 border-b border-slate-100 last:border-0">
+      <div className="flex items-center justify-between gap-2 mb-1.5">
+        <span className="font-semibold text-[13px] text-slate-800">
+          <EmployeeLink id={c.employeeId} name={c.employeeName} /> ・ {monthKeyLabel(c.targetMonth)}分
+        </span>
+        <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full shrink-0 ${MONTHLY_CONFIRM_STATUS_CLASS[c.status]}`}>
+          {MONTHLY_CONFIRM_STATUS_LABEL[c.status]}
+        </span>
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-2">
+        {[
+          ['出勤日数', `${c.summary?.days ?? 0}日`],
+          ['労働時間', minutesToHHMM(c.summary?.workedMin || 0)],
+          ['残業時間', minutesToHHMM(c.summary?.overtimeMin || 0)],
+          ['遅刻・早退', minutesToHHMM((c.summary?.lateMin || 0) + (c.summary?.earlyLeaveMin || 0))],
+        ].map(([label, value]) => (
+          <div key={label} className="bg-slate-50 rounded-lg px-2.5 py-1.5">
+            <div className="text-[10px] text-slate-400">{label}</div>
+            <div className="font-mono text-[13px] font-bold text-slate-700">{value}</div>
+          </div>
+        ))}
+      </div>
+      {c.staffNote && <div className="text-[11.5px] text-slate-500 mb-2">本人メモ：{c.staffNote}</div>}
+      {c.adminComment && <div className="text-[11.5px] text-slate-400 mb-2">管理者コメント：{c.adminComment}</div>}
+      {c.masterComment && <div className="text-[11.5px] text-slate-400 mb-2">マスター管理者コメント：{c.masterComment}</div>}
+
+      {stage && (
+        <div className="space-y-2">
+          <input
+            value={comment[c.id] || ''}
+            onChange={(e) => setMemo(c.id, e.target.value)}
+            placeholder="コメント（任意）"
+            className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-[12.5px]"
+          />
+          <div className="flex gap-2">
+            <button
+              onClick={() => decide(c.id, stage, 'rejected')}
+              disabled={running}
+              className="flex-1 py-1.5 rounded-lg border border-slate-200 text-[12px] font-bold text-slate-500"
+            >
+              差し戻す
+            </button>
+            <button
+              onClick={() => decide(c.id, stage, 'approved')}
+              disabled={running}
+              className="flex-1 py-1.5 rounded-lg bg-emerald-600 disabled:bg-slate-200 text-white text-[12px] font-bold"
+            >
+              {stage === 'master' ? '最終承認する' : '承認する'}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+
+  const Section = ({ title, note, list, stage }) => (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+      <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+        <CheckCircle2 size={15} className="text-slate-400" />
+        <h2 className="font-bold text-[13.5px]">{title}</h2>
+        {list.length > 0 && <span className="ml-auto text-[10.5px] font-bold text-white bg-amber-600 rounded-full px-2 py-0.5">{list.length}件</span>}
+      </div>
+      {note && <div className="px-5 py-2 bg-slate-50 border-b border-slate-100 text-[11.5px] text-slate-500">{note}</div>}
+      {list.length === 0 ? (
+        <div className="px-5 py-8 text-center text-[12.5px] text-slate-300">対象はありません</div>
+      ) : (
+        <div>{list.map((c) => <Card key={c.id} c={c} stage={stage} />)}</div>
+      )}
+    </div>
+  );
+
+  return (
+    <div className="space-y-5">
+      <Section
+        title="管理者の確認待ち"
+        note="スタッフから届いた確定申請です。内容を確認して承認すると、マスター管理者へ最終承認の依頼が届きます。"
+        list={waitingAdmin}
+        stage="admin"
+      />
+      <Section
+        title="マスター管理者の最終承認待ち"
+        note={isMasterAdmin
+          ? '最終承認すると勤怠が確定し、その月の給与計算に進めます。'
+          : '最終承認はマスター管理者のみが行えます。'}
+        list={waitingMaster}
+        stage={isMasterAdmin ? 'master' : null}
+      />
+      <Section title="確定済み・差し戻し（直近20件）" list={others} stage={null} />
     </div>
   );
 }
