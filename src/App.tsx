@@ -4970,7 +4970,7 @@ const STAFF_REQUEST_ITEMS = [
   { key: 'commute', label: '交通費申請', desc: '立て替えた交通費の精算', icon: Wallet },
   // 実績入力は業務（メイングループ）ごとに入力フォーマットが変わる。
   // 表示名・説明は PERFORMANCE_FORMATS の定義で上書きされる。
-  { key: 'performance', label: '実績入力', desc: '当月の実績を入力して保存', icon: BarChart3, byGroup: true },
+  { key: 'performance', label: '実績入力', desc: '担当業務の実績を入力して保存', icon: BarChart3, byGroup: true },
   { key: 'yearend', label: '年末調整', desc: '年末調整の書類を提出', icon: FileText },
   { key: 'profile', label: '個人情報の変更申請', desc: '氏名・住所・口座などの変更', icon: UserCog },
 ];
@@ -6652,7 +6652,7 @@ function EoPerformanceSection({ employeeId, isDesktop }) {
 const PERFORMANCE_FORMATS = {
   [EO_GROUP_NAME]: {
     label: '実績入力',
-    desc: '新規・既存の実績を入力して保存',
+    desc: '担当業務の実績を入力して保存',
     Component: EoPerformanceSection,
   },
 };
