@@ -3225,6 +3225,50 @@ function StandardRemunerationTablePicker({ onClose, onPick }) {
   );
 }
 
+// パスワード入力欄。
+// type="password" は日本語入力と相性が悪く、スマートフォンによっては
+// 1文字ごとにキーボードが閉じてしまう。そのため通常のテキスト欄として扱い、
+// CSSで伏せ字にする（対応していない端末では従来どおり type="password"）。
+const SUPPORTS_TEXT_SECURITY =
+  typeof CSS !== 'undefined' &&
+  typeof CSS.supports === 'function' &&
+  (CSS.supports('-webkit-text-security', 'disc') || CSS.supports('text-security', 'disc'));
+
+function PasswordInput({ inputRef, id, name, className, autoFocus }) {
+  const [shown, setShown] = useState(false);
+  const masked = !shown && SUPPORTS_TEXT_SECURITY;
+  return (
+    <div className="flex items-center gap-2">
+      <input
+        ref={inputRef}
+        id={id}
+        name={name}
+        type={SUPPORTS_TEXT_SECURITY || shown ? 'text' : 'password'}
+        autoComplete="off"
+        autoCapitalize="off"
+        autoCorrect="off"
+        spellCheck={false}
+        defaultValue=""
+        autoFocus={autoFocus}
+        style={masked ? { WebkitTextSecurity: 'disc', textSecurity: 'disc' } : undefined}
+        className={className}
+        required
+      />
+      <button
+        type="button"
+        onClick={() => setShown((v) => !v)}
+        className="shrink-0 text-[11px] font-bold text-slate-500 border border-slate-200 rounded-xl px-3 py-3"
+      >
+        {shown ? '隠す' : '表示'}
+      </button>
+    </div>
+  );
+}
+
+// パスワードは半角の英数字・記号のみ受け付ける
+// （日本語入力のまま打つと全角文字が混ざり、次回ログインできなくなるため）
+const isHalfWidthPassword = (v) => /^[\x21-\x7e]+$/.test(String(v || ''));
+
 // ---- 初回ログイン：パスワード変更（必須） ----
 function FirstLoginPasswordScreen({ session, toast, onDone, onLogout }) {
   // 入力欄はReactで値を持たない（非制御）。
@@ -3241,6 +3285,10 @@ function FirstLoginPasswordScreen({ session, toast, onDone, onLogout }) {
     const confirmPassword = confirmRef.current?.value || '';
     if (password.length < 6) {
       setError('パスワードは6文字以上にしてください');
+      return;
+    }
+    if (!isHalfWidthPassword(password)) {
+      setError('パスワードは半角の英数字・記号でご入力ください（日本語入力をオフにしてください）');
       return;
     }
     if (password !== confirmPassword) {
@@ -3274,32 +3322,25 @@ function FirstLoginPasswordScreen({ session, toast, onDone, onLogout }) {
           </div>
 
           <div className="bg-amber-50 border border-amber-200 rounded-xl px-3.5 py-3 text-[12px] text-amber-800">
-            仮パスワードでログインしています。安全にご利用いただくため、ご自身のパスワードを設定してください。
+            仮パスワードでログインしています。安全にご利用いただくため、ご自身のパスワードを設定してください。<br />
+            半角の英数字でご入力ください（日本語入力はオフにしてください）。
           </div>
 
           <form onSubmit={submit} className="space-y-4">
             <Field label="新しいパスワード（6文字以上）">
-              <input
-                ref={passwordRef}
+              <PasswordInput
+                inputRef={passwordRef}
                 id="new-password"
                 name="new-password"
-                type="password"
-                autoComplete="off"
-                defaultValue=""
                 className="w-full border-2 border-slate-200 rounded-xl px-3.5 py-3 text-[16px] outline-none focus:border-slate-900"
-                required
               />
             </Field>
             <Field label="新しいパスワード（確認）">
-              <input
-                ref={confirmRef}
+              <PasswordInput
+                inputRef={confirmRef}
                 id="new-password-confirm"
                 name="new-password-confirm"
-                type="password"
-                autoComplete="off"
-                defaultValue=""
                 className="w-full border-2 border-slate-200 rounded-xl px-3.5 py-3 text-[16px] outline-none focus:border-slate-900"
-                required
               />
             </Field>
             {error && <div className="text-[12.5px] text-rose-600">{error}</div>}
@@ -3911,6 +3952,10 @@ function ResetPasswordRecoveryScreen({ toast, onDone }) {
       setError('パスワードは6文字以上にしてください');
       return;
     }
+    if (!isHalfWidthPassword(password)) {
+      setError('パスワードは半角の英数字・記号でご入力ください（日本語入力をオフにしてください）');
+      return;
+    }
     if (password !== confirmPassword) {
       setError('パスワードが一致しません');
       return;
@@ -3948,28 +3993,20 @@ function ResetPasswordRecoveryScreen({ toast, onDone }) {
             <form onSubmit={submit} className="space-y-4">
               <div>
                 <label className="block text-[12.5px] font-bold text-slate-800 mb-1.5">新しいパスワード（6文字以上）</label>
-                <input
-                  ref={passwordRef}
+                <PasswordInput
+                  inputRef={passwordRef}
                   id="recovery-password"
                   name="recovery-password"
-                  type="password"
-                  autoComplete="off"
-                  defaultValue=""
                   className="w-full border-2 border-slate-200 rounded-xl px-3.5 py-3 text-[16px] outline-none focus:border-slate-900"
-                  required
                 />
               </div>
               <div>
                 <label className="block text-[12.5px] font-bold text-slate-800 mb-1.5">新しいパスワード（確認）</label>
-                <input
-                  ref={confirmRef}
+                <PasswordInput
+                  inputRef={confirmRef}
                   id="recovery-password-confirm"
                   name="recovery-password-confirm"
-                  type="password"
-                  autoComplete="off"
-                  defaultValue=""
                   className="w-full border-2 border-slate-200 rounded-xl px-3.5 py-3 text-[16px] outline-none focus:border-slate-900"
-                  required
                 />
               </div>
               {error && <div className="bg-rose-50 border border-rose-200 rounded-xl px-4 py-2.5 text-[12px] text-rose-700">{error}</div>}
