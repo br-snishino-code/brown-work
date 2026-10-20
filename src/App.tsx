@@ -3359,6 +3359,7 @@ function AttendanceApp() {
                 claims={data.commuteExpenseClaims.filter((c) => c.employeeId === employeeId)}
                 onSubmit={submitCommuteExpenseClaim}
                 onUpdate={updateCommuteExpenseClaim}
+                onSaveDraft={saveCommuteExpenseDraft}
               />
             </div>
           ) : (
@@ -3403,6 +3404,7 @@ function AttendanceApp() {
                 onSubmit={submitMonthlyAttendanceConfirmation}
                 onSubmitCommute={submitCommuteExpenseClaim}
                 onUpdateCommute={updateCommuteExpenseClaim}
+                onSaveCommuteDraft={saveCommuteExpenseDraft}
               />
             )}
             {employeeTab === 'attendance' && (
@@ -6831,7 +6833,7 @@ const HELP_STAFF = [
     items: [
       { q: '給与明細はどこで見られますか', a: '「給与」タブを開くと、公開済みの給与明細が一覧で表示されます。明細をクリックすると内訳が確認でき、印刷もできます。' },
       { q: '交通費の申請はいつまでですか', a: '毎月1日が締め切りです。前月分の交通費を、翌月1日までに申請してください。期限までに未提出の場合、打刻時にお知らせが表示されます。' },
-      { q: '交通費の申請方法を教えてください', a: '「勤怠」タブの「月次勤怠の確定申請」で、勤怠と一緒に入力して提出できます。交通費だけを申請する場合は「給与」タブの交通費精算からも申請できます。日付・区間・金額を入力して申請します。経路検索のリンクがあるので、運賃の確認に利用してください。複数件をまとめて登録できます。一度申請した区間は運賃を覚えているため、次回は乗駅・降駅を入れるだけで金額が入ります。その月に交通費が無い場合も、空のまま「0円」として申請できます。0円で申請しようとすると、入力漏れでないかの確認が表示されます。' },
+      { q: '交通費の申請方法を教えてください', a: '「勤怠」タブの「月次勤怠の確定申請」で、勤怠と一緒に入力して提出できます。交通費だけを申請する場合は「給与」タブの交通費精算からも申請できます。日付・区間・金額を入力して申請します。経路検索のリンクがあるので、運賃の確認に利用してください。複数件をまとめて登録できます。一度申請した区間は運賃を覚えているため、次回は乗駅・降駅を入れるだけで金額が入ります。その月に交通費が無い場合も、空のまま「0円」として申請できます。0円で申請しようとすると、入力漏れでないかの確認が表示されます。入力の途中で「一時保存する」を押すと、申請せずに内容を残せます。月の途中でこまめに入力しておき、締切前に申請する使い方ができます。一時保存した内容は一覧の「続きを入力する」から再開できます。' },
       { q: '申請した交通費を間違えました', a: '承認される前であれば、交通費精算の一覧にある「修正する」から内容を直せます。修正して送信すると、改めて承認待ちになります。承認済みのものは修正できないため、管理者にご相談ください。' },
       { q: '年末調整の書類はどう出しますか', a: '「人材」タブの年末調整から、必要事項を入力して提出します。提出時期になったら管理者からお知らせがあります。' },
     ],
@@ -9161,7 +9163,7 @@ function AdminYearEndAdjustmentTab({ requests, onDecide, isDesktop }) {
 }
 
 // ---- 月次勤怠の確定（スタッフ側）----
-function MonthlyAttendanceConfirmSection({ records, confirmations, commuteClaims = [], onSubmit, onSubmitCommute, onUpdateCommute }) {
+function MonthlyAttendanceConfirmSection({ records, confirmations, commuteClaims = [], onSubmit, onSubmitCommute, onUpdateCommute, onSaveCommuteDraft }) {
   const [targetMonth, setTargetMonth] = useState(() => prevMonthKey());
   const [note, setNote] = useState('');
   const [saving, setSaving] = useState(false);
@@ -9185,6 +9187,19 @@ function MonthlyAttendanceConfirmSection({ records, confirmations, commuteClaims
     editor.reset(claim ? [...(claim.items || []).map((r) => ({ ...emptyCommuteRow(), ...r })), emptyCommuteRow()] : undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [targetMonth, commuteClaim?.id]);
+
+  // 交通費の入力内容だけ保存する（勤怠は申請しない）
+  const saveCommuteDraft = async () => {
+    const items = editor.toItems();
+    setSaving(true);
+    await onSaveCommuteDraft({
+      targetMonth,
+      submittedDate: todayKey(),
+      items,
+      totalAmount: items.reduce((sum, r) => sum + r.subtotal, 0),
+    });
+    setSaving(false);
+  };
 
   const submit = async () => {
     setSaving(true);
@@ -9292,6 +9307,16 @@ function MonthlyAttendanceConfirmSection({ records, confirmations, commuteClaims
                   <div className="flex items-center justify-between bg-slate-900 text-white rounded-xl px-4 py-2.5">
                     <span className="text-[12px] font-bold">交通費の合計</span>
                     <span className="font-mono text-[16px] font-bold">{formatYen(editor.total)}</span>
+                  </div>
+                  <button
+                    onClick={saveCommuteDraft}
+                    disabled={saving}
+                    className="w-full py-2 rounded-lg border border-slate-300 disabled:border-slate-200 text-[12.5px] font-bold text-slate-600"
+                  >
+                    {saving ? '保存中…' : '交通費だけ一時保存する'}
+                  </button>
+                  <div className="text-[11px] text-slate-400">
+                    月の途中でも保存できます。保存しただけでは申請されません。
                   </div>
                 </>
               )}
@@ -9639,7 +9664,7 @@ function CommuteRowsEditor({ editor }) {
   );
 }
 
-function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate }) {
+function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate, onSaveDraft }) {
   const [formOpen, setFormOpen] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [targetMonth, setTargetMonth] = useState(() => prevMonthKey());
@@ -9663,6 +9688,20 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate }) {
     setSubmittedDate(claim.submittedDate || todayKey());
     editor.reset([...(claim.items || []).map((r) => ({ ...emptyCommuteRow(), ...r })), emptyCommuteRow()]);
     setFormOpen(true);
+  };
+
+  // 申請はせず、入力内容だけ残す
+  const saveDraft = async () => {
+    const items = editor.toItems();
+    setSaving(true);
+    const ok = await onSaveDraft({
+      targetMonth,
+      submittedDate,
+      items,
+      totalAmount: items.reduce((s, r) => s + r.subtotal, 0),
+    });
+    setSaving(false);
+    if (ok) resetForm();
   };
 
   const submit = async () => {
@@ -9728,9 +9767,17 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate }) {
             <span className="text-[12.5px] font-bold">合計金額</span>
             <span className="font-mono text-[18px] font-bold">{formatYen(total)}</span>
           </div>
-          <button onClick={submit} disabled={saving} className="w-full py-2.5 rounded-lg bg-amber-600 disabled:bg-slate-200 text-white text-[13.5px] font-bold">
-            {saving ? '送信中…' : editingId ? 'この内容で修正する' : '申請する'}
-          </button>
+          <div className="flex gap-2">
+            <button onClick={saveDraft} disabled={saving} className="flex-1 py-2.5 rounded-lg border border-slate-300 disabled:border-slate-200 text-[13.5px] font-bold text-slate-600">
+              {saving ? '保存中…' : '一時保存する'}
+            </button>
+            <button onClick={submit} disabled={saving} className="flex-1 py-2.5 rounded-lg bg-amber-600 disabled:bg-slate-200 text-white text-[13.5px] font-bold">
+              {saving ? '送信中…' : editingId ? 'この内容で修正する' : '申請する'}
+            </button>
+          </div>
+          <div className="text-[11px] text-slate-400">
+            「一時保存する」は管理者には申請されません。入力の途中でも保存でき、あとから続きを入力できます。
+          </div>
         </div>
       )}
 
@@ -9748,7 +9795,7 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate }) {
                 <div className="font-mono text-[15px] font-bold text-slate-800">{formatYen(c.totalAmount)}</div>
                 {c.status !== 'approved' && (
                   <button onClick={() => startEdit(c)} className="text-[11.5px] font-bold text-amber-600 border border-amber-200 rounded-lg px-2.5 py-1 flex items-center gap-1">
-                    <Pencil size={11} /> 修正する
+                    <Pencil size={11} /> {c.status === 'draft' ? '続きを入力する' : '修正する'}
                   </button>
                 )}
               </div>
@@ -9822,7 +9869,8 @@ function AdminCommuteExpenseClaimsTab({ claims, isMasterAdmin = false, onDecide,
     setSelected([]);
     setBulkRunning(false);
   };
-  const decided = claims.filter((c) => c.status !== 'pending').slice(0, 20);
+  // 一時保存はスタッフが入力中のため、管理者の一覧には出さない
+  const decided = claims.filter((c) => c.status !== 'pending' && c.status !== 'draft').slice(0, 20);
   const statusLabel = { pending: '承認待ち', approved: '承認済み', rejected: '差し戻し' };
   const statusClass = { pending: 'bg-amber-50 text-amber-600', approved: 'bg-emerald-50 text-emerald-600', rejected: 'bg-rose-50 text-rose-600' };
   const targetMonths = Array.from(new Set(claims.map((c) => c.targetMonth).filter(Boolean))).sort().reverse();
