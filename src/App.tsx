@@ -1628,6 +1628,8 @@ function AttendanceApp() {
   const [schedulePatterns, setSchedulePatterns] = useState([]);
   const [activePatternNo, setActivePatternNo] = useState(1);
   const [passwordRecoveryMode, setPasswordRecoveryMode] = useState(false);
+  // 「要対応」や通知から、管理画面の特定のサブ画面を開くための指定
+  const [pendingAdminTab, setPendingAdminTab] = useState(null);
   // 初回ログインのパスワード設定・登録情報の入力中は、時計の更新を止める
   // （毎秒の再描画でスマートフォンのキーボードが閉じてしまうため）
   const isOnboarding = !!session && (session.mustChangePassword === true || session.profileSetupCompleted === false);
@@ -3339,6 +3341,33 @@ function AttendanceApp() {
     const recs = data.records[acc.id] || {};
     return sum + Object.keys(recs).filter((k) => k !== today && recs[k]?.clockIn && !recs[k]?.clockOut).length;
   }, 0);
+  // 月次勤怠の確定：自分が処理すべき件数（管理者は1次、マスター管理者は両方）
+  const monthlyConfirmPendingCount = (data.monthlyConfirmations || []).filter((c) => {
+    const submitterRole = data.accounts.find((a) => a.id === c.employeeId)?.role;
+    const bySelfAdmin = submitterRole === 'admin' || submitterRole === 'master_admin';
+    if (c.status === 'pending') return session.role === 'master_admin' ? true : !bySelfAdmin;
+    if (c.status === 'admin_approved') return session.role === 'master_admin';
+    return false;
+  }).length;
+
+  // 「要対応」を押したとき、未処理が1種類だけならその画面へ直接移動する
+  const alertTargets = [
+    { tab: 'requests', count: pendingCorrectionCount },
+    { tab: 'leave', count: pendingLeaveCount },
+    { tab: 'performance', count: pendingPerformanceCount },
+    { tab: 'monthlyconfirm', count: monthlyConfirmPendingCount },
+    { tab: 'attendance', count: missingPunchCount },
+  ].filter((t) => t.count > 0);
+  const alertCount = alertTargets.reduce((sum, t) => sum + t.count, 0);
+  const ADMIN_TAB_LABEL = { requests: '勤怠修正', leave: '休暇申請', performance: '実績報告', monthlyconfirm: '月次確定', attendance: '勤怠一覧', dashboard: 'ダッシュボード' };
+  const alertHint = alertTargets.length === 1
+    ? `${ADMIN_TAB_LABEL[alertTargets[0].tab]}を開く`
+    : '要対応の一覧（ダッシュボード）を開く';
+  const openAlertTarget = () => {
+    setTopTab('attendance');
+    setPersonalMode(false);
+    setPendingAdminTab(alertTargets.length === 1 ? alertTargets[0].tab : 'dashboard');
+  };
 
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-900">
@@ -3350,8 +3379,9 @@ function AttendanceApp() {
             session={session}
             personalMode={personalMode}
             setPersonalMode={setPersonalMode}
-            alertCount={pendingCorrectionCount + pendingLeaveCount + pendingPerformanceCount + missingPunchCount}
-            onAlertClick={() => { setTopTab('attendance'); setPersonalMode(false); }}
+            alertCount={alertCount}
+            alertHint={alertHint}
+            onAlertClick={openAlertTarget}
             onLogout={handleLogout}
             viewMode={viewMode}
             onToggleViewMode={() => setViewMode((v) => (v === 'desktop' ? 'mobile' : 'desktop'))}
@@ -3539,6 +3569,8 @@ function AttendanceApp() {
             employeeAccounts={employeeAccounts}
             session={session}
             onNavigateTop={setTopTab}
+            requestedAdminTab={pendingAdminTab}
+            onConsumeRequestedAdminTab={() => setPendingAdminTab(null)}
             onDecide={decideCorrection}
             onDecideLeave={decideLeaveRequest}
             onDecidePerformance={decidePerformanceReport}
@@ -4689,7 +4721,7 @@ function ResetPasswordRecoveryScreen({ toast, onDone }) {
 // 上部バー。タブ・要対応・表示モードの切り替え・利用者メニューを1段にまとめる。
 function GlobalTopTabs({
   topTab, setTopTab, session, personalMode, setPersonalMode,
-  alertCount = 0, onAlertClick, onLogout, viewMode, onToggleViewMode,
+  alertCount = 0, alertHint = '要対応の一覧を開く', onAlertClick, onLogout, viewMode, onToggleViewMode,
   cloudStatusLabel, cloudStatusClass,
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -4776,7 +4808,7 @@ function GlobalTopTabs({
           {isAdminRole && alertCount > 0 && (
             <button
               onClick={onAlertClick}
-              title="要対応の一覧を開く"
+              title={alertHint}
               className="hidden sm:flex items-center gap-1.5 shrink-0 rounded-lg bg-amber-600 hover:bg-amber-500 transition-colors px-2.5 py-1.5 text-[11px] font-bold text-white"
             >
               <Bell size={13} />
@@ -7997,7 +8029,7 @@ function AdminTopNav({ tab, setTab, correctionCount, leaveCount, performanceCoun
   );
 }
 
-function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, onDecideLeave, onDecidePerformance, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onChangeLoginEmail, onDecideMonthlyConfirm, onCancelMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
+function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAdminTab = null, onConsumeRequestedAdminTab, onDecide, onDecideLeave, onDecidePerformance, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onChangeLoginEmail, onDecideMonthlyConfirm, onCancelMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
   const [tab, setTab] = useState('dashboard'); // dashboard | attendance | requests | leave | performance | accounts
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
@@ -8061,6 +8093,14 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, o
     setPendingProfileId(id);
     setTab('accounts');
   }, []);
+
+  // 「要対応」などから指定された画面へ移動する
+  useEffect(() => {
+    if (!requestedAdminTab) return;
+    setTab(requestedAdminTab);
+    if (onConsumeRequestedAdminTab) onConsumeRequestedAdminTab();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requestedAdminTab]);
 
   // 通知履歴の項目をクリックしたとき、その内容を確認できる画面へ移動する
   const openNotification = useCallback((notif) => {
