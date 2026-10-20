@@ -3402,7 +3402,7 @@ const PROFILE_SETUP_SECTIONS = [
         check: (v) => (isEmailLike(v) ? '' : 'メールアドレスの形式をご確認ください'),
       },
       {
-        key: 'phone', label: '電話番号', type: 'tel', placeholder: '例）090-1234-5678', required: true, autoComplete: 'tel',
+        key: 'phone', label: '電話番号', placeholder: '例）090-1234-5678', required: true, autoComplete: 'tel',
         phone: true, check: checkPhone,
       },
       {
@@ -3439,7 +3439,7 @@ const PROFILE_SETUP_SECTIONS = [
       { key: 'emergencyContactName', label: 'お名前', placeholder: '例）田中 太郎', required: true },
       { key: 'emergencyContactRelation', label: '続柄', placeholder: '例）母', required: true },
       {
-        key: 'emergencyContactPhone', label: '電話番号', type: 'tel', placeholder: '例）090-0000-0000', required: true,
+        key: 'emergencyContactPhone', label: '電話番号', placeholder: '例）090-0000-0000', required: true,
         phone: true, check: checkPhone,
       },
       { key: 'emergencyContactAddress', label: '住所', placeholder: '例）京都府亀岡市三宅町22-11', required: true },
@@ -10322,7 +10322,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                 <input value={form.nearestStation} onChange={set('nearestStation')} placeholder="例）京都駅" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" />
               </Field>
               <Field label="電話番号">
-                <FormattedInput value={form.phone} onValueChange={(v) => setForm((f) => ({ ...f, phone: v }))} format={formatPhone} type="tel" placeholder="例）090-1234-5678" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
+                <FormattedInput value={form.phone} onValueChange={(v) => setForm((f) => ({ ...f, phone: v }))} format={formatPhone} placeholder="例）090-1234-5678" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
               </Field>
               <div className="grid grid-cols-2 gap-3">
                 <Field label="緊急連絡先（氏名）">
@@ -10333,7 +10333,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                 </Field>
               </div>
               <Field label="緊急連絡先（電話）">
-                <FormattedInput value={form.emergencyContactPhone} onValueChange={(v) => setForm((f) => ({ ...f, emergencyContactPhone: v }))} format={formatPhone} type="tel" placeholder="例）090-0000-0000" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
+                <FormattedInput value={form.emergencyContactPhone} onValueChange={(v) => setForm((f) => ({ ...f, emergencyContactPhone: v }))} format={formatPhone} placeholder="例）090-0000-0000" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
               </Field>
               <Field label="緊急連絡先（住所）">
                 <input value={form.emergencyContactAddress} onChange={set('emergencyContactAddress')} placeholder="例）京都府亀岡市三宅町22-11" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
