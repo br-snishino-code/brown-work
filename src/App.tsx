@@ -975,21 +975,36 @@ const rowToAudit = (row) => ({
   createdAt: row.created_at,
 });
 
+// スタッフが変更を申請できる項目（管理者の承認後に反映される）
+// bank: true の項目は、口座情報の入力欄でまとめて扱う
 const PROFILE_EDITABLE_FIELDS = [
-  { key: 'contactEmail', label: '連絡用メールアドレス' },
-  { key: 'postalCode', label: '郵便番号' },
-  { key: 'address', label: '住所' },
-  { key: 'residentAddress', label: '住民票の住所' },
-  { key: 'spouseStatus', label: '配偶者の有無' },
-  { key: 'householderName', label: '世帯主の氏名' },
-  { key: 'householderRelation', label: '世帯主との続柄' },
-  { key: 'nearestStation', label: '最寄り駅' },
-  { key: 'phone', label: '電話番号' },
-  { key: 'emergencyContactName', label: '緊急連絡先（氏名）' },
-  { key: 'emergencyContactFurigana', label: '緊急連絡先（ふりがな）' },
-  { key: 'emergencyContactRelation', label: '緊急連絡先（続柄）' },
-  { key: 'emergencyContactPhone', label: '緊急連絡先（電話）' },
-  { key: 'emergencyContactAddress', label: '緊急連絡先（住所）' },
+  { key: 'name', label: '氏名', group: '本人情報' },
+  { key: 'furigana', label: 'ふりがな', group: '本人情報' },
+
+  { key: 'contactEmail', label: '連絡用メールアドレス', group: 'ご連絡先' },
+  { key: 'phone', label: '電話番号（ハイフン含む）', group: 'ご連絡先', format: formatPhone },
+  { key: 'postalCode', label: '郵便番号', group: 'ご連絡先', format: formatPostalCode },
+  { key: 'address', label: '住所', group: 'ご連絡先' },
+  { key: 'residentAddress', label: '住民票の住所', group: 'ご連絡先' },
+  { key: 'nearestStation', label: '最寄り駅', group: 'ご連絡先' },
+
+  { key: 'spouseStatus', label: '配偶者の有無', group: '世帯について', type: 'select', options: ['無', '有'] },
+  { key: 'householderName', label: '世帯主の氏名', group: '世帯について' },
+  { key: 'householderRelation', label: '世帯主との続柄', group: '世帯について' },
+
+  { key: 'emergencyContactName', label: '緊急連絡先（氏名）', group: '緊急連絡先' },
+  { key: 'emergencyContactFurigana', label: '緊急連絡先（ふりがな）', group: '緊急連絡先' },
+  { key: 'emergencyContactRelation', label: '緊急連絡先（続柄）', group: '緊急連絡先' },
+  { key: 'emergencyContactPhone', label: '緊急連絡先（電話・ハイフン含む）', group: '緊急連絡先', format: formatPhone },
+  { key: 'emergencyContactAddress', label: '緊急連絡先（住所）', group: '緊急連絡先' },
+
+  { key: 'bankName', label: '銀行名', group: '口座情報（給与振込先）', bank: true },
+  { key: 'bankCode', label: '銀行コード', group: '口座情報（給与振込先）', bank: true },
+  { key: 'branchName', label: '支店名', group: '口座情報（給与振込先）', bank: true },
+  { key: 'branchCode', label: '支店コード', group: '口座情報（給与振込先）', bank: true },
+  { key: 'accountType', label: '預金種別', group: '口座情報（給与振込先）', bank: true },
+  { key: 'accountNumber', label: '口座番号', group: '口座情報（給与振込先）', bank: true },
+  { key: 'accountHolder', label: '口座名義（カナ）', group: '口座情報（給与振込先）', bank: true },
 ];
 
 const rowToProfileRequest = (row) => ({
@@ -2315,6 +2330,7 @@ function AttendanceApp() {
 
   const updateEmployeeProfile = async (targetEmployeeId, patch) => {
     const colMap = {
+      name: 'name',
       hireDate: 'hire_date',
       resignationDate: 'resignation_date',
       furigana: 'furigana',
@@ -6412,7 +6428,7 @@ const HELP_STAFF = [
     items: [
       { q: 'パスワードを忘れました', a: 'ログイン画面の「パスワードをお忘れですか？」から再設定できます。うまくいかない場合は管理者に連絡してください。管理者が仮パスワードを再発行します。' },
       { q: '初めてログインするときの流れは', a: '管理者から届いた案内メールのURLを開き、メールアドレスと仮パスワードでログインします。続けてご自身のパスワードを設定し、ご登録情報（ふりがな・生年月日・連絡先・郵便番号・現住所・住民票の住所・配偶者の有無・世帯主・緊急連絡先・給与振込先の口座情報・マイナンバー）を入力すると利用開始です。いずれも必須のため、通帳とマイナンバーカードをお手元にご用意ください。' },
-      { q: '住所や氏名が変わりました', a: '「人材」タブのプロフィール変更申請から、変更内容を入力して申請してください。管理者が承認すると反映されます。' },
+      { q: '住所や氏名が変わりました', a: '「人材」タブのプロフィール変更申請から、変更内容を入力して申請してください。氏名・ふりがな・連絡先・住所・世帯・緊急連絡先・給与振込先の口座情報を申請できます。管理者が承認すると反映されます。生年月日・入職日・雇用形態などは申請できないため、管理者にご相談ください。' },
       { q: 'スマートフォンで使えますか', a: '使えます。ブラウザで同じURLを開いてログインしてください。画面はスマートフォン用に自動で切り替わります。ホーム画面に追加しておくとアプリのように使えます。' },
     ],
   },
@@ -8975,15 +8991,20 @@ function ProfileRequestView({ session, requests, onSubmit }) {
           </button>
         </div>
         <div className="divide-y divide-slate-100">
-          {PROFILE_EDITABLE_FIELDS.map(({ key, label }) => (
-            <div key={key} className="px-5 py-3 flex items-center justify-between text-[13px]">
-              <span className="text-slate-400">{label}</span>
-              <span className="font-medium text-slate-700">{session[key] || '未設定'}</span>
+          {PROFILE_EDITABLE_FIELDS.map((f, i) => (
+            <div key={f.key}>
+              {(i === 0 || PROFILE_EDITABLE_FIELDS[i - 1].group !== f.group) && (
+                <div className="px-5 pt-3 pb-1 text-[11px] font-bold text-slate-400">{f.group}</div>
+              )}
+              <div className="px-5 py-2.5 flex items-center justify-between gap-3 text-[13px]">
+                <span className="text-slate-400 shrink-0">{f.label}</span>
+                <span className="font-medium text-slate-700 text-right break-all">{session[f.key] || '未設定'}</span>
+              </div>
             </div>
           ))}
         </div>
         <div className="px-5 py-2.5 bg-slate-50 text-[10.5px] text-slate-400 border-t border-slate-100">
-          変更は管理者の承認後に反映されます。氏名・入職日・スタッフ種別などの変更はご相談ください。
+          変更は管理者の承認後に反映されます。生年月日・入職日・スタッフ種別などの変更はご相談ください。
         </div>
       </div>
 
@@ -9057,11 +9078,29 @@ function ProfileRequestModal({ session, onClose, onSubmit }) {
           <button onClick={onClose} className="text-slate-400 text-xl leading-none px-1">×</button>
         </div>
         <div className="px-5 py-4 space-y-4">
-          {PROFILE_EDITABLE_FIELDS.map(({ key, label }) => (
-            <Field key={key} label={label}>
-              <input value={form[key]} onChange={set(key)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" />
-            </Field>
+          {PROFILE_EDITABLE_FIELDS.filter((f) => !f.bank).map((f, i, arr) => (
+            <div key={f.key} className="space-y-4">
+              {(i === 0 || arr[i - 1].group !== f.group) && (
+                <div className="text-[12px] font-bold text-slate-500 border-b border-slate-100 pb-2">{f.group}</div>
+              )}
+              <Field label={f.label}>
+                {f.type === 'select' ? (
+                  <select value={form[f.key]} onChange={set(f.key)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px] bg-white">
+                    {f.options.map((o) => <option key={o} value={o}>{o}</option>)}
+                  </select>
+                ) : (
+                  <FormattedInput
+                    value={form[f.key]}
+                    onValueChange={(v) => setForm((cur) => ({ ...cur, [f.key]: v }))}
+                    format={f.format}
+                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]"
+                  />
+                )}
+              </Field>
+            </div>
           ))}
+
+          <BankAccountFields form={form} setForm={setForm} />
           <Field label="変更理由（任意）">
             <textarea value={reason} onChange={(e) => setReason(e.target.value)} rows={2} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] resize-none" />
           </Field>
