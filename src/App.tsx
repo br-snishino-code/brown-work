@@ -1521,7 +1521,7 @@ async function saveSchedulePatterns(employeeId, year, month, patterns) {
 // ============================================================
 // Main App
 // ============================================================
-export default function AttendanceApp() {
+function AttendanceApp() {
   const [data, setData] = useState(EMPTY_DATA);
   const [loaded, setLoaded] = useState(false);
   const [cloudStatus, setCloudStatus] = useState(CLOUD_ENABLED ? 'connecting' : 'local');
@@ -3830,8 +3830,9 @@ function ProfileSetupScreen({ session, toast, onSave, onLogout }) {
                   <Field key={f.key} label={`${f.label}${f.required || f.readOnly ? '' : '（任意）'}`}>
                     {f.type === 'select' ? (
                       <select
+                        name={f.key}
                         value={form[f.key]}
-                        onChange={set(f)}
+                        onChange={(e) => setValue(f)(e.target.value)}
                         className="w-full border-2 border-slate-200 rounded-xl px-3.5 py-2.5 text-[14px] bg-white outline-none focus:border-slate-900"
                       >
                         {f.options.map((o) => <option key={o} value={o}>{o}</option>)}
@@ -10765,5 +10766,58 @@ function MyNumberSection({ account, onFetch, onSave }) {
         </>
       )}
     </div>
+  );
+}
+
+// 画面の描画中に問題が起きたとき、真っ白な画面にせず案内を表示する。
+class AppErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  componentDidCatch(error, info) {
+    console.error('画面の表示に失敗しました', error, info);
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div className="min-h-screen bg-slate-50 font-sans flex items-center justify-center px-4 py-10">
+        <div className="w-full max-w-[420px] bg-white rounded-[24px] border border-slate-200 shadow-sm p-7 space-y-4">
+          <div className="flex items-center gap-2.5">
+            <div className="w-10 h-10 rounded-xl bg-rose-50 flex items-center justify-center shrink-0">
+              <AlertTriangle size={18} className="text-rose-600" />
+            </div>
+            <h1 className="font-bold text-[16px] leading-tight">画面を表示できませんでした</h1>
+          </div>
+          <div className="text-[12.5px] text-slate-500 leading-relaxed">
+            一時的な問題の可能性があります。下のボタンで開き直してください。
+            繰り返し表示される場合は、下記の内容を添えて管理者までご連絡ください。
+          </div>
+          <div className="bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-3 text-[11px] font-mono text-slate-600 break-all">
+            {String(this.state.error?.message || this.state.error)}
+          </div>
+          <button
+            onClick={() => window.location.reload()}
+            className="w-full py-3 rounded-xl bg-slate-950 text-white text-[14px] font-bold"
+          >
+            画面を開き直す
+          </button>
+        </div>
+      </div>
+    );
+  }
+}
+
+export default function AttendanceAppRoot() {
+  return (
+    <AppErrorBoundary>
+      <AttendanceApp />
+    </AppErrorBoundary>
   );
 }
