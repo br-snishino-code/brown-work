@@ -3376,6 +3376,33 @@ const BANK_ACCOUNT_FIELDS = [
 
 const PROFILE_SETUP_ALL_FIELDS = PROFILE_SETUP_SECTIONS.flatMap((s) => s.fields);
 
+// 日本語入力の変換中に値を書き換えると、文字が二重に入力されてしまう。
+// 変換が終わってから整形する入力欄。
+function FormattedInput({ value, onValueChange, format, blurFormat, ...rest }) {
+  const composing = useRef(false);
+  const apply = (raw, fn) => onValueChange(fn ? fn(raw) : raw);
+  return (
+    <input
+      {...rest}
+      value={value}
+      onChange={(e) => {
+        const raw = e.target.value;
+        if (composing.current) onValueChange(raw);
+        else apply(raw, format);
+      }}
+      onCompositionStart={() => { composing.current = true; }}
+      onCompositionEnd={(e) => { composing.current = false; apply(e.target.value, format); }}
+      onBlur={(e) => { composing.current = false; apply(e.target.value, blurFormat || format); }}
+    />
+  );
+}
+
+// 郵便番号を 123-4567 の形にそろえる
+const formatPostalCode = (v) => {
+  const d = onlyDigits(v).slice(0, 7);
+  return d.length > 3 ? `${d.slice(0, 3)}-${d.slice(3)}` : d;
+};
+
 // ---- 郵便番号から住所を自動で入力する ----
 // public/zip/ に置いた一覧（先頭2桁ごとに分割）を、必要な分だけ読み込む。
 // 外部のサービスへは送信しないため、住所の情報が社外に出ることはない。
@@ -3497,11 +3524,12 @@ function BankAccountFields({ form, setForm }) {
     if (code) loadZenginBranches().then(setBranches);
   };
 
-  const onBranchCode = (raw) => {
-    const code = onlyDigits(raw).slice(0, 3);
+  // 値の整形は FormattedInput 側で行う（日本語入力の変換中は保留される）
+  const onBranchCode = (value) => {
+    const code = onlyDigits(value).slice(0, 3);
     const map = branches && form.bankCode ? branches[form.bankCode] : null;
     const name = map && map[code] ? map[code] : '';
-    patch({ branchCode: code, ...(name ? { branchName: name } : {}) });
+    patch({ branchCode: value, ...(name ? { branchName: name } : {}) });
   };
 
   const onBranchName = (raw) => {
@@ -3522,9 +3550,9 @@ function BankAccountFields({ form, setForm }) {
       </div>
 
       <Field label="銀行名">
-        <input
+        <FormattedInput
           name="bankName" autoComplete="off" list="zengin-banks"
-          value={form.bankName} onChange={(e) => onBankName(e.target.value)}
+          value={form.bankName} onValueChange={onBankName}
           placeholder="例）京都銀行" className={inputClass}
         />
       </Field>
@@ -3534,16 +3562,17 @@ function BankAccountFields({ form, setForm }) {
 
       <div className="grid grid-cols-[110px_1fr] gap-3">
         <Field label="支店コード">
-          <input
+          <FormattedInput
             name="branchCode" autoComplete="off" inputMode="numeric"
-            value={form.branchCode} onChange={(e) => onBranchCode(e.target.value)}
+            value={form.branchCode} onValueChange={onBranchCode}
+            format={(v) => onlyDigits(v).slice(0, 3)}
             placeholder="111" className={monoClass}
           />
         </Field>
         <Field label="支店名">
-          <input
+          <FormattedInput
             name="branchName" autoComplete="off" list="zengin-branches"
-            value={form.branchName} onChange={(e) => onBranchName(e.target.value)}
+            value={form.branchName} onValueChange={onBranchName}
             placeholder={bankResolved ? '例）四条支店' : '先に銀行をご入力ください'}
             className={inputClass}
           />
@@ -3571,19 +3600,20 @@ function BankAccountFields({ form, setForm }) {
         </select>
       </Field>
       <Field label="口座番号">
-        <input
+        <FormattedInput
           name="accountNumber" autoComplete="off" inputMode="numeric"
           value={form.accountNumber}
-          onChange={(e) => patch({ accountNumber: onlyDigits(e.target.value).slice(0, 10) })}
+          onValueChange={(v) => patch({ accountNumber: v })}
+          format={(v) => onlyDigits(v).slice(0, 10)}
           placeholder="例）1234567" className={monoClass}
         />
       </Field>
       <Field label="口座名義（カナ）">
-        <input
+        <FormattedInput
           name="accountHolder" autoComplete="off"
           value={form.accountHolder}
-          onChange={(e) => patch({ accountHolder: e.target.value })}
-          onBlur={() => setForm((prev) => ({ ...prev, accountHolder: toKatakana(prev.accountHolder) }))}
+          onValueChange={(v) => patch({ accountHolder: v })}
+          blurFormat={toKatakana}
           placeholder="例）タナカ ハナコ" className={inputClass}
         />
       </Field>
@@ -3636,22 +3666,19 @@ function ProfileSetupScreen({ session, toast, onSave, onLogout }) {
     setForm((prev) => (prev.residentAddress === prev.address ? prev : { ...prev, residentAddress: prev.address }));
   }, [useSameAddress, form.address]);
 
-  const set = (f) => (e) => {
-    let v = e.target.value;
+  // 入力中の整形（日本語入力の変換中は FormattedInput 側で保留される）
+  const formatField = (f) => (raw) => {
+    let v = raw;
     if (f.digitsOnly) v = onlyDigits(v).slice(0, f.maxLength || 20);
-    if (f.postal) {
-      const d = onlyDigits(v).slice(0, 7);
-      v = d.length > 3 ? `${d.slice(0, 3)}-${d.slice(3)}` : d;
-    }
-    setForm((prev) => ({ ...prev, [f.key]: v }));
+    if (f.postal) v = formatPostalCode(v);
+    return v;
   };
-
-  // ひらがなで入力された場合は、入力が確定してからカタカナへ変換する
-  // （変換中に書き換えると、文字が二重に入力されてしまうため）
-  const convertOnBlur = (f) => () => {
-    if (!f.katakana) return;
-    setForm((prev) => ({ ...prev, [f.key]: toKatakana(prev[f.key]) }));
+  // 入力が終わってからカタカナへ変換する
+  const blurFormatField = (f) => (raw) => {
+    const v = formatField(f)(raw);
+    return f.katakana ? toKatakana(v) : v;
   };
+  const setValue = (f) => (v) => setForm((prev) => ({ ...prev, [f.key]: v }));
 
   const submit = async (e) => {
     e.preventDefault();
@@ -3729,14 +3756,15 @@ function ProfileSetupScreen({ session, toast, onSave, onLogout }) {
                       </select>
                     ) : (
                       <>
-                        <input
+                        <FormattedInput
                           type={f.type || 'text'}
                           name={f.key}
                           autoComplete={f.autoComplete || 'off'}
-                          inputMode={f.digitsOnly ? 'numeric' : undefined}
+                          inputMode={f.digitsOnly || f.postal ? 'numeric' : undefined}
                           value={form[f.key]}
-                          onChange={set(f)}
-                          onBlur={convertOnBlur(f)}
+                          onValueChange={setValue(f)}
+                          format={formatField(f)}
+                          blurFormat={blurFormatField(f)}
                           readOnly={f.readOnly || (f.sameAsLogin && useLoginEmail) || (f.sameAsAddress && useSameAddress)}
                           placeholder={f.placeholder}
                           className={`w-full border-2 border-slate-200 rounded-xl px-3.5 py-2.5 text-[14px] outline-none focus:border-slate-900 ${f.mono || f.type === 'date' ? 'font-mono' : ''} ${f.readOnly || (f.sameAsLogin && useLoginEmail) || (f.sameAsAddress && useSameAddress) ? 'bg-slate-100 text-slate-500' : ''}`}
@@ -3790,12 +3818,13 @@ function ProfileSetupScreen({ session, toast, onSave, onLogout }) {
               </div>
               <Field label="マイナンバー（12桁）">
                 <div className="flex items-center gap-2">
-                  <input
+                  <FormattedInput
                     type={myNumberShown ? 'text' : 'password'}
                     inputMode="numeric"
                     autoComplete="off"
                     value={myNumber}
-                    onChange={(e) => setMyNumber(onlyDigits(e.target.value).slice(0, 12))}
+                    onValueChange={setMyNumber}
+                    format={(v) => onlyDigits(v).slice(0, 12)}
                     placeholder="123456789012"
                     className="flex-1 border-2 border-slate-200 rounded-xl px-3.5 py-2.5 font-mono text-[14px] outline-none focus:border-slate-900"
                   />
@@ -9927,10 +9956,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
   });
   const [savingAttendance, setSavingAttendance] = useState(false);
   const setPersonalMonth = (m) => (e) => setPersonalMonths((prev) => ({ ...prev, [m]: e.target.value }));
-  const setPostalCode = (e) => {
-    const d = onlyDigits(e.target.value).slice(0, 7);
-    setForm((prev) => ({ ...prev, postalCode: d.length > 3 ? `${d.slice(0, 3)}-${d.slice(3)}` : d }));
-  };
+  const setPostalCodeValue = (v) => setForm((prev) => ({ ...prev, postalCode: v }));
   const savePersonalAttendance = async () => {
     setSavingAttendance(true);
     await onSaveEmployeeAttendance(account.id, personalMonths);
@@ -10140,7 +10166,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                 <input value={form.staffNumber} onChange={set('staffNumber')} placeholder="例）00016" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
               </Field>
               <Field label="郵便番号">
-                <input value={form.postalCode} onChange={setPostalCode} placeholder="例）621-0814" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
+                <FormattedInput value={form.postalCode} onValueChange={setPostalCodeValue} format={formatPostalCode} inputMode="numeric" placeholder="例）621-0814" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
                 {postalNotice && <div className="mt-1 text-[11.5px] text-amber-700">{postalNotice}</div>}
               </Field>
               <Field label="住所">
