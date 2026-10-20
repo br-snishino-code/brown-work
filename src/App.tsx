@@ -5351,8 +5351,6 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
         </div>
       </div>
 
-      {patternSection}
-
       <div className="rounded-2xl bg-white border border-slate-200 shadow-sm overflow-hidden">
         <div className="px-5 py-3 bg-slate-100 text-[12.5px] font-bold text-slate-500">以下の項目の確認をお願いいたします</div>
         <button onClick={() => blockingMissingDates[0] && onOpenCorrection(blockingMissingDates[0])} className="w-full px-5 py-3 flex items-center justify-between text-[13px] hover:bg-slate-50 transition-colors">
@@ -5402,6 +5400,8 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
         <SummaryTile label="遅刻・早退" value={`${monthly.lateMin + monthly.earlyLeaveMin}分`} icon={<AlertTriangle size={16}/>} />
       </div>
       {doneToday && <DayMetricsCard record={todayRecord} />}
+
+      {patternSection}
     </div>
   );
 
