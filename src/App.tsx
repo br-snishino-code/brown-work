@@ -3296,7 +3296,10 @@ function AttendanceApp() {
               <MonthlyAttendanceConfirmSection
                 records={employeeRecords}
                 confirmations={(data.monthlyConfirmations || []).filter((c) => c.employeeId === employeeId)}
+                commuteClaims={data.commuteExpenseClaims.filter((c) => c.employeeId === employeeId)}
                 onSubmit={submitMonthlyAttendanceConfirmation}
+                onSubmitCommute={submitCommuteExpenseClaim}
+                onUpdateCommute={updateCommuteExpenseClaim}
               />
             )}
             {employeeTab === 'attendance' && (
@@ -6725,7 +6728,7 @@ const HELP_STAFF = [
     items: [
       { q: '給与明細はどこで見られますか', a: '「給与」タブを開くと、公開済みの給与明細が一覧で表示されます。明細をクリックすると内訳が確認でき、印刷もできます。' },
       { q: '交通費の申請はいつまでですか', a: '毎月1日が締め切りです。前月分の交通費を、翌月1日までに申請してください。期限までに未提出の場合、打刻時にお知らせが表示されます。' },
-      { q: '交通費の申請方法を教えてください', a: '「給与」タブの交通費精算から、日付・区間・金額を入力して申請します。経路検索のリンクがあるので、運賃の確認に利用してください。複数件をまとめて登録できます。一度申請した区間は運賃を覚えているため、次回は乗駅・降駅を入れるだけで金額が入ります。' },
+      { q: '交通費の申請方法を教えてください', a: '「勤怠」タブの「月次勤怠の確定申請」で、勤怠と一緒に入力して提出できます。交通費だけを申請する場合は「給与」タブの交通費精算からも申請できます。日付・区間・金額を入力して申請します。経路検索のリンクがあるので、運賃の確認に利用してください。複数件をまとめて登録できます。一度申請した区間は運賃を覚えているため、次回は乗駅・降駅を入れるだけで金額が入ります。' },
       { q: '申請した交通費を間違えました', a: '承認される前であれば、交通費精算の一覧にある「修正する」から内容を直せます。修正して送信すると、改めて承認待ちになります。承認済みのものは修正できないため、管理者にご相談ください。' },
       { q: '年末調整の書類はどう出しますか', a: '「人材」タブの年末調整から、必要事項を入力して提出します。提出時期になったら管理者からお知らせがあります。' },
     ],
@@ -8062,6 +8065,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, o
         <AdminMonthlyConfirmTab
           confirmations={monthlyConfirmations}
           accounts={data.accounts}
+          commuteClaims={data.commuteExpenseClaims}
           isMasterAdmin={isMasterAdmin}
           onDecide={onDecideMonthlyConfirm}
           onCancel={onCancelMonthlyConfirm}
@@ -9053,10 +9057,11 @@ function AdminYearEndAdjustmentTab({ requests, onDecide, isDesktop }) {
 }
 
 // ---- 月次勤怠の確定（スタッフ側）----
-function MonthlyAttendanceConfirmSection({ records, confirmations, onSubmit }) {
+function MonthlyAttendanceConfirmSection({ records, confirmations, commuteClaims = [], onSubmit, onSubmitCommute, onUpdateCommute }) {
   const [targetMonth, setTargetMonth] = useState(() => prevMonthKey());
   const [note, setNote] = useState('');
   const [saving, setSaving] = useState(false);
+  const editor = useCommuteRows(commuteClaims);
 
   const [y, m] = targetMonth.split('-').map(Number);
   const summary = useMemo(
@@ -9066,8 +9071,31 @@ function MonthlyAttendanceConfirmSection({ records, confirmations, onSubmit }) {
   const current = (confirmations || []).find((c) => c.targetMonth === targetMonth) || null;
   const locked = current && (current.status === 'pending' || current.status === 'admin_approved' || current.status === 'confirmed');
 
+  // 同じ対象月の交通費精算（承認済みのものは触らない）
+  const commuteClaim = (commuteClaims || []).find((c) => c.targetMonth === targetMonth) || null;
+  const commuteLocked = commuteClaim?.status === 'approved';
+
+  // 対象月を変えたら、その月の交通費の内容を読み込み直す
+  useEffect(() => {
+    const claim = (commuteClaims || []).find((c) => c.targetMonth === targetMonth);
+    editor.reset(claim ? [...(claim.items || []).map((r) => ({ ...emptyCommuteRow(), ...r })), emptyCommuteRow()] : undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [targetMonth, commuteClaim?.id]);
+
   const submit = async () => {
     setSaving(true);
+    // 交通費の入力があれば、同じ対象月の精算書として一緒に提出する
+    const items = editor.toItems();
+    if (items.length > 0 && !commuteLocked) {
+      const payload = {
+        targetMonth,
+        submittedDate: todayKey(),
+        items,
+        totalAmount: items.reduce((sum, r) => sum + r.subtotal, 0),
+      };
+      const commuteOk = commuteClaim ? await onUpdateCommute(commuteClaim.id, payload) : await onSubmitCommute(payload);
+      if (!commuteOk) { setSaving(false); return; }
+    }
     const ok = await onSubmit(targetMonth, {
       days: summary.days,
       workedMin: summary.workedMin,
@@ -9137,6 +9165,34 @@ function MonthlyAttendanceConfirmSection({ records, confirmations, onSubmit }) {
           </div>
         ) : (
           <>
+            <div className="border-t border-slate-100 pt-3 space-y-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                <Wallet size={14} className="text-slate-400" />
+                <span className="text-[12px] font-bold text-slate-600">交通費精算（同じ月の分）</span>
+                {commuteClaim && (
+                  <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full ${commuteClaim.status === 'approved' ? 'bg-emerald-50 text-emerald-600' : commuteClaim.status === 'rejected' ? 'bg-rose-50 text-rose-600' : 'bg-amber-50 text-amber-600'}`}>
+                    {commuteClaim.status === 'approved' ? '承認済み' : commuteClaim.status === 'rejected' ? '差し戻し' : '承認待ち'}
+                  </span>
+                )}
+              </div>
+              {commuteLocked ? (
+                <div className="text-[11.5px] text-slate-500">
+                  {monthKeyLabel(targetMonth)}分の交通費精算は承認済みです（{formatYen(commuteClaim.totalAmount)}）。修正が必要な場合は管理者にご相談ください。
+                </div>
+              ) : (
+                <>
+                  <div className="text-[11.5px] text-slate-500">
+                    この月に立て替えた交通費があれば入力してください。勤怠の確定申請と一緒に提出されます。無い場合は空のままで構いません。
+                  </div>
+                  <CommuteRowsEditor editor={editor} />
+                  <div className="flex items-center justify-between bg-slate-900 text-white rounded-xl px-4 py-2.5">
+                    <span className="text-[12px] font-bold">交通費の合計</span>
+                    <span className="font-mono text-[16px] font-bold">{formatYen(editor.total)}</span>
+                  </div>
+                </>
+              )}
+            </div>
+
             <Field label="管理者へのメモ（任意）">
               <textarea
                 value={note}
@@ -9156,7 +9212,7 @@ function MonthlyAttendanceConfirmSection({ records, confirmations, onSubmit }) {
               disabled={saving || summary.days === 0}
               className="w-full py-2.5 rounded-lg bg-amber-600 disabled:bg-slate-200 text-white text-[13.5px] font-bold"
             >
-              {saving ? '送信中…' : locked ? 'この内容で出し直す' : 'この内容で確定申請する'}
+              {saving ? '送信中…' : locked ? 'この内容で出し直す' : '勤怠と交通費をまとめて申請する'}
             </button>
             {summary.days === 0 && (
               <div className="text-[11.5px] text-slate-400">この月の出勤記録がありません。対象月をご確認ください。</div>
@@ -9169,7 +9225,7 @@ function MonthlyAttendanceConfirmSection({ records, confirmations, onSubmit }) {
 }
 
 // ---- 月次勤怠の確定（管理者側）----
-function AdminMonthlyConfirmTab({ confirmations, accounts = [], isMasterAdmin, onDecide, onCancel, isDesktop }) {
+function AdminMonthlyConfirmTab({ confirmations, accounts = [], commuteClaims = [], isMasterAdmin, onDecide, onCancel, isDesktop }) {
   const [comment, setComment] = useState({});
   const [running, setRunning] = useState(false);
   const setMemo = (id, v) => setComment((prev) => ({ ...prev, [id]: v }));
@@ -9222,6 +9278,22 @@ function AdminMonthlyConfirmTab({ confirmations, accounts = [], isMasterAdmin, o
           </div>
         ))}
       </div>
+      {(() => {
+        const claim = commuteClaims.find((x) => x.employeeId === c.employeeId && x.targetMonth === c.targetMonth);
+        if (!claim) return null;
+        return (
+          <div className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 mb-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11.5px] font-bold text-slate-600">同じ月の交通費精算 {claim.items?.length || 0}件</span>
+              <span className="font-mono text-[13px] font-bold text-slate-800">{formatYen(claim.totalAmount)}</span>
+            </div>
+            <div className="text-[11px] text-slate-400 mt-0.5">
+              {claim.status === 'approved' ? '承認済み' : claim.status === 'rejected' ? '差し戻し' : '承認待ち'}
+              ・承認は「給与」→「交通費精算書」から行います
+            </div>
+          </div>
+        );
+      })()}
       {isAdminSubmitter(c) && c.status !== 'confirmed' && (
         <div className="text-[11.5px] text-blue-700 mb-2">管理者ご本人の申請のため、マスター管理者の承認のみで確定します。</div>
       )}
@@ -9341,18 +9413,14 @@ const computeCommuteRowSubtotal = (row) => {
 };
 const yahooTransitUrl = (from, to) => `https://transit.yahoo.co.jp/search/result?flatlon=&from=${encodeURIComponent(from || '')}&to=${encodeURIComponent(to || '')}`;
 
-function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate }) {
-  const [formOpen, setFormOpen] = useState(false);
-  const [editingId, setEditingId] = useState(null);
-  const [targetMonth, setTargetMonth] = useState(() => prevMonthKey());
-  const [submittedDate, setSubmittedDate] = useState(todayKey());
-  const [rows, setRows] = useState(() => Array.from({ length: 5 }, emptyCommuteRow));
-  const [saving, setSaving] = useState(false);
+// 交通費の明細入力（勤怠の確定申請とお支払いの申請で共用する）
+function useCommuteRows(claims, initialRows) {
+  const [rows, setRows] = useState(() => initialRows || Array.from({ length: 5 }, emptyCommuteRow));
 
   // 過去の申請から、同じ区間の運賃を覚えておく（新しい申請の内容を優先する）
   const fareMemory = useMemo(() => {
     const memo = {};
-    [...claims]
+    [...(claims || [])]
       .sort((a, b) => String(a.submittedDate).localeCompare(String(b.submittedDate)))
       .forEach((c) => {
         (c.items || []).forEach((r) => {
@@ -9376,9 +9444,7 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate }) {
     if (field === 'fromStation' || field === 'toStation') {
       const remembered = fareMemory[`${next.fromStation}→${next.toStation}`];
       const hasAmount = next.unitPrice || next.passFare || next.excessAmount;
-      if (remembered && !hasAmount) {
-        return { ...next, ...remembered, recalled: true };
-      }
+      if (remembered && !hasAmount) return { ...next, ...remembered, recalled: true };
     }
     return next;
   }));
@@ -9386,12 +9452,83 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate }) {
   const copyPrevRow = (i) => setRows((prev) => prev.map((r, idx) => (idx === i && i > 0 ? { ...prev[i - 1], date: r.date, note: '' } : r)));
   const removeRow = (i) => setRows((prev) => prev.filter((_, idx) => idx !== i));
   const total = rows.reduce((sum, r) => sum + computeCommuteRowSubtotal(r), 0);
+  const toItems = () => rows
+    .filter((r) => r.date && r.fromStation && r.toStation)
+    .map(({ recalled, subtotal, ...r }) => ({ ...r, subtotal: computeCommuteRowSubtotal(r) }));
+  const reset = (next) => setRows(next || Array.from({ length: 5 }, emptyCommuteRow));
+
+  return { rows, setRows, updateRow, addRow, copyPrevRow, removeRow, total, toItems, reset };
+}
+
+function CommuteRowsEditor({ editor }) {
+  const { rows, updateRow, addRow, copyPrevRow, removeRow } = editor;
+  return (
+    <>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[980px] text-[12px]">
+              <thead>
+                <tr className="text-left text-[10.5px] text-slate-400 border-b border-slate-100">
+                  {['利用日','勤務先','乗物','乗駅','降駅','算出方法','金額','小計','備考',''].map((h) => <th key={h} className="px-2 py-1.5 font-medium whitespace-nowrap">{h}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r, i) => (
+                  <tr key={i} className="border-b border-slate-100 last:border-0 align-top">
+                    <td className="px-2 py-1.5">
+                      <input type="date" value={r.date} onChange={(e) => updateRow(i, 'date', e.target.value)} className="w-[128px] border border-slate-200 rounded px-1.5 py-1 font-mono text-[11.5px]" />
+                      {i > 0 && <button onClick={() => copyPrevRow(i)} className="block mt-1 text-[10px] text-amber-600 font-bold">↑前日をコピー</button>}
+                    </td>
+                    <td className="px-2 py-1.5"><input value={r.workplace} onChange={(e) => updateRow(i, 'workplace', e.target.value)} placeholder="勤務先" className="w-24 border border-slate-200 rounded px-1.5 py-1 text-[11.5px]" /></td>
+                    <td className="px-2 py-1.5"><input value={r.transport} onChange={(e) => updateRow(i, 'transport', e.target.value)} placeholder="阪急" className="w-16 border border-slate-200 rounded px-1.5 py-1 text-[11.5px]" /></td>
+                    <td className="px-2 py-1.5"><input value={r.fromStation} onChange={(e) => updateRow(i, 'fromStation', e.target.value)} placeholder="西向日" className="w-20 border border-slate-200 rounded px-1.5 py-1 text-[11.5px]" /></td>
+                    <td className="px-2 py-1.5"><input value={r.toStation} onChange={(e) => updateRow(i, 'toStation', e.target.value)} placeholder="烏丸" className="w-20 border border-slate-200 rounded px-1.5 py-1 text-[11.5px]" /></td>
+                    <td className="px-2 py-1.5">
+                      <select value={r.calcMethod} onChange={(e) => updateRow(i, 'calcMethod', e.target.value)} className="w-[168px] border border-slate-200 rounded px-1.5 py-1 text-[11px] bg-white">
+                        {COMMUTE_CALC_METHODS.map((m) => <option key={m.key} value={m.key}>{m.label}</option>)}
+                      </select>
+                    </td>
+                    <td className="px-2 py-1.5">
+                      {r.calcMethod === 'within_pass' ? (
+                        <span className="text-[10.5px] text-slate-300">不要</span>
+                      ) : r.calcMethod === 'excess' ? (
+                        <input type="number" value={r.excessAmount} onChange={(e) => updateRow(i, 'excessAmount', e.target.value)} placeholder="差額" className="w-20 border border-slate-200 rounded px-1.5 py-1 font-mono text-[11.5px]" />
+                      ) : r.calcMethod === 'pass_fare' ? (
+                        <input type="number" value={r.passFare} onChange={(e) => updateRow(i, 'passFare', e.target.value)} placeholder="定期代" className="w-20 border border-slate-200 rounded px-1.5 py-1 font-mono text-[11.5px]" />
+                      ) : (
+                        <input type="number" value={r.unitPrice} onChange={(e) => updateRow(i, 'unitPrice', e.target.value)} placeholder={r.calcMethod === 'round_trip' ? '片道単価' : '運賃'} className="w-20 border border-slate-200 rounded px-1.5 py-1 font-mono text-[11.5px]" />
+                      )}
+                      {r.recalled && <div className="mt-1 text-[10px] text-emerald-700 font-bold">前回の運賃を入力しました</div>}
+                      {r.fromStation && r.toStation && (
+                        <a href={yahooTransitUrl(r.fromStation, r.toStation)} target="_blank" rel="noopener noreferrer" className="block mt-1 text-[10px] text-blue-600 font-bold">経路を調べる↗</a>
+                      )}
+                    </td>
+                    <td className="px-2 py-1.5 font-mono text-slate-500 whitespace-nowrap pt-2.5">{formatYen(computeCommuteRowSubtotal(r))}</td>
+                    <td className="px-2 py-1.5"><input value={r.note} onChange={(e) => updateRow(i, 'note', e.target.value)} className="w-20 border border-slate-200 rounded px-1.5 py-1 text-[11.5px]" /></td>
+                    <td className="px-2 py-1.5 pt-2.5"><button onClick={() => removeRow(i)} className="text-slate-300 hover:text-rose-500"><Trash2 size={13} /></button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <button onClick={addRow} className="text-[11.5px] font-bold text-amber-600 flex items-center gap-1"><Plus size={12} />行を追加</button>
+    </>
+  );
+}
+
+function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate }) {
+  const [formOpen, setFormOpen] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [targetMonth, setTargetMonth] = useState(() => prevMonthKey());
+  const [submittedDate, setSubmittedDate] = useState(todayKey());
+  const [saving, setSaving] = useState(false);
+  const editor = useCommuteRows(claims);
+  const { total } = editor;
 
   const resetForm = () => {
     setEditingId(null);
     setTargetMonth(prevMonthKey());
     setSubmittedDate(todayKey());
-    setRows(Array.from({ length: 5 }, emptyCommuteRow));
+    editor.reset();
     setFormOpen(false);
   };
 
@@ -9400,14 +9537,12 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate }) {
     setEditingId(claim.id);
     setTargetMonth(claim.targetMonth || prevMonthKey());
     setSubmittedDate(claim.submittedDate || todayKey());
-    setRows([...(claim.items || []).map((r) => ({ ...emptyCommuteRow(), ...r })), emptyCommuteRow()]);
+    editor.reset([...(claim.items || []).map((r) => ({ ...emptyCommuteRow(), ...r })), emptyCommuteRow()]);
     setFormOpen(true);
   };
 
   const submit = async () => {
-    const items = rows
-      .filter((r) => r.date && r.fromStation && r.toStation)
-      .map(({ recalled, subtotal, ...r }) => ({ ...r, subtotal: computeCommuteRowSubtotal(r) }));
+    const items = editor.toItems();
     if (items.length === 0) return;
     const payload = { targetMonth, submittedDate, items, totalAmount: items.reduce((s, r) => s + r.subtotal, 0) };
     setSaving(true);
@@ -9460,53 +9595,7 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate }) {
             <div>・提出後も、承認されるまでは一覧の「修正する」から内容を直せます。</div>
           </div>
 
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[980px] text-[12px]">
-              <thead>
-                <tr className="text-left text-[10.5px] text-slate-400 border-b border-slate-100">
-                  {['利用日','勤務先','乗物','乗駅','降駅','算出方法','金額','小計','備考',''].map((h) => <th key={h} className="px-2 py-1.5 font-medium whitespace-nowrap">{h}</th>)}
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((r, i) => (
-                  <tr key={i} className="border-b border-slate-100 last:border-0 align-top">
-                    <td className="px-2 py-1.5">
-                      <input type="date" value={r.date} onChange={(e) => updateRow(i, 'date', e.target.value)} className="w-[128px] border border-slate-200 rounded px-1.5 py-1 font-mono text-[11.5px]" />
-                      {i > 0 && <button onClick={() => copyPrevRow(i)} className="block mt-1 text-[10px] text-amber-600 font-bold">↑前日をコピー</button>}
-                    </td>
-                    <td className="px-2 py-1.5"><input value={r.workplace} onChange={(e) => updateRow(i, 'workplace', e.target.value)} placeholder="勤務先" className="w-24 border border-slate-200 rounded px-1.5 py-1 text-[11.5px]" /></td>
-                    <td className="px-2 py-1.5"><input value={r.transport} onChange={(e) => updateRow(i, 'transport', e.target.value)} placeholder="阪急" className="w-16 border border-slate-200 rounded px-1.5 py-1 text-[11.5px]" /></td>
-                    <td className="px-2 py-1.5"><input value={r.fromStation} onChange={(e) => updateRow(i, 'fromStation', e.target.value)} placeholder="西向日" className="w-20 border border-slate-200 rounded px-1.5 py-1 text-[11.5px]" /></td>
-                    <td className="px-2 py-1.5"><input value={r.toStation} onChange={(e) => updateRow(i, 'toStation', e.target.value)} placeholder="烏丸" className="w-20 border border-slate-200 rounded px-1.5 py-1 text-[11.5px]" /></td>
-                    <td className="px-2 py-1.5">
-                      <select value={r.calcMethod} onChange={(e) => updateRow(i, 'calcMethod', e.target.value)} className="w-[168px] border border-slate-200 rounded px-1.5 py-1 text-[11px] bg-white">
-                        {COMMUTE_CALC_METHODS.map((m) => <option key={m.key} value={m.key}>{m.label}</option>)}
-                      </select>
-                    </td>
-                    <td className="px-2 py-1.5">
-                      {r.calcMethod === 'within_pass' ? (
-                        <span className="text-[10.5px] text-slate-300">不要</span>
-                      ) : r.calcMethod === 'excess' ? (
-                        <input type="number" value={r.excessAmount} onChange={(e) => updateRow(i, 'excessAmount', e.target.value)} placeholder="差額" className="w-20 border border-slate-200 rounded px-1.5 py-1 font-mono text-[11.5px]" />
-                      ) : r.calcMethod === 'pass_fare' ? (
-                        <input type="number" value={r.passFare} onChange={(e) => updateRow(i, 'passFare', e.target.value)} placeholder="定期代" className="w-20 border border-slate-200 rounded px-1.5 py-1 font-mono text-[11.5px]" />
-                      ) : (
-                        <input type="number" value={r.unitPrice} onChange={(e) => updateRow(i, 'unitPrice', e.target.value)} placeholder={r.calcMethod === 'round_trip' ? '片道単価' : '運賃'} className="w-20 border border-slate-200 rounded px-1.5 py-1 font-mono text-[11.5px]" />
-                      )}
-                      {r.recalled && <div className="mt-1 text-[10px] text-emerald-700 font-bold">前回の運賃を入力しました</div>}
-                      {r.fromStation && r.toStation && (
-                        <a href={yahooTransitUrl(r.fromStation, r.toStation)} target="_blank" rel="noopener noreferrer" className="block mt-1 text-[10px] text-blue-600 font-bold">経路を調べる↗</a>
-                      )}
-                    </td>
-                    <td className="px-2 py-1.5 font-mono text-slate-500 whitespace-nowrap pt-2.5">{formatYen(computeCommuteRowSubtotal(r))}</td>
-                    <td className="px-2 py-1.5"><input value={r.note} onChange={(e) => updateRow(i, 'note', e.target.value)} className="w-20 border border-slate-200 rounded px-1.5 py-1 text-[11.5px]" /></td>
-                    <td className="px-2 py-1.5 pt-2.5"><button onClick={() => removeRow(i)} className="text-slate-300 hover:text-rose-500"><Trash2 size={13} /></button></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <button onClick={addRow} className="text-[11.5px] font-bold text-amber-600 flex items-center gap-1"><Plus size={12} />行を追加</button>
+          <CommuteRowsEditor editor={editor} />
 
           <div className="flex items-center justify-between bg-slate-900 text-white rounded-xl px-4 py-3">
             <span className="text-[12.5px] font-bold">合計金額</span>
