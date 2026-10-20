@@ -237,7 +237,7 @@ function buildInviteMail({ name, email, tempPassword }) {
     '　連絡用メールアドレス／電話番号',
     '　郵便番号／現住所／住民票の住所',
     '　配偶者の有無／世帯主の氏名・続柄',
-    '　緊急連絡先（お名前・続柄・電話番号・住所）',
+    '　緊急連絡先（お名前・ふりがな・続柄・電話番号・住所）',
     '　給与振込先の口座情報（銀行名・支店名・口座番号・口座名義）',
     '　マイナンバー（12桁）',
     '',
@@ -798,6 +798,7 @@ const rowToAccount = (row) => ({
   householderRelation: row.householder_relation || '',
   phone: row.phone || '',
   emergencyContactName: row.emergency_contact_name || '',
+  emergencyContactFurigana: row.emergency_contact_furigana || '',
   emergencyContactRelation: row.emergency_contact_relation || '',
   emergencyContactPhone: row.emergency_contact_phone || '',
   emergencyContactAddress: row.emergency_contact_address || '',
@@ -982,6 +983,7 @@ const PROFILE_EDITABLE_FIELDS = [
   { key: 'nearestStation', label: '最寄り駅' },
   { key: 'phone', label: '電話番号' },
   { key: 'emergencyContactName', label: '緊急連絡先（氏名）' },
+  { key: 'emergencyContactFurigana', label: '緊急連絡先（ふりがな）' },
   { key: 'emergencyContactRelation', label: '緊急連絡先（続柄）' },
   { key: 'emergencyContactPhone', label: '緊急連絡先（電話）' },
   { key: 'emergencyContactAddress', label: '緊急連絡先（住所）' },
@@ -2273,6 +2275,7 @@ function AttendanceApp() {
       residentAddress: 'resident_address',
       phone: 'phone',
       emergencyContactName: 'emergency_contact_name',
+      emergencyContactFurigana: 'emergency_contact_furigana',
       emergencyContactRelation: 'emergency_contact_relation',
       emergencyContactPhone: 'emergency_contact_phone',
       emergencyContactAddress: 'emergency_contact_address',
@@ -3415,7 +3418,7 @@ const PROFILE_SETUP_SECTIONS = [
         key: 'residentAddress', label: '住民票の住所', placeholder: '例）京都府亀岡市三宅町22-11', required: true,
         sameAsAddress: true,
       },
-      { key: 'nearestStation', label: '最寄り駅', placeholder: '例）亀岡駅' },
+      { key: 'nearestStation', label: '最寄り駅', placeholder: '例）亀岡駅', required: true },
     ],
   },
   {
@@ -3437,12 +3440,16 @@ const PROFILE_SETUP_SECTIONS = [
     note: 'ご家族など、勤務中に連絡が取れる方をご記入ください。',
     fields: [
       { key: 'emergencyContactName', label: 'お名前', placeholder: '例）田中 太郎', required: true },
+      { key: 'emergencyContactFurigana', label: 'ふりがな', placeholder: '例）たなか たろう', required: true },
       { key: 'emergencyContactRelation', label: '続柄', placeholder: '例）母', required: true },
       {
         key: 'emergencyContactPhone', label: '電話番号（ハイフン含む）', placeholder: '例）090-0000-0000', required: true,
         phone: true, check: checkPhone,
       },
-      { key: 'emergencyContactAddress', label: '住所', placeholder: '例）京都府亀岡市三宅町22-11', required: true },
+      {
+        key: 'emergencyContactAddress', label: '住所', placeholder: '例）京都府亀岡市三宅町22-11', required: true,
+        sameAsHome: true,
+      },
     ],
   },
 ];
@@ -3774,6 +3781,20 @@ function ProfileSetupScreen({ session, toast, onSave, onLogout }) {
     setForm((prev) => (prev.householderName === prev.name ? prev : { ...prev, householderName: prev.name }));
   }, [householderIsSelf, form.name]);
 
+  // 緊急連絡先の方と同居しているかどうか
+  const [livesTogether, setLivesTogether] = useState(
+    () => !!session.address && session.emergencyContactAddress === session.address
+  );
+  const toggleLivesTogether = (checked) => {
+    setLivesTogether(checked);
+    setForm((prev) => ({ ...prev, emergencyContactAddress: checked ? prev.address : '' }));
+  };
+  // 同居にしている間は、現住所の変更を緊急連絡先の住所にも反映する
+  useEffect(() => {
+    if (!livesTogether) return;
+    setForm((prev) => (prev.emergencyContactAddress === prev.address ? prev : { ...prev, emergencyContactAddress: prev.address }));
+  }, [livesTogether, form.address]);
+
   // 住民票の住所を現住所と同じにするかどうか
   const [useSameAddress, setUseSameAddress] = useState(
     () => !!session.address && session.residentAddress === session.address
@@ -3890,13 +3911,23 @@ function ProfileSetupScreen({ session, toast, onSave, onLogout }) {
                           onValueChange={setValue(f)}
                           format={formatField(f)}
                           blurFormat={blurFormatField(f)}
-                          readOnly={f.readOnly || (f.sameAsLogin && useLoginEmail) || (f.sameAsAddress && useSameAddress) || ((f.sameAsSelf || f.lockedWhenSelf) && householderIsSelf)}
+                          readOnly={f.readOnly || (f.sameAsLogin && useLoginEmail) || (f.sameAsAddress && useSameAddress) || ((f.sameAsSelf || f.lockedWhenSelf) && householderIsSelf) || (f.sameAsHome && livesTogether)}
                           placeholder={f.placeholder}
                           style={{ WebkitAppearance: 'none', appearance: 'none' }}
-                          className={`w-full h-[44px] leading-[20px] border-2 border-slate-200 rounded-xl px-3.5 text-[14px] outline-none focus:border-slate-900 ${f.mono || f.type === 'date' ? 'font-mono' : ''} ${f.readOnly || (f.sameAsLogin && useLoginEmail) || (f.sameAsAddress && useSameAddress) || ((f.sameAsSelf || f.lockedWhenSelf) && householderIsSelf) ? 'bg-slate-100 text-slate-500' : 'bg-white'}`}
+                          className={`w-full h-[44px] leading-[20px] border-2 border-slate-200 rounded-xl px-3.5 text-[14px] outline-none focus:border-slate-900 ${f.mono || f.type === 'date' ? 'font-mono' : ''} ${f.readOnly || (f.sameAsLogin && useLoginEmail) || (f.sameAsAddress && useSameAddress) || ((f.sameAsSelf || f.lockedWhenSelf) && householderIsSelf) || (f.sameAsHome && livesTogether) ? 'bg-slate-100 text-slate-500' : 'bg-white'}`}
                         />
                         {f.note && <div className="mt-1 text-[11px] text-slate-400">{f.note}</div>}
                         {f.postal && postalNotice && <div className="mt-1 text-[11.5px] text-amber-700">{postalNotice}</div>}
+                        {f.sameAsHome && (
+                          <label className="flex items-center gap-2 mt-2 text-[12px] text-slate-600 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={livesTogether}
+                              onChange={(e) => toggleLivesTogether(e.target.checked)}
+                            />
+                            <span>同居（現住所と同じ）</span>
+                          </label>
+                        )}
                         {f.sameAsSelf && (
                           <label className="flex items-center gap-2 mt-2 text-[12px] text-slate-600 cursor-pointer">
                             <input
@@ -3972,6 +4003,14 @@ function ProfileSetupScreen({ session, toast, onSave, onLogout }) {
                     {myNumberShown ? '隠す' : '表示'}
                   </button>
                 </div>
+                {myNumber && onlyDigits(myNumber).length !== 12 && (
+                  <div className="mt-1 text-[11.5px] text-amber-700">
+                    12桁でご入力ください（現在 {onlyDigits(myNumber).length} 桁）
+                  </div>
+                )}
+                {onlyDigits(myNumber).length === 12 && (
+                  <div className="mt-1 text-[11.5px] text-emerald-700">12桁で入力されています</div>
+                )}
               </Field>
             </div>
 
@@ -10109,6 +10148,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
     householderRelation: account.householderRelation || '',
     phone: account.phone || '',
     emergencyContactName: account.emergencyContactName || '',
+    emergencyContactFurigana: account.emergencyContactFurigana || '',
     emergencyContactRelation: account.emergencyContactRelation || '',
     emergencyContactPhone: account.emergencyContactPhone || '',
     emergencyContactAddress: account.emergencyContactAddress || '',
@@ -10328,6 +10368,9 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
               <div className="grid grid-cols-2 gap-3">
                 <Field label="緊急連絡先（氏名）">
                   <input value={form.emergencyContactName} onChange={set('emergencyContactName')} placeholder="例）田中 一郎" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
+                </Field>
+                <Field label="緊急連絡先（ふりがな）">
+                  <input value={form.emergencyContactFurigana} onChange={set('emergencyContactFurigana')} placeholder="例）たなか いちろう" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
                 </Field>
                 <Field label="緊急連絡先（続柄）">
                   <input value={form.emergencyContactRelation} onChange={set('emergencyContactRelation')} placeholder="例）母" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
