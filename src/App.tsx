@@ -3276,6 +3276,7 @@ function AttendanceApp() {
                 isDesktop={isDesktop}
               />
               <AdminCommuteExpenseClaimsTab
+                isMasterAdmin={session.role === 'master_admin'}
                 claims={data.commuteExpenseClaims}
                 onDecide={decideCommuteExpenseClaim}
                 isDesktop={isDesktop}
@@ -6785,7 +6786,7 @@ const HELP_ADMIN = [
       { q: '月次勤怠の確定とは', a: 'スタッフが前月分の勤怠を確認して確定申請し、管理者が内容を確認して承認、最後にマスター管理者が最終承認する流れです。マスター管理者が最初に確認した場合は、その承認だけで確定します。管理者ご本人の申請は、マスター管理者の承認のみで確定します。最終承認が済むと、その月の給与明細を公開できるようになります。「勤怠」→「月次勤怠の確定」で処理します。確定後に修正が必要になった場合は、マスター管理者が「確定を取り消す」で差し戻しに戻せます。取り消すとスタッフへ通知され、給与明細の公開も止まります。' },
       { q: '支給・控除の項目を追加するには', a: 'スタッフの「詳細」→「給与・口座」タブで、スタッフごとの固定的な支給項目・控除項目を登録できます。毎月の計算に自動で反映されます。' },
       { q: '標準報酬月額の設定はどこですか', a: 'スタッフの「詳細」→「社会保険」タブで設定します。等級表から選択でき、健康保険・厚生年金の保険料が自動計算されます。保険料率は別途「保険料率設定」で管理します。' },
-      { q: '交通費精算の承認とExcel出力', a: '「給与」タブの交通費精算一覧から承認・却下します。承認待ちの左側にあるチェックを入れると、まとめて承認できます。承認済みのものは月を指定してExcelファイルに出力でき、経理処理に使えます。承認した金額は、同じ対象月の給与を新規作成する際に支給項目「交通費精算」として自動で入ります。' },
+      { q: '交通費精算の承認とExcel出力', a: '「給与」タブの交通費精算一覧から承認・却下します。承認できるのはマスター管理者のみです。承認待ちの左側にあるチェックを入れると、まとめて承認できます。承認済みのものは月を指定してExcelファイルに出力でき、経理処理に使えます。承認した金額は、同じ対象月の給与を新規作成する際に支給項目「交通費精算」として自動で入ります。' },
       { q: '年末調整の進め方', a: '「人材」タブの年末調整で、スタッフから提出された内容を確認し、承認します。提出状況は一覧で把握できます。' },
     ],
   },
@@ -9634,7 +9635,7 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate }) {
   );
 }
 
-function AdminCommuteExpenseClaimsTab({ claims, onDecide, isDesktop }) {
+function AdminCommuteExpenseClaimsTab({ claims, isMasterAdmin = false, onDecide, isDesktop }) {
   const [comment, setComment] = useState({});
   const [exportMonth, setExportMonth] = useState('all');
   const [selected, setSelected] = useState([]);
@@ -9702,7 +9703,7 @@ function AdminCommuteExpenseClaimsTab({ claims, onDecide, isDesktop }) {
     <div className="px-5 py-3.5 border-b border-slate-100 last:border-0">
       <div className="flex items-center justify-between mb-1.5 gap-2">
         <span className="font-semibold text-[13px] text-slate-800 flex items-center gap-2">
-          {c.status === 'pending' && (
+          {c.status === 'pending' && isMasterAdmin && (
             <input
               type="checkbox"
               checked={selected.includes(c.id)}
@@ -9743,18 +9744,22 @@ function AdminCommuteExpenseClaimsTab({ claims, onDecide, isDesktop }) {
         {formatYen(c.totalAmount)}
       </div>
       {c.status === 'pending' ? (
-        <div className="space-y-2">
-          <input
-            value={comment[c.id] || ''}
-            onChange={(e) => setComment((prev) => ({ ...prev, [c.id]: e.target.value }))}
-            placeholder="コメント（任意）"
-            className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-[12.5px]"
-          />
-          <div className="flex gap-2">
-            <button onClick={() => onDecide(c.id, 'rejected', comment[c.id])} className="flex-1 py-1.5 rounded-lg border border-slate-200 text-[12px] font-bold text-slate-500">差し戻す</button>
-            <button onClick={() => onDecide(c.id, 'approved', comment[c.id])} className="flex-1 py-1.5 rounded-lg bg-emerald-600 text-white text-[12px] font-bold">承認する</button>
+        isMasterAdmin ? (
+          <div className="space-y-2">
+            <input
+              value={comment[c.id] || ''}
+              onChange={(e) => setComment((prev) => ({ ...prev, [c.id]: e.target.value }))}
+              placeholder="コメント（任意）"
+              className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-[12.5px]"
+            />
+            <div className="flex gap-2">
+              <button onClick={() => onDecide(c.id, 'rejected', comment[c.id])} className="flex-1 py-1.5 rounded-lg border border-slate-200 text-[12px] font-bold text-slate-500">差し戻す</button>
+              <button onClick={() => onDecide(c.id, 'approved', comment[c.id])} className="flex-1 py-1.5 rounded-lg bg-emerald-600 text-white text-[12px] font-bold">承認する</button>
+            </div>
           </div>
-        </div>
+        ) : (
+          <div className="text-[11.5px] text-slate-400">交通費精算の承認はマスター管理者のみが行えます。</div>
+        )
       ) : (
         c.adminComment && <div className="text-[11.5px] text-slate-400">管理者コメント：{c.adminComment}</div>
       )}
@@ -9781,7 +9786,7 @@ function AdminCommuteExpenseClaimsTab({ claims, onDecide, isDesktop }) {
         <div className="px-5 py-10 text-center text-[12.5px] text-slate-300">申請はまだありません</div>
       ) : (
         <div>
-          {pending.length > 0 && (
+          {pending.length > 0 && isMasterAdmin && (
             <div className="px-5 py-2.5 bg-slate-50 border-b border-slate-100 flex items-center gap-3 flex-wrap">
               <label className="flex items-center gap-2 text-[12px] font-bold text-slate-600 cursor-pointer">
                 <input type="checkbox" checked={allSelected} onChange={toggleAll} />
