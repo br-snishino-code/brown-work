@@ -2641,6 +2641,41 @@ function AttendanceApp() {
     return true;
   };
 
+  // 交通費精算書の修正（承認待ち・差し戻しのものだけ本人が直せる）
+  const updateCommuteExpenseClaim = async (id, payload) => {
+    const claim = (data.commuteExpenseClaims || []).find((c) => c.id === id);
+    if (!claim || claim.employeeId !== employeeId) return false;
+    if (claim.status === 'approved') {
+      show('承認済みの申請は修正できません', 'warn');
+      return false;
+    }
+    const { error } = await supabase
+      .from('commute_expense_claims')
+      .update({
+        target_month: payload.targetMonth,
+        submitted_date: payload.submittedDate,
+        items: payload.items,
+        total_amount: payload.totalAmount,
+        status: 'pending',
+        admin_comment: null,
+        decided_at: null,
+      })
+      .eq('id', id);
+    if (error) {
+      console.error('交通費精算書の修正に失敗しました', error);
+      show('交通費精算書の修正に失敗しました', 'warn');
+      return false;
+    }
+    await notifyAdmin(
+      `【交通費精算・修正】${session.name} - ${formatYen(payload.totalAmount)}`,
+      `${session.name}さんが交通費精算書を修正しました（合計 ${formatYen(payload.totalAmount)}・${payload.items.length}件）。内容をご確認のうえ承認してください。`,
+      id
+    );
+    await refreshData();
+    show('交通費精算書を修正しました', 'success');
+    return true;
+  };
+
   const decideCommuteExpenseClaim = async (id, decision, comment) => {
     const claim = data.commuteExpenseClaims.find((c) => c.id === id);
     if (!claim) return;
@@ -3037,6 +3072,7 @@ function AttendanceApp() {
                 session={session}
                 claims={data.commuteExpenseClaims.filter((c) => c.employeeId === employeeId)}
                 onSubmit={submitCommuteExpenseClaim}
+                onUpdate={updateCommuteExpenseClaim}
               />
             </div>
           ) : (
@@ -3045,6 +3081,7 @@ function AttendanceApp() {
                 employeeAccounts={employeeAccounts}
                 records={data.records}
                 payrollRecords={data.payrollRecords}
+                commuteExpenseClaims={data.commuteExpenseClaims}
                 groupAttendanceSchedules={data.groupLeaveSchedules}
                 employeeAttendanceSchedules={data.employeeAttendanceSchedules}
                 onSaveDraft={savePayrollDraft}
@@ -6493,7 +6530,8 @@ const HELP_STAFF = [
     items: [
       { q: '給与明細はどこで見られますか', a: '「給与」タブを開くと、公開済みの給与明細が一覧で表示されます。明細をクリックすると内訳が確認でき、印刷もできます。' },
       { q: '交通費の申請はいつまでですか', a: '毎月1日が締め切りです。前月分の交通費を、翌月1日までに申請してください。期限までに未提出の場合、打刻時にお知らせが表示されます。' },
-      { q: '交通費の申請方法を教えてください', a: '「給与」タブの交通費精算から、日付・区間・金額を入力して申請します。経路検索のリンクがあるので、運賃の確認に利用してください。複数件をまとめて登録できます。' },
+      { q: '交通費の申請方法を教えてください', a: '「給与」タブの交通費精算から、日付・区間・金額を入力して申請します。経路検索のリンクがあるので、運賃の確認に利用してください。複数件をまとめて登録できます。一度申請した区間は運賃を覚えているため、次回は乗駅・降駅を入れるだけで金額が入ります。' },
+      { q: '申請した交通費を間違えました', a: '承認される前であれば、交通費精算の一覧にある「修正する」から内容を直せます。修正して送信すると、改めて承認待ちになります。承認済みのものは修正できないため、管理者にご相談ください。' },
       { q: '年末調整の書類はどう出しますか', a: '「人材」タブの年末調整から、必要事項を入力して提出します。提出時期になったら管理者からお知らせがあります。' },
     ],
   },
@@ -6548,7 +6586,7 @@ const HELP_ADMIN = [
       { q: '給与計算の流れを教えてください', a: '「給与」タブで対象月を選ぶと、勤怠記録から労働時間と残業時間が自動集計されます。支給項目・控除項目を確認して下書き保存し、内容が確定したら「公開」します。公開するとスタッフ側の画面に明細が表示されます。' },
       { q: '支給・控除の項目を追加するには', a: 'スタッフの「詳細」→「給与・口座」タブで、スタッフごとの固定的な支給項目・控除項目を登録できます。毎月の計算に自動で反映されます。' },
       { q: '標準報酬月額の設定はどこですか', a: 'スタッフの「詳細」→「社会保険」タブで設定します。等級表から選択でき、健康保険・厚生年金の保険料が自動計算されます。保険料率は別途「保険料率設定」で管理します。' },
-      { q: '交通費精算の承認とExcel出力', a: '「給与」タブの交通費精算一覧から承認・却下します。承認済みのものは月を指定してExcelファイルに出力でき、経理処理に使えます。' },
+      { q: '交通費精算の承認とExcel出力', a: '「給与」タブの交通費精算一覧から承認・却下します。承認待ちの左側にあるチェックを入れると、まとめて承認できます。承認済みのものは月を指定してExcelファイルに出力でき、経理処理に使えます。承認した金額は、同じ対象月の給与を新規作成する際に支給項目「交通費精算」として自動で入ります。' },
       { q: '年末調整の進め方', a: '「人材」タブの年末調整で、スタッフから提出された内容を確認し、承認します。提出状況は一覧で把握できます。' },
     ],
   },
@@ -7104,7 +7142,7 @@ function PayrollItemsEditor({ title, items, onChange, addLabel = '項目を追�
   );
 }
 
-function PayrollAdminTab({ employeeAccounts, records, payrollRecords, groupAttendanceSchedules = {}, employeeAttendanceSchedules = {}, onSaveDraft, onPublish, onUpdateWage, isDesktop }) {
+function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExpenseClaims = [], groupAttendanceSchedules = {}, employeeAttendanceSchedules = {}, onSaveDraft, onPublish, onUpdateWage, isDesktop }) {
   const now = new Date();
   const [employeeId, setEmployeeId] = useState(employeeAccounts[0]?.id || '');
   const [year, setYear] = useState(now.getFullYear());
@@ -7145,6 +7183,13 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, groupAtten
 
   const commuteRouteTotal = employeeCommuteRoutes.reduce((sum, r) => sum + computeRouteMonthlyAmount(r), 0);
 
+  // 承認済みの交通費精算（対象月が一致するもの）の合計。給与の支給項目に自動で入れる
+  const payrollMonthKey = `${year}-${pad(month)}`;
+  const approvedCommuteClaims = (commuteExpenseClaims || []).filter(
+    (c) => c.employeeId === employeeId && c.status === 'approved' && c.targetMonth === payrollMonthKey
+  );
+  const approvedCommuteTotal = approvedCommuteClaims.reduce((sum, c) => sum + (Number(c.totalAmount) || 0), 0);
+
   const monthly = computeMonthlySummary(records[employeeId] || {}, new Date(year, month - 1, 1));
   const attendanceDays = employee ? getPrescribedAttendanceDays(employee, month, groupAttendanceSchedules, employeeAttendanceSchedules) : null;
   const preview = employee ? computePayrollPreview({
@@ -7168,6 +7213,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, groupAtten
         { label: '基本給', amount: preview.baseAmount },
         ...(preview.allowanceAmount > 0 ? [{ label: '通勤手当', amount: preview.allowanceAmount }] : []),
         ...(preview.overtimeAmount > 0 ? [{ label: '残業手当', amount: preview.overtimeAmount }] : []),
+        ...(approvedCommuteTotal > 0 ? [{ label: `交通費精算（${month}月分）`, amount: approvedCommuteTotal }] : []),
         ...employeeSalaryItems.filter((it) => it.kind === 'payment').map((it) => ({ label: it.label, amount: it.amount })),
       ]);
     }
@@ -7183,7 +7229,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, groupAtten
     setPaidLeaveDays(String(existing?.attendanceExtra?.paidLeaveDays ?? 0));
     setPaidLeaveHours(String(existing?.attendanceExtra?.paidLeaveHours ?? 0));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [employeeId, year, month, existing?.id, employeeSalaryItems]);
+  }, [employeeId, year, month, existing?.id, employeeSalaryItems, approvedCommuteTotal]);
 
   if (!employee) {
     return <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-6 py-14 text-center text-[12.5px] text-slate-300">スタッフが登録されていません</div>;
@@ -7301,6 +7347,11 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, groupAtten
 
         {commuteRouteTotal > 0 && (
           <div className="text-[11px] text-slate-400 -mt-1">通勤手当は、スタッフ詳細で登録された経路（合計 {formatYen(commuteRouteTotal)}）を初期値にしています。金額は下の支給項目欄で調整できます。</div>
+        )}
+        {approvedCommuteTotal > 0 && (
+          <div className="text-[11px] text-emerald-700 -mt-1">
+            承認済みの交通費精算 {approvedCommuteClaims.length}件（合計 {formatYen(approvedCommuteTotal)}）を、支給項目「交通費精算（{month}月分）」として反映しています。
+          </div>
         )}
         {employeeSalaryItems.length > 0 && (
           <div className="text-[11px] text-slate-400 -mt-1">スタッフ詳細で登録された固定支給・控除項目（{employeeSalaryItems.length}件）を初期値として含めています。</div>
@@ -8781,33 +8832,79 @@ const computeCommuteRowSubtotal = (row) => {
 };
 const yahooTransitUrl = (from, to) => `https://transit.yahoo.co.jp/search/result?flatlon=&from=${encodeURIComponent(from || '')}&to=${encodeURIComponent(to || '')}`;
 
-function CommuteExpenseClaimSection({ session, claims, onSubmit }) {
+function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate }) {
   const [formOpen, setFormOpen] = useState(false);
+  const [editingId, setEditingId] = useState(null);
   const [targetMonth, setTargetMonth] = useState(() => prevMonthKey());
   const [submittedDate, setSubmittedDate] = useState(todayKey());
   const [rows, setRows] = useState(() => Array.from({ length: 5 }, emptyCommuteRow));
   const [saving, setSaving] = useState(false);
 
-  const updateRow = (i, field, value) => setRows((prev) => prev.map((r, idx) => (idx === i ? { ...r, [field]: value } : r)));
+  // 過去の申請から、同じ区間の運賃を覚えておく（新しい申請の内容を優先する）
+  const fareMemory = useMemo(() => {
+    const memo = {};
+    [...claims]
+      .sort((a, b) => String(a.submittedDate).localeCompare(String(b.submittedDate)))
+      .forEach((c) => {
+        (c.items || []).forEach((r) => {
+          if (!r.fromStation || !r.toStation) return;
+          memo[`${r.fromStation}→${r.toStation}`] = {
+            transport: r.transport || '',
+            calcMethod: r.calcMethod || 'round_trip',
+            unitPrice: r.unitPrice || '',
+            passFare: r.passFare || '',
+            excessAmount: r.excessAmount || '',
+          };
+        });
+      });
+    return memo;
+  }, [claims]);
+
+  const updateRow = (i, field, value) => setRows((prev) => prev.map((r, idx) => {
+    if (idx !== i) return r;
+    const next = { ...r, [field]: value };
+    // 区間がそろった時点で、過去に申請した同じ区間の運賃を呼び出す
+    if (field === 'fromStation' || field === 'toStation') {
+      const remembered = fareMemory[`${next.fromStation}→${next.toStation}`];
+      const hasAmount = next.unitPrice || next.passFare || next.excessAmount;
+      if (remembered && !hasAmount) {
+        return { ...next, ...remembered, recalled: true };
+      }
+    }
+    return next;
+  }));
   const addRow = () => setRows((prev) => [...prev, emptyCommuteRow()]);
   const copyPrevRow = (i) => setRows((prev) => prev.map((r, idx) => (idx === i && i > 0 ? { ...prev[i - 1], date: r.date, note: '' } : r)));
   const removeRow = (i) => setRows((prev) => prev.filter((_, idx) => idx !== i));
   const total = rows.reduce((sum, r) => sum + computeCommuteRowSubtotal(r), 0);
 
+  const resetForm = () => {
+    setEditingId(null);
+    setTargetMonth(prevMonthKey());
+    setSubmittedDate(todayKey());
+    setRows(Array.from({ length: 5 }, emptyCommuteRow));
+    setFormOpen(false);
+  };
+
+  // 承認待ち・差し戻しの申請を読み込んで修正する
+  const startEdit = (claim) => {
+    setEditingId(claim.id);
+    setTargetMonth(claim.targetMonth || prevMonthKey());
+    setSubmittedDate(claim.submittedDate || todayKey());
+    setRows([...(claim.items || []).map((r) => ({ ...emptyCommuteRow(), ...r })), emptyCommuteRow()]);
+    setFormOpen(true);
+  };
+
   const submit = async () => {
     const items = rows
       .filter((r) => r.date && r.fromStation && r.toStation)
-      .map((r) => ({ ...r, subtotal: computeCommuteRowSubtotal(r) }));
+      .map(({ recalled, subtotal, ...r }) => ({ ...r, subtotal: computeCommuteRowSubtotal(r) }));
     if (items.length === 0) return;
+    const payload = { targetMonth, submittedDate, items, totalAmount: items.reduce((s, r) => s + r.subtotal, 0) };
     setSaving(true);
-    const ok = await onSubmit({ targetMonth, submittedDate, items, totalAmount: items.reduce((s, r) => s + r.subtotal, 0) });
+    const ok = editingId ? await onUpdate(editingId, payload) : await onSubmit(payload);
     setSaving(false);
-    if (ok) {
-      setTargetMonth(prevMonthKey());
-      setSubmittedDate(todayKey());
-      setRows(Array.from({ length: 5 }, emptyCommuteRow));
-      setFormOpen(false);
-    }
+    if (ok) resetForm();
   };
 
   const statusLabel = { pending: '承認待ち', approved: '承認済み', rejected: '差し戻し' };
@@ -8819,7 +8916,7 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit }) {
         <Wallet size={15} className="text-slate-400" />
         <h2 className="font-bold text-[13.5px]">交通費精算書</h2>
         <span className="text-[13px] font-extrabold text-rose-600">※ 締切：毎月1日</span>
-        <button onClick={() => setFormOpen((v) => !v)} className="ml-auto text-[11.5px] font-bold text-amber-600 flex items-center gap-1">
+        <button onClick={() => (formOpen ? resetForm() : setFormOpen(true))} className="ml-auto text-[11.5px] font-bold text-amber-600 flex items-center gap-1">
           <Plus size={12} />{formOpen ? '閉じる' : '新規申請'}
         </button>
       </div>
@@ -8830,6 +8927,13 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit }) {
 
       {formOpen && (
         <div className="px-5 py-4 space-y-3 border-b border-slate-100">
+          {editingId && (
+            <div className="bg-amber-50 border border-amber-200 rounded-xl px-3.5 py-2.5 text-[12px] text-amber-800 flex items-center gap-2">
+              <Pencil size={13} className="shrink-0" />
+              <span>提出済みの申請を修正しています。送信すると、改めて承認待ちになります。</span>
+              <button onClick={resetForm} className="ml-auto text-[11.5px] font-bold text-amber-700 underline shrink-0">やめる</button>
+            </div>
+          )}
           <div className="grid grid-cols-2 gap-3">
             <Field label="対象月">
               <input type="month" value={targetMonth} onChange={(e) => setTargetMonth(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
@@ -8843,6 +8947,8 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit }) {
             <div>・算出方法は行ごとに選べます：<b>実費(往復/片道)</b>／<b>定期代の範囲内(追加費用なし)</b>／<b>定期代を超える差額分</b>。</div>
             <div>・運賃がわからない場合は、各行の「経路を調べる」リンクからYahoo!路線情報で最安の交通手段・運賃を確認できます。</div>
             <div>・行が足りない場合は下の「行を追加」で増やせます。</div>
+            <div>・一度申請した区間は運賃を覚えています。乗駅・降駅を入れると金額が自動で入ります（金額は書き換えられます）。</div>
+            <div>・提出後も、承認されるまでは一覧の「修正する」から内容を直せます。</div>
           </div>
 
           <div className="overflow-x-auto">
@@ -8878,6 +8984,7 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit }) {
                       ) : (
                         <input type="number" value={r.unitPrice} onChange={(e) => updateRow(i, 'unitPrice', e.target.value)} placeholder={r.calcMethod === 'round_trip' ? '片道単価' : '運賃'} className="w-20 border border-slate-200 rounded px-1.5 py-1 font-mono text-[11.5px]" />
                       )}
+                      {r.recalled && <div className="mt-1 text-[10px] text-emerald-700 font-bold">前回の運賃を入力しました</div>}
                       {r.fromStation && r.toStation && (
                         <a href={yahooTransitUrl(r.fromStation, r.toStation)} target="_blank" rel="noopener noreferrer" className="block mt-1 text-[10px] text-blue-600 font-bold">経路を調べる↗</a>
                       )}
@@ -8897,7 +9004,7 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit }) {
             <span className="font-mono text-[18px] font-bold">{formatYen(total)}</span>
           </div>
           <button onClick={submit} disabled={saving} className="w-full py-2.5 rounded-lg bg-amber-600 disabled:bg-slate-200 text-white text-[13.5px] font-bold">
-            {saving ? '送信中…' : '申請する'}
+            {saving ? '送信中…' : editingId ? 'この内容で修正する' : '申請する'}
           </button>
         </div>
       )}
@@ -8912,7 +9019,14 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit }) {
                 <span className="text-[13px] font-bold text-slate-800">{c.targetMonth ? `${monthKeyLabel(c.targetMonth)}分 ・ ` : ''}{dateLabel(c.submittedDate)} 提出 ・ {c.items.length}件</span>
                 <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full ${statusClass[c.status]}`}>{statusLabel[c.status]}</span>
               </div>
-              <div className="font-mono text-[15px] font-bold text-slate-800">{formatYen(c.totalAmount)}</div>
+              <div className="flex items-center justify-between gap-2">
+                <div className="font-mono text-[15px] font-bold text-slate-800">{formatYen(c.totalAmount)}</div>
+                {c.status !== 'approved' && (
+                  <button onClick={() => startEdit(c)} className="text-[11.5px] font-bold text-amber-600 border border-amber-200 rounded-lg px-2.5 py-1 flex items-center gap-1">
+                    <Pencil size={11} /> 修正する
+                  </button>
+                )}
+              </div>
               {c.adminComment && <div className="text-[11.5px] text-slate-400 mt-0.5">管理者コメント：{c.adminComment}</div>}
             </div>
           ))
@@ -8925,7 +9039,23 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit }) {
 function AdminCommuteExpenseClaimsTab({ claims, onDecide, isDesktop }) {
   const [comment, setComment] = useState({});
   const [exportMonth, setExportMonth] = useState('all');
+  const [selected, setSelected] = useState([]);
+  const [bulkRunning, setBulkRunning] = useState(false);
   const pending = claims.filter((c) => c.status === 'pending');
+
+  const toggleSelected = (id) => setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  const allSelected = pending.length > 0 && selected.length === pending.length;
+  const toggleAll = () => setSelected(allSelected ? [] : pending.map((c) => c.id));
+  const approveSelected = async () => {
+    if (selected.length === 0) return;
+    if (!window.confirm(`選択した ${selected.length} 件を承認します。よろしいですか。`)) return;
+    setBulkRunning(true);
+    for (const id of selected) {
+      await onDecide(id, 'approved', '');
+    }
+    setSelected([]);
+    setBulkRunning(false);
+  };
   const decided = claims.filter((c) => c.status !== 'pending').slice(0, 20);
   const statusLabel = { pending: '承認待ち', approved: '承認済み', rejected: '差し戻し' };
   const statusClass = { pending: 'bg-amber-50 text-amber-600', approved: 'bg-emerald-50 text-emerald-600', rejected: 'bg-rose-50 text-rose-600' };
@@ -8972,8 +9102,19 @@ function AdminCommuteExpenseClaimsTab({ claims, onDecide, isDesktop }) {
 
   const Card = ({ c }) => (
     <div className="px-5 py-3.5 border-b border-slate-100 last:border-0">
-      <div className="flex items-center justify-between mb-1.5">
-        <span className="font-semibold text-[13px] text-slate-800"><EmployeeLink id={c.employeeId} name={c.employeeName} /> ・ {c.targetMonth ? `${monthKeyLabel(c.targetMonth)}分` : ''} ・ {dateLabel(c.submittedDate)}提出</span>
+      <div className="flex items-center justify-between mb-1.5 gap-2">
+        <span className="font-semibold text-[13px] text-slate-800 flex items-center gap-2">
+          {c.status === 'pending' && (
+            <input
+              type="checkbox"
+              checked={selected.includes(c.id)}
+              onChange={() => toggleSelected(c.id)}
+              onClick={(e) => e.stopPropagation()}
+              title="まとめて承認する対象に含める"
+            />
+          )}
+          <span><EmployeeLink id={c.employeeId} name={c.employeeName} /> ・ {c.targetMonth ? `${monthKeyLabel(c.targetMonth)}分` : ''} ・ {dateLabel(c.submittedDate)}提出</span>
+        </span>
         <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full ${statusClass[c.status]}`}>{statusLabel[c.status]}</span>
       </div>
       <div className="overflow-x-auto mb-2">
@@ -9042,6 +9183,21 @@ function AdminCommuteExpenseClaimsTab({ claims, onDecide, isDesktop }) {
         <div className="px-5 py-10 text-center text-[12.5px] text-slate-300">申請はまだありません</div>
       ) : (
         <div>
+          {pending.length > 0 && (
+            <div className="px-5 py-2.5 bg-slate-50 border-b border-slate-100 flex items-center gap-3 flex-wrap">
+              <label className="flex items-center gap-2 text-[12px] font-bold text-slate-600 cursor-pointer">
+                <input type="checkbox" checked={allSelected} onChange={toggleAll} />
+                承認待ち {pending.length}件をすべて選択
+              </label>
+              <button
+                onClick={approveSelected}
+                disabled={selected.length === 0 || bulkRunning}
+                className="ml-auto py-1.5 px-3 rounded-lg bg-emerald-600 disabled:bg-slate-200 text-white text-[12px] font-bold"
+              >
+                {bulkRunning ? '承認中…' : `選択した${selected.length}件を承認`}
+              </button>
+            </div>
+          )}
           {pending.map((c) => <Card key={c.id} c={c} />)}
           {decided.map((c) => <Card key={c.id} c={c} />)}
         </div>
