@@ -2691,13 +2691,21 @@ function AttendanceApp() {
     const target = (data.monthlyConfirmations || []).find((c) => c.id === id);
     if (!target) return false;
     const now = new Date().toISOString();
+    // マスター管理者が確認した時点で確定とする（管理者の承認は1次確認のみ）
+    const isFinal = stage === 'master' || session.role === 'master_admin';
     const patch = decision === 'rejected'
       ? { status: 'rejected' }
-      : { status: stage === 'master' ? 'confirmed' : 'admin_approved' };
-    if (stage === 'master') {
+      : { status: isFinal ? 'confirmed' : 'admin_approved' };
+    if (isFinal) {
       patch.master_comment = comment || null;
       patch.master_decided_by = session.id;
       patch.master_decided_at = now;
+      // 管理者の確認を経ずにマスター管理者が確定した場合も、確認日時を残す
+      if (stage === 'admin') {
+        patch.admin_comment = comment || null;
+        patch.admin_decided_by = session.id;
+        patch.admin_decided_at = now;
+      }
     } else {
       patch.admin_comment = comment || null;
       patch.admin_decided_by = session.id;
@@ -2718,7 +2726,7 @@ function AttendanceApp() {
         id
       );
       show('差し戻しました', 'warn');
-    } else if (stage === 'admin') {
+    } else if (!isFinal) {
       // マスター管理者へ最終承認を依頼する
       await notify(
         `【最終承認のお願い】${target.employeeName} - ${monthLabel}分`,
@@ -2740,7 +2748,7 @@ function AttendanceApp() {
     await refreshData();
     await logAudit(
       session,
-      decision === 'rejected' ? '勤怠確定を差し戻し' : stage === 'master' ? '勤怠を最終承認' : '勤怠確定を承認',
+      decision === 'rejected' ? '勤怠確定を差し戻し' : isFinal ? '勤怠を最終承認' : '勤怠確定を承認',
       monthLabel,
       target.employeeId,
       target.employeeName
@@ -6729,7 +6737,7 @@ const HELP_ADMIN = [
     category: '給与',
     items: [
       { q: '給与計算の流れを教えてください', a: 'まず「勤怠」→「月次勤怠の確定」で、その月の勤怠を最終承認まで進めます。次に「給与」タブで対象月を選ぶと、勤怠記録から労働時間と残業時間が自動集計されます。承認済みの交通費精算も支給項目に自動で入ります。支給項目・控除項目を確認して下書き保存し、内容が確定したら「公開」します。公開するとスタッフ側の画面に明細が表示されます。勤怠が最終承認されるまで公開はできません。' },
-      { q: '月次勤怠の確定とは', a: 'スタッフが前月分の勤怠を確認して確定申請し、管理者が内容を確認して承認、最後にマスター管理者が最終承認する流れです。最終承認が済むと、その月の給与明細を公開できるようになります。「勤怠」→「月次勤怠の確定」で処理します。' },
+      { q: '月次勤怠の確定とは', a: 'スタッフが前月分の勤怠を確認して確定申請し、管理者が内容を確認して承認、最後にマスター管理者が最終承認する流れです。マスター管理者が最初に確認した場合は、その承認だけで確定します。最終承認が済むと、その月の給与明細を公開できるようになります。「勤怠」→「月次勤怠の確定」で処理します。' },
       { q: '支給・控除の項目を追加するには', a: 'スタッフの「詳細」→「給与・口座」タブで、スタッフごとの固定的な支給項目・控除項目を登録できます。毎月の計算に自動で反映されます。' },
       { q: '標準報酬月額の設定はどこですか', a: 'スタッフの「詳細」→「社会保険」タブで設定します。等級表から選択でき、健康保険・厚生年金の保険料が自動計算されます。保険料率は別途「保険料率設定」で管理します。' },
       { q: '交通費精算の承認とExcel出力', a: '「給与」タブの交通費精算一覧から承認・却下します。承認待ちの左側にあるチェックを入れると、まとめて承認できます。承認済みのものは月を指定してExcelファイルに出力でき、経理処理に使えます。承認した金額は、同じ対象月の給与を新規作成する際に支給項目「交通費精算」として自動で入ります。' },
@@ -9176,7 +9184,7 @@ function AdminMonthlyConfirmTab({ confirmations, isMasterAdmin, onDecide, isDesk
               disabled={running}
               className="flex-1 py-1.5 rounded-lg bg-emerald-600 disabled:bg-slate-200 text-white text-[12px] font-bold"
             >
-              {stage === 'master' ? '最終承認する' : '承認する'}
+              {stage === 'master' ? '最終承認する' : isMasterAdmin ? '承認して確定する' : '承認する'}
             </button>
           </div>
         </div>
@@ -9205,7 +9213,7 @@ function AdminMonthlyConfirmTab({ confirmations, isMasterAdmin, onDecide, isDesk
       <Section
         title={isMasterAdmin ? '管理者の確認待ち' : 'あなたの確認待ち'}
         note={isMasterAdmin
-          ? 'スタッフから届いた確定申請です。承認すると、下の「最終承認待ち」へ移ります。'
+          ? 'スタッフから届いた確定申請です。マスター管理者が承認すると、その場で確定し給与計算に進めます。'
           : 'スタッフから届いた確定申請です。内容を確認して承認すると、マスター管理者へ最終承認の依頼が届きます。'}
         list={waitingAdmin}
         stage="admin"
@@ -9213,7 +9221,7 @@ function AdminMonthlyConfirmTab({ confirmations, isMasterAdmin, onDecide, isDesk
       <Section
         title={isMasterAdmin ? 'あなたの最終承認待ち' : 'マスター管理者の最終承認待ち'}
         note={isMasterAdmin
-          ? '最終承認すると勤怠が確定し、その月の給与計算に進めます。'
+          ? '管理者が1次確認を済ませたものです。最終承認すると勤怠が確定し、その月の給与計算に進めます。'
           : '管理者の確認は完了しています。マスター管理者の最終承認をお待ちください。'}
         list={waitingMaster}
         stage={isMasterAdmin ? 'master' : null}
