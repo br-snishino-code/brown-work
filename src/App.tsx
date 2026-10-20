@@ -3413,6 +3413,7 @@ function AttendanceApp() {
             topTab={effectiveTopTab}
             setTopTab={setTopTab}
             staffMode={showStaffScreens}
+            wide={isDesktop && !showStaffScreens}
             requestItems={staffRequestItems}
             requestBadges={requestBadges}
             onSelectRequest={(key) => setRequestTab(key)}
@@ -3430,7 +3431,7 @@ function AttendanceApp() {
           />
         </div>
       </div>
-      <main className={isDesktop ? 'max-w-6xl mx-auto px-6 pb-16 pt-8' : 'max-w-3xl mx-auto px-4 pt-6 pb-10'}>
+      <main className={isDesktop ? `${showStaffScreens ? 'max-w-6xl' : 'max-w-[1400px]'} mx-auto px-6 pb-16 pt-8` : 'max-w-3xl mx-auto px-4 pt-6 pb-10'}>
         {effectiveTopTab === 'labor' && (
           <div className="space-y-5">
             {!showStaffScreens && session.role === 'master_admin' && (
@@ -4752,7 +4753,7 @@ function GlobalTopTabs({
   topTab, setTopTab, session, personalMode, setPersonalMode,
   alertCount = 0, alertHint = '要対応の一覧を開く', onAlertClick, onLogout, viewMode, onToggleViewMode,
   cloudStatusLabel, cloudStatusClass,
-  staffMode = false, requestItems = [], requestBadges = {}, onSelectRequest,
+  staffMode = false, requestItems = [], requestBadges = {}, onSelectRequest, wide = false,
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [requestMenuOpen, setRequestMenuOpen] = useState(false);
@@ -4823,7 +4824,7 @@ function GlobalTopTabs({
 
   return (
     <div className="relative bg-slate-950 text-slate-300">
-      <div className="max-w-6xl mx-auto px-4">
+      <div className={`${wide ? 'max-w-[1400px]' : 'max-w-6xl'} mx-auto px-4`}>
         <div className="flex items-center gap-2">
           <div className="hidden lg:flex items-center gap-2 shrink-0 pr-1">
             <div className="w-7 h-7 rounded-lg bg-amber-600 flex items-center justify-center">
@@ -4932,7 +4933,7 @@ function GlobalTopTabs({
       {/* 「各種申請」を押したときに出る申請の候補 */}
       {requestMenuOpen && requestItems.length > 0 && (
         <div ref={requestMenuRef} className="absolute inset-x-0 top-full z-50">
-          <div className="max-w-6xl mx-auto px-4">
+          <div className={`${wide ? 'max-w-[1400px]' : 'max-w-6xl'} mx-auto px-4`}>
             <div className="mt-1.5 w-full sm:w-[360px] sm:ml-24 lg:ml-[9.5rem] bg-white rounded-2xl border border-slate-200 shadow-2xl overflow-hidden">
               <div className="px-4 pt-3 pb-1.5 text-[10.5px] font-bold tracking-wide text-slate-400">申請する</div>
               {requestItems.map((it) => {
@@ -12269,12 +12270,11 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
   );
 
   if (isDesktop) {
+    // 一覧の列が多いため、登録フォームは横ではなく下に置いて一覧を全幅で使う
     return (
       <div className="space-y-4">
-        <div className={formCard ? 'grid grid-cols-[1fr_320px] gap-5 items-start' : ''}>
-          {listCard}
-          {formCard}
-        </div>
+        {listCard}
+        {formCard}
         {disclaimer}
         {modals}
       </div>
