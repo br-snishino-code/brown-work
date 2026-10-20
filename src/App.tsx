@@ -3380,9 +3380,9 @@ function FirstLoginPasswordScreen({ session, toast, onDone, onLogout }) {
 }
 
 // ---- 初回ログイン：個人情報の入力依頼 ----
-const onlyDigits = (v) => String(v || '').replace(/[^0-9]/g, '');
-const isEmailLike = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || '').trim());
-const toKatakana = (v) => String(v || '').replace(/[ぁ-ゖ]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) + 0x60));
+function onlyDigits(v) { return String(v || '').replace(/[^0-9]/g, ''); }
+function isEmailLike(v) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || '').trim()); }
+function toKatakana(v) { return String(v || '').replace(/[ぁ-ゖ]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) + 0x60)); }
 
 const PROFILE_SETUP_SECTIONS = [
   {
@@ -3482,7 +3482,7 @@ function FormattedInput({ value, onValueChange, format, blurFormat, ...rest }) {
 // 電話番号にハイフンを入れる。
 // 市外局番は桁数が地域ごとに異なるため、区切りが明らかな番号だけ自動で整える。
 // すでにハイフンが入っている場合は、そのままの入力を尊重する。
-const formatPhone = (v) => {
+function formatPhone(v) {
   const raw = String(v || '');
   if (raw.includes('-')) return raw;
   const d = onlyDigits(raw);
@@ -3490,20 +3490,20 @@ const formatPhone = (v) => {
   if (/^(0120|0800|0570)\d{6}$/.test(d)) return `${d.slice(0, 4)}-${d.slice(4, 7)}-${d.slice(7)}`;
   if (/^0[36]\d{8}$/.test(d)) return `${d.slice(0, 2)}-${d.slice(2, 6)}-${d.slice(6)}`;
   return raw;
-};
+}
 
 // ハイフン入りで入力されているかを確認する
-const checkPhone = (v) => {
+function checkPhone(v) {
   if (onlyDigits(v).length < 10) return '電話番号をご確認ください';
   if (!String(v).includes('-')) return 'ハイフンを入れてご入力ください（例）090-1234-5678）';
   return '';
-};
+}
 
 // 郵便番号を 123-4567 の形にそろえる
-const formatPostalCode = (v) => {
+function formatPostalCode(v) {
   const d = onlyDigits(v).slice(0, 7);
   return d.length > 3 ? `${d.slice(0, 3)}-${d.slice(3)}` : d;
-};
+}
 
 // ---- 郵便番号から住所を自動で入力する ----
 // public/zip/ に置いた一覧（先頭2桁ごとに分割）を、必要な分だけ読み込む。
