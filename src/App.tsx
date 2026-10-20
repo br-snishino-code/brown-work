@@ -1140,6 +1140,8 @@ const rowToResignationReason = (row) => ({
 
 const rowToShiftPeriod = (row) => ({
   targetMonth: row.target_month,
+  // 対象者。未設定・空なら全員が対象
+  targetEmployeeIds: Array.isArray(row.target_employee_ids) ? row.target_employee_ids : null,
   isOpen: row.is_open !== false,
   deadline: row.deadline || '',
   requestDays: Array.isArray(row.request_days) ? row.request_days : [],
@@ -3037,6 +3039,9 @@ function AttendanceApp() {
       is_open: patch.isOpen != null ? patch.isOpen : (existing ? existing.isOpen : true),
       deadline: patch.deadline !== undefined ? (patch.deadline || null) : (existing?.deadline || null),
       request_days: patch.requestDays || existing?.requestDays || [],
+      target_employee_ids: patch.targetEmployeeIds !== undefined
+        ? (patch.targetEmployeeIds && patch.targetEmployeeIds.length > 0 ? patch.targetEmployeeIds : null)
+        : (existing?.targetEmployeeIds || null),
       note: patch.note !== undefined ? (patch.note || null) : (existing?.note || null),
       opened_by: session.id,
     };
@@ -3504,7 +3509,9 @@ function AttendanceApp() {
   );
   const needsMonthlyConfirm = !myMonthlyConfirm || myMonthlyConfirm.status === 'draft' || myMonthlyConfirm.status === 'rejected';
   // シフト希望：受付中の月があるときだけ各種申請に出す
-  const openShiftPeriod = (data.shiftPeriods || []).find((p) => p.isOpen) || null;
+  const openShiftPeriod = (data.shiftPeriods || []).find(
+    (p) => p.isOpen && (!p.targetEmployeeIds || p.targetEmployeeIds.length === 0 || p.targetEmployeeIds.includes(employeeId))
+  ) || null;
   const myShiftRequest = openShiftPeriod
     ? (data.shiftRequests || []).find((r) => r.employeeId === employeeId && r.targetMonth === openShiftPeriod.targetMonth) || null
     : null;
@@ -7608,7 +7615,7 @@ const HELP_ADMIN = [
   {
     category: '勤怠の管理',
     items: [
-      { q: 'シフト希望を集めるには', a: '「勤怠」→「シフト」で対象月を選び、締切と連絡事項を入れて「この月の受付を開始する」を押します。スタッフの「各種申請」に「シフト希望」が出て、提出されると一覧に反映されます。未提出の方がいるときは「未提出の◯名に依頼を送る」でお知らせとメールをまとめて送れます。一覧の最下行はその日に出勤可能な人数で、10名以下の日は赤くなります。集まったら「CSVで書き出す」でスタッフ×日付の形に出力し、スプレッドシートに貼り付けてシフトを作成してください。締め切るときは「受付を締め切る」を押します。' },
+      { q: 'シフト希望を集めるには', a: '「勤怠」→「シフト」で対象月を選び、締切と連絡事項を入れて「この月の受付を開始する」を押します。対象者は既定で在籍スタッフ全員ですが、「選んだ方のみ」に切り替えると、チェックした方にだけ表示できます（試験運用のときに便利です）。スタッフの「各種申請」に「シフト希望」が出て、提出されると一覧に反映されます。未提出の方がいるときは「未提出の◯名に依頼を送る」でお知らせとメールをまとめて送れます。一覧の最下行はその日に出勤可能な人数で、10名以下の日は赤くなります。集まったら「CSVで書き出す」でスタッフ×日付の形に出力し、スプレッドシートに貼り付けてシフトを作成してください。締め切るときは「受付を締め切る」を押します。' },
       { q: '承認をまとめて行うには', a: '「勤怠」→「承認」を開くと、勤怠修正・休暇・月次勤怠の確定・交通費の未処理が1つの画面に並びます。上の「すべて／勤怠修正／休暇／月次確定／交通費」で絞り込めます。左のチェックを入れて「まとめて承認」を押すと、種類が違っても一度に承認できます。却下も同じ手順です。金額を直してから承認する場合や、差し戻しの理由を入れる場合は「詳細」から元の画面で操作してください。交通費と月次勤怠の最終承認はマスター管理者のみに表示されます。' },
       { q: 'ダッシュボードの右側は何ですか', a: '「本日の勤務状況」は勤務中・退勤済・未出勤の人数と、まだ打刻のない方の氏名です。「今月の締めまで」は前月分の月次勤怠と交通費の提出状況で、未提出の方へまとめて提出のお知らせを送れます。「最近の操作」は直近の承認や修正の履歴です。' },
       { q: 'スタッフ一覧から直接操作するには', a: '「勤怠」→「スタッフ一覧」の各行に、本日の状態・今月の勤務時間・有休残・その方の未処理が表示されます。行の右端にある「⋯」を押すと、そのスタッフの勤怠の確認と修正、未処理の承認、給与の作成、登録情報の編集へ直接移動できます。' },
@@ -7828,13 +7835,17 @@ function ShiftAdminTab({ employeeAccounts, periods = [], requests = [], tablesRe
   const [targetMonth, setTargetMonth] = useState(() => (periods[0]?.targetMonth || nextMonth));
   const [deadline, setDeadline] = useState('');
   const [note, setNote] = useState('');
+  const [targetMode, setTargetMode] = useState('all'); // all | some
+  const [targetIds, setTargetIds] = useState([]);
   const [loadedFor, setLoadedFor] = useState(null);
   const [saving, setSaving] = useState(false);
   const [sending, setSending] = useState(false);
 
   const period = periods.find((p) => p.targetMonth === targetMonth) || null;
   const days = useMemo(() => shiftMonthDays(targetMonth), [targetMonth]);
-  const activeStaff = employeeAccounts.filter((a) => !a.resignationDate);
+  const allStaff = employeeAccounts.filter((a) => !a.resignationDate);
+  // 対象者を絞っているときは、その方だけを一覧・件数・依頼の対象にする
+  const activeStaff = targetMode === 'some' ? allStaff.filter((a) => targetIds.includes(a.id)) : allStaff;
   const monthRequests = requests.filter((r) => r.targetMonth === targetMonth);
   const byEmployee = {};
   monthRequests.forEach((r) => { byEmployee[r.employeeId] = r; });
@@ -7847,13 +7858,22 @@ function ShiftAdminTab({ employeeAccounts, periods = [], requests = [], tablesRe
     if (loadedFor === targetMonth) return;
     setDeadline(period?.deadline || '');
     setNote(period?.note || '');
+    const ids = period?.targetEmployeeIds || [];
+    setTargetMode(ids.length > 0 ? 'some' : 'all');
+    setTargetIds(ids);
     setLoadedFor(targetMonth);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [targetMonth, period?.targetMonth]);
 
   const savePeriod = async (patch) => {
     setSaving(true);
-    await onSavePeriod(targetMonth, { deadline, note, requestDays: Array.from(requestDays), ...patch });
+    await onSavePeriod(targetMonth, {
+      deadline,
+      note,
+      requestDays: Array.from(requestDays),
+      targetEmployeeIds: targetMode === 'some' ? targetIds : [],
+      ...patch,
+    });
     setSaving(false);
   };
 
@@ -7983,6 +8003,7 @@ function ShiftAdminTab({ employeeAccounts, periods = [], requests = [], tablesRe
           <span className={`rounded-full border px-2.5 py-1 text-[10.5px] font-bold ${period.isOpen ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-slate-100 text-slate-500'}`}>
             {period.isOpen ? '受付中' : '受付終了'}
             {period.deadline ? ` ・ 締切 ${dateLabel(period.deadline)}` : ''}
+            {period.targetEmployeeIds && period.targetEmployeeIds.length > 0 ? ` ・ 対象${period.targetEmployeeIds.length}名` : ''}
           </span>
         ) : (
           <span className="rounded-full border border-slate-200 bg-slate-100 px-2.5 py-1 text-[10.5px] font-bold text-slate-500">未開始</span>
@@ -8017,6 +8038,49 @@ function ShiftAdminTab({ employeeAccounts, periods = [], requests = [], tablesRe
             </Field>
           </div>
         </div>
+        <div className="border-t border-slate-100 px-5 py-4">
+          <div className="mb-2 text-[11px] font-bold text-slate-400">対象者</div>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => setTargetMode('all')}
+              className={`rounded-lg border px-3 py-1.5 text-[12px] font-bold ${targetMode === 'all' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 bg-white text-slate-500'}`}
+            >
+              在籍スタッフ全員（{allStaff.length}名）
+            </button>
+            <button
+              type="button"
+              onClick={() => setTargetMode('some')}
+              className={`rounded-lg border px-3 py-1.5 text-[12px] font-bold ${targetMode === 'some' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 bg-white text-slate-500'}`}
+            >
+              選んだ方のみ（{targetIds.length}名）
+            </button>
+          </div>
+          {targetMode === 'some' && (
+            <div className="mt-2.5">
+              <div className="mb-1.5 text-[11px] text-slate-400">チェックを入れた方の「各種申請」にだけ表示されます。試験運用のあいだはご自身だけを選んでおくと安全です。</div>
+              <div className="max-h-44 overflow-y-auto rounded-xl border border-slate-200 p-2">
+                <div className="grid grid-cols-2 gap-x-3 gap-y-1 sm:grid-cols-3">
+                  {allStaff.map((a) => (
+                    <label key={a.id} className="flex items-center gap-2 rounded-md px-1.5 py-1 text-[12px] text-slate-700 hover:bg-slate-50">
+                      <input
+                        type="checkbox"
+                        checked={targetIds.includes(a.id)}
+                        onChange={() => setTargetIds((prev) => (prev.includes(a.id) ? prev.filter((x) => x !== a.id) : [...prev, a.id]))}
+                        className="h-4 w-4 accent-amber-600"
+                      />
+                      <span className="truncate">{a.name}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+              {targetIds.length === 0 && (
+                <div className="mt-1.5 text-[11.5px] font-bold text-rose-600">対象者が0名のため、誰にも表示されません。</div>
+              )}
+            </div>
+          )}
+        </div>
+
         <div className="flex flex-wrap gap-2 border-t border-slate-100 px-5 py-3">
           {!period || !period.isOpen ? (
             <button
@@ -9322,6 +9386,9 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
   const shiftPendingCount = openShiftPeriodAdmin
     ? employeeAccounts.filter(
         (a) => !a.resignationDate
+          && (!openShiftPeriodAdmin.targetEmployeeIds
+            || openShiftPeriodAdmin.targetEmployeeIds.length === 0
+            || openShiftPeriodAdmin.targetEmployeeIds.includes(a.id))
           && !(data.shiftRequests || []).some((r) => r.employeeId === a.id && r.targetMonth === openShiftPeriodAdmin.targetMonth)
       ).length
     : 0;
