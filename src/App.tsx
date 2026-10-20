@@ -7267,6 +7267,9 @@ const HELP_ADMIN = [
   {
     category: '勤怠の管理',
     items: [
+      { q: '承認をまとめて行うには', a: '「勤怠」→「承認」を開くと、勤怠修正・休暇・月次勤怠の確定・交通費の未処理が1つの画面に並びます。上の「すべて／勤怠修正／休暇／月次確定／交通費」で絞り込めます。左のチェックを入れて「まとめて承認」を押すと、種類が違っても一度に承認できます。却下も同じ手順です。金額を直してから承認する場合や、差し戻しの理由を入れる場合は「詳細」から元の画面で操作してください。交通費と月次勤怠の最終承認はマスター管理者のみに表示されます。' },
+      { q: 'ダッシュボードの右側は何ですか', a: '「本日の勤務状況」は勤務中・退勤済・未出勤の人数と、まだ打刻のない方の氏名です。「今月の締めまで」は前月分の月次勤怠と交通費の提出状況で、未提出の方へまとめて提出のお知らせを送れます。「最近の操作」は直近の承認や修正の履歴です。' },
+      { q: 'スタッフ一覧から直接操作するには', a: '「勤怠」→「スタッフ一覧」の各行に、本日の状態・今月の勤務時間・有休残・その方の未処理が表示されます。行の右端にある「⋯」を押すと、そのスタッフの勤怠の確認と修正、未処理の承認、給与の作成、登録情報の編集へ直接移動できます。' },
       { q: '勤怠修正申請を承認するには', a: '「勤怠」→「休暇申請」に未承認の申請が一覧表示されます。内容を確認して承認または却下してください。承認すると勤怠記録が自動で書き換わります。' },
       { q: '管理者が直接勤怠を修正できますか', a: 'できます。「勤怠」→「勤怠一覧」で対象のスタッフと日付を選び、時刻を直接編集してください。給与に反映させない修正の場合は、控除対象外のフラグを設定できます。' },
       { q: '打刻漏れはどこで分かりますか', a: '「勤怠」→「勤怠修正」を開くと、上部に赤い枠で日付とスタッフ名が表示されます。各行の「この日の勤怠を修正する」を押すと、その日のそのスタッフに絞り込んだ勤怠一覧へ移動し、退勤時刻をその場で入力できます。ダッシュボードのアラート一覧にも件数が表示されます。' },
@@ -8798,6 +8801,34 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
     if (it.kind === 'commute') return onDecideCommute(it.id, 'rejected', '');
     return false;
   };
+  // ---- スタッフ一覧に出す、その人の現在の状況 ----
+  const staffRowInfo = {};
+  employeeAccounts.forEach((acc) => {
+    const recs = data.records[acc.id] || {};
+    const r = recs[today];
+    const used = data.leaveRequests
+      .filter((l) => l.employeeId === acc.id && l.type === '有休' && l.status === 'approved')
+      .reduce((sum, l) => sum + l.days, 0);
+    const total = computeLeaveTotal(acc, new Date(), data.groupLeaveSchedules);
+    const kinds = approvalItems.filter((it) => it.employeeId === acc.id).map((it) => it.kind);
+    const kindCounts = {};
+    kinds.forEach((k) => { kindCounts[k] = (kindCounts[k] || 0) + 1; });
+    staffRowInfo[acc.id] = {
+      todayState: r?.clockOut ? 'done' : r?.clockIn ? 'working' : 'absent',
+      monthWorkedMin: computeMonthlySummary(recs).workedMin,
+      leaveRemaining: Math.max(0, total - used),
+      leaveShort: paidLeaveShortages.some((s) => s.employeeId === acc.id),
+      pendingCount: kinds.length,
+      pendingKinds: Object.entries(kindCounts).map(([kind, count]) => ({ kind, count })),
+    };
+  });
+
+  const staffRowActions = {
+    onOpenAttendance: (employeeId) => openAttendanceFor(employeeId, null),
+    onOpenApprovals: () => setTab('approvals'),
+    onOpenPayroll: () => onNavigateTop && onNavigateTop('payroll'),
+  };
+
   const openApprovalDetail = (it) => {
     if (it.kind === 'correction') setTab('requests');
     else if (it.kind === 'leave') setTab('leave');
@@ -8967,6 +8998,8 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
           resignationReasons={data.resignationReasons}
           initialProfileId={pendingProfileId}
           onConsumeInitialProfile={() => setPendingProfileId(null)}
+          rowInfo={staffRowInfo}
+          rowActions={staffRowActions}
           session={session}
           isDesktop={isDesktop}
         />
@@ -11700,7 +11733,79 @@ const ADMIN_TAB_OPTIONS = [
   { key: 'payroll', label: '給与' },
 ];
 
-function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail, onUpdateDates, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, groupLeaveSchedules, employeeAttendanceSchedules, onSaveEmployeeAttendance, resignationReasons = [], initialProfileId = null, onConsumeInitialProfile, session, isDesktop }) {
+const STAFF_TODAY_STATE = {
+  working: { label: '勤務中', cls: 'text-emerald-700' },
+  done: { label: '退勤済', cls: 'text-slate-500' },
+  absent: { label: '未出勤', cls: 'text-rose-600' },
+};
+
+// スタッフ一覧の行末メニュー。その人の画面へ直接移動する
+function StaffRowMenu({ account, info, onOpenProfile, onOpenAttendance, onOpenApprovals, onOpenPayroll }) {
+  const [pos, setPos] = useState(null); // 開いている位置（画面基準）
+  const btnRef = useRef(null);
+
+  useEffect(() => {
+    if (!pos) return undefined;
+    const close = () => setPos(null);
+    document.addEventListener('mousedown', close);
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => {
+      document.removeEventListener('mousedown', close);
+      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('resize', close);
+    };
+  }, [pos]);
+
+  const toggle = () => {
+    if (pos) { setPos(null); return; }
+    const r = btnRef.current?.getBoundingClientRect();
+    if (!r) return;
+    setPos({ top: r.bottom + 6, right: Math.max(8, window.innerWidth - r.right) });
+  };
+
+  const item = (label, fn, badge) => (
+    <button
+      onClick={() => { setPos(null); fn(); }}
+      className="flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left text-[12.5px] font-bold text-slate-800 hover:bg-slate-50"
+    >
+      <span>{label}</span>
+      {badge ? <span className="text-amber-600">{badge}</span> : null}
+    </button>
+  );
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        onMouseDown={(e) => e.stopPropagation()}
+        onClick={toggle}
+        aria-label={`${account.name}さんの操作メニュー`}
+        className={`rounded-lg px-2.5 py-1 text-[13px] font-bold ${
+          info?.pendingCount > 0 ? 'bg-slate-900 text-white' : 'border border-slate-200 text-slate-500 hover:bg-slate-50'
+        }`}
+      >
+        ⋯
+      </button>
+      {pos && createPortal(
+        <div
+          onMouseDown={(e) => e.stopPropagation()}
+          style={{ position: 'fixed', top: pos.top, right: pos.right, zIndex: 60 }}
+          className="w-60 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl"
+        >
+          <div className="px-4 pt-2.5 pb-1 text-[10.5px] font-bold text-slate-400">{account.name} さんの操作</div>
+          {item('勤怠を見る・直す', () => onOpenAttendance(account.id))}
+          {info?.pendingCount > 0 && item('未処理の申請を承認する', () => onOpenApprovals(account.id), info.pendingCount)}
+          {item('給与を作成する', () => onOpenPayroll(account.id))}
+          {item('登録情報を編集する', () => onOpenProfile(account))}
+        </div>,
+        document.body
+      )}
+    </>
+  );
+}
+
+function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail, onUpdateDates, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, groupLeaveSchedules, employeeAttendanceSchedules, onSaveEmployeeAttendance, resignationReasons = [], initialProfileId = null, onConsumeInitialProfile, rowInfo = {}, rowActions = {}, session, isDesktop }) {
   const knownGroups = Array.from(new Set([...employeeAccounts.map((a) => a.mainGroup).filter(Boolean), ...Object.keys(groupLeaveSchedules || {})]));
   const [listGroupFilter, setListGroupFilter] = useState('all');
   const [listStaffTypeFilter, setListStaffTypeFilter] = useState('all');
@@ -11917,20 +12022,27 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
         </Field>
       </div>
       {isDesktop ? (
-        <table className="w-full text-[13px]">
+        <div className="overflow-x-auto">
+        <table className="w-full min-w-[920px] text-[13px]">
           <thead>
             <tr className="text-left text-[11px] text-slate-400 border-b border-slate-100">
               <th className="px-5 py-2 font-medium">氏名</th>
-              <th className="px-5 py-2 font-medium">雇用形態</th>
-              <th className="px-5 py-2 font-medium"></th>
-              {isMasterAdmin && <th className="px-5 py-2 font-medium"></th>}
-              <th className="px-5 py-2 font-medium"></th>
-              <th className="px-5 py-2 font-medium"></th>
+              <th className="px-3 py-2 font-medium">グループ</th>
+              <th className="px-3 py-2 font-medium">本日</th>
+              <th className="px-3 py-2 font-medium">今月の勤務</th>
+              <th className="px-3 py-2 font-medium">有休残</th>
+              <th className="px-3 py-2 font-medium">未処理</th>
+              {isMasterAdmin && <th className="px-2 py-2 font-medium"></th>}
+              <th className="px-2 py-2 font-medium"></th>
+              <th className="px-2 py-2 font-medium"></th>
+              <th className="px-3 py-2 font-medium"></th>
             </tr>
           </thead>
           <tbody>
             {filteredEmployeeAccounts.map((acc) => {
               const retired = !!acc.resignationDate;
+              const info = rowInfo[acc.id];
+              const state = info && !retired ? STAFF_TODAY_STATE[info.todayState] : null;
               return (
                 <tr key={acc.id} className="border-b border-slate-100 last:border-0">
                   <td className="px-5 py-2.5 font-semibold text-slate-800 cursor-pointer hover:text-amber-700" onClick={() => setProfileModalAccount(acc)}>
@@ -11938,25 +12050,55 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
                     {retired && <span className="ml-1.5 text-[10px] font-bold text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">退職済み</span>}
                     {acc.furigana && <div className="text-[10.5px] font-normal text-slate-400">{acc.furigana}</div>}
                   </td>
-                  <td className="px-5 py-2.5 text-slate-600">{acc.staffType || '社員'}</td>
-                  <td className="px-5 py-2.5"><button onClick={() => setProfileModalAccount(acc)} className="text-[11px] font-bold text-slate-500 border border-slate-200 rounded-md px-2 py-1">詳細</button></td>
+                  <td className="px-3 py-2.5 text-slate-600 whitespace-nowrap">{acc.mainGroup || acc.staffType || '社員'}</td>
+                  <td className={`px-3 py-2.5 font-bold whitespace-nowrap ${state ? state.cls : 'text-slate-300'}`}>{state ? state.label : '—'}</td>
+                  <td className="px-3 py-2.5 font-mono text-slate-600 whitespace-nowrap">{info ? minutesToHHMM(info.monthWorkedMin) : '—'}</td>
+                  <td className={`px-3 py-2.5 font-mono whitespace-nowrap ${info?.leaveShort ? 'text-rose-600 font-bold' : 'text-slate-600'}`}>
+                    {info ? `${fmtDays(info.leaveRemaining)}日` : '—'}
+                  </td>
+                  <td className="px-3 py-2.5">
+                    {info && info.pendingKinds.length > 0 ? (
+                      <span className="flex flex-wrap gap-1">
+                        {info.pendingKinds.map((p) => (
+                          <span key={p.kind} className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${APPROVAL_KIND_META[p.kind].cls}`}>
+                            {APPROVAL_KIND_META[p.kind].label} {p.count}
+                          </span>
+                        ))}
+                      </span>
+                    ) : (
+                      <span className="text-[11.5px] text-slate-300">なし</span>
+                    )}
+                  </td>
                   {isMasterAdmin && (
-                    <td className="px-5 py-2.5"><button onClick={() => setLoginEmailTarget(acc)} className="text-slate-300 hover:text-amber-600" title="ログインIDを変更"><Mail size={14} /></button></td>
+                    <td className="px-2 py-2.5"><button onClick={() => setLoginEmailTarget(acc)} className="text-slate-300 hover:text-amber-600" title="ログインIDを変更"><Mail size={14} /></button></td>
                   )}
-                  <td className="px-5 py-2.5"><button onClick={() => setResetPasswordTarget(acc)} className="text-slate-300 hover:text-amber-600" title="パスワードリセット"><Key size={14} /></button></td>
-                  <td className="px-5 py-2.5"><button onClick={() => setDeleteTarget(acc)} className="text-slate-300 hover:text-rose-500"><Trash2 size={14} /></button></td>
+                  <td className="px-2 py-2.5"><button onClick={() => setResetPasswordTarget(acc)} className="text-slate-300 hover:text-amber-600" title="パスワードリセット"><Key size={14} /></button></td>
+                  <td className="px-2 py-2.5"><button onClick={() => setDeleteTarget(acc)} className="text-slate-300 hover:text-rose-500" title="削除"><Trash2 size={14} /></button></td>
+                  <td className="px-3 py-2.5">
+                    <StaffRowMenu
+                      account={acc}
+                      info={info}
+                      onOpenProfile={setProfileModalAccount}
+                      onOpenAttendance={rowActions.onOpenAttendance || (() => {})}
+                      onOpenApprovals={rowActions.onOpenApprovals || (() => {})}
+                      onOpenPayroll={rowActions.onOpenPayroll || (() => {})}
+                    />
+                  </td>
                 </tr>
               );
             })}
             {filteredEmployeeAccounts.length === 0 && (
-              <tr><td colSpan={isMasterAdmin ? 6 : 5} className="px-5 py-8 text-center text-[12.5px] text-slate-300">該当するスタッフがいません</td></tr>
+              <tr><td colSpan={isMasterAdmin ? 10 : 9} className="px-5 py-8 text-center text-[12.5px] text-slate-300">該当するスタッフがいません</td></tr>
             )}
           </tbody>
         </table>
+        </div>
       ) : (
         <div className="divide-y divide-slate-100">
           {filteredEmployeeAccounts.map((acc) => {
             const retired = !!acc.resignationDate;
+            const info = rowInfo[acc.id];
+            const state = info && !retired ? STAFF_TODAY_STATE[info.todayState] : null;
             return (
               <div key={acc.id} className="px-5 py-3.5">
                 <div className="flex items-center justify-between">
@@ -11964,17 +12106,38 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
                     <div className="text-[13px] font-semibold text-slate-800 flex items-center gap-1.5">
                       {acc.name}
                       {retired && <span className="text-[10px] font-bold text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">退職済み</span>}
+                      {state && <span className={`text-[11px] font-bold ${state.cls}`}>{state.label}</span>}
                     </div>
                     {acc.furigana && <div className="text-[10.5px] text-slate-400">{acc.furigana}</div>}
-                    <div className="text-[11.5px] text-slate-500 mt-0.5">{acc.staffType || '社員'}</div>
+                    <div className="text-[11.5px] text-slate-500 mt-0.5">
+                      {acc.mainGroup || acc.staffType || '社員'}
+                      {info && <span className="ml-2 font-mono">今月 {minutesToHHMM(info.monthWorkedMin)}</span>}
+                      {info && <span className={`ml-2 font-mono ${info.leaveShort ? 'text-rose-600 font-bold' : ''}`}>有休 {fmtDays(info.leaveRemaining)}日</span>}
+                    </div>
+                    {info && info.pendingKinds.length > 0 && (
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {info.pendingKinds.map((p) => (
+                          <span key={p.kind} className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${APPROVAL_KIND_META[p.kind].cls}`}>
+                            {APPROVAL_KIND_META[p.kind].label} {p.count}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </div>
                   <div className="flex items-center gap-1">
-                    <button onClick={() => setProfileModalAccount(acc)} className="text-[11px] font-bold text-slate-500 border border-slate-200 rounded-md px-2 py-1">詳細</button>
                     {isMasterAdmin && (
                       <button onClick={() => setLoginEmailTarget(acc)} className="text-slate-300 hover:text-amber-600 p-1" title="ログインIDを変更"><Mail size={14} /></button>
                     )}
                     <button onClick={() => setResetPasswordTarget(acc)} className="text-slate-300 hover:text-amber-600 p-1" title="パスワードリセット"><Key size={14} /></button>
-                    <button onClick={() => setDeleteTarget(acc)} className="text-slate-300 hover:text-rose-500 p-1"><Trash2 size={14} /></button>
+                    <button onClick={() => setDeleteTarget(acc)} className="text-slate-300 hover:text-rose-500 p-1" title="削除"><Trash2 size={14} /></button>
+                    <StaffRowMenu
+                      account={acc}
+                      info={info}
+                      onOpenProfile={setProfileModalAccount}
+                      onOpenAttendance={rowActions.onOpenAttendance || (() => {})}
+                      onOpenApprovals={rowActions.onOpenApprovals || (() => {})}
+                      onOpenPayroll={rowActions.onOpenPayroll || (() => {})}
+                    />
                   </div>
                 </div>
               </div>
