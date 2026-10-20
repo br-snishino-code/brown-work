@@ -8088,6 +8088,7 @@ function ShiftAdminTab({ employeeAccounts, periods = [], requests = [], tablesRe
           <div>{activeStaff.map((acc) => renderRow(acc))}</div>
         )}
 
+        {monthRequests.length > 0 && (
         <div className="flex items-center gap-2 border-t border-slate-200 bg-slate-50 px-3 py-2">
           <span className="w-28 shrink-0 text-[10.5px] font-bold text-slate-500">出勤可能な人数</span>
           <span className="flex flex-1 min-w-0 gap-[2px] overflow-x-auto">
@@ -8105,6 +8106,7 @@ function ShiftAdminTab({ employeeAccounts, periods = [], requests = [], tablesRe
           </span>
           <span className="w-16 shrink-0" />
         </div>
+        )}
       </div>
 
       <div className="text-[11.5px] text-slate-400">
