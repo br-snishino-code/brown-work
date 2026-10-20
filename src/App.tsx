@@ -3357,11 +3357,11 @@ function AttendanceApp() {
 
   // 「要対応」を押したとき、未処理が1種類だけならその画面へ直接移動する
   const alertTargets = [
-    { tab: 'requests', count: pendingCorrectionCount },
+    { tab: 'requests', count: pendingCorrectionCount + missingPunchCount },
     { tab: 'leave', count: pendingLeaveCount },
     { tab: 'performance', count: pendingPerformanceCount },
     { tab: 'monthlyconfirm', count: monthlyConfirmPendingCount },
-    { tab: 'attendance', count: missingPunchCount + clockInApprovalCount },
+    { tab: 'attendance', count: clockInApprovalCount },
   ].filter((t) => t.count > 0);
   const alertCount = alertTargets.reduce((sum, t) => sum + t.count, 0);
   const ADMIN_TAB_LABEL = { requests: '勤怠修正', leave: '休暇申請', performance: '実績報告', monthlyconfirm: '月次確定', attendance: '勤怠一覧', dashboard: 'ダッシュボード' };
@@ -8127,8 +8127,8 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
         <AdminTopNav
           tab={tab}
           setTab={setTab}
-          attendanceCount={clockInApprovalCount + missing.length}
-          correctionCount={pending.length}
+          attendanceCount={clockInApprovalCount}
+          correctionCount={pending.length + missing.length}
           leaveCount={leavePending.length}
           performanceCount={performancePending.length}
           monthlyConfirmCount={monthlyConfirmCount}
