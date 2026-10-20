@@ -7255,7 +7255,7 @@ const HELP_ADMIN = [
   {
     category: 'スタッフの登録・管理',
     items: [
-      { q: 'スタッフアカウントを新しく作るには', a: 'アカウントを作成できるのはマスター管理者のみです。「勤怠」→「スタッフ一覧」を開くと、右側に登録フォームがあります。姓名・ふりがな・メールアドレス・仮パスワード・入職日・役割を入力して作成します。作成すると、そのメールアドレス宛にログインURLと仮パスワードを記載した案内メールが自動で送られます。仮パスワードは「自動生成」ボタンでも作れます。管理者の画面には登録フォームは表示されません。' },
+      { q: 'スタッフアカウントを新しく作るには', a: 'アカウントを作成できるのはマスター管理者のみです。「勤怠」→「スタッフ一覧」を開き、一覧の上にある「新しいアカウントを作成」を押すと登録フォームが開きます。姓名・ふりがな・メールアドレス・仮パスワード・入職日・役割を入力して作成します。作成すると、そのメールアドレス宛にログインURLと仮パスワードを記載した案内メールが自動で送られます。仮パスワードは「自動生成」ボタンでも作れます。管理者の画面には登録フォームは表示されません。' },
       { q: '大人数をまとめて登録したい', a: 'スタッフ一覧の右上にある「CSV一括登録」を使います（マスター管理者のみ）。1行目の見出しは name,email,password,hireDate です。email はログインIDになるため、登録フォームと同じくメールアドレスでご入力ください。案内メールを送るかどうかは「ログイン案内メールを送る」のチェックで選べます（初期状態は送信しません）。送らない場合は、ログインURLと仮パスワードを別途ご本人にお伝えください。初回ログイン時のパスワード変更と個人情報の入力は、通常の登録と同じように求められます。' },
       { q: '郵便番号から住所は入りますか', a: '郵便番号を7桁まで入力すると、都道府県・市区町村・町名までが住所欄に自動で入ります。続けて番地・建物名をご入力ください。郵便番号を入れ直した場合も、番地はそのまま残して住所の前半だけが入れ替わります。住所を手入力済みの場合は自動入力されません。' },
       { q: '退職者の処理はどうしますか', a: 'スタッフの「詳細」を開き、基本タブの退職日を入力して保存します。退職日を入れたスタッフは、一覧の絞り込みで「在籍のみ」にすると非表示になります。アカウント自体は残るため、過去の勤怠や給与は参照できます。' },
@@ -11982,11 +11982,6 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
             <Download size={13} /> {backingUp ? '作成中…' : 'データバックアップ'}
           </button>
         )}
-        {!isDesktop && isMasterAdmin && (
-          <button onClick={() => setShowForm((v) => !v)} className="flex items-center gap-1 text-[12px] font-bold text-amber-600">
-            <UserPlus size={14} /> 追加
-          </button>
-        )}
       </div>
 
       <div className="px-5 py-3.5 border-b border-slate-100 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2.5">
@@ -12152,9 +12147,26 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
     </div>
   );
 
-  const formCard = isMasterAdmin && (showForm || isDesktop) && (
+  // 登録フォームは開閉できるようにして、普段は一覧を広く使えるようにする
+  const formToggle = isMasterAdmin && (
+    <button
+      type="button"
+      onClick={() => setShowForm((v) => !v)}
+      className={`flex w-full items-center gap-2 rounded-2xl border px-5 py-3 text-left shadow-sm transition-colors ${
+        showForm ? 'border-slate-300 bg-slate-50' : 'border-slate-200 bg-white hover:bg-slate-50'
+      }`}
+    >
+      <UserPlus size={15} className="text-amber-600" />
+      <span className="text-[13.5px] font-bold text-slate-800">新しいアカウントを作成</span>
+      <span className="ml-auto flex items-center gap-1.5 text-[11.5px] font-bold text-slate-500">
+        {showForm ? '閉じる' : '開く'}
+        <ChevronDown size={14} className={showForm ? 'rotate-180 transition-transform' : 'transition-transform'} />
+      </span>
+    </button>
+  );
+
+  const formCard = isMasterAdmin && showForm && (
     <form onSubmit={submit} className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 space-y-3.5 h-fit">
-      <h3 className="font-bold text-[13.5px] mb-1">新しいアカウントを作成</h3>
       <div className="grid grid-cols-2 gap-3">
         <Field label="姓">
           <input value={sei} onChange={(e) => setSei(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" placeholder="例）田中" />
@@ -12269,22 +12281,12 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
     </>
   );
 
-  if (isDesktop) {
-    // 一覧の列が多いため、登録フォームは横ではなく下に置いて一覧を全幅で使う
-    return (
-      <div className="space-y-4">
-        {listCard}
-        {formCard}
-        {disclaimer}
-        {modals}
-      </div>
-    );
-  }
-
+  // 一覧の列が多いため、登録フォームは横に並べず、一覧の上に開閉式で置く
   return (
     <div className="space-y-4">
-      {listCard}
+      {formToggle}
       {formCard}
+      {listCard}
       {disclaimer}
       {modals}
     </div>
