@@ -3341,6 +3341,11 @@ function AttendanceApp() {
     const recs = data.records[acc.id] || {};
     return sum + Object.keys(recs).filter((k) => k !== today && recs[k]?.clockIn && !recs[k]?.clockOut).length;
   }, 0);
+  // 遅刻・早出などで承認待ちになっている出勤・退勤
+  const clockInApprovalCount = employeeAccounts.reduce((sum, acc) => {
+    const recs = data.records[acc.id] || {};
+    return sum + Object.values(recs).filter((r) => r?.clockInApproval === 'pending' || r?.clockOutApproval === 'pending').length;
+  }, 0);
   // 月次勤怠の確定：自分が処理すべき件数（管理者は1次、マスター管理者は両方）
   const monthlyConfirmPendingCount = (data.monthlyConfirmations || []).filter((c) => {
     const submitterRole = data.accounts.find((a) => a.id === c.employeeId)?.role;
@@ -3356,7 +3361,7 @@ function AttendanceApp() {
     { tab: 'leave', count: pendingLeaveCount },
     { tab: 'performance', count: pendingPerformanceCount },
     { tab: 'monthlyconfirm', count: monthlyConfirmPendingCount },
-    { tab: 'attendance', count: missingPunchCount },
+    { tab: 'attendance', count: missingPunchCount + clockInApprovalCount },
   ].filter((t) => t.count > 0);
   const alertCount = alertTargets.reduce((sum, t) => sum + t.count, 0);
   const ADMIN_TAB_LABEL = { requests: '勤怠修正', leave: '休暇申請', performance: '実績報告', monthlyconfirm: '月次確定', attendance: '勤怠一覧', dashboard: 'ダッシュボード' };
@@ -7897,7 +7902,7 @@ function PayrollMetric({ label, value }) {
   );
 }
 
-function AdminTopNav({ tab, setTab, correctionCount, leaveCount, performanceCount, monthlyConfirmCount = 0, isMasterAdmin }) {
+function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveCount, performanceCount, monthlyConfirmCount = 0, isMasterAdmin }) {
   const [open, setOpen] = useState(null);
   const wrapRef = useRef(null);
 
@@ -7951,13 +7956,13 @@ function AdminTopNav({ tab, setTab, correctionCount, leaveCount, performanceCoun
     },
   ];
 
-  const totalBadge = correctionCount + leaveCount + performanceCount + monthlyConfirmCount;
+  const totalBadge = attendanceCount + correctionCount + leaveCount + performanceCount + monthlyConfirmCount;
 
   // よく使う項目は常に横並びで表示し、1クリックで開けるようにする。
   // 残りは「その他」にまとめる。
   const primaryItems = [
     { tab: 'dashboard', label: 'ダッシュボード', icon: <LayoutGrid size={14} /> },
-    { tab: 'attendance', label: '勤怠一覧' },
+    { tab: 'attendance', label: '勤怠一覧', badge: attendanceCount },
     { tab: 'requests', label: '勤怠修正', badge: correctionCount },
     { tab: 'monthlyconfirm', label: '月次確定', badge: monthlyConfirmCount },
     { tab: 'leave', label: '休暇申請', badge: leaveCount },
@@ -8122,6 +8127,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
         <AdminTopNav
           tab={tab}
           setTab={setTab}
+          attendanceCount={clockInApprovalCount + missing.length}
           correctionCount={pending.length}
           leaveCount={leavePending.length}
           performanceCount={performancePending.length}
