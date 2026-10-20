@@ -3611,6 +3611,7 @@ function AttendanceApp() {
             onDecideLeave={decideLeaveRequest}
             onDecidePerformance={decidePerformanceReport}
             onDecideCommute={decideCommuteExpenseClaim}
+            onNotifyEmployee={notifyEmployeeUser}
             onAddAccount={handleAddAccount}
             onDeleteAccount={handleDeleteAccount}
             onResetPassword={handleResetPassword}
@@ -7642,7 +7643,120 @@ function ApprovalHubTab({ items, isMasterAdmin, onApprove, onReject, onOpenDetai
   );
 }
 
-function AdminDashboardTab({ missingCount, correctionCount, leaveCount, performanceCount, gpsAlertCount, contractAlertCount, clockInApprovalCount = 0, employeeCount, todayPresentCount = 0, monthOvertimeMin = 0, paidLeaveShortages = [], announcements = [], notifications = [], onNavigate, onNavigateTop, onOpenNotification, isDesktop }) {
+// ダッシュボード右側：本日の勤務状況
+function TodayStatusCard({ working = 0, done = 0, absent = 0, absentees = [], onNavigate }) {
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+      <div className="px-4 py-2.5 border-b border-slate-100 flex items-center justify-between">
+        <span className="text-[12.5px] font-bold text-slate-800">本日の勤務状況</span>
+        <span className="text-[11px] text-slate-400">{hhmm(new Date())} 時点</span>
+      </div>
+      <div className="flex gap-2 px-4 py-3 border-b border-slate-100">
+        <div className="flex-1 rounded-xl border border-emerald-200 bg-emerald-50 py-2 text-center">
+          <div className="text-[10.5px] text-emerald-700">勤務中</div>
+          <div className="font-mono text-[19px] font-bold text-emerald-800">{working}</div>
+        </div>
+        <div className="flex-1 rounded-xl border border-slate-200 bg-slate-50 py-2 text-center">
+          <div className="text-[10.5px] text-slate-500">退勤済</div>
+          <div className="font-mono text-[19px] font-bold text-slate-700">{done}</div>
+        </div>
+        <div className={`flex-1 rounded-xl py-2 text-center border ${absent > 0 ? 'border-rose-200 bg-rose-50' : 'border-slate-200 bg-slate-50'}`}>
+          <div className={`text-[10.5px] ${absent > 0 ? 'text-rose-700' : 'text-slate-500'}`}>未出勤</div>
+          <div className={`font-mono text-[19px] font-bold ${absent > 0 ? 'text-rose-700' : 'text-slate-700'}`}>{absent}</div>
+        </div>
+      </div>
+      {absentees.length === 0 ? (
+        <div className="px-4 py-3 text-[11.5px] text-slate-400">本日の出勤予定の方は全員打刻済みです。</div>
+      ) : (
+        <div>
+          {absentees.slice(0, 5).map((a) => (
+            <div key={a.id} className="px-4 py-2 border-b border-slate-100 last:border-0 flex items-center justify-between gap-2">
+              <span className="text-[12px] font-bold text-slate-800 truncate">
+                <EmployeeLink id={a.id} name={a.name} />
+              </span>
+              <span className="text-[11.5px] font-bold text-rose-600 shrink-0">
+                未出勤{a.startTime ? `（予定 ${a.startTime}）` : ''}
+              </span>
+            </div>
+          ))}
+          {absentees.length > 5 && (
+            <button onClick={() => onNavigate && onNavigate('attendance')} className="w-full px-4 py-2 text-left text-[11.5px] font-bold text-amber-600">
+              ほか{absentees.length - 5}名を見る
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ダッシュボード右側：今月の締めまで（提出状況）
+function MonthClosingCard({ targetMonth, total = 0, monthlyDone = 0, commuteDone = 0, pendingNames = [], onRemind, reminding = false }) {
+  const pct = (n) => (total > 0 ? Math.round((n / total) * 100) : 0);
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+      <div className="px-4 py-2.5 border-b border-slate-100 flex items-center justify-between">
+        <span className="text-[12.5px] font-bold text-slate-800">今月の締めまで</span>
+        <span className="text-[11px] text-slate-400">{monthKeyLabel(targetMonth)}分</span>
+      </div>
+      <div className="px-4 py-3 space-y-2.5">
+        <div className="flex items-center justify-between">
+          <span className="text-[12px] text-slate-600">月次勤怠の提出</span>
+          <span className="text-[12px] font-bold text-slate-800">{monthlyDone}／{total}名</span>
+        </div>
+        <div className="h-[7px] rounded-full bg-slate-200 overflow-hidden">
+          <div className="h-[7px] bg-amber-600" style={{ width: `${pct(monthlyDone)}%` }} />
+        </div>
+        <div className="flex items-center justify-between">
+          <span className="text-[12px] text-slate-600">交通費の提出</span>
+          <span className="text-[12px] font-bold text-slate-800">{commuteDone}／{total}名</span>
+        </div>
+        <div className="h-[7px] rounded-full bg-slate-200 overflow-hidden">
+          <div className="h-[7px] bg-teal-700" style={{ width: `${pct(commuteDone)}%` }} />
+        </div>
+        {pendingNames.length > 0 ? (
+          <button
+            onClick={onRemind}
+            disabled={reminding}
+            className="mt-1 w-full rounded-lg border border-slate-300 disabled:border-slate-200 py-2 text-[11.5px] font-bold text-slate-600"
+          >
+            {reminding ? '送信中…' : `未提出の${pendingNames.length}名にお知らせを送る`}
+          </button>
+        ) : (
+          <div className="mt-1 text-[11.5px] text-slate-400">全員が提出済みです。</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ダッシュボード右側：最近の操作
+function RecentActionsCard({ logs = [], onOpenAll }) {
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+      <div className="px-4 py-2.5 border-b border-slate-100 flex items-center justify-between">
+        <span className="text-[12.5px] font-bold text-slate-800">最近の操作</span>
+        {onOpenAll && (
+          <button onClick={onOpenAll} className="text-[11px] font-bold text-slate-400 hover:text-slate-700">すべて見る</button>
+        )}
+      </div>
+      {logs.length === 0 ? (
+        <div className="px-4 py-5 text-center text-[12px] text-slate-300">まだ記録がありません</div>
+      ) : (
+        <div>
+          {logs.slice(0, 5).map((l) => (
+            <div key={l.id} className="px-4 py-2 border-b border-slate-100 last:border-0 text-[11.5px] text-slate-600">
+              <span className="font-mono text-slate-400 mr-1.5">{l.createdAt ? hhmm(new Date(l.createdAt)) : ''}</span>
+              {l.action}{l.targetEmployeeName ? `（${l.targetEmployeeName}）` : ''}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AdminDashboardTab({ missingCount, correctionCount, leaveCount, performanceCount, gpsAlertCount, contractAlertCount, clockInApprovalCount = 0, employeeCount, todayPresentCount = 0, monthOvertimeMin = 0, paidLeaveShortages = [], announcements = [], notifications = [], onNavigate, onNavigateTop, onOpenNotification, isDesktop, todayStatus = null, monthClosing = null, auditLogs = [] }) {
   const alertRows = [
     { label: '打刻漏れ・打刻間違い', count: missingCount, tab: 'requests', icon: <AlertTriangle size={14} /> },
     { label: '位置情報が5回以上連続で未記録', count: gpsAlertCount, tab: 'attendance', icon: <MapPin size={14} /> },
@@ -7700,8 +7814,9 @@ function AdminDashboardTab({ missingCount, correctionCount, leaveCount, performa
   );
 
   return (
-    <div className="space-y-5">
-      <div className={`grid gap-3 ${isDesktop ? 'grid-cols-4' : 'grid-cols-2'}`}>
+    <div className={isDesktop ? 'flex gap-5 items-start' : 'space-y-5'}>
+    <div className={isDesktop ? 'flex-1 min-w-0 space-y-5' : 'space-y-5'}>
+      <div className={`grid gap-3 ${isDesktop ? 'grid-cols-2' : 'grid-cols-2'}`}>
         {tiles.map((t) => (
           <div key={t.label} className="bg-white rounded-2xl shadow-sm border border-slate-200 px-4 py-3.5">
             <div className="text-[11px] text-slate-400 mb-1">{t.label}</div>
@@ -7810,6 +7925,31 @@ function AdminDashboardTab({ missingCount, correctionCount, leaveCount, performa
           ))}
         </div>
       </Card>
+    </div>
+
+    <div className={isDesktop ? 'w-[340px] shrink-0 space-y-5' : 'space-y-5'}>
+      {todayStatus && (
+        <TodayStatusCard
+          working={todayStatus.working}
+          done={todayStatus.done}
+          absent={todayStatus.absent}
+          absentees={todayStatus.absentees}
+          onNavigate={onNavigate}
+        />
+      )}
+      {monthClosing && (
+        <MonthClosingCard
+          targetMonth={monthClosing.targetMonth}
+          total={monthClosing.total}
+          monthlyDone={monthClosing.monthlyDone}
+          commuteDone={monthClosing.commuteDone}
+          pendingNames={monthClosing.pendingNames}
+          onRemind={monthClosing.onRemind}
+          reminding={monthClosing.reminding}
+        />
+      )}
+      <RecentActionsCard logs={auditLogs} onOpenAll={() => onNavigate('auditlog')} />
+    </div>
     </div>
   );
 }
@@ -8449,7 +8589,7 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
   );
 }
 
-function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAdminTab = null, onConsumeRequestedAdminTab, onDecide, onDecideLeave, onDecidePerformance, onDecideCommute, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onChangeLoginEmail, onDecideMonthlyConfirm, onCancelMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
+function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAdminTab = null, onConsumeRequestedAdminTab, onDecide, onDecideLeave, onDecidePerformance, onDecideCommute, onNotifyEmployee, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onChangeLoginEmail, onDecideMonthlyConfirm, onCancelMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
   const [tab, setTab] = useState('dashboard'); // dashboard | attendance | requests | leave | performance | accounts
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
@@ -8531,6 +8671,60 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
     if (onConsumeRequestedAdminTab) onConsumeRequestedAdminTab();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [requestedAdminTab]);
+
+  // ---- ダッシュボード右側：本日の勤務状況 ----
+  const activeStaff = employeeAccounts.filter((acc) => !acc.resignationDate);
+  const todayStatus = (() => {
+    let working = 0;
+    let done = 0;
+    const absentees = [];
+    activeStaff.forEach((acc) => {
+      const r = (data.records[acc.id] || {})[today];
+      if (r?.clockOut) done += 1;
+      else if (r?.clockIn) working += 1;
+      else absentees.push({ id: acc.id, name: acc.name, startTime: '' });
+    });
+    return { working, done, absent: absentees.length, absentees };
+  })();
+
+  // ---- ダッシュボード右側：今月の締めまで（前月分の提出状況） ----
+  const closingMonth = prevMonthKey();
+  const [reminding, setReminding] = useState(false);
+  const monthClosing = (() => {
+    const submittedMonthly = new Set(
+      monthlyConfirmations
+        .filter((c) => c.targetMonth === closingMonth && c.status !== 'draft' && c.status !== 'rejected')
+        .map((c) => c.employeeId)
+    );
+    const submittedCommute = new Set(
+      (data.commuteExpenseClaims || [])
+        .filter((c) => c.targetMonth === closingMonth && c.status !== 'draft' && c.status !== 'rejected')
+        .map((c) => c.employeeId)
+    );
+    const pendingStaff = activeStaff.filter((acc) => !submittedMonthly.has(acc.id));
+    return {
+      targetMonth: closingMonth,
+      total: activeStaff.length,
+      monthlyDone: activeStaff.filter((acc) => submittedMonthly.has(acc.id)).length,
+      commuteDone: activeStaff.filter((acc) => submittedCommute.has(acc.id)).length,
+      pendingNames: pendingStaff.map((a) => a.name),
+      reminding,
+      onRemind: async () => {
+        if (pendingStaff.length === 0 || !onNotifyEmployee) return;
+        if (!window.confirm(`未提出の${pendingStaff.length}名に、月次勤怠の提出をお願いするお知らせを送ります。よろしいですか？`)) return;
+        setReminding(true);
+        for (const acc of pendingStaff) {
+          // eslint-disable-next-line no-await-in-loop
+          await onNotifyEmployee(
+            acc.id,
+            `【ご提出のお願い】${monthKeyLabel(closingMonth)}分の月次勤怠申請`,
+            `${monthKeyLabel(closingMonth)}分の月次勤怠申請がまだ提出されていません。「各種申請」→「月次勤怠申請」からご提出をお願いいたします。`
+          );
+        }
+        setReminding(false);
+      },
+    };
+  })();
 
   // ---- 承認タブ：種類をまたいだ未処理の一覧 ----
   const monthlyPendingForMe = monthlyConfirmations.filter((c) => {
@@ -8746,6 +8940,9 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
           onNavigate={setTab}
           onNavigateTop={onNavigateTop}
           onOpenNotification={openNotification}
+          todayStatus={todayStatus}
+          monthClosing={monthClosing}
+          auditLogs={data.auditLogs}
           isDesktop={isDesktop}
         />
       )}
