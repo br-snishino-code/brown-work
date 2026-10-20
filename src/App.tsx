@@ -9671,7 +9671,6 @@ function MonthlyAttendanceConfirmSection({ session, records, confirmations, comm
       <div className="px-5 py-4 space-y-3">
         <div className="text-[11.5px] text-slate-500">
           前月分の勤怠を確認し、内容に間違いがなければ確定申請してください。
-          管理者とマスター管理者の承認を経て確定し、その内容をもとに給与計算が行われます。
         </div>
 
         <Field label="対象月">
