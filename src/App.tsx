@@ -1810,6 +1810,12 @@ function AttendanceApp() {
     if (emp?.contactEmail) await sendEmailBestEffort(emp.contactEmail, subject, body);
   };
 
+  // 特定スタッフへの通知（アプリ内のお知らせのみ。メールは送らない）
+  // 月次勤怠・交通費・個人情報変更の結果は、件数が多くなるためメールを送らない
+  const notifyEmployeeInApp = async (targetEmployeeId, subject, body, relatedId) => {
+    await notify(subject, body, relatedId, targetEmployeeId, 'employee');
+  };
+
   const handleLogin = async (username, password) => {
     try {
       const { error } = await supabase.auth.signInWithPassword({
@@ -2582,7 +2588,7 @@ function AttendanceApp() {
     if (decision === 'approved') {
       await updateEmployeeProfile(request.employeeId, request.requestedChanges);
     }
-    await notifyEmployeeUser(
+    await notifyEmployeeInApp(
       request.employeeId,
       `【個人情報変更${decision === 'approved' ? '承認' : '却下'}】`,
       `個人情報の変更申請が${decision === 'approved' ? '承認され、反映されました' : '却下されました'}。${memo ? `管理者コメント：${memo}` : ''}`,
@@ -2760,7 +2766,7 @@ function AttendanceApp() {
     }
     const monthLabel = monthKeyLabel(target.targetMonth);
     if (decision === 'rejected') {
-      await notifyEmployeeUser(
+      await notifyEmployeeInApp(
         target.employeeId,
         `【勤怠確定・差し戻し】${monthLabel}分`,
         `${monthLabel}分の勤怠確定申請が差し戻されました。${comment ? `コメント：${comment}` : ''}内容をご確認のうえ、修正して再度ご提出ください。`,
@@ -2778,7 +2784,7 @@ function AttendanceApp() {
       );
       show('承認しました。マスター管理者へ最終承認を依頼しました', 'success');
     } else {
-      await notifyEmployeeUser(
+      await notifyEmployeeInApp(
         target.employeeId,
         `【勤怠確定】${monthLabel}分`,
         `${monthLabel}分の勤怠が確定しました。この内容をもとに給与計算を行います。`,
@@ -2823,7 +2829,7 @@ function AttendanceApp() {
       return false;
     }
     const monthLabel = monthKeyLabel(target.targetMonth);
-    await notifyEmployeeUser(
+    await notifyEmployeeInApp(
       target.employeeId,
       `【勤怠確定の取り消し】${monthLabel}分`,
       `${monthLabel}分の勤怠の確定が取り消されました。${reason ? `理由：${reason}` : ''}内容をご確認のうえ、修正して再度ご提出ください。`,
@@ -2991,7 +2997,7 @@ function AttendanceApp() {
       return false;
     }
     const payrollChanged = await syncCommuteAmountInPayroll(claim.employeeId, claim.targetMonth, 0);
-    await notifyEmployeeUser(
+    await notifyEmployeeInApp(
       claim.employeeId,
       '【交通費精算・承認の取り消し】',
       `交通費精算書（合計 ${formatYen(claim.totalAmount)}）の承認が取り消されました。${reason ? `理由：${reason}` : ''}${payrollChanged ? '給与明細の交通費も取り下げました。' : ''}内容をご確認のうえ、修正して再度ご提出ください。`,
@@ -3042,7 +3048,7 @@ function AttendanceApp() {
     if (comment) lines.push('', `管理者コメント：${comment}`);
     if (payrollChanged) lines.push('', '給与明細の交通費も更新しました。');
 
-    await notifyEmployeeUser(
+    await notifyEmployeeInApp(
       claim.employeeId,
       `【交通費精算${decision === 'approved' ? (changes.length > 0 ? '修正のうえ承認' : '承認') : '差し戻し'}】`,
       lines.join('\n'),
@@ -7261,6 +7267,7 @@ const HELP_ADMIN = [
       { q: '退職者の処理はどうしますか', a: 'スタッフの「詳細」を開き、基本タブの退職日を入力して保存します。退職日を入れたスタッフは、一覧の絞り込みで「在籍のみ」にすると非表示になります。アカウント自体は残るため、過去の勤怠や給与は参照できます。' },
       { q: 'ログインID（メールアドレス）を変えるには', a: 'スタッフ一覧の各行にあるメールのアイコンから変更できます（マスター管理者のみ）。新しいメールアドレスを入力すると、ログイン用のアドレスが切り替わります。パスワードは変わりません。連絡用メールアドレスも同時に変更するか、本人へお知らせメールを送るかを選べます。変更内容は監査ログに記録されます。' },
       { q: 'パスワードを再発行するには', a: 'スタッフ一覧の各行にある鍵のアイコンを押すと、仮パスワードを設定できます。設定した仮パスワードは本人に直接お伝えください。本人が次にログインした際、新しいパスワードの設定画面が表示されます。' },
+      { q: 'スタッフにメールが届くのはどんなときですか', a: 'アカウントの作成（案内メール）、ログインIDの変更（送信を選んだ場合）、年末調整の承認・差し戻し、給与明細の公開、ダッシュボードの「未提出の◯名にお知らせを送る」の5つです。月次勤怠の確定・差し戻し・確定の取り消し、交通費の承認・差し戻し・承認の取り消し、個人情報の変更申請の承認・却下は、件数が多くなるためメールを送らず、スタッフ画面の「管理者からのお知らせ」にのみ表示されます。' },
       { q: '通知メールの送信先を変えるには', a: '「勤怠」→「その他」→「管理者権限」の一番上にある「通知メールの送信先」で指定します。カンマ区切りで複数指定でき、未設定の場合はマスター管理者の連絡用メールアドレスに届きます。マスター管理者のみが設定できます。なお管理者宛のメールは個人情報の変更申請と年末調整のときだけ送られます。勤怠修正・休暇申請・実績報告などは、画面右上のベルのお知らせでご確認ください。' },
       { q: '管理者権限を与えるには', a: '「勤怠」→「その他」→「管理者権限」から設定します。タブ単位（勤怠・労務・人材・給与）でアクセス範囲を制限できます。マスター管理者のみが操作できます。' },
     ],
