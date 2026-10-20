@@ -3388,6 +3388,10 @@ function AttendanceApp() {
     monthly: needsMonthlyConfirm ? '未提出' : null,
     commute: needsCommuteClaimReminder ? '未提出' : null,
   };
+  // eo業務の方だけ「実績入力」を出す
+  const staffRequestItems = STAFF_REQUEST_ITEMS.filter(
+    (it) => !it.eoOnly || session.mainGroup === EO_GROUP_NAME
+  );
   const openRequest = (key) => {
     setTopTab('requests');
     setRequestTab(key);
@@ -3405,7 +3409,7 @@ function AttendanceApp() {
             topTab={effectiveTopTab}
             setTopTab={setTopTab}
             staffMode={showStaffScreens}
-            requestItems={STAFF_REQUEST_ITEMS}
+            requestItems={staffRequestItems}
             requestBadges={requestBadges}
             onSelectRequest={(key) => setRequestTab(key)}
             session={session}
@@ -3461,7 +3465,7 @@ function AttendanceApp() {
         )}
         {effectiveTopTab === 'requests' && showStaffScreens && (
           <div className="space-y-5">
-            <StaffRequestNav active={requestTab} onSelect={setRequestTab} badges={requestBadges} />
+            <StaffRequestNav active={requestTab} onSelect={setRequestTab} badges={requestBadges} items={staffRequestItems} />
             {requestTab === 'leave' && (
               <LeaveView
                 leaveRequests={myLeaveRequests}
@@ -3493,6 +3497,9 @@ function AttendanceApp() {
                 onUpdate={updateCommuteExpenseClaim}
                 onSaveDraft={saveCommuteExpenseDraft}
               />
+            )}
+            {requestTab === 'performance' && session.mainGroup === EO_GROUP_NAME && (
+              <EoPerformanceSection employeeId={session.id} isDesktop={isDesktop} />
             )}
             {requestTab === 'yearend' && (
               <YearEndAdjustmentSection
@@ -3595,16 +3602,11 @@ function AttendanceApp() {
               />
             )}
             {employeeTab === 'performance' && (
-              <div className="space-y-5">
-                {session.mainGroup === EO_GROUP_NAME && (
-                  <EoPerformanceSection employeeId={session.id} isDesktop={isDesktop} />
-                )}
-                <PerformanceView
-                  reports={myPerformanceReports}
-                  onOpenModal={(type) => setPerformanceModal(type)}
-                  isDesktop={isDesktop}
-                />
-              </div>
+              <PerformanceView
+                reports={myPerformanceReports}
+                onOpenModal={(type) => setPerformanceModal(type)}
+                isDesktop={isDesktop}
+              />
             )}
           </div>
         ) : (
@@ -4985,6 +4987,7 @@ const STAFF_REQUEST_ITEMS = [
   { key: 'leave', label: '休暇申請', desc: '有休・欠勤などの申請と残日数', icon: Palmtree },
   { key: 'monthly', label: '月次勤怠申請', desc: '前月分の勤怠（交通費とまとめて提出）', icon: CheckCircle2 },
   { key: 'commute', label: '交通費申請', desc: '立て替えた交通費の精算', icon: Wallet },
+  { key: 'performance', label: 'eo業務 実績入力', desc: '新規・既存の実績を入力して保存', icon: BarChart3, eoOnly: true },
   { key: 'yearend', label: '年末調整', desc: '年末調整の書類を提出', icon: FileText },
   { key: 'profile', label: '個人情報の変更申請', desc: '氏名・住所・口座などの変更', icon: UserCog },
 ];
@@ -5011,13 +5014,13 @@ function MonthlyConfirmReminderCard({ targetMonth, onOpen }) {
 }
 
 // 各種申請タブの中の切り替え。未選択のときは候補を一覧で出す。
-function StaffRequestNav({ active, onSelect, badges = {} }) {
+function StaffRequestNav({ active, onSelect, badges = {}, items = STAFF_REQUEST_ITEMS }) {
   if (!active) {
     return (
       <div className="space-y-3">
         <h2 className="font-bold text-[15px] text-slate-800">各種申請</h2>
         <div className="space-y-2.5">
-          {STAFF_REQUEST_ITEMS.map((it) => {
+          {items.map((it) => {
             const Icon = it.icon;
             const badge = badges[it.key];
             return (
@@ -5056,7 +5059,7 @@ function StaffRequestNav({ active, onSelect, badges = {} }) {
         <ChevronLeft size={14} /> 各種申請の一覧へ
       </button>
       <div className="-mx-1 flex gap-1.5 overflow-x-auto px-1 pb-1">
-        {STAFF_REQUEST_ITEMS.map((it) => {
+        {items.map((it) => {
           const badge = badges[it.key];
           return (
             <button
@@ -6517,6 +6520,9 @@ function EoPerformanceSection({ employeeId, isDesktop }) {
   const [cancellations, setCancellations] = useState('0');
   const [existingDaily, setExistingDaily] = useState({});
   const [saving, setSaving] = useState(false);
+  // 入力したまま保存していない状態を見えるようにする（途中保存のため）
+  const [dirty, setDirty] = useState(false);
+  const [savedAt, setSavedAt] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -6527,15 +6533,25 @@ function EoPerformanceSection({ employeeId, isDesktop }) {
       setTabletIssues(String(np?.tablet_issues ?? 0));
       setCancellations(String(np?.cancellations ?? 0));
       setExistingDaily(ep?.daily || {});
+      setDirty(false);
+      setSavedAt(null);
       setLoading(false);
     });
     return () => { cancelled = true; };
   }, [employeeId, year, month]);
 
+  // 保存していない入力があるまま対象月を変えると消えてしまうため、確認する
+  const changeMonthSafely = (apply) => {
+    if (dirty && !window.confirm('保存していない入力があります。保存せずに対象月を切り替えますか？')) return;
+    apply();
+  };
+
   const updateNewDay = (d, updater) => {
+    setDirty(true);
     setNewDaily((prev) => ({ ...prev, [d]: updater(prev[d] || emptyNewPerfDay()) }));
   };
   const updateExistingDay = (d, key, value) => {
+    setDirty(true);
     setExistingDaily((prev) => ({ ...prev, [d]: { ...(prev[d] || emptyExistingPerfDay()), [key]: value } }));
   };
 
@@ -6547,14 +6563,14 @@ function EoPerformanceSection({ employeeId, isDesktop }) {
   const approxG10Rate = computeApproxG10Rate(newDaily);
   const adjustedNewPoints = monthNewPoints - (Number(tabletIssues) || 0) * 2 - (Number(cancellations) || 0) * 3;
 
+  // 新規・既存の両方をまとめて保存する（シートを切り替えても入力が消えないようにするため）
   const save = async () => {
     setSaving(true);
-    if (sheet === 'new') {
-      await saveNewPerf(employeeId, year, month, { daily: newDaily, tablet_issues: Number(tabletIssues) || 0, cancellations: Number(cancellations) || 0 });
-    } else {
-      await saveExistingPerf(employeeId, year, month, existingDaily);
-    }
+    await saveNewPerf(employeeId, year, month, { daily: newDaily, tablet_issues: Number(tabletIssues) || 0, cancellations: Number(cancellations) || 0 });
+    await saveExistingPerf(employeeId, year, month, existingDaily);
     setSaving(false);
+    setDirty(false);
+    setSavedAt(new Date());
   };
 
   const years = [now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1];
@@ -6565,14 +6581,29 @@ function EoPerformanceSection({ employeeId, isDesktop }) {
       <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2 flex-wrap">
         <BarChart3 size={15} className="text-slate-400" />
         <h2 className="font-bold text-[13.5px]">eo業務 実績入力</h2>
+        {dirty && (
+          <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10.5px] font-bold text-amber-700">未保存</span>
+        )}
         <div className="ml-auto flex items-center gap-2">
-          <select value={year} onChange={(e) => setYear(Number(e.target.value))} className="border border-slate-200 rounded-lg px-2 py-1.5 text-[12.5px] bg-white">
+          <select
+            value={year}
+            onChange={(e) => { const v = Number(e.target.value); changeMonthSafely(() => setYear(v)); }}
+            className="border border-slate-200 rounded-lg px-2 py-1.5 text-[12.5px] bg-white"
+          >
             {years.map((y) => <option key={y} value={y}>{y}年</option>)}
           </select>
-          <select value={month} onChange={(e) => setMonth(Number(e.target.value))} className="border border-slate-200 rounded-lg px-2 py-1.5 text-[12.5px] bg-white">
+          <select
+            value={month}
+            onChange={(e) => { const v = Number(e.target.value); changeMonthSafely(() => setMonth(v)); }}
+            className="border border-slate-200 rounded-lg px-2 py-1.5 text-[12.5px] bg-white"
+          >
             {months.map((m) => <option key={m} value={m}>{m}月</option>)}
           </select>
         </div>
+      </div>
+
+      <div className="px-5 pt-3 text-[11.5px] text-slate-500">
+        入力の途中でも「実績の内容を保存する」で保存できます。新規・既存の両方がまとめて保存され、あとから続きを入力できます。
       </div>
 
       <div className="px-5 pt-3 flex gap-2">
@@ -6595,10 +6626,10 @@ function EoPerformanceSection({ employeeId, isDesktop }) {
       {sheet === 'new' && (
         <div className="px-5 pb-3 grid grid-cols-2 gap-3">
           <Field label="タブレット不備件数（-2P/件）">
-            <input type="number" value={tabletIssues} onChange={(e) => setTabletIssues(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" />
+            <input type="number" value={tabletIssues} onChange={(e) => { setDirty(true); setTabletIssues(e.target.value); }} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" />
           </Field>
           <Field label="キャンセル件数（-3P/件）">
-            <input type="number" value={cancellations} onChange={(e) => setCancellations(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" />
+            <input type="number" value={cancellations} onChange={(e) => { setDirty(true); setCancellations(e.target.value); }} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" />
           </Field>
         </div>
       )}
@@ -6615,9 +6646,16 @@ function EoPerformanceSection({ employeeId, isDesktop }) {
           ) : (
             <EoExistingPerfTable year={year} month={month} daily={existingDaily} onUpdateDay={updateExistingDay} />
           )}
-          <button onClick={save} disabled={saving} className="mt-4 w-full py-2.5 rounded-lg bg-slate-800 disabled:bg-slate-300 text-white text-[13px] font-bold">
-            {saving ? '保存中…' : 'この内容で保存する'}
+          <button onClick={save} disabled={saving} className="mt-4 w-full py-2.5 rounded-lg bg-amber-600 disabled:bg-slate-300 text-white text-[13px] font-bold">
+            {saving ? '保存中…' : '実績の内容を保存する'}
           </button>
+          <div className="mt-1.5 text-center text-[11px] text-slate-400">
+            {dirty
+              ? '保存していない入力があります'
+              : savedAt
+                ? `保存しました（${hhmm(savedAt)}）`
+                : '入力の途中でも保存できます'}
+          </div>
         </div>
       )}
     </div>
@@ -7163,7 +7201,8 @@ const HELP_STAFF = [
     category: '画面の構成',
     items: [
       { q: '画面の上のタブはどう分かれていますか', a: '「勤怠」＝打刻と勤怠一覧・実績、「労務」＝会社からのお知らせ、「各種申請」＝申請の入口、「給与」＝給与明細、「ヘルプ」＝この画面です。スマートフォンでも同じ並びです。' },
-      { q: '申請はどこからしますか', a: 'すべて「各種申請」タブからです。押すと「休暇申請」「月次勤怠申請」「交通費申請」「年末調整」「個人情報の変更申請」の候補が出るので、必要なものを選んでください。未提出のものがあるときはタブに印が付きます。' },
+      { q: '申請はどこからしますか', a: 'すべて「各種申請」タブからです。押すと「休暇申請」「月次勤怠申請」「交通費申請」「年末調整」「個人情報の変更申請」の候補が出るので、必要なものを選んでください。eo業務の方は「eo業務 実績入力」も同じ場所にあります。未提出のものがあるときはタブに印が付きます。' },
+      { q: 'eo業務の実績はどこで入力しますか', a: '「各種申請」→「eo業務 実績入力」です。対象の年月を選び、新規実績・既存実績（アップセルLTV）を日ごとに入力します。入力の途中でも「実績の内容を保存する」で保存でき、新規・既存の両方がまとめて保存されます。保存していない入力があるときは「未保存」と表示され、対象月を切り替えようとすると確認が出ます。' },
       { q: '月次勤怠申請とは', a: '前月分の勤怠を確認して提出する手続きです。「各種申請」→「月次勤怠申請」から、交通費とまとめて提出できます。提出すると管理者が確認し、最後にマスター管理者が最終承認して確定します。確定後にその月の給与明細が公開されます。未提出のときは「勤怠」タブにもお知らせが出ます。' },
     ],
   },
