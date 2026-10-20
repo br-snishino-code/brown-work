@@ -786,7 +786,7 @@ function ToastView({ toast }) {
 // 以降のコンポーネント（LoginScreenなど）は一切変更していません。
 // ============================================================
 
-const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, performanceReports: [], payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, employeeAttendanceSchedules: {}, announcements: [], yearEndAdjustments: [], commuteExpenseClaims: [], resignationReasons: [], monthlyConfirmations: [], settings: {} };
+const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, performanceReports: [], payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, employeeAttendanceSchedules: {}, announcements: [], yearEndAdjustments: [], commuteExpenseClaims: [], resignationReasons: [], monthlyConfirmations: [], shiftPeriods: [], shiftRequests: [], settings: {} };
 
 // 管理者宛の通知メールの送信先（app_settings の key）
 const SETTING_ADMIN_NOTIFY_EMAIL = 'admin_notify_email';
@@ -1138,6 +1138,25 @@ const rowToResignationReason = (row) => ({
   isActive: row.is_active !== false,
 });
 
+const rowToShiftPeriod = (row) => ({
+  targetMonth: row.target_month,
+  isOpen: row.is_open !== false,
+  deadline: row.deadline || '',
+  requestDays: Array.isArray(row.request_days) ? row.request_days : [],
+  note: row.note || '',
+  openedAt: row.opened_at,
+});
+
+const rowToShiftRequest = (row) => ({
+  id: row.id,
+  employeeId: row.employee_id,
+  employeeName: row.employees?.name || '',
+  targetMonth: row.target_month,
+  answers: row.answers || {},
+  note: row.note || '',
+  submittedAt: row.submitted_at,
+});
+
 const rowToAnnouncement = (row) => ({
   id: row.id,
   title: row.title,
@@ -1171,6 +1190,8 @@ async function fetchAllData() {
     resignationReasonsRes,
     appSettingsRes,
     monthlyConfirmRes,
+    shiftPeriodRes,
+    shiftRequestRes,
   ] = await Promise.all([
     supabase.from('employees').select('*'),
     supabase.from('attendance_records').select('*'),
@@ -1189,6 +1210,8 @@ async function fetchAllData() {
     supabase.from('resignation_reasons').select('*').order('sort_order', { ascending: true }),
     supabase.from('app_settings').select('*'),
     supabase.from('monthly_attendance_confirmations').select('*, employees(name)').order('target_month', { ascending: false }),
+    supabase.from('shift_request_periods').select('*').order('target_month', { ascending: false }),
+    supabase.from('shift_requests').select('*, employees(name)').order('target_month', { ascending: false }),
   ]);
 
   for (const res of [employeesRes, recordsRes, correctionsRes, leaveRes, perfRes, notifRes, payrollRes, auditRes, profileReqRes, groupLeaveRes, employeeAttendanceRes, announcementsRes, yearEndRes, commuteClaimsRes]) {
@@ -1199,6 +1222,10 @@ async function fetchAllData() {
 
   // 月次勤怠の確定（SQL未実行でも画面が落ちないよう、エラー時は空扱いにする）
   const monthlyConfirmations = monthlyConfirmRes?.error ? [] : (monthlyConfirmRes?.data || []).map(rowToMonthlyConfirm);
+
+  // シフト希望（SQL未実行でも画面が落ちないよう、エラー時は空扱いにする）
+  const shiftPeriods = shiftPeriodRes?.error ? [] : (shiftPeriodRes?.data || []).map(rowToShiftPeriod);
+  const shiftRequests = shiftRequestRes?.error ? [] : (shiftRequestRes?.data || []).map(rowToShiftRequest);
 
   // アプリ全体の設定（SQL未実行でも画面が落ちないよう、エラー時は空扱いにする）
   const settings = {};
@@ -1244,6 +1271,8 @@ async function fetchAllData() {
     commuteExpenseClaims: (commuteClaimsRes.data || []).map(rowToCommuteClaim),
     resignationReasons,
     monthlyConfirmations,
+    shiftPeriods,
+    shiftRequests,
     settings,
   };
 }
@@ -2966,6 +2995,60 @@ function AttendanceApp() {
     return true;
   };
 
+  // ---- シフト希望 ----
+  // スタッフが1日ごとの希望（ok／off／paid）を提出する
+  const submitShiftRequest = async (targetMonth, answers, note) => {
+    const existing = (data.shiftRequests || []).find(
+      (r) => r.employeeId === employeeId && r.targetMonth === targetMonth
+    );
+    const row = {
+      employee_id: employeeId,
+      target_month: targetMonth,
+      answers,
+      note: note || null,
+      submitted_at: new Date().toISOString(),
+    };
+    const { error } = existing
+      ? await supabase.from('shift_requests').update(row).eq('id', existing.id)
+      : await supabase.from('shift_requests').insert(row);
+    if (error) {
+      console.error('シフト希望の提出に失敗しました', error);
+      show(`提出に失敗しました：${error.message || ''}`, 'warn');
+      return false;
+    }
+    await notifyAdmin(
+      `【シフト希望】${session.name} - ${monthKeyLabel(targetMonth)}分`,
+      `${session.name}さんが${monthKeyLabel(targetMonth)}分のシフト希望を提出しました。`,
+      null
+    );
+    await refreshData();
+    show(existing ? 'シフト希望を出し直しました' : 'シフト希望を提出しました', 'success');
+    return true;
+  };
+
+  // 管理者が対象月の受付設定（受付中・締切・出勤依頼日）を保存する
+  const saveShiftPeriod = async (targetMonth, patch) => {
+    const existing = (data.shiftPeriods || []).find((p) => p.targetMonth === targetMonth);
+    const row = {
+      target_month: targetMonth,
+      is_open: patch.isOpen != null ? patch.isOpen : (existing ? existing.isOpen : true),
+      deadline: patch.deadline !== undefined ? (patch.deadline || null) : (existing?.deadline || null),
+      request_days: patch.requestDays || existing?.requestDays || [],
+      note: patch.note !== undefined ? (patch.note || null) : (existing?.note || null),
+      opened_by: session.id,
+    };
+    const { error } = existing
+      ? await supabase.from('shift_request_periods').update(row).eq('target_month', targetMonth)
+      : await supabase.from('shift_request_periods').insert(row);
+    if (error) {
+      console.error('シフト受付の保存に失敗しました', error);
+      show(`保存に失敗しました：${error.message || ''}`, 'warn');
+      return false;
+    }
+    await refreshData();
+    return true;
+  };
+
   // 交通費の承認内容が変わったとき、作成済みの給与明細の「交通費精算」も合わせる
   const syncCommuteAmountInPayroll = async (targetEmployeeId, targetMonth, newAmount) => {
     if (!targetMonth) return false;
@@ -3420,16 +3503,26 @@ function AttendanceApp() {
   const requestBadges = {
     monthly: needsMonthlyConfirm ? '未提出' : null,
     commute: needsCommuteClaimReminder ? '未提出' : null,
+    shift: openShiftPeriod && !myShiftRequest ? '未提出' : null,
   };
   // 実績入力は、所属している業務（メイングループ）の入力フォーマットを自動で出す。
   // 定義がない業務の方には「実績入力」自体を出さない。
   const perfFormat = performanceFormatFor(session.mainGroup);
   const PerformanceFormatSection = perfFormat?.Component || null;
+  // シフト希望：受付中の月があるときだけ各種申請に出す
+  const openShiftPeriod = (data.shiftPeriods || []).find((p) => p.isOpen) || null;
+  const myShiftRequest = openShiftPeriod
+    ? (data.shiftRequests || []).find((r) => r.employeeId === employeeId && r.targetMonth === openShiftPeriod.targetMonth) || null
+    : null;
   const staffRequestItems = STAFF_REQUEST_ITEMS
-    .filter((it) => !it.byGroup || !!perfFormat)
-    .map((it) => (it.byGroup && perfFormat
-      ? { ...it, label: perfFormat.label, desc: perfFormat.desc }
-      : it));
+    .filter((it) => (!it.byGroup || !!perfFormat) && (!it.shiftOnly || !!openShiftPeriod))
+    .map((it) => {
+      if (it.byGroup && perfFormat) return { ...it, label: perfFormat.label, desc: perfFormat.desc };
+      if (it.shiftOnly && openShiftPeriod) {
+        return { ...it, desc: `${monthKeyLabel(openShiftPeriod.targetMonth)}分${openShiftPeriod.deadline ? `（締切 ${dateLabel(openShiftPeriod.deadline)}）` : ''}` };
+      }
+      return it;
+    });
   const openRequest = (key) => {
     setTopTab('requests');
     setRequestTab(key);
@@ -3505,6 +3598,14 @@ function AttendanceApp() {
         {effectiveTopTab === 'requests' && showStaffScreens && (
           <div className="space-y-5">
             <StaffRequestNav active={requestTab} onSelect={setRequestTab} badges={requestBadges} items={staffRequestItems} />
+            {requestTab === 'shift' && (
+              <ShiftRequestSection
+                session={session}
+                period={openShiftPeriod}
+                request={myShiftRequest}
+                onSubmit={submitShiftRequest}
+              />
+            )}
             {requestTab === 'leave' && (
               <LeaveView
                 leaveRequests={myLeaveRequests}
@@ -3649,6 +3750,7 @@ function AttendanceApp() {
             onDecidePerformance={decidePerformanceReport}
             onDecideCommute={decideCommuteExpenseClaim}
             onNotifyEmployee={notifyEmployeeUser}
+            onSaveShiftPeriod={saveShiftPeriod}
             onAddAccount={handleAddAccount}
             onDeleteAccount={handleDeleteAccount}
             onResetPassword={handleResetPassword}
@@ -5004,6 +5106,7 @@ function GlobalTopTabs({
 
 // 各種申請の候補（スタッフ画面）
 const STAFF_REQUEST_ITEMS = [
+  { key: 'shift', label: 'シフト希望', desc: '翌月の出勤可能日を提出', icon: CalendarDays, shiftOnly: true },
   { key: 'leave', label: '休暇申請', desc: '有休・欠勤などの申請と残日数', icon: Palmtree },
   { key: 'monthly', label: '月次勤怠申請', desc: '前月分の勤怠（交通費とまとめて提出）', icon: CheckCircle2 },
   { key: 'commute', label: '交通費申請', desc: '立て替えた交通費の精算', icon: Wallet },
@@ -5013,6 +5116,202 @@ const STAFF_REQUEST_ITEMS = [
   { key: 'yearend', label: '年末調整', desc: '年末調整の書類を提出', icon: FileText },
   { key: 'profile', label: '個人情報の変更申請', desc: '氏名・住所・口座などの変更', icon: UserCog },
 ];
+
+// ---- シフト希望 ----
+const SHIFT_ANSWERS = [
+  { key: 'ok', label: '●', full: '出勤可能', cls: 'bg-amber-600 text-white border-amber-600' },
+  { key: 'off', label: '×', full: '希望休', cls: 'bg-slate-700 text-white border-slate-700' },
+  { key: 'paid', label: '有給', full: '有給（SV報告済）', cls: 'bg-teal-700 text-white border-teal-700' },
+];
+const SHIFT_ANSWER_LABEL = { ok: '●', off: '×', paid: '有給' };
+
+// 対象月の日付を並べる（祝日と曜日の情報つき）
+function shiftMonthDays(targetMonth) {
+  const [y, m] = targetMonth.split('-').map(Number);
+  if (!y || !m) return [];
+  const lastDay = new Date(y, m, 0).getDate();
+  const days = [];
+  for (let d = 1; d <= lastDay; d++) {
+    const key = `${targetMonth}-${pad(d)}`;
+    const wd = new Date(key + 'T00:00:00').getDay();
+    const holidayName = getHolidayName(key);
+    days.push({
+      key,
+      day: d,
+      weekday: ['日', '月', '火', '水', '木', '金', '土'][wd],
+      isSunday: wd === 0,
+      isSaturday: wd === 6,
+      holidayName,
+      isWeekendOrHoliday: wd === 0 || wd === 6 || !!holidayName,
+    });
+  }
+  return days;
+}
+
+// 出勤依頼日の既定（土日祝）
+function defaultRequestDays(targetMonth) {
+  return shiftMonthDays(targetMonth).filter((d) => d.isWeekendOrHoliday).map((d) => d.key);
+}
+
+function ShiftRequestSection({ session, period, request, onSubmit }) {
+  const targetMonth = period?.targetMonth || '';
+  const days = useMemo(() => shiftMonthDays(targetMonth), [targetMonth]);
+  const [answers, setAnswers] = useState({});
+  const [loadedFor, setLoadedFor] = useState(null);
+  const [note, setNote] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (loadedFor === targetMonth) return;
+    setAnswers(request?.answers || {});
+    setNote(request?.note || '');
+    setLoadedFor(targetMonth);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [targetMonth, request?.id]);
+
+  if (!period) {
+    return (
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-5 py-10 text-center">
+        <CalendarDays size={22} className="mx-auto mb-2 text-slate-300" />
+        <div className="text-[13px] font-bold text-slate-600">いまは受付中のシフト希望はありません</div>
+        <div className="mt-1 text-[11.5px] text-slate-400">受付が始まると、お知らせでご連絡します。</div>
+      </div>
+    );
+  }
+
+  const requestDays = new Set(period.requestDays && period.requestDays.length > 0 ? period.requestDays : defaultRequestDays(targetMonth));
+  const filled = days.filter((d) => answers[d.key]).length;
+  const complete = filled === days.length && days.length > 0;
+  const closed = !period.isOpen;
+
+  const setAll = () => {
+    const next = { ...answers };
+    days.forEach((d) => { if (!next[d.key]) next[d.key] = 'ok'; });
+    setAnswers(next);
+  };
+
+  const submit = async () => {
+    setSaving(true);
+    const ok = await onSubmit(targetMonth, answers, note);
+    setSaving(false);
+    if (ok) setLoadedFor(null);
+  };
+
+  // 1日分の行。再描画で作り直されないよう関数として組み立てる
+  const renderDay = (d) => {
+    const picked = answers[d.key];
+    const isRequest = requestDays.has(d.key);
+    return (
+      <div
+        key={d.key}
+        className={`rounded-2xl border px-3 py-2.5 ${isRequest ? 'border-amber-500 bg-white' : 'border-slate-200 bg-white'}`}
+      >
+        <div className="mb-2 flex items-center gap-1.5 flex-wrap">
+          <span className={`text-[13.5px] font-bold ${d.isSunday || d.holidayName ? 'text-rose-600' : d.isSaturday ? 'text-sky-600' : 'text-slate-800'}`}>
+            {d.day}日({d.weekday})
+          </span>
+          {isRequest && (
+            <span className="rounded-full bg-amber-50 px-1.5 py-[1px] text-[10px] font-bold text-amber-700">★ 出勤依頼日</span>
+          )}
+          {d.holidayName && (
+            <span className="rounded-full bg-rose-50 px-1.5 py-[1px] text-[10px] font-bold text-rose-600">{d.holidayName}</span>
+          )}
+        </div>
+        <div className="flex gap-1.5">
+          {SHIFT_ANSWERS.map((a) => (
+            <button
+              key={a.key}
+              type="button"
+              disabled={closed}
+              onClick={() => setAnswers((prev) => ({ ...prev, [d.key]: a.key }))}
+              className={`flex-1 rounded-xl border py-2.5 text-[13px] font-bold transition-colors disabled:opacity-60 ${
+                picked === a.key ? a.cls : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50'
+              } ${a.key === 'paid' ? 'text-[11.5px]' : ''}`}
+            >
+              {a.label}
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2 flex-wrap">
+          <CalendarDays size={15} className="text-slate-400" />
+          <h2 className="font-bold text-[13.5px]">{monthKeyLabel(targetMonth)}のシフト希望</h2>
+          {period.deadline && (
+            <span className="rounded-full bg-rose-50 px-2 py-0.5 text-[10.5px] font-bold text-rose-700">締切 {dateLabel(period.deadline)}</span>
+          )}
+          {request && (
+            <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10.5px] font-bold text-emerald-700">提出済み</span>
+          )}
+          {closed && (
+            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10.5px] font-bold text-slate-500">受付終了</span>
+          )}
+        </div>
+        <div className="px-5 py-4 space-y-3">
+          <div className="rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-[11.5px] leading-relaxed text-slate-600">
+            ● ＝ 出勤可能　／　× ＝ 希望休<br />
+            有給 ＝ SVへ報告済みの有給<br />
+            <span className="font-bold text-amber-700">★</span> の日は出勤依頼日です（土日祝）
+          </div>
+          {period.note && (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-[11.5px] text-amber-800">{period.note}</div>
+          )}
+          <div className="flex items-center gap-3">
+            <div className="flex-1">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] text-slate-400">入力済み</span>
+                <span className="text-[11.5px] font-bold text-slate-800">{filled}／{days.length}日</span>
+              </div>
+              <div className="mt-1 h-1.5 rounded-full bg-slate-200 overflow-hidden">
+                <div className="h-1.5 bg-amber-600" style={{ width: `${days.length ? Math.round((filled / days.length) * 100) : 0}%` }} />
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={setAll}
+              disabled={closed}
+              className="shrink-0 rounded-lg border border-slate-300 px-3 py-2 text-[11.5px] font-bold text-slate-600 disabled:opacity-60"
+            >
+              残りを●にする
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="space-y-2">{days.map((d) => renderDay(d))}</div>
+
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-5 py-4 space-y-3">
+        <Field label="管理者へのメモ（任意）">
+          <textarea
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            rows={2}
+            placeholder="例）15日は午後から出られます"
+            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px] resize-none"
+          />
+        </Field>
+        <button
+          onClick={submit}
+          disabled={saving || !complete || closed}
+          className="w-full rounded-xl bg-amber-600 py-3 text-[14px] font-bold text-white disabled:bg-slate-200"
+        >
+          {saving ? '送信中…' : request ? 'この内容で出し直す' : 'この内容で提出する'}
+        </button>
+        {!complete && !closed && (
+          <div className="text-center text-[11px] text-slate-400">すべての日を選ぶと押せるようになります（残り{days.length - filled}日）</div>
+        )}
+        {closed && (
+          <div className="text-center text-[11px] text-slate-400">受付が終了しているため提出できません。管理者にご相談ください。</div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 // 勤怠画面から月次勤怠申請へ誘導するお知らせ
 function MonthlyConfirmReminderCard({ targetMonth, onOpen }) {
@@ -7241,6 +7540,7 @@ const HELP_STAFF = [
     items: [
       { q: '画面の上のタブはどう分かれていますか', a: '「勤怠」＝打刻と勤怠履歴、「労務」＝会社からのお知らせ、「各種申請」＝申請の入口、「給与」＝給与明細、「ヘルプ」＝この画面です。スマートフォンでも同じ並びです。' },
       { q: '申請はどこからしますか', a: 'すべて「各種申請」タブからです。押すと「休暇申請」「月次勤怠申請」「交通費申請」「年末調整」「個人情報の変更申請」の候補が出るので、必要なものを選んでください。eo業務など、実績を入力する業務の方は「実績入力」も同じ場所にあります。未提出のものがあるときはタブに印が付きます。' },
+      { q: 'シフト希望はどこから出しますか', a: '受付が始まると「各種申請」に「シフト希望」が出ます。1日ごとに「●（出勤可能）」「×（希望休）」「有給（SVへ報告済み）」から選び、すべての日を選ぶと提出できます。★が付いている日は出勤依頼日（土日祝）です。「残りを●にする」で未選択の日をまとめて●にできます。締切前であれば、提出後も同じ画面から出し直せます。受付が終わると項目は表示されなくなります。' },
       { q: '実績はどこで入力しますか', a: '「各種申請」→「実績入力」です。入力する項目は、所属している業務によって自動で切り替わります。対象の年月を選び、新規実績・既存実績（アップセルLTV）を日ごとに入力します。入力の途中でも「実績の内容を保存する」で保存でき、新規・既存の両方がまとめて保存されます。保存していない入力があるときは「未保存」と表示され、対象月を切り替えようとすると確認が出ます。' },
       { q: '月次勤怠申請とは', a: '前月分の勤怠を確認して提出する手続きです。「各種申請」→「月次勤怠申請」から、交通費とまとめて提出できます。提出すると管理者が確認し、最後にマスター管理者が最終承認して確定します。確定後にその月の給与明細が公開されます。未提出のときは「勤怠」タブにもお知らせが出ます。' },
     ],
@@ -7305,6 +7605,7 @@ const HELP_ADMIN = [
   {
     category: '勤怠の管理',
     items: [
+      { q: 'シフト希望を集めるには', a: '「勤怠」→「シフト」で対象月を選び、締切と連絡事項を入れて「この月の受付を開始する」を押します。スタッフの「各種申請」に「シフト希望」が出て、提出されると一覧に反映されます。未提出の方がいるときは「未提出の◯名に依頼を送る」でお知らせとメールをまとめて送れます。一覧の最下行はその日に出勤可能な人数で、10名以下の日は赤くなります。集まったら「CSVで書き出す」でスタッフ×日付の形に出力し、スプレッドシートに貼り付けてシフトを作成してください。締め切るときは「受付を締め切る」を押します。' },
       { q: '承認をまとめて行うには', a: '「勤怠」→「承認」を開くと、勤怠修正・休暇・月次勤怠の確定・交通費の未処理が1つの画面に並びます。上の「すべて／勤怠修正／休暇／月次確定／交通費」で絞り込めます。左のチェックを入れて「まとめて承認」を押すと、種類が違っても一度に承認できます。却下も同じ手順です。金額を直してから承認する場合や、差し戻しの理由を入れる場合は「詳細」から元の画面で操作してください。交通費と月次勤怠の最終承認はマスター管理者のみに表示されます。' },
       { q: 'ダッシュボードの右側は何ですか', a: '「本日の勤務状況」は勤務中・退勤済・未出勤の人数と、まだ打刻のない方の氏名です。「今月の締めまで」は前月分の月次勤怠と交通費の提出状況で、未提出の方へまとめて提出のお知らせを送れます。「最近の操作」は直近の承認や修正の履歴です。' },
       { q: 'スタッフ一覧から直接操作するには', a: '「勤怠」→「スタッフ一覧」の各行に、本日の状態・今月の勤務時間・有休残・その方の未処理が表示されます。行の右端にある「⋯」を押すと、そのスタッフの勤怠の確認と修正、未処理の承認、給与の作成、登録情報の編集へ直接移動できます。' },
@@ -7509,6 +7810,287 @@ function PaidLeaveSummaryTab({ employeeAccounts, leaveRequests, isDesktop }) {
         </div>
       )}
 
+    </div>
+  );
+}
+
+// ---- 管理者：シフト希望の受付と一覧 ----
+function ShiftAdminTab({ employeeAccounts, periods = [], requests = [], onSavePeriod, onNotifyEmployee, isDesktop }) {
+  const nextMonth = (() => {
+    const d = new Date();
+    const y = d.getMonth() === 11 ? d.getFullYear() + 1 : d.getFullYear();
+    const m = d.getMonth() === 11 ? 1 : d.getMonth() + 2;
+    return `${y}-${pad(m)}`;
+  })();
+  const [targetMonth, setTargetMonth] = useState(() => (periods[0]?.targetMonth || nextMonth));
+  const [deadline, setDeadline] = useState('');
+  const [note, setNote] = useState('');
+  const [loadedFor, setLoadedFor] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [sending, setSending] = useState(false);
+
+  const period = periods.find((p) => p.targetMonth === targetMonth) || null;
+  const days = useMemo(() => shiftMonthDays(targetMonth), [targetMonth]);
+  const activeStaff = employeeAccounts.filter((a) => !a.resignationDate);
+  const monthRequests = requests.filter((r) => r.targetMonth === targetMonth);
+  const byEmployee = {};
+  monthRequests.forEach((r) => { byEmployee[r.employeeId] = r; });
+  const notSubmitted = activeStaff.filter((a) => !byEmployee[a.id]);
+  const requestDays = new Set(
+    period && period.requestDays && period.requestDays.length > 0 ? period.requestDays : defaultRequestDays(targetMonth)
+  );
+
+  useEffect(() => {
+    if (loadedFor === targetMonth) return;
+    setDeadline(period?.deadline || '');
+    setNote(period?.note || '');
+    setLoadedFor(targetMonth);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [targetMonth, period?.targetMonth]);
+
+  const savePeriod = async (patch) => {
+    setSaving(true);
+    await onSavePeriod(targetMonth, { deadline, note, requestDays: Array.from(requestDays), ...patch });
+    setSaving(false);
+  };
+
+  const sendRequestMail = async () => {
+    if (notSubmitted.length === 0 || !onNotifyEmployee) return;
+    if (!window.confirm(`${monthKeyLabel(targetMonth)}分のシフト希望について、未提出の${notSubmitted.length}名に提出のお願いを送ります。よろしいですか？`)) return;
+    setSending(true);
+    const deadlineText = deadline ? `締切は${dateLabel(deadline)}です。` : '';
+    for (const acc of notSubmitted) {
+      // eslint-disable-next-line no-await-in-loop
+      await onNotifyEmployee(
+        acc.id,
+        `【ご提出のお願い】${monthKeyLabel(targetMonth)}分のシフト希望`,
+        `${monthKeyLabel(targetMonth)}分のシフト希望がまだ提出されていません。${deadlineText}「各種申請」→「シフト希望」からご提出ください。`,
+        null,
+        [
+          `${monthKeyLabel(targetMonth)}分のシフト希望がまだ提出されていません。`,
+          ...(deadlineText ? [deadlineText] : []),
+          '「各種申請」→「シフト希望」からご提出ください。',
+        ]
+      );
+    }
+    setSending(false);
+  };
+
+  // スプレッドシートに貼り付けられる形で書き出す
+  const exportCsv = () => {
+    const header = ['氏名', ...days.map((d) => `${d.day}(${d.weekday})${requestDays.has(d.key) ? '★' : ''}`)];
+    const lines = [header.join(',')];
+    activeStaff.forEach((acc) => {
+      const r = byEmployee[acc.id];
+      const cells = days.map((d) => (r ? (SHIFT_ANSWER_LABEL[r.answers?.[d.key]] || '') : ''));
+      lines.push([acc.name, ...cells].join(','));
+    });
+    const blob = new Blob(['﻿' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `シフト希望_${targetMonth}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const monthOptions = (() => {
+    const base = new Date();
+    const out = [];
+    for (let i = -1; i <= 3; i++) {
+      const d = new Date(base.getFullYear(), base.getMonth() + i, 1);
+      out.push(`${d.getFullYear()}-${pad(d.getMonth() + 1)}`);
+    }
+    periods.forEach((p) => { if (!out.includes(p.targetMonth)) out.push(p.targetMonth); });
+    return out.sort().reverse();
+  })();
+
+  // その日に出勤可能な人数
+  const okCount = (dayKey) => monthRequests.filter((r) => r.answers?.[dayKey] === 'ok').length;
+
+  const renderRow = (acc) => {
+    const r = byEmployee[acc.id];
+    if (!r) {
+      return (
+        <div key={acc.id} className="flex items-center gap-2 border-b border-slate-100 bg-rose-50 px-3 py-2 last:border-0">
+          <span className="w-28 shrink-0 text-[12.5px] font-bold text-rose-800 truncate">
+            <EmployeeLink id={acc.id} name={acc.name} />
+          </span>
+          <span className="flex-1 text-[11.5px] font-bold text-rose-700">未提出</span>
+          <span className="w-16 shrink-0 text-right text-[12px] font-bold text-slate-300">—</span>
+        </div>
+      );
+    }
+    const okDays = days.filter((d) => r.answers?.[d.key] === 'ok').length;
+    return (
+      <div key={acc.id} className="flex items-center gap-2 border-b border-slate-100 px-3 py-2 last:border-0">
+        <span className="w-28 shrink-0 text-[12.5px] font-bold text-slate-800 truncate">
+          <EmployeeLink id={acc.id} name={acc.name} />
+        </span>
+        <span className="flex flex-1 min-w-0 gap-[2px] overflow-x-auto">
+          {days.map((d) => {
+            const v = r.answers?.[d.key];
+            const cls = v === 'ok' ? 'text-amber-600' : v === 'off' ? 'text-slate-700' : v === 'paid' ? 'text-teal-700' : 'text-slate-200';
+            return (
+              <span
+                key={d.key}
+                title={`${d.day}日(${d.weekday})`}
+                className={`w-[22px] shrink-0 text-center text-[11px] font-bold ${cls} ${requestDays.has(d.key) ? 'bg-amber-50 rounded' : ''}`}
+              >
+                {v === 'paid' ? '有' : SHIFT_ANSWER_LABEL[v] || '-'}
+              </span>
+            );
+          })}
+        </span>
+        <span className="w-16 shrink-0 text-right text-[12px] font-bold text-slate-800">{okDays}日</span>
+      </div>
+    );
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-2.5 flex-wrap">
+        <CalendarDays size={16} className="text-slate-400" />
+        <h2 className="text-[14px] font-bold text-slate-800">シフト希望</h2>
+        <select
+          value={targetMonth}
+          onChange={(e) => setTargetMonth(e.target.value)}
+          aria-label="対象月"
+          className="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-[12px]"
+        >
+          {monthOptions.map((m) => <option key={m} value={m}>{monthKeyLabel(m)}分</option>)}
+        </select>
+        {period ? (
+          <span className={`rounded-full border px-2.5 py-1 text-[10.5px] font-bold ${period.isOpen ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-slate-100 text-slate-500'}`}>
+            {period.isOpen ? '受付中' : '受付終了'}
+            {period.deadline ? ` ・ 締切 ${dateLabel(period.deadline)}` : ''}
+          </span>
+        ) : (
+          <span className="rounded-full border border-slate-200 bg-slate-100 px-2.5 py-1 text-[10.5px] font-bold text-slate-500">未開始</span>
+        )}
+        <button
+          onClick={exportCsv}
+          className="ml-auto rounded-lg border border-slate-300 px-3 py-1.5 text-[11.5px] font-bold text-slate-600 hover:bg-slate-50"
+        >
+          CSVで書き出す
+        </button>
+      </div>
+
+      <div className="rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <div className="border-b border-slate-100 px-5 py-3 text-[12.5px] font-bold text-slate-700">受付の設定</div>
+        <div className="grid gap-3 px-5 py-4 sm:grid-cols-3">
+          <Field label="締切">
+            <input
+              type="date"
+              value={deadline}
+              onChange={(e) => setDeadline(e.target.value)}
+              className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono text-[13px]"
+            />
+          </Field>
+          <div className="sm:col-span-2">
+            <Field label="スタッフへの連絡事項（任意）">
+              <input
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                placeholder="例）年末のため土日の出勤にご協力ください"
+                className="w-full rounded-lg border border-slate-200 px-3 py-2 text-[13px]"
+              />
+            </Field>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2 border-t border-slate-100 px-5 py-3">
+          {!period || !period.isOpen ? (
+            <button
+              onClick={() => savePeriod({ isOpen: true })}
+              disabled={saving}
+              className="rounded-lg bg-amber-600 px-4 py-2 text-[12.5px] font-bold text-white disabled:bg-slate-200"
+            >
+              {saving ? '保存中…' : period ? '受付を再開する' : 'この月の受付を開始する'}
+            </button>
+          ) : (
+            <>
+              <button
+                onClick={() => savePeriod({})}
+                disabled={saving}
+                className="rounded-lg bg-slate-900 px-4 py-2 text-[12.5px] font-bold text-white disabled:bg-slate-200"
+              >
+                {saving ? '保存中…' : '設定を保存する'}
+              </button>
+              <button
+                onClick={() => savePeriod({ isOpen: false })}
+                disabled={saving}
+                className="rounded-lg border border-slate-300 px-4 py-2 text-[12.5px] font-bold text-slate-600"
+              >
+                受付を締め切る
+              </button>
+            </>
+          )}
+          <span className="self-center text-[11px] text-slate-400">
+            出勤依頼日（★）は土日祝が自動で付きます。
+          </span>
+        </div>
+      </div>
+
+      {period && notSubmitted.length > 0 && (
+        <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-amber-500 bg-amber-50 px-4 py-3">
+          <div className="min-w-[16rem] flex-1">
+            <div className="text-[12.5px] font-bold text-amber-900">提出 {activeStaff.length - notSubmitted.length}／{activeStaff.length}名　未提出が{notSubmitted.length}名います</div>
+            <div className="mt-0.5 text-[11px] text-amber-700">{notSubmitted.slice(0, 8).map((a) => a.name).join('、')}{notSubmitted.length > 8 ? ` ほか${notSubmitted.length - 8}名` : ''}</div>
+          </div>
+          <button
+            onClick={sendRequestMail}
+            disabled={sending}
+            className="shrink-0 rounded-lg bg-amber-600 px-3.5 py-2 text-[12px] font-bold text-white disabled:bg-slate-200"
+          >
+            {sending ? '送信中…' : `未提出の${notSubmitted.length}名に依頼を送る`}
+          </button>
+        </div>
+      )}
+
+      <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <div className="flex items-center gap-2 border-b border-slate-200 bg-slate-50 px-3 py-2">
+          <span className="w-28 shrink-0 text-[10.5px] font-bold text-slate-400">スタッフ</span>
+          <span className="flex flex-1 min-w-0 gap-[2px] overflow-x-auto">
+            {days.map((d) => (
+              <span
+                key={d.key}
+                className={`w-[22px] shrink-0 text-center text-[9.5px] font-bold ${d.isSunday || d.holidayName ? 'text-rose-500' : d.isSaturday ? 'text-sky-500' : 'text-slate-400'}`}
+              >
+                {d.day}
+              </span>
+            ))}
+          </span>
+          <span className="w-16 shrink-0 text-right text-[10.5px] font-bold text-slate-400">出勤可能</span>
+        </div>
+
+        {monthRequests.length === 0 && notSubmitted.length === activeStaff.length ? (
+          <div className="px-5 py-12 text-center text-[12.5px] text-slate-300">提出はまだありません</div>
+        ) : (
+          <div>{activeStaff.map((acc) => renderRow(acc))}</div>
+        )}
+
+        <div className="flex items-center gap-2 border-t border-slate-200 bg-slate-50 px-3 py-2">
+          <span className="w-28 shrink-0 text-[10.5px] font-bold text-slate-500">出勤可能な人数</span>
+          <span className="flex flex-1 min-w-0 gap-[2px] overflow-x-auto">
+            {days.map((d) => {
+              const n = okCount(d.key);
+              return (
+                <span
+                  key={d.key}
+                  className={`w-[22px] shrink-0 text-center text-[10.5px] font-bold ${n <= 10 ? 'text-rose-600' : 'text-slate-700'}`}
+                >
+                  {n}
+                </span>
+              );
+            })}
+          </span>
+          <span className="w-16 shrink-0" />
+        </div>
+      </div>
+
+      <div className="text-[11.5px] text-slate-400">
+        「CSVで書き出す」で、スプレッドシートに貼り付けられる形（スタッフ×日付）で出力します。シフトの作成はこれまでどおりスプレッドシートで行ってください。
+      </div>
     </div>
   );
 }
@@ -8498,7 +9080,7 @@ function PayrollMetric({ label, value }) {
   );
 }
 
-function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveCount, performanceCount, monthlyConfirmCount = 0, approvalCount = 0, isMasterAdmin }) {
+function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveCount, performanceCount, monthlyConfirmCount = 0, approvalCount = 0, shiftPendingCount = 0, isMasterAdmin }) {
   const [open, setOpen] = useState(null);
   const wrapRef = useRef(null);
 
@@ -8562,6 +9144,7 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
     { tab: 'attendance', label: '勤怠一覧', badge: attendanceCount },
     { tab: 'requests', label: '勤怠修正', badge: correctionCount },
     { tab: 'monthlyconfirm', label: '月次確定', badge: monthlyConfirmCount },
+    { tab: 'shift', label: 'シフト', badge: shiftPendingCount },
     { tab: 'leave', label: '休暇申請', badge: leaveCount },
     { tab: 'accounts', label: 'スタッフ一覧' },
   ];
@@ -8630,7 +9213,7 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
   );
 }
 
-function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAdminTab = null, onConsumeRequestedAdminTab, onDecide, onDecideLeave, onDecidePerformance, onDecideCommute, onNotifyEmployee, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onChangeLoginEmail, onDecideMonthlyConfirm, onCancelMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
+function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAdminTab = null, onConsumeRequestedAdminTab, onDecide, onDecideLeave, onDecidePerformance, onDecideCommute, onNotifyEmployee, onSaveShiftPeriod, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onChangeLoginEmail, onDecideMonthlyConfirm, onCancelMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
   const [tab, setTab] = useState('dashboard'); // dashboard | attendance | requests | leave | performance | accounts
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
@@ -8712,6 +9295,15 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
     if (onConsumeRequestedAdminTab) onConsumeRequestedAdminTab();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [requestedAdminTab]);
+
+  // シフト希望：受付中の月の未提出件数
+  const openShiftPeriodAdmin = (data.shiftPeriods || []).find((p) => p.isOpen) || null;
+  const shiftPendingCount = openShiftPeriodAdmin
+    ? employeeAccounts.filter(
+        (a) => !a.resignationDate
+          && !(data.shiftRequests || []).some((r) => r.employeeId === a.id && r.targetMonth === openShiftPeriodAdmin.targetMonth)
+      ).length
+    : 0;
 
   // ---- ダッシュボード右側：本日の勤務状況 ----
   const activeStaff = employeeAccounts.filter((acc) => !acc.resignationDate);
@@ -8905,6 +9497,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
           performanceCount={performancePending.length}
           monthlyConfirmCount={monthlyConfirmCount}
           approvalCount={approvalItems.length}
+          shiftPendingCount={shiftPendingCount}
           isMasterAdmin={isMasterAdmin}
         />
       ) : (
@@ -8919,6 +9512,9 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
                 {approvalItems.length}
               </span>
             )}
+          </button>
+          <button onClick={() => setTab('shift')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'shift' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
+            シフト
           </button>
           <button onClick={() => setTab('attendance')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'attendance' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
             勤怠一覧
@@ -8983,6 +9579,17 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
             ))}
           </div>
         </div>
+      )}
+
+      {tab === 'shift' && (
+        <ShiftAdminTab
+          employeeAccounts={employeeAccounts}
+          periods={data.shiftPeriods || []}
+          requests={data.shiftRequests || []}
+          onSavePeriod={onSaveShiftPeriod}
+          onNotifyEmployee={onNotifyEmployee}
+          isDesktop={isDesktop}
+        />
       )}
 
       {tab === 'approvals' && (
