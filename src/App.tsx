@@ -237,7 +237,7 @@ function buildInviteMail({ name, email, tempPassword }) {
     '　連絡用メールアドレス／電話番号',
     '　郵便番号／現住所／住民票の住所',
     '　配偶者の有無／世帯主の氏名・続柄',
-    '　緊急連絡先（お名前・電話番号）',
+    '　緊急連絡先（お名前・続柄・電話番号・住所）',
     '　給与振込先の口座情報（銀行名・支店名・口座番号・口座名義）',
     '　マイナンバー（12桁）',
     '',
@@ -798,7 +798,9 @@ const rowToAccount = (row) => ({
   householderRelation: row.householder_relation || '',
   phone: row.phone || '',
   emergencyContactName: row.emergency_contact_name || '',
+  emergencyContactRelation: row.emergency_contact_relation || '',
   emergencyContactPhone: row.emergency_contact_phone || '',
+  emergencyContactAddress: row.emergency_contact_address || '',
   wageType: row.wage_type || 'hourly',
   hourlyWage: row.hourly_wage != null ? Number(row.hourly_wage) : 0,
   monthlySalary: row.monthly_salary != null ? Number(row.monthly_salary) : 0,
@@ -980,7 +982,9 @@ const PROFILE_EDITABLE_FIELDS = [
   { key: 'nearestStation', label: '最寄り駅' },
   { key: 'phone', label: '電話番号' },
   { key: 'emergencyContactName', label: '緊急連絡先（氏名）' },
+  { key: 'emergencyContactRelation', label: '緊急連絡先（続柄）' },
   { key: 'emergencyContactPhone', label: '緊急連絡先（電話）' },
+  { key: 'emergencyContactAddress', label: '緊急連絡先（住所）' },
 ];
 
 const rowToProfileRequest = (row) => ({
@@ -2269,7 +2273,9 @@ function AttendanceApp() {
       residentAddress: 'resident_address',
       phone: 'phone',
       emergencyContactName: 'emergency_contact_name',
+      emergencyContactRelation: 'emergency_contact_relation',
       emergencyContactPhone: 'emergency_contact_phone',
+      emergencyContactAddress: 'emergency_contact_address',
       wageType: 'wage_type',
       hourlyWage: 'hourly_wage',
       monthlySalary: 'monthly_salary',
@@ -3380,6 +3386,8 @@ const toKatakana = (v) => String(v || '').replace(/[ぁ-ゖ]/g, (ch) => String.f
 
 // 世帯主との続柄（ご本人から見た関係）
 const HOUSEHOLDER_RELATIONS = ['本人', '配偶者', '父', '母', '子', '祖父', '祖母', '兄弟姉妹', 'その他'];
+// 緊急連絡先との続柄（ご本人から見た関係）
+const EMERGENCY_RELATIONS = ['配偶者', '父', '母', '子', '祖父', '祖母', '兄弟姉妹', '親族', '知人', 'その他'];
 
 const PROFILE_SETUP_SECTIONS = [
   {
@@ -3435,9 +3443,14 @@ const PROFILE_SETUP_SECTIONS = [
     fields: [
       { key: 'emergencyContactName', label: 'お名前', placeholder: '例）田中 太郎', required: true },
       {
+        key: 'emergencyContactRelation', label: '続柄', type: 'select', required: true,
+        options: EMERGENCY_RELATIONS, noDefault: true,
+      },
+      {
         key: 'emergencyContactPhone', label: '電話番号', type: 'tel', placeholder: '例）090-0000-0000', required: true,
         check: (v) => (onlyDigits(v).length >= 10 ? '' : '電話番号をご確認ください'),
       },
+      { key: 'emergencyContactAddress', label: '住所', placeholder: '例）京都府亀岡市三宅町22-11', required: true },
     ],
   },
 ];
@@ -3702,7 +3715,7 @@ function ProfileSetupScreen({ session, toast, onSave, onLogout }) {
   const [form, setForm] = useState(() => {
     const init = {};
     PROFILE_SETUP_ALL_FIELDS.forEach((f) => {
-      init[f.key] = session[f.key] || (f.type === 'select' && !f.lockedWhenSelf ? f.options[0] : '');
+      init[f.key] = session[f.key] || (f.type === 'select' && !f.lockedWhenSelf && !f.noDefault ? f.options[0] : '');
     });
     init.spouseStatus = session.spouseStatus || '無';
     init.householderRelation = session.householderRelation || '';
@@ -10083,7 +10096,9 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
     householderRelation: account.householderRelation || '',
     phone: account.phone || '',
     emergencyContactName: account.emergencyContactName || '',
+    emergencyContactRelation: account.emergencyContactRelation || '',
     emergencyContactPhone: account.emergencyContactPhone || '',
+    emergencyContactAddress: account.emergencyContactAddress || '',
     birthDate: account.birthDate || '',
     staffType: account.staffType || '社員',
     mainGroup: account.mainGroup || '',
@@ -10304,10 +10319,19 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                 <Field label="緊急連絡先（氏名）">
                   <input value={form.emergencyContactName} onChange={set('emergencyContactName')} placeholder="例）田中 一郎" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
                 </Field>
-                <Field label="緊急連絡先（電話）">
-                  <input value={form.emergencyContactPhone} onChange={set('emergencyContactPhone')} placeholder="090-xxxx-xxxx" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
+                <Field label="緊急連絡先（続柄）">
+                  <select value={form.emergencyContactRelation} onChange={set('emergencyContactRelation')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white">
+                    <option value="">未設定</option>
+                    {EMERGENCY_RELATIONS.map((r) => <option key={r} value={r}>{r}</option>)}
+                  </select>
                 </Field>
               </div>
+              <Field label="緊急連絡先（電話）">
+                <input value={form.emergencyContactPhone} onChange={set('emergencyContactPhone')} placeholder="090-xxxx-xxxx" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
+              </Field>
+              <Field label="緊急連絡先（住所）">
+                <input value={form.emergencyContactAddress} onChange={set('emergencyContactAddress')} placeholder="例）京都府亀岡市三宅町22-11" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
+              </Field>
               <Field label="スタッフ備考1"><input value={form.staffNote1} onChange={set('staffNote1')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" /></Field>
               <Field label="スタッフ備考2"><input value={form.staffNote2} onChange={set('staffNote2')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" /></Field>
               <Field label="スタッフ備考3"><input value={form.staffNote3} onChange={set('staffNote3')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" /></Field>
