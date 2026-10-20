@@ -9104,8 +9104,9 @@ function AdminYearEndAdjustmentTab({ requests, onDecide, isDesktop }) {
   const statusLabel = { pending: '承認待ち', approved: '承認済み', rejected: '差し戻し' };
   const statusClass = { pending: 'bg-amber-50 text-amber-600', approved: 'bg-emerald-50 text-emerald-600', rejected: 'bg-rose-50 text-rose-600' };
 
-  const Card = ({ r }) => (
-    <div className="px-5 py-3.5 border-b border-slate-100 last:border-0">
+  // 画面の再描画で入力内容が消えないよう、部品ではなく関数として組み立てる
+  const renderCard = (r) => (
+    <div key={r.id} className="px-5 py-3.5 border-b border-slate-100 last:border-0">
       <div className="flex items-center justify-between mb-1.5">
         <span className="font-semibold text-[13px] text-slate-800"><EmployeeLink id={r.employeeId} name={r.employeeName} /></span>
         <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full ${statusClass[r.status]}`}>{statusLabel[r.status]}</span>
@@ -9151,8 +9152,8 @@ function AdminYearEndAdjustmentTab({ requests, onDecide, isDesktop }) {
         <div className="px-5 py-10 text-center text-[12.5px] text-slate-300">{yearFilter}年分の申告はまだありません</div>
       ) : (
         <div>
-          {pending.map((r) => <Card key={r.id} r={r} />)}
-          {decided.map((r) => <Card key={r.id} r={r} />)}
+          {pending.map((r) => renderCard(r))}
+          {decided.map((r) => renderCard(r))}
         </div>
       )}
     </div>
@@ -9358,8 +9359,9 @@ function AdminMonthlyConfirmTab({ confirmations, accounts = [], commuteClaims = 
     setRunning(false);
   };
 
-  const Card = ({ c, stage }) => (
-    <div className="px-5 py-3.5 border-b border-slate-100 last:border-0">
+  // 画面の再描画で入力内容が消えないよう、部品ではなく関数として組み立てる
+  const renderCard = (c, stage) => (
+    <div key={c.id} className="px-5 py-3.5 border-b border-slate-100 last:border-0">
       <div className="flex items-center justify-between gap-2 mb-1.5">
         <span className="font-semibold text-[13px] text-slate-800">
           <EmployeeLink id={c.employeeId} name={c.employeeName} /> ・ {monthKeyLabel(c.targetMonth)}分
@@ -9451,7 +9453,7 @@ function AdminMonthlyConfirmTab({ confirmations, accounts = [], commuteClaims = 
     </div>
   );
 
-  const Section = ({ title, note, list, stage }) => (
+  const renderSection = ({ title, note, list, stage }) => (
     <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
       <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
         <CheckCircle2 size={15} className="text-slate-400" />
@@ -9462,35 +9464,20 @@ function AdminMonthlyConfirmTab({ confirmations, accounts = [], commuteClaims = 
       {list.length === 0 ? (
         <div className="px-5 py-8 text-center text-[12.5px] text-slate-300">対象はありません</div>
       ) : (
-        <div>{list.map((c) => <Card key={c.id} c={c} stage={stage} />)}</div>
+        <div>{list.map((c) => renderCard(c, stage))}</div>
       )}
     </div>
   );
 
   return (
     <div className="space-y-5">
-      <Section
-        title={isMasterAdmin ? '管理者の確認待ち' : 'あなたの確認待ち'}
-        note={isMasterAdmin
+      {renderSection({ title: isMasterAdmin ? '管理者の確認待ち' : 'あなたの確認待ち', note: isMasterAdmin
           ? 'スタッフから届いた確定申請です。マスター管理者が承認すると、その場で確定し給与計算に進めます。'
-          : 'スタッフから届いた確定申請です。内容を確認して承認すると、マスター管理者へ最終承認の依頼が届きます。管理者ご自身の申請はここには並びません。'}
-        list={waitingAdmin}
-        stage="admin"
-      />
-      <Section
-        title={isMasterAdmin ? 'あなたの最終承認待ち' : 'マスター管理者の最終承認待ち'}
-        note={isMasterAdmin
+          : 'スタッフから届いた確定申請です。内容を確認して承認すると、マスター管理者へ最終承認の依頼が届きます。管理者ご自身の申請はここには並びません。', list: waitingAdmin, stage: "admin" })}
+      {renderSection({ title: isMasterAdmin ? 'あなたの最終承認待ち' : 'マスター管理者の最終承認待ち', note: isMasterAdmin
           ? '管理者が1次確認を済ませたもの、および管理者ご本人の申請です。承認すると勤怠が確定し、その月の給与計算に進めます。'
-          : '管理者の確認が済んだもの、および管理者ご本人の申請です。マスター管理者の承認をお待ちください。'}
-        list={waitingMaster}
-        stage={isMasterAdmin ? 'master' : null}
-      />
-      <Section
-        title="確定済み・差し戻し（直近20件）"
-        note={isMasterAdmin ? '確定後に修正が必要になった場合は、「確定を取り消す」で差し戻しに戻せます。' : '確定の取り消しはマスター管理者のみが行えます。'}
-        list={others}
-        stage={null}
-      />
+          : '管理者の確認が済んだもの、および管理者ご本人の申請です。マスター管理者の承認をお待ちください。', list: waitingMaster, stage: isMasterAdmin ? 'master' : null })}
+      {renderSection({ title: "確定済み・差し戻し（直近20件）", note: isMasterAdmin ? '確定後に修正が必要になった場合は、「確定を取り消す」で差し戻しに戻せます。' : '確定の取り消しはマスター管理者のみが行えます。', list: others, stage: null })}
     </div>
   );
 }
@@ -9869,8 +9856,9 @@ function AdminCommuteExpenseClaimsTab({ claims, isMasterAdmin = false, onDecide,
     XLSX.writeFile(wb, `交通費精算_承認済み_${fileLabel}.xlsx`);
   };
 
-  const Card = ({ c }) => (
-    <div className="px-5 py-3.5 border-b border-slate-100 last:border-0">
+  // 画面の再描画で入力内容が消えないよう、部品ではなく関数として組み立てる
+  const renderCard = (c) => (
+    <div key={c.id} className="px-5 py-3.5 border-b border-slate-100 last:border-0">
       <div className="flex items-center justify-between mb-1.5 gap-2">
         <span className="font-semibold text-[13px] text-slate-800 flex items-center gap-2">
           {c.status === 'pending' && isMasterAdmin && (
@@ -10007,8 +9995,8 @@ function AdminCommuteExpenseClaimsTab({ claims, isMasterAdmin = false, onDecide,
               </button>
             </div>
           )}
-          {pending.map((c) => <Card key={c.id} c={c} />)}
-          {decided.map((c) => <Card key={c.id} c={c} />)}
+          {pending.map((c) => renderCard(c))}
+          {decided.map((c) => renderCard(c))}
         </div>
       )}
     </div>
