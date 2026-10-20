@@ -2666,19 +2666,19 @@ function AttendanceApp() {
       show('処理に失敗しました', 'warn');
       return;
     }
-    await notifyEmployeeUser(
-      request.employeeId,
-      `【年末調整${decision === 'approved' ? '承認' : '差し戻し'}】${request.year}年分`,
-      `${request.year}年分の年末調整申告が${decision === 'approved' ? '承認されました' : '差し戻されました'}。${comment ? `管理者コメント：${comment}` : ''}`,
-      id,
-      [
-        `${request.year}年分の年末調整申告が${decision === 'approved' ? '承認されました' : '差し戻されました'}。`,
+    // 承認のお知らせはアプリ内のみ。差し戻しは再提出が必要なためメールでも知らせる
+    const yearEndSubject = `【年末調整${decision === 'approved' ? '承認' : '差し戻し'}】${request.year}年分`;
+    const yearEndBody = `${request.year}年分の年末調整申告が${decision === 'approved' ? '承認されました' : '差し戻されました'}。${comment ? `管理者コメント：${comment}` : ''}`;
+    if (decision === 'approved') {
+      await notifyEmployeeInApp(request.employeeId, yearEndSubject, yearEndBody, id);
+    } else {
+      await notifyEmployeeUser(request.employeeId, yearEndSubject, yearEndBody, id, [
+        `${request.year}年分の年末調整申告が差し戻されました。`,
         ...(comment ? ['', `管理者コメント：${comment}`] : []),
-        ...(decision === 'approved'
-          ? ['下記よりご確認ください。']
-          : ['', '内容をご確認のうえ、修正して再度ご提出ください。']),
-      ]
-    );
+        '',
+        '内容をご確認のうえ、修正して再度ご提出ください。',
+      ]);
+    }
     await refreshData();
     await logAudit(session, decision === 'approved' ? '年末調整を承認' : '年末調整を差し戻し', `${request.year}年分`, request.employeeId, request.employeeName);
     show(decision === 'approved' ? '承認しました' : '差し戻しました', decision === 'approved' ? 'success' : 'warn');
@@ -3561,6 +3561,8 @@ function AttendanceApp() {
               <AdminYearEndAdjustmentTab
                 requests={data.yearEndAdjustments}
                 onDecide={decideYearEndAdjustment}
+                employeeAccounts={employeeAccounts}
+                onNotifyEmployee={notifyEmployeeUser}
                 isDesktop={isDesktop}
               />
               <AdminProfileRequestsTab
@@ -7295,7 +7297,7 @@ const HELP_ADMIN = [
       { q: '退職者の処理はどうしますか', a: 'スタッフの「詳細」を開き、基本タブの退職日を入力して保存します。退職日を入れたスタッフは、一覧の絞り込みで「在籍のみ」にすると非表示になります。アカウント自体は残るため、過去の勤怠や給与は参照できます。' },
       { q: 'ログインID（メールアドレス）を変えるには', a: 'スタッフ一覧の各行にあるメールのアイコンから変更できます（マスター管理者のみ）。新しいメールアドレスを入力すると、ログイン用のアドレスが切り替わります。パスワードは変わりません。連絡用メールアドレスも同時に変更するか、本人へお知らせメールを送るかを選べます。変更内容は監査ログに記録されます。' },
       { q: 'パスワードを再発行するには', a: 'スタッフ一覧の各行にある鍵のアイコンを押すと、仮パスワードを設定できます。設定した仮パスワードは本人に直接お伝えください。本人が次にログインした際、新しいパスワードの設定画面が表示されます。' },
-      { q: 'スタッフにメールが届くのはどんなときですか', a: 'アカウントの作成（案内メール）、ログインIDの変更（送信を選んだ場合）、年末調整の承認・差し戻し、給与明細の公開、ダッシュボードの「未提出の◯名にお知らせを送る」の5つです。月次勤怠の確定・差し戻し・確定の取り消し、交通費の承認・差し戻し・承認の取り消し、個人情報の変更申請の承認・却下は、件数が多くなるためメールを送らず、スタッフ画面の「管理者からのお知らせ」にのみ表示されます。' },
+      { q: 'スタッフにメールが届くのはどんなときですか', a: 'アカウントの作成（案内メール）、ログインIDの変更（送信を選んだ場合）、年末調整の入力依頼、年末調整の差し戻し、給与明細の公開、ダッシュボードの「未提出の◯名にお知らせを送る」の6つです。月次勤怠の確定・差し戻し・確定の取り消し、交通費の承認・差し戻し・承認の取り消し、個人情報の変更申請の承認・却下、年末調整の承認は、スタッフ画面の「管理者からのお知らせ」にのみ表示され、メールは送られません。' },
       { q: '通知メールの送信先を変えるには', a: '「勤怠」→「その他」→「管理者権限」の一番上にある「通知メールの送信先」で指定します。カンマ区切りで複数指定でき、未設定の場合はマスター管理者の連絡用メールアドレスに届きます。マスター管理者のみが設定できます。なお管理者宛のメールは個人情報の変更申請と年末調整のときだけ送られます。勤怠修正・休暇申請・実績報告などは、画面右上のベルのお知らせでご確認ください。' },
       { q: '管理者権限を与えるには', a: '「勤怠」→「その他」→「管理者権限」から設定します。タブ単位（勤怠・労務・人材・給与）でアクセス範囲を制限できます。マスター管理者のみが操作できます。' },
     ],
@@ -7331,7 +7333,7 @@ const HELP_ADMIN = [
       { q: '支給・控除の項目を追加するには', a: 'スタッフの「詳細」→「給与・口座」タブで、スタッフごとの固定的な支給項目・控除項目を登録できます。毎月の計算に自動で反映されます。' },
       { q: '標準報酬月額の設定はどこですか', a: 'スタッフの「詳細」→「社会保険」タブで設定します。等級表から選択でき、健康保険・厚生年金の保険料が自動計算されます。保険料率は別途「保険料率設定」で管理します。' },
       { q: '交通費精算の承認とExcel出力', a: '「給与」タブの交通費精算一覧から承認・却下します。承認できるのはマスター管理者のみです。承認待ちの左側にあるチェックを入れると、まとめて承認できます。承認済みのものは月を指定してExcelファイルに出力でき、経理処理に使えます。承認した金額は、同じ対象月の給与を新規作成する際に支給項目「交通費精算」として自動で入ります。承認する前に「内容を修正して承認」を選ぶと、金額や区間を直してから承認できます。修正した箇所は本人への通知に一覧で記載されます。承認後に修正が必要になった場合は、マスター管理者が「承認を取り消す」で差し戻しに戻せます。いずれの場合も、作成済みの給与明細の「交通費精算」の金額は自動で更新されます。' },
-      { q: '年末調整の進め方', a: '「人材」タブの年末調整で、スタッフから提出された内容を確認し、承認します。提出状況は一覧で把握できます。' },
+      { q: '年末調整の進め方', a: '「人材」タブの年末調整で、スタッフから提出された内容を確認し、承認します。見出しの横に提出済みの人数が出ます。未提出の方がいるときは「未提出の◯名に入力依頼を送る」が表示され、お知らせとメールをまとめて送れます。承認したことはアプリ内のお知らせでのみ伝わり、メールは送りません。差し戻した場合は再提出が必要なため、メールでもお知らせします。' },
     ],
   },
   {
@@ -10088,10 +10090,11 @@ function YearEndAdjustmentSection({ session, requests, onSubmit }) {
   );
 }
 
-function AdminYearEndAdjustmentTab({ requests, onDecide, isDesktop }) {
+function AdminYearEndAdjustmentTab({ requests, onDecide, employeeAccounts = [], onNotifyEmployee, isDesktop }) {
   const now = new Date();
   const [yearFilter, setYearFilter] = useState(now.getFullYear());
   const [comment, setComment] = useState({});
+  const [requesting, setRequesting] = useState(false);
 
   const years = Array.from(new Set(requests.map((r) => r.year))).sort((a, b) => b - a);
   if (!years.includes(now.getFullYear())) years.unshift(now.getFullYear());
@@ -10101,6 +10104,29 @@ function AdminYearEndAdjustmentTab({ requests, onDecide, isDesktop }) {
   const decided = filtered.filter((r) => r.status !== 'pending');
   const statusLabel = { pending: '承認待ち', approved: '承認済み', rejected: '差し戻し' };
   const statusClass = { pending: 'bg-amber-50 text-amber-600', approved: 'bg-emerald-50 text-emerald-600', rejected: 'bg-rose-50 text-rose-600' };
+
+  // まだ提出していない在籍スタッフへ、入力のお願いを送る
+  const submittedIds = new Set(filtered.map((r) => r.employeeId));
+  const notSubmitted = employeeAccounts.filter((a) => !a.resignationDate && !submittedIds.has(a.id));
+  const sendInputRequest = async () => {
+    if (notSubmitted.length === 0 || !onNotifyEmployee) return;
+    if (!window.confirm(`${yearFilter}年分の年末調整について、未提出の${notSubmitted.length}名に入力のお願いを送ります。よろしいですか？`)) return;
+    setRequesting(true);
+    for (const acc of notSubmitted) {
+      // eslint-disable-next-line no-await-in-loop
+      await onNotifyEmployee(
+        acc.id,
+        `【ご入力のお願い】${yearFilter}年分の年末調整`,
+        `${yearFilter}年分の年末調整の入力をお願いいたします。「各種申請」→「年末調整」からご提出ください。`,
+        null,
+        [
+          `${yearFilter}年分の年末調整の入力をお願いいたします。`,
+          '「各種申請」→「年末調整」からご提出ください。',
+        ]
+      );
+    }
+    setRequesting(false);
+  };
 
   // 画面の再描画で入力内容が消えないよう、部品ではなく関数として組み立てる
   const renderCard = (r) => (
@@ -10142,10 +10168,27 @@ function AdminYearEndAdjustmentTab({ requests, onDecide, isDesktop }) {
       <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
         <FileText size={15} className="text-slate-400" />
         <h2 className="font-bold text-[13.5px]">年末調整の申告一覧</h2>
+        <span className="text-[11.5px] text-slate-400">提出 {submittedIds.size}／{submittedIds.size + notSubmitted.length}名</span>
         <select value={yearFilter} onChange={(e) => setYearFilter(Number(e.target.value))} className="ml-auto border border-slate-200 rounded-lg px-2 py-1.5 text-[12.5px] bg-white">
           {years.map((y) => <option key={y} value={y}>{y}年分</option>)}
         </select>
       </div>
+
+      {notSubmitted.length > 0 && onNotifyEmployee && (
+        <div className="px-5 py-3 border-b border-slate-100 bg-amber-50 flex items-center gap-3 flex-wrap">
+          <div className="flex-1 min-w-[14rem]">
+            <div className="text-[12.5px] font-bold text-amber-900">{yearFilter}年分が未提出のスタッフが{notSubmitted.length}名います</div>
+            <div className="mt-0.5 text-[11px] text-amber-700">お知らせと、連絡用メールアドレス宛のメールをまとめて送れます。</div>
+          </div>
+          <button
+            onClick={sendInputRequest}
+            disabled={requesting}
+            className="shrink-0 rounded-lg bg-amber-600 disabled:bg-slate-200 px-3.5 py-2 text-[12px] font-bold text-white"
+          >
+            {requesting ? '送信中…' : `未提出の${notSubmitted.length}名に入力依頼を送る`}
+          </button>
+        </div>
+      )}
       {filtered.length === 0 ? (
         <div className="px-5 py-10 text-center text-[12.5px] text-slate-300">{yearFilter}年分の申告はまだありません</div>
       ) : (
