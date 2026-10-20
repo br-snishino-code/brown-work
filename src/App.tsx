@@ -3340,7 +3340,7 @@ const PROFILE_SETUP_SECTIONS = [
         check: (v) => (onlyDigits(v).length >= 10 ? '' : '電話番号をご確認ください'),
       },
       {
-        key: 'postalCode', label: '郵便番号', placeholder: '例）621-0014', required: true,
+        key: 'postalCode', label: '郵便番号', placeholder: '例）621-0814', required: true,
         autoComplete: 'postal-code', postal: true, mono: true,
         check: (v) => (onlyDigits(v).length === 7 ? '' : '郵便番号は7桁でご入力ください'),
       },
@@ -3375,6 +3375,53 @@ const BANK_ACCOUNT_FIELDS = [
 ];
 
 const PROFILE_SETUP_ALL_FIELDS = PROFILE_SETUP_SECTIONS.flatMap((s) => s.fields);
+
+// ---- 郵便番号から住所を自動で入力する ----
+// public/zip/ に置いた一覧（先頭2桁ごとに分割）を、必要な分だけ読み込む。
+// 外部のサービスへは送信しないため、住所の情報が社外に出ることはない。
+const zipChunkCache = {};
+
+const loadZipChunk = (prefix) => {
+  if (!zipChunkCache[prefix]) {
+    zipChunkCache[prefix] = fetch(`/zip/${prefix}.json`)
+      .then((r) => (r.ok ? r.json() : {}))
+      .catch(() => ({}));
+  }
+  return zipChunkCache[prefix];
+};
+
+// 郵便番号が7桁になったら、住所欄に「都道府県＋市区町村＋町名」を入れる。
+// 番地などを入力済みの場合は、先頭の住所だけを差し替えて残りを保つ。
+function usePostalAutoFill(postalCode, setForm, addressKey = 'address') {
+  const lastBase = useRef('');
+  const [notice, setNotice] = useState('');
+
+  useEffect(() => {
+    const digits = onlyDigits(postalCode);
+    if (digits.length !== 7) { setNotice(''); return; }
+    let cancelled = false;
+    loadZipChunk(digits.slice(0, 2)).then((map) => {
+      if (cancelled) return;
+      const base = map ? map[digits] : '';
+      if (!base) { setNotice('この郵便番号に該当する住所が見つかりませんでした。住所は手入力してください。'); return; }
+      setNotice('');
+      setForm((prev) => {
+        const current = String(prev[addressKey] || '').trim();
+        const prevBase = lastBase.current;
+        let next;
+        if (!current) next = base;
+        else if (prevBase && current.startsWith(prevBase)) next = base + current.slice(prevBase.length);
+        else return prev; // 手入力済みの住所は書き換えない
+        lastBase.current = base;
+        return next === prev[addressKey] ? prev : { ...prev, [addressKey]: next };
+      });
+      lastBase.current = base;
+    });
+    return () => { cancelled = true; };
+  }, [postalCode, setForm, addressKey]);
+
+  return notice;
+}
 
 // ---- 金融機関マスター（全国銀行協会のコード表）----
 // public/zengin/ に置いた一覧を、必要になった時だけ読み込む。
@@ -3572,6 +3619,9 @@ function ProfileSetupScreen({ session, toast, onSave, onLogout }) {
     setForm((prev) => ({ ...prev, contactEmail: checked ? loginEmail : '' }));
   };
 
+  // 郵便番号を入れたら住所を自動で入力する
+  const postalNotice = usePostalAutoFill(form.postalCode, setForm);
+
   // 住民票の住所を現住所と同じにするかどうか
   const [useSameAddress, setUseSameAddress] = useState(
     () => !!session.address && session.residentAddress === session.address
@@ -3692,6 +3742,7 @@ function ProfileSetupScreen({ session, toast, onSave, onLogout }) {
                           className={`w-full border-2 border-slate-200 rounded-xl px-3.5 py-2.5 text-[14px] outline-none focus:border-slate-900 ${f.mono || f.type === 'date' ? 'font-mono' : ''} ${f.readOnly || (f.sameAsLogin && useLoginEmail) || (f.sameAsAddress && useSameAddress) ? 'bg-slate-100 text-slate-500' : ''}`}
                         />
                         {f.note && <div className="mt-1 text-[11px] text-slate-400">{f.note}</div>}
+                        {f.postal && postalNotice && <div className="mt-1 text-[11.5px] text-amber-700">{postalNotice}</div>}
                         {f.sameAsAddress && (
                           <label className="flex items-center gap-2 mt-2 text-[12px] text-slate-600 cursor-pointer">
                             <input
@@ -6089,6 +6140,7 @@ const HELP_ADMIN = [
     items: [
       { q: 'スタッフアカウントを新しく作るには', a: 'アカウントを作成できるのはマスター管理者のみです。「人材」→「スタッフ管理」→「スタッフ一覧・登録」を開くと、右側に登録フォームがあります。姓名・ふりがな・メールアドレス・仮パスワード・入職日・役割を入力して作成します。作成すると、そのメールアドレス宛にログインURLと仮パスワードを記載した案内メールが自動で送られます。仮パスワードは「自動生成」ボタンでも作れます。管理者の画面には登録フォームは表示されません。' },
       { q: '大人数をまとめて登録したい', a: 'スタッフ一覧の右上にある「CSV一括登録」を使います。表示される形式にあわせてCSVファイルを用意し、アップロードしてください。' },
+      { q: '郵便番号から住所は入りますか', a: '郵便番号を7桁まで入力すると、都道府県・市区町村・町名までが住所欄に自動で入ります。続けて番地・建物名をご入力ください。郵便番号を入れ直した場合も、番地はそのまま残して住所の前半だけが入れ替わります。住所を手入力済みの場合は自動入力されません。' },
       { q: '退職者の処理はどうしますか', a: 'スタッフの「詳細」を開き、基本タブの退職日を入力して保存します。退職日を入れたスタッフは、一覧の絞り込みで「在籍のみ」にすると非表示になります。アカウント自体は残るため、過去の勤怠や給与は参照できます。' },
       { q: 'パスワードを再発行するには', a: 'スタッフ一覧の各行にある鍵のアイコンを押すと、仮パスワードを設定できます。設定した仮パスワードは本人に直接お伝えください。本人が次にログインした際、新しいパスワードの設定画面が表示されます。' },
       { q: '管理者権限を与えるには', a: '「人材」→「スタッフ管理」→「管理者権限」から設定します。タブ単位（勤怠・労務・人材・給与）でアクセス範囲を制限できます。マスター管理者のみが操作できます。' },
@@ -9875,6 +9927,10 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
   });
   const [savingAttendance, setSavingAttendance] = useState(false);
   const setPersonalMonth = (m) => (e) => setPersonalMonths((prev) => ({ ...prev, [m]: e.target.value }));
+  const setPostalCode = (e) => {
+    const d = onlyDigits(e.target.value).slice(0, 7);
+    setForm((prev) => ({ ...prev, postalCode: d.length > 3 ? `${d.slice(0, 3)}-${d.slice(3)}` : d }));
+  };
   const savePersonalAttendance = async () => {
     setSavingAttendance(true);
     await onSaveEmployeeAttendance(account.id, personalMonths);
@@ -9944,6 +10000,8 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
     singleParentClassification: account.singleParentClassification || '対象外',
   });
   const [saving, setSaving] = useState(false);
+  // 郵便番号を入れたら住所を自動で入力する
+  const postalNotice = usePostalAutoFill(form.postalCode, setForm);
   const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }));
   const setCheck = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.checked }));
 
@@ -10082,7 +10140,8 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                 <input value={form.staffNumber} onChange={set('staffNumber')} placeholder="例）00016" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
               </Field>
               <Field label="郵便番号">
-                <input value={form.postalCode} onChange={set('postalCode')} placeholder="例）621-0014" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
+                <input value={form.postalCode} onChange={setPostalCode} placeholder="例）621-0814" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
+                {postalNotice && <div className="mt-1 text-[11.5px] text-amber-700">{postalNotice}</div>}
               </Field>
               <Field label="住所">
                 <input value={form.address} onChange={set('address')} placeholder="例）京都府京都市〇〇区..." className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" />
