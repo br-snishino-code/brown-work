@@ -3352,6 +3352,10 @@ function AttendanceApp() {
           pendingCount={pendingCorrectionCount + pendingLeaveCount + pendingPerformanceCount}
           missingPunchCount={missingPunchCount}
           viewMode={viewMode}
+          onToggleViewMode={() => setViewMode((v) => (v === 'desktop' ? 'mobile' : 'desktop'))}
+          topTab={topTab}
+          personalMode={showStaffScreens}
+          onAlertClick={() => { setTopTab('attendance'); if (setPersonalMode) setPersonalMode(false); }}
           cloudStatusLabel={cloudStatusLabel}
           cloudStatusClass={cloudStatusClass}
         />
@@ -4741,9 +4745,6 @@ function GlobalTopTabs({ topTab, setTopTab, session, personalMode, setPersonalMo
             ))}
           </div>
           {showToggle && <div className="hidden sm:block shrink-0">{modeToggle(false)}</div>}
-          {session?.role === 'master_admin' && (
-            <span className="hidden sm:inline shrink-0 ml-2 text-[10px] font-bold text-amber-500 bg-amber-500/10 px-2 py-1 rounded-full whitespace-nowrap">マスター管理者</span>
-          )}
         </div>
         {showToggle && <div className="sm:hidden pb-2">{modeToggle(true)}</div>}
       </div>
@@ -4921,9 +4922,18 @@ function AnnouncementComposerModal({ onClose, onSubmit }) {
   );
 }
 
-function Header({ session, onLogout, pendingCount, missingPunchCount, viewMode, cloudStatusLabel, cloudStatusClass }) {
+// 画面の見出しに使う、上部タブの名前
+const TOP_TAB_TITLE = { attendance: '勤怠', labor: '労務', hr: '人材', payroll: '給与', help: 'ヘルプ' };
+
+function Header({ session, onLogout, pendingCount, missingPunchCount, viewMode, onToggleViewMode, topTab, personalMode, onAlertClick, cloudStatusLabel, cloudStatusClass }) {
   const alertCount = pendingCount + missingPunchCount;
   const isDesktop = viewMode === 'desktop';
+  const isAdminRole = session.role === 'admin' || session.role === 'master_admin';
+  const roleLabel = session.role === 'master_admin' ? 'マスター管理者' : session.role === 'admin' ? '管理者' : 'スタッフ';
+  // いま開いている画面が分かるように見出しを変える
+  const title = !isAdminRole || personalMode
+    ? (topTab === 'attendance' ? '勤怠打刻' : `${TOP_TAB_TITLE[topTab] || ''}（自分の画面）`)
+    : `管理画面：${TOP_TAB_TITLE[topTab] || ''}`;
   return (
     <header className="bg-slate-800 text-white shadow-sm">
       <div className={`${isDesktop ? 'max-w-6xl px-6' : 'max-w-3xl px-4'} mx-auto py-3.5 flex items-center justify-between`}>
@@ -4932,25 +4942,34 @@ function Header({ session, onLogout, pendingCount, missingPunchCount, viewMode, 
             <Clock size={17} className="text-white" strokeWidth={2.4} />
           </div>
           <div>
-            <div className="font-bold text-[15px] leading-tight tracking-tight">勤怠打刻</div>
-            <div className="text-[10.5px] text-slate-400 leading-tight">{session.name}（{session.role === 'master_admin' ? 'マスター管理者' : session.role === 'admin' ? '管理者' : 'スタッフ'}）</div>
+            <div className="font-bold text-[15px] leading-tight tracking-tight">{title}</div>
+            <div className="text-[10.5px] text-slate-400 leading-tight">{session.name}（{roleLabel}）</div>
           </div>
         </div>
         <div className="flex items-center gap-2">
-          {(session.role === 'admin' || session.role === 'master_admin') && alertCount > 0 && (
-            <span className="w-5 h-5 bg-amber-600 rounded-full text-[10px] flex items-center justify-center text-white font-bold">
-              {alertCount}
-            </span>
+          {isAdminRole && alertCount > 0 && (
+            <button
+              onClick={onAlertClick}
+              title="要対応の一覧を開く"
+              className="flex items-center gap-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 transition-colors px-2.5 py-1.5 text-[11px] font-bold text-white"
+            >
+              <Bell size={13} />
+              要対応 {alertCount}件
+            </button>
           )}
           {cloudStatusLabel && (
             <span className={`hidden sm:inline-flex items-center rounded-full border px-2.5 py-1 text-[10.5px] font-semibold ${cloudStatusClass}`}>
               {cloudStatusLabel}
             </span>
           )}
-          <div className="hidden md:flex items-center gap-1.5 rounded-lg bg-white/10 px-2.5 py-1.5 text-[10.5px] font-bold text-slate-300">
+          <button
+            onClick={onToggleViewMode}
+            title={isDesktop ? 'スマホ向けの表示に切り替える' : 'パソコン向けの表示に切り替える'}
+            className="hidden md:flex items-center gap-1.5 rounded-lg bg-white/10 hover:bg-white/20 transition-colors px-2.5 py-1.5 text-[10.5px] font-bold text-slate-300"
+          >
             {isDesktop ? <Monitor size={13} /> : <Smartphone size={13} />}
             {isDesktop ? 'PC表示' : 'スマホ表示'}
-          </div>
+          </button>
           <button
             onClick={onLogout}
             className="flex items-center gap-1 text-[12px] font-medium text-slate-300 bg-white/10 rounded-lg px-3 py-1.5"
@@ -6918,7 +6937,7 @@ const HELP_STAFF = [
       { q: 'パスワードを忘れました', a: 'ログイン画面の「パスワードをお忘れですか？」から再設定できます。うまくいかない場合は管理者に連絡してください。管理者が仮パスワードを再発行します。' },
       { q: '初めてログインするときの流れは', a: '管理者から届いた案内メールのURLを開き、メールアドレスと仮パスワードでログインします。続けてご自身のパスワードを設定し、ご登録情報（ふりがな・生年月日・連絡先・郵便番号・現住所・住民票の住所・配偶者の有無・世帯主・緊急連絡先・給与振込先の口座情報・マイナンバー）を入力すると利用開始です。いずれも必須のため、通帳とマイナンバーカードをお手元にご用意ください。' },
       { q: '住所や氏名が変わりました', a: '「人材」タブのプロフィール変更申請から、変更内容を入力して申請してください。氏名・ふりがな・連絡先・住所・世帯・緊急連絡先・給与振込先の口座情報を申請できます。管理者が承認すると反映されます。生年月日・入職日・雇用形態などは申請できないため、管理者にご相談ください。' },
-      { q: 'スマートフォンで使えますか', a: '使えます。ブラウザで同じURLを開いてログインしてください。画面はスマートフォン用に自動で切り替わります。ホーム画面に追加しておくとアプリのように使えます。' },
+      { q: 'スマートフォンで使えますか', a: '使えます。ブラウザで同じURLを開いてログインしてください。画面はスマートフォン用に自動で切り替わります。ホーム画面に追加しておくとアプリのように使えます。パソコンでご覧の場合、画面右上の「PC表示」を押すとスマートフォン向けの表示に切り替えられます。' },
     ],
   },
 ];
