@@ -3384,11 +3384,6 @@ const onlyDigits = (v) => String(v || '').replace(/[^0-9]/g, '');
 const isEmailLike = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v || '').trim());
 const toKatakana = (v) => String(v || '').replace(/[ぁ-ゖ]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) + 0x60));
 
-// 世帯主との続柄（ご本人から見た関係）
-const HOUSEHOLDER_RELATIONS = ['本人', '配偶者', '父', '母', '子', '祖父', '祖母', '兄弟姉妹', 'その他'];
-// 緊急連絡先との続柄（ご本人から見た関係）
-const EMERGENCY_RELATIONS = ['配偶者', '父', '母', '子', '祖父', '祖母', '兄弟姉妹', '親族', '知人', 'その他'];
-
 const PROFILE_SETUP_SECTIONS = [
   {
     title: '基本情報',
@@ -3432,8 +3427,8 @@ const PROFILE_SETUP_SECTIONS = [
         sameAsSelf: true,
       },
       {
-        key: 'householderRelation', label: '世帯主との続柄', type: 'select', required: true,
-        options: HOUSEHOLDER_RELATIONS, lockedWhenSelf: true,
+        key: 'householderRelation', label: '世帯主との続柄', placeholder: '例）父', required: true,
+        lockedWhenSelf: true,
       },
     ],
   },
@@ -3442,10 +3437,7 @@ const PROFILE_SETUP_SECTIONS = [
     note: 'ご家族など、勤務中に連絡が取れる方をご記入ください。',
     fields: [
       { key: 'emergencyContactName', label: 'お名前', placeholder: '例）田中 太郎', required: true },
-      {
-        key: 'emergencyContactRelation', label: '続柄', type: 'select', required: true,
-        options: EMERGENCY_RELATIONS, noDefault: true,
-      },
+      { key: 'emergencyContactRelation', label: '続柄', placeholder: '例）母', required: true },
       {
         key: 'emergencyContactPhone', label: '電話番号', type: 'tel', placeholder: '例）090-0000-0000', required: true,
         check: (v) => (onlyDigits(v).length >= 10 ? '' : '電話番号をご確認ください'),
@@ -3715,7 +3707,7 @@ function ProfileSetupScreen({ session, toast, onSave, onLogout }) {
   const [form, setForm] = useState(() => {
     const init = {};
     PROFILE_SETUP_ALL_FIELDS.forEach((f) => {
-      init[f.key] = session[f.key] || (f.type === 'select' && !f.lockedWhenSelf && !f.noDefault ? f.options[0] : '');
+      init[f.key] = session[f.key] || (f.type === 'select' ? f.options[0] : '');
     });
     init.spouseStatus = session.spouseStatus || '無';
     init.householderRelation = session.householderRelation || '';
@@ -3861,8 +3853,7 @@ function ProfileSetupScreen({ session, toast, onSave, onLogout }) {
                         name={f.key}
                         value={form[f.key]}
                         onChange={(e) => setValue(f)(e.target.value)}
-                        disabled={f.lockedWhenSelf && householderIsSelf}
-                        className={`w-full border-2 border-slate-200 rounded-xl px-3.5 py-2.5 text-[14px] outline-none focus:border-slate-900 ${f.lockedWhenSelf && householderIsSelf ? 'bg-slate-100 text-slate-500' : 'bg-white'}`}
+                        className="w-full border-2 border-slate-200 rounded-xl px-3.5 py-2.5 text-[14px] bg-white outline-none focus:border-slate-900"
                       >
                         {!form[f.key] && <option value="">選択してください</option>}
                         {f.options.map((o) => <option key={o} value={o}>{o}</option>)}
@@ -3878,9 +3869,9 @@ function ProfileSetupScreen({ session, toast, onSave, onLogout }) {
                           onValueChange={setValue(f)}
                           format={formatField(f)}
                           blurFormat={blurFormatField(f)}
-                          readOnly={f.readOnly || (f.sameAsLogin && useLoginEmail) || (f.sameAsAddress && useSameAddress) || (f.sameAsSelf && householderIsSelf)}
+                          readOnly={f.readOnly || (f.sameAsLogin && useLoginEmail) || (f.sameAsAddress && useSameAddress) || ((f.sameAsSelf || f.lockedWhenSelf) && householderIsSelf)}
                           placeholder={f.placeholder}
-                          className={`w-full border-2 border-slate-200 rounded-xl px-3.5 py-2.5 text-[14px] outline-none focus:border-slate-900 ${f.mono || f.type === 'date' ? 'font-mono' : ''} ${f.readOnly || (f.sameAsLogin && useLoginEmail) || (f.sameAsAddress && useSameAddress) || (f.sameAsSelf && householderIsSelf) ? 'bg-slate-100 text-slate-500' : ''}`}
+                          className={`w-full border-2 border-slate-200 rounded-xl px-3.5 py-2.5 text-[14px] outline-none focus:border-slate-900 ${f.mono || f.type === 'date' ? 'font-mono' : ''} ${f.readOnly || (f.sameAsLogin && useLoginEmail) || (f.sameAsAddress && useSameAddress) || ((f.sameAsSelf || f.lockedWhenSelf) && householderIsSelf) ? 'bg-slate-100 text-slate-500' : ''}`}
                         />
                         {f.note && <div className="mt-1 text-[11px] text-slate-400">{f.note}</div>}
                         {f.postal && postalNotice && <div className="mt-1 text-[11.5px] text-amber-700">{postalNotice}</div>}
@@ -10303,10 +10294,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                   <input value={form.householderName} onChange={set('householderName')} placeholder="例）田中 太郎" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
                 </Field>
                 <Field label="世帯主との続柄">
-                  <select value={form.householderRelation} onChange={set('householderRelation')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white">
-                    <option value="">未設定</option>
-                    {HOUSEHOLDER_RELATIONS.map((r) => <option key={r} value={r}>{r}</option>)}
-                  </select>
+                  <input value={form.householderRelation} onChange={set('householderRelation')} placeholder="例）本人" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
                 </Field>
               </div>
               <Field label="最寄り駅">
@@ -10320,10 +10308,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                   <input value={form.emergencyContactName} onChange={set('emergencyContactName')} placeholder="例）田中 一郎" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
                 </Field>
                 <Field label="緊急連絡先（続柄）">
-                  <select value={form.emergencyContactRelation} onChange={set('emergencyContactRelation')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white">
-                    <option value="">未設定</option>
-                    {EMERGENCY_RELATIONS.map((r) => <option key={r} value={r}>{r}</option>)}
-                  </select>
+                  <input value={form.emergencyContactRelation} onChange={set('emergencyContactRelation')} placeholder="例）母" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
                 </Field>
               </div>
               <Field label="緊急連絡先（電話）">
