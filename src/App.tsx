@@ -234,7 +234,8 @@ function buildInviteMail({ name, email, tempPassword }) {
     '',
     '【手順3でご入力いただく内容】',
     '　ふりがな／生年月日',
-    '　連絡用メールアドレス／電話番号／住所',
+    '　連絡用メールアドレス／電話番号',
+    '　郵便番号／現住所／住民票の住所',
     '　緊急連絡先（お名前・電話番号）',
     '　給与振込先の口座情報（銀行名・支店名・口座番号・口座名義）',
     '　マイナンバー（12桁）',
@@ -789,7 +790,9 @@ const rowToAccount = (row) => ({
   resignationNote: row.resignation_note || '',
   contactEmail: row.contact_email || '',
   staffNumber: row.staff_number || '',
+  postalCode: row.postal_code || '',
   address: row.address || '',
+  residentAddress: row.resident_address || '',
   phone: row.phone || '',
   emergencyContactName: row.emergency_contact_name || '',
   emergencyContactPhone: row.emergency_contact_phone || '',
@@ -965,7 +968,9 @@ const rowToAudit = (row) => ({
 
 const PROFILE_EDITABLE_FIELDS = [
   { key: 'contactEmail', label: '連絡用メールアドレス' },
+  { key: 'postalCode', label: '郵便番号' },
   { key: 'address', label: '住所' },
+  { key: 'residentAddress', label: '住民票の住所' },
   { key: 'nearestStation', label: '最寄り駅' },
   { key: 'phone', label: '電話番号' },
   { key: 'emergencyContactName', label: '緊急連絡先（氏名）' },
@@ -2253,7 +2258,9 @@ export default function AttendanceApp() {
       adminPermissions: 'admin_permissions',
       contactEmail: 'contact_email',
       staffNumber: 'staff_number',
+      postalCode: 'postal_code',
       address: 'address',
+      residentAddress: 'resident_address',
       phone: 'phone',
       emergencyContactName: 'emergency_contact_name',
       emergencyContactPhone: 'emergency_contact_phone',
@@ -3332,7 +3339,16 @@ const PROFILE_SETUP_SECTIONS = [
         key: 'phone', label: '電話番号', type: 'tel', placeholder: '例）090-1234-5678', required: true, autoComplete: 'tel',
         check: (v) => (onlyDigits(v).length >= 10 ? '' : '電話番号をご確認ください'),
       },
+      {
+        key: 'postalCode', label: '郵便番号', placeholder: '例）621-0014', required: true,
+        autoComplete: 'postal-code', postal: true, mono: true,
+        check: (v) => (onlyDigits(v).length === 7 ? '' : '郵便番号は7桁でご入力ください'),
+      },
       { key: 'address', label: '住所', placeholder: '例）京都府亀岡市三宅町22-11', required: true, autoComplete: 'street-address' },
+      {
+        key: 'residentAddress', label: '住民票の住所', placeholder: '例）京都府亀岡市三宅町22-11', required: true,
+        sameAsAddress: true,
+      },
       { key: 'nearestStation', label: '最寄り駅', placeholder: '例）亀岡駅' },
     ],
   },
@@ -3556,9 +3572,27 @@ function ProfileSetupScreen({ session, toast, onSave, onLogout }) {
     setForm((prev) => ({ ...prev, contactEmail: checked ? loginEmail : '' }));
   };
 
+  // 住民票の住所を現住所と同じにするかどうか
+  const [useSameAddress, setUseSameAddress] = useState(
+    () => !!session.address && session.residentAddress === session.address
+  );
+  const toggleSameAddress = (checked) => {
+    setUseSameAddress(checked);
+    setForm((prev) => ({ ...prev, residentAddress: checked ? prev.address : '' }));
+  };
+  // 「現住所と同じ」にしている間は、現住所の変更を住民票の住所にも反映する
+  useEffect(() => {
+    if (!useSameAddress) return;
+    setForm((prev) => (prev.residentAddress === prev.address ? prev : { ...prev, residentAddress: prev.address }));
+  }, [useSameAddress, form.address]);
+
   const set = (f) => (e) => {
     let v = e.target.value;
     if (f.digitsOnly) v = onlyDigits(v).slice(0, f.maxLength || 20);
+    if (f.postal) {
+      const d = onlyDigits(v).slice(0, 7);
+      v = d.length > 3 ? `${d.slice(0, 3)}-${d.slice(3)}` : d;
+    }
     setForm((prev) => ({ ...prev, [f.key]: v }));
   };
 
@@ -3653,11 +3687,21 @@ function ProfileSetupScreen({ session, toast, onSave, onLogout }) {
                           value={form[f.key]}
                           onChange={set(f)}
                           onBlur={convertOnBlur(f)}
-                          readOnly={f.readOnly || (f.sameAsLogin && useLoginEmail)}
+                          readOnly={f.readOnly || (f.sameAsLogin && useLoginEmail) || (f.sameAsAddress && useSameAddress)}
                           placeholder={f.placeholder}
-                          className={`w-full border-2 border-slate-200 rounded-xl px-3.5 py-2.5 text-[14px] outline-none focus:border-slate-900 ${f.mono || f.type === 'date' ? 'font-mono' : ''} ${f.readOnly || (f.sameAsLogin && useLoginEmail) ? 'bg-slate-100 text-slate-500' : ''}`}
+                          className={`w-full border-2 border-slate-200 rounded-xl px-3.5 py-2.5 text-[14px] outline-none focus:border-slate-900 ${f.mono || f.type === 'date' ? 'font-mono' : ''} ${f.readOnly || (f.sameAsLogin && useLoginEmail) || (f.sameAsAddress && useSameAddress) ? 'bg-slate-100 text-slate-500' : ''}`}
                         />
                         {f.note && <div className="mt-1 text-[11px] text-slate-400">{f.note}</div>}
+                        {f.sameAsAddress && (
+                          <label className="flex items-center gap-2 mt-2 text-[12px] text-slate-600 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={useSameAddress}
+                              onChange={(e) => toggleSameAddress(e.target.checked)}
+                            />
+                            <span>現住所と同じ</span>
+                          </label>
+                        )}
                         {f.sameAsLogin && loginEmail && (
                           <label className="flex items-start gap-2 mt-2 text-[12px] text-slate-600 cursor-pointer">
                             <input
@@ -6032,7 +6076,7 @@ const HELP_STAFF = [
     category: 'アカウント',
     items: [
       { q: 'パスワードを忘れました', a: 'ログイン画面の「パスワードをお忘れですか？」から再設定できます。うまくいかない場合は管理者に連絡してください。管理者が仮パスワードを再発行します。' },
-      { q: '初めてログインするときの流れは', a: '管理者から届いた案内メールのURLを開き、メールアドレスと仮パスワードでログインします。続けてご自身のパスワードを設定し、ご登録情報（ふりがな・生年月日・連絡先・住所・緊急連絡先・給与振込先の口座情報・マイナンバー）を入力すると利用開始です。いずれも必須のため、通帳とマイナンバーカードをお手元にご用意ください。' },
+      { q: '初めてログインするときの流れは', a: '管理者から届いた案内メールのURLを開き、メールアドレスと仮パスワードでログインします。続けてご自身のパスワードを設定し、ご登録情報（ふりがな・生年月日・連絡先・郵便番号・現住所・住民票の住所・緊急連絡先・給与振込先の口座情報・マイナンバー）を入力すると利用開始です。いずれも必須のため、通帳とマイナンバーカードをお手元にご用意ください。' },
       { q: '住所や氏名が変わりました', a: '「人材」タブのプロフィール変更申請から、変更内容を入力して申請してください。管理者が承認すると反映されます。' },
       { q: 'スマートフォンで使えますか', a: '使えます。ブラウザで同じURLを開いてログインしてください。画面はスマートフォン用に自動で切り替わります。ホーム画面に追加しておくとアプリのように使えます。' },
     ],
@@ -9844,7 +9888,9 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
     resignationDate: account.resignationDate || '',
     resignationReasonId: account.resignationReasonId || '',
     resignationNote: account.resignationNote || '',
+    postalCode: account.postalCode || '',
     address: account.address || '',
+    residentAddress: account.residentAddress || '',
     phone: account.phone || '',
     emergencyContactName: account.emergencyContactName || '',
     emergencyContactPhone: account.emergencyContactPhone || '',
@@ -10035,8 +10081,14 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
               <Field label="スタッフナンバー">
                 <input value={form.staffNumber} onChange={set('staffNumber')} placeholder="例）00016" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
               </Field>
+              <Field label="郵便番号">
+                <input value={form.postalCode} onChange={set('postalCode')} placeholder="例）621-0014" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
+              </Field>
               <Field label="住所">
                 <input value={form.address} onChange={set('address')} placeholder="例）京都府京都市〇〇区..." className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" />
+              </Field>
+              <Field label="住民票の住所">
+                <input value={form.residentAddress} onChange={set('residentAddress')} placeholder="現住所と異なる場合にご入力ください" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" />
               </Field>
               <Field label="最寄り駅">
                 <input value={form.nearestStation} onChange={set('nearestStation')} placeholder="例）京都駅" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" />
