@@ -9520,7 +9520,7 @@ function describeCommuteItemChanges(before = [], after = []) {
 // 0円で申請しようとしたときの確認メッセージ
 const confirmZeroMessage = (itemCount, targetMonth) => (
   itemCount === 0
-    ? `${monthKeyLabel(targetMonth)}分の交通費は「なし（0円）」として申請します。\n立て替えた交通費はありませんか。お間違いなければ「OK」を押してください。`
+    ? `${monthKeyLabel(targetMonth)}分の交通費は「なし（0円）」として申請します。\nお間違いなければ「OK」を押してください。`
     : `交通費の合計が0円です。\n金額の入力漏れはありませんか。お間違いなければ「OK」を押してください。`
 );
 
