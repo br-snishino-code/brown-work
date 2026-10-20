@@ -3481,8 +3481,8 @@ function AttendanceApp() {
                 onSubmit={submitMonthlyAttendanceConfirmation}
                 onSubmitCommute={submitCommuteExpenseClaim}
                 onUpdateCommute={updateCommuteExpenseClaim}
-                onSaveCommuteDraft={saveCommuteExpenseDraft}
                 onSaveAttendanceDraft={saveMonthlyAttendanceDraft}
+                onGoToCommute={() => openRequest('commute')}
               />
             )}
             {requestTab === 'commute' && (
@@ -7193,7 +7193,7 @@ const HELP_STAFF = [
     items: [
       { q: '給与明細はどこで見られますか', a: '「給与」タブを開くと、公開済みの給与明細が一覧で表示されます。明細をクリックすると内訳が確認でき、印刷もできます。' },
       { q: '交通費の申請はいつまでですか', a: '毎月1日が締め切りです。前月分の交通費を、翌月1日までに申請してください。期限までに未提出の場合、打刻時にお知らせが表示されます。' },
-      { q: '交通費の申請方法を教えてください', a: '「各種申請」タブを押して「月次勤怠申請」を選ぶと、勤怠と一緒に入力して提出できます。交通費だけを申請する場合は「各種申請」→「交通費申請」からも申請できます。日付・区間・金額を入力して申請します。経路検索のリンクがあるので、運賃の確認に利用してください。複数件をまとめて登録できます。一度申請した区間は運賃を覚えているため、次回は乗駅・降駅を入れるだけで金額が入ります。その月に交通費が無い場合も、空のまま「0円」として申請できます。0円で申請しようとすると、入力漏れでないかの確認が表示されます。入力の途中で「一時保存する」を押すと、申請せずに内容を残せます。月の途中でこまめに入力しておき、締切前に申請する使い方ができます。一時保存した内容は一覧の「続きを入力する」から再開できます。車通勤などで交通費を個別に申請する方は、管理者がスタッフ詳細の「交通費精算の申請方法」を「個別に申請する」に設定すると、勤怠の確定申請の画面に交通費の欄が出なくなります。月ごとに「今月はまとめて申請する」へ切り替えることもできます。' },
+      { q: '交通費の申請方法を教えてください', a: '入力は「各種申請」→「交通費申請」でおこないます。日付・区間・金額を入力して申請します。経路検索のリンクがあるので、運賃の確認に利用してください。複数件をまとめて登録できます。一度申請した区間は運賃を覚えているため、次回は乗駅・降駅を入れるだけで金額が入ります。その月に交通費が無い場合も、空のまま「0円」として申請できます。0円で申請しようとすると、入力漏れでないかの確認が表示されます。入力の途中で「一時保存する」を押すと、申請せずに内容を残せます。月の途中でこまめに入力しておき、締切前に申請する使い方ができます。一時保存した内容は一覧の「続きを入力する」から再開できます。一時保存したまま「月次勤怠申請」を提出すると、勤怠と交通費が一緒に提出されます。車通勤などで交通費を個別に申請する方は、管理者がスタッフ詳細の「交通費精算の申請方法」を「個別に申請する」に設定すると、月次勤怠申請では交通費を提出しなくなります。月ごとに「今月はまとめて申請する」へ切り替えることもできます。' },
       { q: '申請した交通費を間違えました', a: '承認される前であれば、「各種申請」→「交通費申請」の一覧にある「修正する」から内容を直せます。修正して送信すると、改めて承認待ちになります。承認済みのものは修正できないため、管理者にご相談ください。' },
       { q: '年末調整の書類はどう出しますか', a: '「各種申請」タブを押して「年末調整」を選び、必要事項を入力して提出します。提出時期になったら管理者からお知らせがあります。' },
     ],
@@ -7247,7 +7247,7 @@ const HELP_ADMIN = [
     category: '給与',
     items: [
       { q: '給与計算の流れを教えてください', a: 'まず「勤怠」→「月次確定」で、その月の勤怠を最終承認まで進めます。次に「給与」タブで対象月を選ぶと、勤怠記録から労働時間と残業時間が自動集計されます。承認済みの交通費精算も支給項目に自動で入ります。支給項目・控除項目を確認して下書き保存し、内容が確定したら「公開」します。公開するとスタッフ側の画面に明細が表示されます。勤怠が最終承認されるまで公開はできません。' },
-      { q: '月次勤怠の確定とは', a: '交通費と勤怠は、それぞれ「保存する」で途中まで残しておけます（順番は問いません）。内容がそろったら「勤怠と交通費をまとめて申請する」で一度に提出します。スタッフが前月分の勤怠を確認して確定申請し、管理者が内容を確認して承認、最後にマスター管理者が最終承認する流れです。マスター管理者が最初に確認した場合は、その承認だけで確定します。管理者ご本人の申請は、マスター管理者の承認のみで確定します。最終承認が済むと、その月の給与明細を公開できるようになります。「勤怠」→「月次確定」で処理します。確定後に修正が必要になった場合は、マスター管理者が「確定を取り消す」で差し戻しに戻せます。取り消すとスタッフへ通知され、給与明細の公開も止まります。' },
+      { q: '月次勤怠の確定とは', a: '交通費は「交通費申請」、勤怠は「月次勤怠申請」で、それぞれ「保存する」で途中まで残しておけます（順番は問いません）。内容がそろったら「月次勤怠申請」の「勤怠と交通費をまとめて申請する」で一度に提出します。スタッフが前月分の勤怠を確認して確定申請し、管理者が内容を確認して承認、最後にマスター管理者が最終承認する流れです。マスター管理者が最初に確認した場合は、その承認だけで確定します。管理者ご本人の申請は、マスター管理者の承認のみで確定します。最終承認が済むと、その月の給与明細を公開できるようになります。「勤怠」→「月次確定」で処理します。確定後に修正が必要になった場合は、マスター管理者が「確定を取り消す」で差し戻しに戻せます。取り消すとスタッフへ通知され、給与明細の公開も止まります。' },
       { q: '支給・控除の項目を追加するには', a: 'スタッフの「詳細」→「給与・口座」タブで、スタッフごとの固定的な支給項目・控除項目を登録できます。毎月の計算に自動で反映されます。' },
       { q: '標準報酬月額の設定はどこですか', a: 'スタッフの「詳細」→「社会保険」タブで設定します。等級表から選択でき、健康保険・厚生年金の保険料が自動計算されます。保険料率は別途「保険料率設定」で管理します。' },
       { q: '交通費精算の承認とExcel出力', a: '「給与」タブの交通費精算一覧から承認・却下します。承認できるのはマスター管理者のみです。承認待ちの左側にあるチェックを入れると、まとめて承認できます。承認済みのものは月を指定してExcelファイルに出力でき、経理処理に使えます。承認した金額は、同じ対象月の給与を新規作成する際に支給項目「交通費精算」として自動で入ります。承認する前に「内容を修正して承認」を選ぶと、金額や区間を直してから承認できます。修正した箇所は本人への通知に一覧で記載されます。承認後に修正が必要になった場合は、マスター管理者が「承認を取り消す」で差し戻しに戻せます。いずれの場合も、作成済みの給与明細の「交通費精算」の金額は自動で更新されます。' },
@@ -9578,12 +9578,11 @@ function AdminYearEndAdjustmentTab({ requests, onDecide, isDesktop }) {
 }
 
 // ---- 月次勤怠の確定（スタッフ側）----
-function MonthlyAttendanceConfirmSection({ session, records, confirmations, commuteClaims = [], onSubmit, onSubmitCommute, onUpdateCommute, onSaveCommuteDraft, onSaveAttendanceDraft }) {
+function MonthlyAttendanceConfirmSection({ session, records, confirmations, commuteClaims = [], onSubmit, onSubmitCommute, onUpdateCommute, onSaveAttendanceDraft, onGoToCommute }) {
   const [targetMonth, setTargetMonth] = useState(() => prevMonthKey());
   const [note, setNote] = useState('');
   const [noteLoadedFor, setNoteLoadedFor] = useState(null);
   const [saving, setSaving] = useState(false);
-  const editor = useCommuteRows(commuteClaims);
 
   const [y, m] = targetMonth.split('-').map(Number);
   const summary = useMemo(
@@ -9616,13 +9615,6 @@ function MonthlyAttendanceConfirmSection({ session, records, confirmations, comm
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [targetMonth, confirmations]);
 
-  // 対象月を変えたら、その月の交通費の内容を読み込み直す
-  useEffect(() => {
-    const claim = (commuteClaims || []).find((c) => c.targetMonth === targetMonth);
-    editor.reset(claim ? [...(claim.items || []).map((r) => ({ ...emptyCommuteRow(), ...r })), emptyCommuteRow()] : undefined);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [targetMonth, commuteClaim?.id]);
-
   const summaryPayload = () => ({
     days: summary.days,
     workedMin: summary.workedMin,
@@ -9638,32 +9630,26 @@ function MonthlyAttendanceConfirmSection({ session, records, confirmations, comm
     setSaving(false);
   };
 
-  // 交通費の入力内容だけ保存する（勤怠は申請しない）
-  const saveCommuteDraft = async () => {
-    const items = editor.toItems();
-    setSaving(true);
-    await onSaveCommuteDraft({
-      targetMonth,
-      submittedDate: todayKey(),
-      items,
-      totalAmount: items.reduce((sum, r) => sum + r.subtotal, 0),
-    });
-    setSaving(false);
-  };
+  // 交通費の入力は「交通費申請」でおこなう。ここでは、入力済み（一時保存・差し戻し）の分を
+  // 勤怠と一緒に提出するだけにする。
+  const commuteSubmittable = !!commuteClaim && (commuteClaim.status === 'draft' || commuteClaim.status === 'rejected');
+  const commuteAlreadySent = !!commuteClaim && (commuteClaim.status === 'pending' || commuteClaim.status === 'approved');
+  const bundleTogether = bundleCommute && !commuteAlreadySent;
 
   const submit = async () => {
-    setSaving(true);
     // 交通費も同じ対象月の精算書として一緒に提出する（0円でも記録を残す）
-    const items = editor.toItems();
-    const totalAmount = items.reduce((sum, r) => sum + r.subtotal, 0);
-    if (!commuteLocked && bundleCommute) {
+    if (bundleTogether) {
+      const items = commuteSubmittable ? (commuteClaim.items || []) : [];
+      const totalAmount = commuteSubmittable ? (commuteClaim.totalAmount || 0) : 0;
       if (totalAmount === 0 && !window.confirm(confirmZeroMessage(items.length, targetMonth))) {
-        setSaving(false);
         return;
       }
+      setSaving(true);
       const payload = { targetMonth, submittedDate: todayKey(), items, totalAmount };
       const commuteOk = commuteClaim ? await onUpdateCommute(commuteClaim.id, payload) : await onSubmitCommute(payload);
       if (!commuteOk) { setSaving(false); return; }
+    } else {
+      setSaving(true);
     }
     const ok = await onSubmit(targetMonth, summaryPayload(), note);
     setSaving(false);
@@ -9742,6 +9728,10 @@ function MonthlyAttendanceConfirmSection({ session, records, confirmations, comm
                 <div className="text-[11.5px] text-slate-500">
                   {monthKeyLabel(targetMonth)}分の交通費精算は承認済みです（{formatYen(commuteClaim.totalAmount)}）。修正が必要な場合は管理者にご相談ください。
                 </div>
+              ) : commuteAlreadySent ? (
+                <div className="text-[11.5px] text-slate-500">
+                  {monthKeyLabel(targetMonth)}分の交通費精算は申請済みです（{formatYen(commuteClaim.totalAmount)}・{(commuteClaim.items || []).length}件）。
+                </div>
               ) : !bundleCommute ? (
                 <div className="space-y-1.5">
                   <div className="text-[11.5px] text-slate-500">
@@ -9756,31 +9746,36 @@ function MonthlyAttendanceConfirmSection({ session, records, confirmations, comm
                   </button>
                 </div>
               ) : (
-                <>
-                  <div className="text-[11.5px] text-slate-500">
-                    この月に立て替えた交通費があれば入力してください。勤怠の確定申請と一緒に提出されます。無い場合は空のままで構いません（0円として記録されます）。
-                  </div>
-                  {separateByDefault && (
-                    <button onClick={() => setBundleCommute(false)} className="text-[11.5px] font-bold text-slate-500 underline">
-                      今月はまとめず、個別に申請する
-                    </button>
+                <div className="space-y-2">
+                  {commuteSubmittable ? (
+                    <div className="flex items-center justify-between rounded-xl border border-slate-200 px-3.5 py-2.5">
+                      <span className="text-[11.5px] text-slate-500">入力済みの交通費（{(commuteClaim.items || []).length}件）</span>
+                      <span className="font-mono text-[15px] font-bold text-slate-800">{formatYen(commuteClaim.totalAmount || 0)}</span>
+                    </div>
+                  ) : (
+                    <div className="text-[11.5px] text-slate-500">
+                      この月の交通費はまだ入力されていません。このまま申請すると0円として記録されます。
+                    </div>
                   )}
-                  <CommuteRowsEditor editor={editor} />
-                  <div className="flex items-center justify-between bg-slate-900 text-white rounded-xl px-4 py-2.5">
-                    <span className="text-[12px] font-bold">交通費の合計</span>
-                    <span className="font-mono text-[16px] font-bold">{formatYen(editor.total)}</span>
+                  <div className="text-[11.5px] text-slate-500">
+                    入力・修正は「各種申請」→「交通費申請」でおこないます。ここでは勤怠と一緒に提出します。
                   </div>
-                  <button
-                    onClick={saveCommuteDraft}
-                    disabled={saving}
-                    className="w-full py-2 rounded-lg border border-slate-300 disabled:border-slate-200 text-[12.5px] font-bold text-slate-600"
-                  >
-                    {saving ? '保存中…' : '交通費だけ一時保存する'}
-                  </button>
-                  <div className="text-[11px] text-slate-400">
-                    月の途中でも保存できます。保存しただけでは申請されません。
+                  <div className="flex gap-2 flex-wrap">
+                    {onGoToCommute && (
+                      <button
+                        onClick={onGoToCommute}
+                        className="rounded-lg border border-slate-300 px-3 py-1.5 text-[11.5px] font-bold text-slate-600"
+                      >
+                        {commuteSubmittable ? '交通費を修正する' : '交通費を入力する'}
+                      </button>
+                    )}
+                    {separateByDefault && (
+                      <button onClick={() => setBundleCommute(false)} className="text-[11.5px] font-bold text-slate-500 underline">
+                        今月はまとめず、個別に申請する
+                      </button>
+                    )}
                   </div>
-                </>
+                </div>
               )}
             </div>
 
@@ -9815,10 +9810,10 @@ function MonthlyAttendanceConfirmSection({ session, records, confirmations, comm
               disabled={saving || summary.days === 0}
               className="w-full py-2.5 rounded-lg bg-amber-600 disabled:bg-slate-200 text-white text-[13.5px] font-bold"
             >
-              {saving ? '送信中…' : locked ? 'この内容で出し直す' : bundleCommute ? '勤怠と交通費をまとめて申請する' : '勤怠を確定申請する'}
+              {saving ? '送信中…' : locked ? 'この内容で出し直す' : bundleTogether ? '勤怠と交通費をまとめて申請する' : '勤怠を確定申請する'}
             </button>
             <div className="text-[11px] text-slate-400">
-              「保存する」は申請されません。交通費と勤怠をそれぞれ保存しておき、締切前にまとめて申請できます。
+              「保存する」は申請されません。交通費は「交通費申請」で入力して保存しておき、締切前にここでまとめて申請できます。
             </div>
             {summary.days === 0 && (
               <div className="text-[11.5px] text-slate-400">この月の出勤記録がありません。対象月をご確認ください。</div>
