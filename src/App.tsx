@@ -7027,7 +7027,7 @@ const HELP_ADMIN = [
     items: [
       { q: '勤怠修正申請を承認するには', a: '「勤怠」→「休暇申請」に未承認の申請が一覧表示されます。内容を確認して承認または却下してください。承認すると勤怠記録が自動で書き換わります。' },
       { q: '管理者が直接勤怠を修正できますか', a: 'できます。「勤怠」→「勤怠一覧」で対象のスタッフと日付を選び、時刻を直接編集してください。給与に反映させない修正の場合は、控除対象外のフラグを設定できます。' },
-      { q: '打刻漏れはどこで分かりますか', a: 'ダッシュボードのアラート一覧に「打刻漏れ・打刻間違い」として件数が表示されます。クリックすると該当の一覧に移動します。' },
+      { q: '打刻漏れはどこで分かりますか', a: '「勤怠」→「勤怠修正」を開くと、上部に赤い枠で日付とスタッフ名が表示されます。各行の「この日の勤怠を修正する」を押すと、その日のそのスタッフに絞り込んだ勤怠一覧へ移動し、退勤時刻をその場で入力できます。ダッシュボードのアラート一覧にも件数が表示されます。' },
       { q: '位置情報のアラートとは', a: '打刻時に位置情報が5回以上連続で記録されなかったスタッフを検知しています。端末の設定で位置情報が拒否されている可能性があるため、本人に確認してください。' },
       { q: '出勤規定日数の設定はどこですか', a: '「勤怠」→「その他」→「出勤規定日数設定」で、グループ別・月別に設定します。給与計算の基礎になる日数です。' },
     ],
@@ -8101,6 +8101,12 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
 
   // 画面のどこかに表示された氏名がクリックされたら、そのスタッフの詳細ページを開く
   const [pendingProfileId, setPendingProfileId] = useState(null);
+  // 打刻漏れの行から「この日のこの人」の勤怠一覧へ移動するための指定
+  const [attendanceFocus, setAttendanceFocus] = useState(null);
+  const openAttendanceFor = (employeeId, date) => {
+    setAttendanceFocus({ employeeId, date });
+    setTab('attendance');
+  };
   const openEmployee = useCallback((id) => {
     setPendingProfileId(id);
     setTab('accounts');
@@ -8197,7 +8203,15 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
           <div className="text-[12.5px] text-rose-700">
             <div className="font-bold mb-0.5">打刻漏れが{missing.length}件あります</div>
             {missing.map((r, i) => (
-              <div key={i}>{dateLabel(r.date)}：<EmployeeLink id={r.employeeId} name={r.employeeName} /> — 退勤打刻がありません</div>
+              <div key={i} className="flex items-center gap-2 flex-wrap py-0.5">
+                <span>{dateLabel(r.date)}：<EmployeeLink id={r.employeeId} name={r.employeeName} /> — 退勤打刻がありません</span>
+                <button
+                  onClick={() => openAttendanceFor(r.employeeId, r.date)}
+                  className="shrink-0 inline-flex items-center gap-1 text-[11px] font-bold text-rose-700 border border-rose-300 rounded-lg px-2 py-0.5 hover:bg-rose-100 transition-colors"
+                >
+                  <Pencil size={11} /> この日の勤怠を修正する
+                </button>
+              </div>
             ))}
           </div>
         </div>
@@ -8226,7 +8240,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
       )}
 
       {tab === 'attendance' && (
-        <AttendanceAdminTab data={data} employeeAccounts={employeeAccounts} gpsAlerts={gpsAlerts} onAdminUpdateAttendance={onAdminUpdateAttendance} onAdminUpdateAttendanceBatch={onAdminUpdateAttendanceBatch} isDesktop={isDesktop} />
+        <AttendanceAdminTab data={data} employeeAccounts={employeeAccounts} gpsAlerts={gpsAlerts} focus={attendanceFocus} onConsumeFocus={() => setAttendanceFocus(null)} onAdminUpdateAttendance={onAdminUpdateAttendance} onAdminUpdateAttendanceBatch={onAdminUpdateAttendanceBatch} isDesktop={isDesktop} />
       )}
 
       {tab === 'accounts' && (
@@ -8546,7 +8560,7 @@ function PerformanceAdminTab({ pending, decided, onDecide, isDesktop }) {
 }
 
 
-function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, isDesktop }) {
+function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], focus = null, onConsumeFocus, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, isDesktop }) {
   const now = new Date();
   const [dateFilter, setDateFilter] = useState(todayKey());
   const [employeeFilter, setEmployeeFilter] = useState('all');
@@ -8563,6 +8577,17 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], onAdminUpd
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
   }, [monthlyViewTarget?.employeeId, monthlyViewTarget?.month]);
+
+  // 打刻漏れなどから「この日のこの人」を指定して開かれたとき、絞り込みを合わせる
+  useEffect(() => {
+    if (!focus) return;
+    setMonthlyViewTarget(null);
+    if (focus.date) setDateFilter(focus.date);
+    if (focus.employeeId) setEmployeeFilter(focus.employeeId);
+    setGroupFilter('all');
+    if (onConsumeFocus) onConsumeFocus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus]);
 
   if (monthlyViewTarget) {
     return (
