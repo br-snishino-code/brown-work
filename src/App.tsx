@@ -3980,7 +3980,7 @@ function ProfileSetupScreen({ session, toast, onSave, onLogout }) {
                   <ul className="list-disc pl-4 space-y-0.5">
                     {MY_NUMBER_PURPOSES.map((p) => <li key={p}>{p}</li>)}
                   </ul>
-                  <div className="mt-1.5">上記の手続きのみに使用します。保存後はマスター管理者のみが閲覧でき、閲覧・変更のたびに記録が残ります。</div>
+                  <div className="mt-1.5">上記の手続きのみに使用します。</div>
                 </div>
               </div>
               <Field label="マイナンバー（12桁）">
