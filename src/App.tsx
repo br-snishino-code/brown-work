@@ -6361,7 +6361,7 @@ const HELP_ADMIN = [
     category: 'スタッフの登録・管理',
     items: [
       { q: 'スタッフアカウントを新しく作るには', a: 'アカウントを作成できるのはマスター管理者のみです。「人材」→「スタッフ管理」→「スタッフ一覧・登録」を開くと、右側に登録フォームがあります。姓名・ふりがな・メールアドレス・仮パスワード・入職日・役割を入力して作成します。作成すると、そのメールアドレス宛にログインURLと仮パスワードを記載した案内メールが自動で送られます。仮パスワードは「自動生成」ボタンでも作れます。管理者の画面には登録フォームは表示されません。' },
-      { q: '大人数をまとめて登録したい', a: 'スタッフ一覧の右上にある「CSV一括登録」を使います。表示される形式にあわせてCSVファイルを用意し、アップロードしてください。' },
+      { q: '大人数をまとめて登録したい', a: 'スタッフ一覧の右上にある「CSV一括登録」を使います（マスター管理者のみ）。1行目の見出しは name,email,password,hireDate です。email はログインIDになるため、登録フォームと同じくメールアドレスでご入力ください。作成後、そのアドレス宛にログイン案内が自動で送られます。' },
       { q: '郵便番号から住所は入りますか', a: '郵便番号を7桁まで入力すると、都道府県・市区町村・町名までが住所欄に自動で入ります。続けて番地・建物名をご入力ください。郵便番号を入れ直した場合も、番地はそのまま残して住所の前半だけが入れ替わります。住所を手入力済みの場合は自動入力されません。' },
       { q: '退職者の処理はどうしますか', a: 'スタッフの「詳細」を開き、基本タブの退職日を入力して保存します。退職日を入れたスタッフは、一覧の絞り込みで「在籍のみ」にすると非表示になります。アカウント自体は残るため、過去の勤怠や給与は参照できます。' },
       { q: 'パスワードを再発行するには', a: 'スタッフ一覧の各行にある鍵のアイコンを押すと、仮パスワードを設定できます。設定した仮パスワードは本人に直接お伝えください。本人が次にログインした際、新しいパスワードの設定画面が表示されます。' },
@@ -9898,8 +9898,9 @@ function DeleteAccountModal({ account, onClose, onConfirm }) {
 }
 
 function CsvImportModal({ onClose, onAddAccount }) {
-  const [csvText, setCsvText] = useState('name,username,password,hireDate\n田中 花子,tanaka,pass1234,2026-08-01');
+  const [csvText, setCsvText] = useState('name,email,password,hireDate\n田中 花子,tanaka@brownkyoto.com,pass1234,2026-08-01');
   const [rows, setRows] = useState([]);
+  const [invalid, setInvalid] = useState([]);
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState([]);
 
@@ -9907,29 +9908,45 @@ function CsvImportModal({ onClose, onAddAccount }) {
     const lines = csvText.trim().split('\n').filter((l) => l.trim());
     if (lines.length < 2) {
       setRows([]);
+      setInvalid([]);
       return;
     }
     const header = lines[0].split(',').map((h) => h.trim());
+    // 旧形式（username）の見出しも受け付ける
+    const emailCol = header.indexOf('email') >= 0 ? header.indexOf('email') : header.indexOf('username');
     const idx = {
       name: header.indexOf('name'),
-      username: header.indexOf('username'),
+      email: emailCol,
       password: header.indexOf('password'),
       hireDate: header.indexOf('hireDate'),
     };
-    if (idx.name < 0 || idx.username < 0 || idx.password < 0) {
+    if (idx.name < 0 || idx.email < 0 || idx.password < 0) {
       setRows([]);
+      setInvalid([]);
       return;
     }
-    const parsed = lines.slice(1).map((line) => {
+    const all = lines.slice(1).map((line) => {
       const cols = line.split(',').map((c) => c.trim());
+      const email = cols[idx.email] || '';
       return {
         name: cols[idx.name] || '',
-        username: cols[idx.username] || '',
+        username: email,
+        contactEmail: email,
         password: cols[idx.password] || '',
         hireDate: idx.hireDate >= 0 ? cols[idx.hireDate] || todayKey() : todayKey(),
       };
-    }).filter((r) => r.name && r.username && r.password);
-    setRows(parsed);
+    }).filter((r) => r.name || r.username || r.password);
+    // ログイン案内メールを送るため、メールアドレス形式とパスワード6文字以上を必須とする
+    const ok = [];
+    const ng = [];
+    all.forEach((r) => {
+      if (!r.name || !r.username || !r.password) ng.push({ ...r, reason: '未入力の項目があります' });
+      else if (!r.username.includes('@')) ng.push({ ...r, reason: 'メールアドレスの形式ではありません' });
+      else if (r.password.length < 6) ng.push({ ...r, reason: 'パスワードが6文字未満です' });
+      else ok.push(r);
+    });
+    setRows(ok);
+    setInvalid(ng);
     setResults([]);
   };
 
@@ -9953,18 +9970,32 @@ function CsvImportModal({ onClose, onAddAccount }) {
         </div>
         <div className="px-5 py-4 space-y-3">
           <div className="text-[11.5px] text-slate-500 bg-slate-50 rounded-lg p-3">
-            1行目は見出し（<code className="font-mono">name,username,password,hireDate</code>）にしてください。<br />
-            2行目以降に1人ずつ、カンマ区切りで入力します。<code className="font-mono">hireDate</code>は省略可（形式：YYYY-MM-DD）。パスワードは6文字以上にしてください。
+            1行目は見出し（<code className="font-mono">name,email,password,hireDate</code>）にしてください。<br />
+            2行目以降に1人ずつ、カンマ区切りで入力します。<code className="font-mono">email</code>はログインIDになります。登録フォームと同じく、メールアドレスでご入力ください（このアドレス宛にログイン案内が届きます）。<code className="font-mono">hireDate</code>は省略可（形式：YYYY-MM-DD）。<code className="font-mono">password</code>は仮パスワードで、6文字以上にしてください。
           </div>
           <textarea
             value={csvText}
-            onChange={(e) => { setCsvText(e.target.value); setRows([]); setResults([]); }}
+            onChange={(e) => { setCsvText(e.target.value); setRows([]); setInvalid([]); setResults([]); }}
             rows={8}
             className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[12.5px] resize-none"
           />
           <button onClick={parse} className="text-[12px] font-bold text-slate-600 border border-slate-200 rounded-lg px-3 py-1.5">
             内容を確認する
           </button>
+
+          {invalid.length > 0 && results.length === 0 && (
+            <div className="border border-rose-200 bg-rose-50 rounded-lg overflow-hidden">
+              <div className="px-3 py-2 text-[11.5px] font-bold text-rose-700">{invalid.length}件は登録できません</div>
+              <div className="divide-y divide-rose-100 max-h-32 overflow-y-auto">
+                {invalid.map((r, i) => (
+                  <div key={i} className="px-3 py-1.5 text-[12px] flex items-center justify-between gap-2">
+                    <span className="truncate">{r.name || '(氏名なし)'}<span className="ml-1 font-mono text-rose-400">{r.username}</span></span>
+                    <span className="shrink-0 text-[11px] text-rose-600">{r.reason}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {rows.length > 0 && results.length === 0 && (
             <div className="border border-slate-200 rounded-lg overflow-hidden">
