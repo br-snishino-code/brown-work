@@ -1213,7 +1213,7 @@ async function fetchAllData() {
     supabase.from('app_settings').select('*'),
     supabase.from('monthly_attendance_confirmations').select('*, employees(name)').order('target_month', { ascending: false }),
     supabase.from('shift_request_periods').select('*').order('target_month', { ascending: false }),
-    supabase.from('shift_requests').select('*, employees(name)').order('target_month', { ascending: false }),
+    supabase.from('shift_request_answers').select('*, employees(name)').order('target_month', { ascending: false }),
   ]);
 
   for (const res of [employeesRes, recordsRes, correctionsRes, leaveRes, perfRes, notifRes, payrollRes, auditRes, profileReqRes, groupLeaveRes, employeeAttendanceRes, announcementsRes, yearEndRes, commuteClaimsRes]) {
@@ -3015,7 +3015,7 @@ function AttendanceApp() {
     };
     // 同じ月の行がすでにあっても確実に書き込めるよう、まとめて upsert する
     const { error } = await supabase
-      .from('shift_requests')
+      .from('shift_request_answers')
       .upsert(row, { onConflict: 'employee_id,target_month' });
     if (error) {
       console.error('シフト希望の提出に失敗しました', error);
@@ -7981,7 +7981,7 @@ function ShiftAdminTab({ employeeAccounts, periods = [], requests = [], tablesRe
         </div>
         <div className="mt-2 text-[12.5px] leading-relaxed text-rose-700">
           データベースにシフト用のテーブルがありません。Supabase の SQL Editor で
-          <b> supabase/34_shift_requests.sql </b>
+          <b> supabase/37_shift_request_answers.sql </b>
           を実行してください。実行後、この画面を再読み込みすると使えるようになります。
         </div>
       </div>
