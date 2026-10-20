@@ -3387,10 +3387,15 @@ function AttendanceApp() {
     monthly: needsMonthlyConfirm ? '未提出' : null,
     commute: needsCommuteClaimReminder ? '未提出' : null,
   };
-  // eo業務の方だけ「実績入力」を出す
-  const staffRequestItems = STAFF_REQUEST_ITEMS.filter(
-    (it) => !it.eoOnly || session.mainGroup === EO_GROUP_NAME
-  );
+  // 実績入力は、所属している業務（メイングループ）の入力フォーマットを自動で出す。
+  // 定義がない業務の方には「実績入力」自体を出さない。
+  const perfFormat = performanceFormatFor(session.mainGroup);
+  const PerformanceFormatSection = perfFormat?.Component || null;
+  const staffRequestItems = STAFF_REQUEST_ITEMS
+    .filter((it) => !it.byGroup || !!perfFormat)
+    .map((it) => (it.byGroup && perfFormat
+      ? { ...it, label: perfFormat.label, desc: perfFormat.desc }
+      : it));
   const openRequest = (key) => {
     setTopTab('requests');
     setRequestTab(key);
@@ -3497,8 +3502,8 @@ function AttendanceApp() {
                 onSaveDraft={saveCommuteExpenseDraft}
               />
             )}
-            {requestTab === 'performance' && session.mainGroup === EO_GROUP_NAME && (
-              <EoPerformanceSection employeeId={session.id} isDesktop={isDesktop} />
+            {requestTab === 'performance' && PerformanceFormatSection && (
+              <PerformanceFormatSection employeeId={session.id} isDesktop={isDesktop} />
             )}
             {requestTab === 'yearend' && (
               <YearEndAdjustmentSection
@@ -4963,7 +4968,9 @@ const STAFF_REQUEST_ITEMS = [
   { key: 'leave', label: '休暇申請', desc: '有休・欠勤などの申請と残日数', icon: Palmtree },
   { key: 'monthly', label: '月次勤怠申請', desc: '前月分の勤怠（交通費とまとめて提出）', icon: CheckCircle2 },
   { key: 'commute', label: '交通費申請', desc: '立て替えた交通費の精算', icon: Wallet },
-  { key: 'performance', label: 'eo業務 実績入力', desc: '新規・既存の実績を入力して保存', icon: BarChart3, eoOnly: true },
+  // 実績入力は業務（メイングループ）ごとに入力フォーマットが変わる。
+  // 表示名・説明は PERFORMANCE_FORMATS の定義で上書きされる。
+  { key: 'performance', label: '実績入力', desc: '当月の実績を入力して保存', icon: BarChart3, byGroup: true },
   { key: 'yearend', label: '年末調整', desc: '年末調整の書類を提出', icon: FileText },
   { key: 'profile', label: '個人情報の変更申請', desc: '氏名・住所・口座などの変更', icon: UserCog },
 ];
@@ -6636,6 +6643,23 @@ function EoPerformanceSection({ employeeId, isDesktop }) {
       )}
     </div>
   );
+}
+
+// ---- 業務（メイングループ）ごとの実績入力フォーマット ----
+// スタッフのメイングループと同じ名前のものが、そのスタッフの実績入力画面になる。
+// 新しい業務の実績入力を追加するときは、ここに1行足す。
+// 定義がないグループのスタッフには「実績入力」は表示されない。
+const PERFORMANCE_FORMATS = {
+  [EO_GROUP_NAME]: {
+    label: 'eo業務 実績入力',
+    desc: '新規・既存の実績を入力して保存',
+    Component: EoPerformanceSection,
+  },
+};
+
+function performanceFormatFor(mainGroup) {
+  if (!mainGroup) return null;
+  return PERFORMANCE_FORMATS[mainGroup] || null;
 }
 
 // 管理者用：eo業務グループのインセンティブ集計
