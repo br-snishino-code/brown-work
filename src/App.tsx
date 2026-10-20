@@ -7193,8 +7193,8 @@ const HELP_STAFF = [
     items: [
       { q: '給与明細はどこで見られますか', a: '「給与」タブを開くと、公開済みの給与明細が一覧で表示されます。明細をクリックすると内訳が確認でき、印刷もできます。' },
       { q: '交通費の申請はいつまでですか', a: '毎月1日が締め切りです。前月分の交通費を、翌月1日までに申請してください。期限までに未提出の場合、打刻時にお知らせが表示されます。' },
-      { q: '交通費の申請方法を教えてください', a: '入力は「各種申請」→「交通費申請」でおこないます。日付・区間・金額を入力して申請します。経路検索のリンクがあるので、運賃の確認に利用してください。複数件をまとめて登録できます。一度申請した区間は運賃を覚えているため、次回は乗駅・降駅を入れるだけで金額が入ります。その月に交通費が無い場合も、空のまま「0円」として申請できます。0円で申請しようとすると、入力漏れでないかの確認が表示されます。入力の途中で「一時保存する」を押すと、申請せずに内容を残せます。月の途中でこまめに入力しておき、締切前に申請する使い方ができます。一時保存した内容は一覧の「続きを入力する」から再開できます。一時保存したまま「月次勤怠申請」を提出すると、勤怠と交通費が一緒に提出されます。車通勤などで交通費を個別に申請する方は、管理者がスタッフ詳細の「交通費精算の申請方法」を「個別に申請する」に設定すると、月次勤怠申請では交通費を提出しなくなります。月ごとに「今月はまとめて申請する」へ切り替えることもできます。' },
-      { q: '申請した交通費を間違えました', a: '承認される前であれば、「各種申請」→「交通費申請」の一覧にある「修正する」から内容を直せます。修正して送信すると、改めて承認待ちになります。承認済みのものは修正できないため、管理者にご相談ください。' },
+      { q: '交通費の申請方法を教えてください', a: '入力は「各種申請」→「交通費申請」でおこないます。日付・区間・金額を入力して申請します。経路検索のリンクがあるので、運賃の確認に利用してください。複数件をまとめて登録できます。一度申請した区間は運賃を覚えているため、次回は乗駅・降駅を入れるだけで金額が入ります。その月に交通費が無い場合も、空のまま「0円」として申請できます。0円で申請しようとすると、入力漏れでないかの確認が表示されます。「交通費の内容を保存する」で入力を残し、申請は「各種申請」→「月次勤怠申請」の「勤怠と交通費をまとめて申請する」でおこないます。月の途中でこまめに入力しておき、締切前にまとめて申請する使い方ができます。保存した内容は一覧の「続きを入力する」から再開できます。車通勤などで交通費を個別に申請する方は、管理者がスタッフ詳細の「交通費精算の申請方法」を「個別に申請する」に設定します。この設定の方は交通費申請の画面に「交通費を申請する」ボタンが出て、単独で申請できます。' },
+      { q: '申請した交通費を間違えました', a: '承認される前であれば、「各種申請」→「交通費申請」の一覧にある「修正する」から内容を直せます。修正して「この内容で修正する」を押すと、改めて承認待ちになります。承認済みのものは修正できないため、管理者にご相談ください。' },
       { q: '年末調整の書類はどう出しますか', a: '「各種申請」タブを押して「年末調整」を選び、必要事項を入力して提出します。提出時期になったら管理者からお知らせがあります。' },
     ],
   },
@@ -9720,7 +9720,7 @@ function MonthlyAttendanceConfirmSection({ session, records, confirmations, comm
                 <span className="text-[12px] font-bold text-slate-600">交通費精算（同じ月の分）</span>
                 {commuteClaim && (
                   <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full ${commuteClaim.status === 'approved' ? 'bg-emerald-50 text-emerald-600' : commuteClaim.status === 'rejected' ? 'bg-rose-50 text-rose-600' : commuteClaim.status === 'draft' ? 'bg-slate-100 text-slate-500' : 'bg-amber-50 text-amber-600'}`}>
-                    {commuteClaim.status === 'approved' ? '承認済み' : commuteClaim.status === 'rejected' ? '差し戻し' : commuteClaim.status === 'draft' ? '一時保存' : '承認待ち'}
+                    {commuteClaim.status === 'approved' ? '承認済み' : commuteClaim.status === 'rejected' ? '差し戻し' : commuteClaim.status === 'draft' ? '保存済み（未申請）' : '承認待ち'}
                   </span>
                 )}
               </div>
@@ -10163,6 +10163,13 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate, onSav
     setFormOpen(true);
   };
 
+  // 交通費を個別に申請する設定の方だけ、この画面から申請できる。
+  // まとめて申請の方は「月次勤怠申請」から勤怠と一緒に提出する。
+  const separateMode = session?.commuteClaimMode === 'separate';
+  const editingClaim = (claims || []).find((c) => c.id === editingId) || null;
+  const editingSubmitted = !!editingClaim && (editingClaim.status === 'pending' || editingClaim.status === 'rejected');
+  const showSubmitButton = separateMode || editingSubmitted;
+
   // 申請はせず、入力内容だけ残す
   const saveDraft = async () => {
     const items = editor.toItems();
@@ -10189,7 +10196,7 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate, onSav
     if (ok) resetForm();
   };
 
-  const statusLabel = { draft: '一時保存', pending: '承認待ち', approved: '承認済み', rejected: '差し戻し' };
+  const statusLabel = { draft: '保存済み（未申請）', pending: '承認待ち', approved: '承認済み', rejected: '差し戻し' };
   const statusClass = { draft: 'bg-slate-100 text-slate-500', pending: 'bg-amber-50 text-amber-600', approved: 'bg-emerald-50 text-emerald-600', rejected: 'bg-rose-50 text-rose-600' };
 
   return (
@@ -10199,7 +10206,7 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate, onSav
         <h2 className="font-bold text-[13.5px]">交通費精算書</h2>
         <span className="text-[13px] font-extrabold text-rose-600">※ 締切：毎月1日</span>
         <button onClick={() => (formOpen ? resetForm() : setFormOpen(true))} className="ml-auto text-[11.5px] font-bold text-amber-600 flex items-center gap-1">
-          <Plus size={12} />{formOpen ? '閉じる' : '新規申請'}
+          <Plus size={12} />{formOpen ? '閉じる' : '新しく入力する'}
         </button>
       </div>
 
@@ -10231,7 +10238,7 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate, onSav
             <div>・行が足りない場合は下の「行を追加」で増やせます。</div>
             <div>・一度申請した区間は運賃を覚えています。乗駅・降駅を入れると金額が自動で入ります（金額は書き換えられます）。</div>
             <div>・提出後も、承認されるまでは一覧の「修正する」から内容を直せます。</div>
-            <div>・この月に交通費が無い場合は、空のまま申請すると「0円」として記録できます。</div>
+            <div>・この月に交通費が無い場合は、空のまま保存すれば「0円」として記録できます。</div>
           </div>
 
           <CommuteRowsEditor editor={editor} />
@@ -10241,22 +10248,30 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate, onSav
             <span className="font-mono text-[18px] font-bold">{formatYen(total)}</span>
           </div>
           <div className="flex gap-2">
-            <button onClick={saveDraft} disabled={saving} className="flex-1 py-2.5 rounded-lg border border-slate-300 disabled:border-slate-200 text-[13.5px] font-bold text-slate-600">
-              {saving ? '保存中…' : '一時保存する'}
+            <button
+              onClick={saveDraft}
+              disabled={saving}
+              className={`py-2.5 rounded-lg text-[13.5px] font-bold ${showSubmitButton ? 'flex-1 border border-slate-300 disabled:border-slate-200 text-slate-600' : 'w-full bg-amber-600 disabled:bg-slate-200 text-white'}`}
+            >
+              {saving ? '保存中…' : '交通費の内容を保存する'}
             </button>
-            <button onClick={submit} disabled={saving} className="flex-1 py-2.5 rounded-lg bg-amber-600 disabled:bg-slate-200 text-white text-[13.5px] font-bold">
-              {saving ? '送信中…' : editingId ? 'この内容で修正する' : '申請する'}
-            </button>
+            {showSubmitButton && (
+              <button onClick={submit} disabled={saving} className="flex-1 py-2.5 rounded-lg bg-amber-600 disabled:bg-slate-200 text-white text-[13.5px] font-bold">
+                {saving ? '送信中…' : editingSubmitted ? 'この内容で修正する' : '交通費を申請する'}
+              </button>
+            )}
           </div>
           <div className="text-[11px] text-slate-400">
-            「一時保存する」は管理者には申請されません。入力の途中でも保存でき、あとから続きを入力できます。
+            {showSubmitButton
+              ? '「保存する」は管理者には申請されません。入力の途中でも保存でき、あとから続きを入力できます。'
+              : '入力の途中でも保存でき、あとから続きを入力できます。保存した交通費は「各種申請」→「月次勤怠申請」から勤怠と一緒に申請します。'}
           </div>
         </div>
       )}
 
       <div className="divide-y divide-slate-100">
         {claims.length === 0 ? (
-          <div className="px-5 py-8 text-center text-[12.5px] text-slate-300">申請はまだありません</div>
+          <div className="px-5 py-8 text-center text-[12.5px] text-slate-300">交通費の入力はまだありません</div>
         ) : (
           claims.map((c) => (
             <div key={c.id} className="px-5 py-3">
