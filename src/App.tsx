@@ -3403,7 +3403,7 @@ const PROFILE_SETUP_SECTIONS = [
       },
       {
         key: 'phone', label: '電話番号', type: 'tel', placeholder: '例）090-1234-5678', required: true, autoComplete: 'tel',
-        check: (v) => (onlyDigits(v).length >= 10 ? '' : '電話番号をご確認ください'),
+        phone: true, check: checkPhone,
       },
       {
         key: 'postalCode', label: '郵便番号', placeholder: '例）621-0814', required: true,
@@ -3440,7 +3440,7 @@ const PROFILE_SETUP_SECTIONS = [
       { key: 'emergencyContactRelation', label: '続柄', placeholder: '例）母', required: true },
       {
         key: 'emergencyContactPhone', label: '電話番号', type: 'tel', placeholder: '例）090-0000-0000', required: true,
-        check: (v) => (onlyDigits(v).length >= 10 ? '' : '電話番号をご確認ください'),
+        phone: true, check: checkPhone,
       },
       { key: 'emergencyContactAddress', label: '住所', placeholder: '例）京都府亀岡市三宅町22-11', required: true },
     ],
@@ -3478,6 +3478,26 @@ function FormattedInput({ value, onValueChange, format, blurFormat, ...rest }) {
     />
   );
 }
+
+// 電話番号にハイフンを入れる。
+// 市外局番は桁数が地域ごとに異なるため、区切りが明らかな番号だけ自動で整える。
+// すでにハイフンが入っている場合は、そのままの入力を尊重する。
+const formatPhone = (v) => {
+  const raw = String(v || '');
+  if (raw.includes('-')) return raw;
+  const d = onlyDigits(raw);
+  if (/^0[5789]0\d{8}$/.test(d)) return `${d.slice(0, 3)}-${d.slice(3, 7)}-${d.slice(7)}`;
+  if (/^(0120|0800|0570)\d{6}$/.test(d)) return `${d.slice(0, 4)}-${d.slice(4, 7)}-${d.slice(7)}`;
+  if (/^0[36]\d{8}$/.test(d)) return `${d.slice(0, 2)}-${d.slice(2, 6)}-${d.slice(6)}`;
+  return raw;
+};
+
+// ハイフン入りで入力されているかを確認する
+const checkPhone = (v) => {
+  if (onlyDigits(v).length < 10) return '電話番号をご確認ください';
+  if (!String(v).includes('-')) return 'ハイフンを入れてご入力ください（例）090-1234-5678）';
+  return '';
+};
 
 // 郵便番号を 123-4567 の形にそろえる
 const formatPostalCode = (v) => {
@@ -3773,6 +3793,7 @@ function ProfileSetupScreen({ session, toast, onSave, onLogout }) {
     let v = raw;
     if (f.digitsOnly) v = onlyDigits(v).slice(0, f.maxLength || 20);
     if (f.postal) v = formatPostalCode(v);
+    if (f.phone) v = formatPhone(v);
     return v;
   };
   // 入力が終わってからカタカナへ変換する
@@ -10301,7 +10322,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                 <input value={form.nearestStation} onChange={set('nearestStation')} placeholder="例）京都駅" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" />
               </Field>
               <Field label="電話番号">
-                <input value={form.phone} onChange={set('phone')} placeholder="例）090-1234-5678" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
+                <FormattedInput value={form.phone} onValueChange={(v) => setForm((f) => ({ ...f, phone: v }))} format={formatPhone} type="tel" placeholder="例）090-1234-5678" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
               </Field>
               <div className="grid grid-cols-2 gap-3">
                 <Field label="緊急連絡先（氏名）">
@@ -10312,7 +10333,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                 </Field>
               </div>
               <Field label="緊急連絡先（電話）">
-                <input value={form.emergencyContactPhone} onChange={set('emergencyContactPhone')} placeholder="090-xxxx-xxxx" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
+                <FormattedInput value={form.emergencyContactPhone} onValueChange={(v) => setForm((f) => ({ ...f, emergencyContactPhone: v }))} format={formatPhone} type="tel" placeholder="例）090-0000-0000" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
               </Field>
               <Field label="緊急連絡先（住所）">
                 <input value={form.emergencyContactAddress} onChange={set('emergencyContactAddress')} placeholder="例）京都府亀岡市三宅町22-11" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
