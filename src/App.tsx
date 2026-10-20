@@ -6366,7 +6366,7 @@ const HELP_ADMIN = [
     category: 'スタッフの登録・管理',
     items: [
       { q: 'スタッフアカウントを新しく作るには', a: 'アカウントを作成できるのはマスター管理者のみです。「人材」→「スタッフ管理」→「スタッフ一覧・登録」を開くと、右側に登録フォームがあります。姓名・ふりがな・メールアドレス・仮パスワード・入職日・役割を入力して作成します。作成すると、そのメールアドレス宛にログインURLと仮パスワードを記載した案内メールが自動で送られます。仮パスワードは「自動生成」ボタンでも作れます。管理者の画面には登録フォームは表示されません。' },
-      { q: '大人数をまとめて登録したい', a: 'スタッフ一覧の右上にある「CSV一括登録」を使います（マスター管理者のみ）。1行目の見出しは name,email,password,hireDate です。email はログインIDになるため、登録フォームと同じくメールアドレスでご入力ください。一括登録ではログイン案内メールは送信されないため、ログインURLと仮パスワードは別途ご本人にお伝えください。初回ログイン時のパスワード変更と個人情報の入力は、通常の登録と同じように求められます。' },
+      { q: '大人数をまとめて登録したい', a: 'スタッフ一覧の右上にある「CSV一括登録」を使います（マスター管理者のみ）。1行目の見出しは name,email,password,hireDate です。email はログインIDになるため、登録フォームと同じくメールアドレスでご入力ください。案内メールを送るかどうかは「ログイン案内メールを送る」のチェックで選べます（初期状態は送信しません）。送らない場合は、ログインURLと仮パスワードを別途ご本人にお伝えください。初回ログイン時のパスワード変更と個人情報の入力は、通常の登録と同じように求められます。' },
       { q: '郵便番号から住所は入りますか', a: '郵便番号を7桁まで入力すると、都道府県・市区町村・町名までが住所欄に自動で入ります。続けて番地・建物名をご入力ください。郵便番号を入れ直した場合も、番地はそのまま残して住所の前半だけが入れ替わります。住所を手入力済みの場合は自動入力されません。' },
       { q: '退職者の処理はどうしますか', a: 'スタッフの「詳細」を開き、基本タブの退職日を入力して保存します。退職日を入れたスタッフは、一覧の絞り込みで「在籍のみ」にすると非表示になります。アカウント自体は残るため、過去の勤怠や給与は参照できます。' },
       { q: 'パスワードを再発行するには', a: 'スタッフ一覧の各行にある鍵のアイコンを押すと、仮パスワードを設定できます。設定した仮パスワードは本人に直接お伝えください。本人が次にログインした際、新しいパスワードの設定画面が表示されます。' },
@@ -9906,6 +9906,8 @@ function CsvImportModal({ onClose, onAddAccount }) {
   const [csvText, setCsvText] = useState('name,email,password,hireDate\n田中 花子,tanaka@brownkyoto.com,pass1234,2026-08-01');
   const [rows, setRows] = useState([]);
   const [invalid, setInvalid] = useState([]);
+  // 一括登録では既定でログイン案内メールを送らない
+  const [sendInvite, setSendInvite] = useState(false);
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState([]);
 
@@ -9959,8 +9961,7 @@ function CsvImportModal({ onClose, onAddAccount }) {
     setRunning(true);
     const nextResults = [];
     for (const row of rows) {
-      // 一括登録ではログイン案内メールを送らない
-      const ok = await onAddAccount({ ...row, skipInvite: true });
+      const ok = await onAddAccount({ ...row, skipInvite: !sendInvite });
       nextResults.push({ ...row, ok });
     }
     setResults(nextResults);
@@ -9977,8 +9978,7 @@ function CsvImportModal({ onClose, onAddAccount }) {
         <div className="px-5 py-4 space-y-3">
           <div className="text-[11.5px] text-slate-500 bg-slate-50 rounded-lg p-3">
             1行目は見出し（<code className="font-mono">name,email,password,hireDate</code>）にしてください。<br />
-            2行目以降に1人ずつ、カンマ区切りで入力します。<code className="font-mono">email</code>はログインIDになります。登録フォームと同じく、メールアドレスでご入力ください（このアドレス宛にログイン案内が届きます）。<code className="font-mono">hireDate</code>は省略可（形式：YYYY-MM-DD）。<code className="font-mono">password</code>は仮パスワードで、6文字以上にしてください。<br />
-            <span className="font-bold text-slate-600">一括登録では、ログイン案内メールは送信されません。</span>ログインURLと仮パスワードは、別途ご本人にお伝えください。
+            2行目以降に1人ずつ、カンマ区切りで入力します。<code className="font-mono">email</code>はログインIDになります。登録フォームと同じく、メールアドレスでご入力ください（このアドレス宛にログイン案内が届きます）。<code className="font-mono">hireDate</code>は省略可（形式：YYYY-MM-DD）。<code className="font-mono">password</code>は仮パスワードで、6文字以上にしてください。
           </div>
           <textarea
             value={csvText}
@@ -9989,6 +9989,23 @@ function CsvImportModal({ onClose, onAddAccount }) {
           <button onClick={parse} className="text-[12px] font-bold text-slate-600 border border-slate-200 rounded-lg px-3 py-1.5">
             内容を確認する
           </button>
+
+          <label className="flex items-start gap-2 text-[12px] text-slate-600 cursor-pointer border border-slate-200 rounded-lg px-3 py-2.5">
+            <input
+              type="checkbox"
+              checked={sendInvite}
+              onChange={(e) => setSendInvite(e.target.checked)}
+              className="mt-0.5"
+            />
+            <span>
+              ログイン案内メールを送る
+              <span className="block text-[11px] text-slate-400">
+                {sendInvite
+                  ? '各メールアドレス宛に、ログインURLと仮パスワードを記載した案内を送信します。'
+                  : 'チェックを入れない場合は送信しません。ログインURLと仮パスワードは別途ご本人にお伝えください。'}
+              </span>
+            </span>
+          </label>
 
           {invalid.length > 0 && results.length === 0 && (
             <div className="border border-rose-200 bg-rose-50 rounded-lg overflow-hidden">
@@ -10023,7 +10040,9 @@ function CsvImportModal({ onClose, onAddAccount }) {
               <div className="px-3 py-2 bg-slate-50 text-[11.5px] font-bold text-slate-600">
                 結果：成功 {results.filter((r) => r.ok).length}件 ／ 失敗 {results.filter((r) => !r.ok).length}件
                 <div className="font-normal text-slate-500 mt-0.5">
-                  ログイン案内メールは送信していません。ログインURL（{APP_LOGIN_URL}）と仮パスワードを、ご本人にお伝えください。
+                  {sendInvite
+                    ? '各メールアドレス宛に、ログイン案内を送信しました。'
+                    : `ログイン案内メールは送信していません。ログインURL（${APP_LOGIN_URL}）と仮パスワードを、ご本人にお伝えください。`}
                 </div>
               </div>
               <div className="divide-y divide-slate-100 max-h-48 overflow-y-auto">
