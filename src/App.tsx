@@ -9203,16 +9203,18 @@ function AdminMonthlyConfirmTab({ confirmations, isMasterAdmin, onDecide, isDesk
   return (
     <div className="space-y-5">
       <Section
-        title="管理者の確認待ち"
-        note="スタッフから届いた確定申請です。内容を確認して承認すると、マスター管理者へ最終承認の依頼が届きます。"
+        title={isMasterAdmin ? '管理者の確認待ち' : 'あなたの確認待ち'}
+        note={isMasterAdmin
+          ? 'スタッフから届いた確定申請です。承認すると、下の「最終承認待ち」へ移ります。'
+          : 'スタッフから届いた確定申請です。内容を確認して承認すると、マスター管理者へ最終承認の依頼が届きます。'}
         list={waitingAdmin}
         stage="admin"
       />
       <Section
-        title="マスター管理者の最終承認待ち"
+        title={isMasterAdmin ? 'あなたの最終承認待ち' : 'マスター管理者の最終承認待ち'}
         note={isMasterAdmin
           ? '最終承認すると勤怠が確定し、その月の給与計算に進めます。'
-          : '最終承認はマスター管理者のみが行えます。'}
+          : '管理者の確認は完了しています。マスター管理者の最終承認をお待ちください。'}
         list={waitingMaster}
         stage={isMasterAdmin ? 'master' : null}
       />
