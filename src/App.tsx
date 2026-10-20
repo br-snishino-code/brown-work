@@ -6831,7 +6831,7 @@ const HELP_STAFF = [
     items: [
       { q: '給与明細はどこで見られますか', a: '「給与」タブを開くと、公開済みの給与明細が一覧で表示されます。明細をクリックすると内訳が確認でき、印刷もできます。' },
       { q: '交通費の申請はいつまでですか', a: '毎月1日が締め切りです。前月分の交通費を、翌月1日までに申請してください。期限までに未提出の場合、打刻時にお知らせが表示されます。' },
-      { q: '交通費の申請方法を教えてください', a: '「勤怠」タブの「月次勤怠の確定申請」で、勤怠と一緒に入力して提出できます。交通費だけを申請する場合は「給与」タブの交通費精算からも申請できます。日付・区間・金額を入力して申請します。経路検索のリンクがあるので、運賃の確認に利用してください。複数件をまとめて登録できます。一度申請した区間は運賃を覚えているため、次回は乗駅・降駅を入れるだけで金額が入ります。' },
+      { q: '交通費の申請方法を教えてください', a: '「勤怠」タブの「月次勤怠の確定申請」で、勤怠と一緒に入力して提出できます。交通費だけを申請する場合は「給与」タブの交通費精算からも申請できます。日付・区間・金額を入力して申請します。経路検索のリンクがあるので、運賃の確認に利用してください。複数件をまとめて登録できます。一度申請した区間は運賃を覚えているため、次回は乗駅・降駅を入れるだけで金額が入ります。その月に交通費が無い場合も、空のまま「0円」として申請できます。0円で申請しようとすると、入力漏れでないかの確認が表示されます。' },
       { q: '申請した交通費を間違えました', a: '承認される前であれば、交通費精算の一覧にある「修正する」から内容を直せます。修正して送信すると、改めて承認待ちになります。承認済みのものは修正できないため、管理者にご相談ください。' },
       { q: '年末調整の書類はどう出しますか', a: '「人材」タブの年末調整から、必要事項を入力して提出します。提出時期になったら管理者からお知らせがあります。' },
     ],
@@ -9188,15 +9188,15 @@ function MonthlyAttendanceConfirmSection({ records, confirmations, commuteClaims
 
   const submit = async () => {
     setSaving(true);
-    // 交通費の入力があれば、同じ対象月の精算書として一緒に提出する
+    // 交通費も同じ対象月の精算書として一緒に提出する（0円でも記録を残す）
     const items = editor.toItems();
-    if (items.length > 0 && !commuteLocked) {
-      const payload = {
-        targetMonth,
-        submittedDate: todayKey(),
-        items,
-        totalAmount: items.reduce((sum, r) => sum + r.subtotal, 0),
-      };
+    const totalAmount = items.reduce((sum, r) => sum + r.subtotal, 0);
+    if (!commuteLocked) {
+      if (totalAmount === 0 && !window.confirm(confirmZeroMessage(items.length, targetMonth))) {
+        setSaving(false);
+        return;
+      }
+      const payload = { targetMonth, submittedDate: todayKey(), items, totalAmount };
       const commuteOk = commuteClaim ? await onUpdateCommute(commuteClaim.id, payload) : await onSubmitCommute(payload);
       if (!commuteOk) { setSaving(false); return; }
     }
@@ -9286,7 +9286,7 @@ function MonthlyAttendanceConfirmSection({ records, confirmations, commuteClaims
               ) : (
                 <>
                   <div className="text-[11.5px] text-slate-500">
-                    この月に立て替えた交通費があれば入力してください。勤怠の確定申請と一緒に提出されます。無い場合は空のままで構いません。
+                    この月に立て替えた交通費があれば入力してください。勤怠の確定申請と一緒に提出されます。無い場合は空のままで構いません（0円として記録されます）。
                   </div>
                   <CommuteRowsEditor editor={editor} />
                   <div className="flex items-center justify-between bg-slate-900 text-white rounded-xl px-4 py-2.5">
@@ -9517,6 +9517,13 @@ function describeCommuteItemChanges(before = [], after = []) {
   return out;
 }
 
+// 0円で申請しようとしたときの確認メッセージ
+const confirmZeroMessage = (itemCount, targetMonth) => (
+  itemCount === 0
+    ? `${monthKeyLabel(targetMonth)}分の交通費は「なし（0円）」として申請します。\n立て替えた交通費はありませんか。お間違いなければ「OK」を押してください。`
+    : `交通費の合計が0円です。\n金額の入力漏れはありませんか。お間違いなければ「OK」を押してください。`
+);
+
 const emptyCommuteRow = () => ({ date: '', workplace: '', transport: '', fromStation: '', toStation: '', calcMethod: 'round_trip', unitPrice: '', passFare: '', excessAmount: '', note: '' });
 const computeCommuteRowSubtotal = (row) => {
   switch (row.calcMethod) {
@@ -9660,8 +9667,10 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate }) {
 
   const submit = async () => {
     const items = editor.toItems();
-    if (items.length === 0) return;
-    const payload = { targetMonth, submittedDate, items, totalAmount: items.reduce((s, r) => s + r.subtotal, 0) };
+    const totalAmount = items.reduce((s, r) => s + r.subtotal, 0);
+    // 0円での申請は、入力漏れと区別がつかないため確認する
+    if (totalAmount === 0 && !window.confirm(confirmZeroMessage(items.length, targetMonth))) return;
+    const payload = { targetMonth, submittedDate, items, totalAmount };
     setSaving(true);
     const ok = editingId ? await onUpdate(editingId, payload) : await onSubmit(payload);
     setSaving(false);
@@ -9710,6 +9719,7 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate }) {
             <div>・行が足りない場合は下の「行を追加」で増やせます。</div>
             <div>・一度申請した区間は運賃を覚えています。乗駅・降駅を入れると金額が自動で入ります（金額は書き換えられます）。</div>
             <div>・提出後も、承認されるまでは一覧の「修正する」から内容を直せます。</div>
+            <div>・この月に交通費が無い場合は、空のまま申請すると「0円」として記録できます。</div>
           </div>
 
           <CommuteRowsEditor editor={editor} />
@@ -9899,7 +9909,14 @@ function AdminCommuteExpenseClaimsTab({ claims, isMasterAdmin = false, onDecide,
       </div>
       <div className="flex items-center justify-between font-mono font-bold text-[14px] text-slate-800 mb-2">
         <span className="font-sans text-[12px] font-bold text-slate-500">合計金額</span>
-        {formatYen(c.totalAmount)}
+        <span>
+          {formatYen(c.totalAmount)}
+          {Number(c.totalAmount) === 0 && (
+            <span className="ml-2 font-sans text-[11px] font-bold text-slate-400">
+              {(c.items?.length || 0) === 0 ? '（交通費なしとして申請）' : '（0円として申請）'}
+            </span>
+          )}
+        </span>
       </div>
       {c.status === 'pending' ? (
         isMasterAdmin ? (
