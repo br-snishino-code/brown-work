@@ -1955,6 +1955,63 @@ function AttendanceApp() {
     }
   };
 
+  // ログインID（メールアドレス）を変更する（マスター管理者のみ）
+  const handleChangeLoginEmail = async (account, newEmail, options = {}) => {
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const accessToken = sessionData?.session?.access_token;
+      const { data: fnData, error } = await supabase.functions.invoke('update-employee-email', {
+        body: {
+          employeeId: account.id,
+          newEmail,
+          updateContactEmail: !!options.updateContactEmail,
+        },
+        headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
+      });
+      if (error || fnData?.error) {
+        let detail = fnData?.error;
+        if (!detail && error?.context) {
+          try {
+            const body = await error.context.json();
+            detail = body?.error || body?.message;
+          } catch (_) {
+            try { detail = await error.context.text(); } catch (__) { /* noop */ }
+          }
+        }
+        show(detail || 'ログインIDの変更に失敗しました', 'warn');
+        return false;
+      }
+      if (options.notify) {
+        const subject = '【Brown Work】ログインIDの変更について';
+        const text = [
+          `${account.name} 様`,
+          '',
+          'お疲れさまです。',
+          '勤怠管理システム「Brown Work」のログインIDを下記のとおり変更しました。',
+          '',
+          '────────────────────',
+          `ログインURL： ${APP_LOGIN_URL}`,
+          `新しいログインID： ${newEmail}`,
+          '────────────────────',
+          '',
+          'パスワードはこれまでどおりです。',
+          'ご不明な点がありましたら、担当者までお問い合わせください。',
+          '',
+          '株式会社Brown',
+        ].join('\n');
+        await sendEmailBestEffort(newEmail, subject, text);
+      }
+      await refreshData();
+      await logAudit(session, 'ログインIDを変更', `${account.username} → ${newEmail}`, account.id, account.name);
+      show('ログインIDを変更しました', 'success');
+      return true;
+    } catch (e) {
+      console.error('ログインIDの変更に失敗しました', e);
+      show('ログインIDの変更に失敗しました', 'warn');
+      return false;
+    }
+  };
+
   // 管理者宛の通知メールの送信先を保存する（マスター管理者のみ）
   const saveAdminNotifyEmail = async (value) => {
     const trimmed = String(value || '').trim();
@@ -3077,6 +3134,7 @@ function AttendanceApp() {
             onUpdateDates={updateEmployeeDates}
             onUpdateAdminAccess={updateAdminAccess}
             onSaveAdminNotifyEmail={saveAdminNotifyEmail}
+            onChangeLoginEmail={handleChangeLoginEmail}
             onSaveGroupLeave={saveGroupLeaveSchedule}
             onSaveEmployeeAttendance={saveEmployeeAttendanceSchedule}
             onAdminUpdateAttendance={adminUpdateAttendance}
@@ -6458,6 +6516,7 @@ const HELP_ADMIN = [
       { q: '大人数をまとめて登録したい', a: 'スタッフ一覧の右上にある「CSV一括登録」を使います（マスター管理者のみ）。1行目の見出しは name,email,password,hireDate です。email はログインIDになるため、登録フォームと同じくメールアドレスでご入力ください。案内メールを送るかどうかは「ログイン案内メールを送る」のチェックで選べます（初期状態は送信しません）。送らない場合は、ログインURLと仮パスワードを別途ご本人にお伝えください。初回ログイン時のパスワード変更と個人情報の入力は、通常の登録と同じように求められます。' },
       { q: '郵便番号から住所は入りますか', a: '郵便番号を7桁まで入力すると、都道府県・市区町村・町名までが住所欄に自動で入ります。続けて番地・建物名をご入力ください。郵便番号を入れ直した場合も、番地はそのまま残して住所の前半だけが入れ替わります。住所を手入力済みの場合は自動入力されません。' },
       { q: '退職者の処理はどうしますか', a: 'スタッフの「詳細」を開き、基本タブの退職日を入力して保存します。退職日を入れたスタッフは、一覧の絞り込みで「在籍のみ」にすると非表示になります。アカウント自体は残るため、過去の勤怠や給与は参照できます。' },
+      { q: 'ログインID（メールアドレス）を変えるには', a: 'スタッフ一覧の各行にあるメールのアイコンから変更できます（マスター管理者のみ）。新しいメールアドレスを入力すると、ログイン用のアドレスが切り替わります。パスワードは変わりません。連絡用メールアドレスも同時に変更するか、本人へお知らせメールを送るかを選べます。変更内容は監査ログに記録されます。' },
       { q: 'パスワードを再発行するには', a: 'スタッフ一覧の各行にある鍵のアイコンを押すと、仮パスワードを設定できます。設定した仮パスワードは本人に直接お伝えください。本人が次にログインした際、新しいパスワードの設定画面が表示されます。' },
       { q: '通知メールの送信先を変えるには', a: '「勤怠」→「スタッフ管理」→「管理者権限」の一番上にある「通知メールの送信先」で指定します。カンマ区切りで複数指定でき、未設定の場合はマスター管理者の連絡用メールアドレスに届きます。マスター管理者のみが設定できます。なお管理者宛のメールは個人情報の変更申請と年末調整のときだけ送られます。勤怠修正・休暇申請・実績報告などは、画面右上のベルのお知らせでご確認ください。' },
       { q: '管理者権限を与えるには', a: '「勤怠」→「スタッフ管理」→「管理者権限」から設定します。タブ単位（勤怠・労務・人材・給与）でアクセス範囲を制限できます。マスター管理者のみが操作できます。' },
@@ -7426,7 +7485,7 @@ function AdminTopNav({ tab, setTab, correctionCount, leaveCount, performanceCoun
   );
 }
 
-function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, onDecideLeave, onDecidePerformance, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
+function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, onDecideLeave, onDecidePerformance, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onChangeLoginEmail, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
   const [tab, setTab] = useState('dashboard'); // dashboard | attendance | requests | leave | performance | accounts
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
@@ -7596,6 +7655,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, o
         <AccountManagement
           employeeAccounts={employeeAccounts}
           onAddAccount={onAddAccount}
+          onChangeLoginEmail={onChangeLoginEmail}
           onUpdateDates={onUpdateDates}
           onDeleteAccount={onDeleteAccount}
           onResetPassword={onResetPassword}
@@ -9628,7 +9688,7 @@ const ADMIN_TAB_OPTIONS = [
   { key: 'payroll', label: '給与' },
 ];
 
-function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, groupLeaveSchedules, employeeAttendanceSchedules, onSaveEmployeeAttendance, resignationReasons = [], initialProfileId = null, onConsumeInitialProfile, session, isDesktop }) {
+function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail, onUpdateDates, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, groupLeaveSchedules, employeeAttendanceSchedules, onSaveEmployeeAttendance, resignationReasons = [], initialProfileId = null, onConsumeInitialProfile, session, isDesktop }) {
   const knownGroups = Array.from(new Set([...employeeAccounts.map((a) => a.mainGroup).filter(Boolean), ...Object.keys(groupLeaveSchedules || {})]));
   const [listGroupFilter, setListGroupFilter] = useState('all');
   const [listStaffTypeFilter, setListStaffTypeFilter] = useState('all');
@@ -9649,6 +9709,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
   const [csvModalOpen, setCsvModalOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [resetPasswordTarget, setResetPasswordTarget] = useState(null);
+  const [loginEmailTarget, setLoginEmailTarget] = useState(null);
   const [backingUp, setBackingUp] = useState(false);
   const isMasterAdmin = session?.role === 'master_admin';
 
@@ -9850,6 +9911,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
               <th className="px-5 py-2 font-medium">氏名</th>
               <th className="px-5 py-2 font-medium">雇用形態</th>
               <th className="px-5 py-2 font-medium"></th>
+              {isMasterAdmin && <th className="px-5 py-2 font-medium"></th>}
               <th className="px-5 py-2 font-medium"></th>
               <th className="px-5 py-2 font-medium"></th>
             </tr>
@@ -9866,13 +9928,16 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
                   </td>
                   <td className="px-5 py-2.5 text-slate-600">{acc.staffType || '社員'}</td>
                   <td className="px-5 py-2.5"><button onClick={() => setProfileModalAccount(acc)} className="text-[11px] font-bold text-slate-500 border border-slate-200 rounded-md px-2 py-1">詳細</button></td>
+                  {isMasterAdmin && (
+                    <td className="px-5 py-2.5"><button onClick={() => setLoginEmailTarget(acc)} className="text-slate-300 hover:text-amber-600" title="ログインIDを変更"><Mail size={14} /></button></td>
+                  )}
                   <td className="px-5 py-2.5"><button onClick={() => setResetPasswordTarget(acc)} className="text-slate-300 hover:text-amber-600" title="パスワードリセット"><Key size={14} /></button></td>
                   <td className="px-5 py-2.5"><button onClick={() => setDeleteTarget(acc)} className="text-slate-300 hover:text-rose-500"><Trash2 size={14} /></button></td>
                 </tr>
               );
             })}
             {filteredEmployeeAccounts.length === 0 && (
-              <tr><td colSpan={5} className="px-5 py-8 text-center text-[12.5px] text-slate-300">該当するスタッフがいません</td></tr>
+              <tr><td colSpan={isMasterAdmin ? 6 : 5} className="px-5 py-8 text-center text-[12.5px] text-slate-300">該当するスタッフがいません</td></tr>
             )}
           </tbody>
         </table>
@@ -9893,7 +9958,10 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
                   </div>
                   <div className="flex items-center gap-1">
                     <button onClick={() => setProfileModalAccount(acc)} className="text-[11px] font-bold text-slate-500 border border-slate-200 rounded-md px-2 py-1">詳細</button>
-                    <button onClick={() => setResetPasswordTarget(acc)} className="text-slate-300 hover:text-amber-600 p-1"><Key size={14} /></button>
+                    {isMasterAdmin && (
+                      <button onClick={() => setLoginEmailTarget(acc)} className="text-slate-300 hover:text-amber-600 p-1" title="ログインIDを変更"><Mail size={14} /></button>
+                    )}
+                    <button onClick={() => setResetPasswordTarget(acc)} className="text-slate-300 hover:text-amber-600 p-1" title="パスワードリセット"><Key size={14} /></button>
                     <button onClick={() => setDeleteTarget(acc)} className="text-slate-300 hover:text-rose-500 p-1"><Trash2 size={14} /></button>
                   </div>
                 </div>
@@ -10001,6 +10069,17 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
           }}
         />
       )}
+      {loginEmailTarget && (
+        <ChangeLoginEmailModal
+          account={loginEmailTarget}
+          onClose={() => setLoginEmailTarget(null)}
+          onConfirm={async (newEmail, options) => {
+            const ok = await onChangeLoginEmail(loginEmailTarget, newEmail, options);
+            if (ok) setLoginEmailTarget(null);
+            return ok;
+          }}
+        />
+      )}
       {resetPasswordTarget && (
         <ResetPasswordModal
           account={resetPasswordTarget}
@@ -10034,6 +10113,70 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
       {disclaimer}
       {modals}
     </div>
+  );
+}
+
+function ChangeLoginEmailModal({ account, onClose, onConfirm }) {
+  const [newEmail, setNewEmail] = useState('');
+  const [updateContactEmail, setUpdateContactEmail] = useState(true);
+  const [notify, setNotify] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const trimmed = newEmail.trim();
+  const canSubmit = isEmailLike(trimmed) && trimmed !== account.username;
+
+  const run = async () => {
+    setSaving(true);
+    await onConfirm(trimmed, { updateContactEmail, notify });
+    setSaving(false);
+  };
+
+  return createPortal(
+    <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-50 p-0 sm:p-4">
+      <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-md max-h-[92vh] overflow-y-auto">
+        <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center gap-2">
+          <div className="w-9 h-9 rounded-xl bg-amber-50 flex items-center justify-center shrink-0">
+            <Mail size={16} className="text-amber-600" />
+          </div>
+          <h3 className="font-bold text-[15px]">ログインIDを変更</h3>
+        </div>
+        <div className="px-5 py-4 space-y-3">
+          <div className="text-[12.5px] text-slate-500">{account.name} さんのログイン用メールアドレスを変更します。</div>
+          <Field label="現在のログインID">
+            <div className="w-full border border-slate-200 bg-slate-100 rounded-lg px-3 py-2 font-mono text-[13.5px] text-slate-500 break-all">{account.username}</div>
+          </Field>
+          <Field label="新しいログインID（メールアドレス）">
+            <input
+              value={newEmail}
+              onChange={(e) => setNewEmail(e.target.value)}
+              placeholder="例）tanaka@brownkyoto.com"
+              autoCapitalize="none"
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]"
+            />
+          </Field>
+          {trimmed && !isEmailLike(trimmed) && (
+            <div className="text-[11.5px] text-rose-600">メールアドレスの形式をご確認ください</div>
+          )}
+          <label className="flex items-start gap-2 text-[12px] text-slate-600 cursor-pointer">
+            <input type="checkbox" checked={updateContactEmail} onChange={(e) => setUpdateContactEmail(e.target.checked)} className="mt-0.5" />
+            <span>連絡用メールアドレスも同じアドレスに変更する</span>
+          </label>
+          <label className="flex items-start gap-2 text-[12px] text-slate-600 cursor-pointer">
+            <input type="checkbox" checked={notify} onChange={(e) => setNotify(e.target.checked)} className="mt-0.5" />
+            <span>新しいアドレスへ変更のお知らせメールを送る</span>
+          </label>
+          <div className="text-[11px] text-slate-400">
+            パスワードは変わりません。変更後は、新しいアドレスでログインしていただきます。
+          </div>
+        </div>
+        <div className="px-5 pb-5 pt-1 flex gap-2">
+          <button onClick={onClose} className="flex-1 py-2.5 rounded-lg border border-slate-200 text-[13.5px] font-medium text-slate-500">キャンセル</button>
+          <button onClick={run} disabled={!canSubmit || saving} className="flex-1 py-2.5 rounded-lg bg-amber-600 disabled:bg-slate-200 text-white text-[13.5px] font-bold">
+            {saving ? '変更中…' : '変更する'}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body
   );
 }
 
