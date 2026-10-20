@@ -2756,6 +2756,44 @@ function AttendanceApp() {
     return true;
   };
 
+  // 確定した勤怠の取り消し（マスター管理者のみ）。差し戻し扱いに戻す
+  const cancelMonthlyAttendanceConfirmation = async (id, reason) => {
+    if (session.role !== 'master_admin') {
+      show('確定を取り消せるのはマスター管理者のみです', 'warn');
+      return false;
+    }
+    const target = (data.monthlyConfirmations || []).find((c) => c.id === id);
+    if (!target) return false;
+    const { error } = await supabase
+      .from('monthly_attendance_confirmations')
+      .update({
+        status: 'rejected',
+        master_comment: reason ? `確定を取り消しました：${reason}` : '確定を取り消しました',
+        master_decided_by: session.id,
+        master_decided_at: new Date().toISOString(),
+        admin_decided_by: null,
+        admin_decided_at: null,
+        admin_comment: null,
+      })
+      .eq('id', id);
+    if (error) {
+      console.error('確定の取り消しに失敗しました', error);
+      show(`確定の取り消しに失敗しました：${error.message || ''}`, 'warn');
+      return false;
+    }
+    const monthLabel = monthKeyLabel(target.targetMonth);
+    await notifyEmployeeUser(
+      target.employeeId,
+      `【勤怠確定の取り消し】${monthLabel}分`,
+      `${monthLabel}分の勤怠の確定が取り消されました。${reason ? `理由：${reason}` : ''}内容をご確認のうえ、修正して再度ご提出ください。`,
+      id
+    );
+    await refreshData();
+    await logAudit(session, '勤怠の確定を取り消し', `${monthLabel}${reason ? `／理由：${reason}` : ''}`, target.employeeId, target.employeeName);
+    show('確定を取り消しました。スタッフへ通知しています', 'warn');
+    return true;
+  };
+
   // 交通費精算書の申請を提出
   const submitCommuteExpenseClaim = async (payload) => {
     const { data: inserted, error } = await supabase
@@ -3325,6 +3363,7 @@ function AttendanceApp() {
             onSaveAdminNotifyEmail={saveAdminNotifyEmail}
             onChangeLoginEmail={handleChangeLoginEmail}
             onDecideMonthlyConfirm={decideMonthlyAttendanceConfirmation}
+            onCancelMonthlyConfirm={cancelMonthlyAttendanceConfirmation}
             onSaveGroupLeave={saveGroupLeaveSchedule}
             onSaveEmployeeAttendance={saveEmployeeAttendanceSchedule}
             onAdminUpdateAttendance={adminUpdateAttendance}
@@ -6737,7 +6776,7 @@ const HELP_ADMIN = [
     category: '給与',
     items: [
       { q: '給与計算の流れを教えてください', a: 'まず「勤怠」→「月次勤怠の確定」で、その月の勤怠を最終承認まで進めます。次に「給与」タブで対象月を選ぶと、勤怠記録から労働時間と残業時間が自動集計されます。承認済みの交通費精算も支給項目に自動で入ります。支給項目・控除項目を確認して下書き保存し、内容が確定したら「公開」します。公開するとスタッフ側の画面に明細が表示されます。勤怠が最終承認されるまで公開はできません。' },
-      { q: '月次勤怠の確定とは', a: 'スタッフが前月分の勤怠を確認して確定申請し、管理者が内容を確認して承認、最後にマスター管理者が最終承認する流れです。マスター管理者が最初に確認した場合は、その承認だけで確定します。最終承認が済むと、その月の給与明細を公開できるようになります。「勤怠」→「月次勤怠の確定」で処理します。' },
+      { q: '月次勤怠の確定とは', a: 'スタッフが前月分の勤怠を確認して確定申請し、管理者が内容を確認して承認、最後にマスター管理者が最終承認する流れです。マスター管理者が最初に確認した場合は、その承認だけで確定します。最終承認が済むと、その月の給与明細を公開できるようになります。「勤怠」→「月次勤怠の確定」で処理します。確定後に修正が必要になった場合は、マスター管理者が「確定を取り消す」で差し戻しに戻せます。取り消すとスタッフへ通知され、給与明細の公開も止まります。' },
       { q: '支給・控除の項目を追加するには', a: 'スタッフの「詳細」→「給与・口座」タブで、スタッフごとの固定的な支給項目・控除項目を登録できます。毎月の計算に自動で反映されます。' },
       { q: '標準報酬月額の設定はどこですか', a: 'スタッフの「詳細」→「社会保険」タブで設定します。等級表から選択でき、健康保険・厚生年金の保険料が自動計算されます。保険料率は別途「保険料率設定」で管理します。' },
       { q: '交通費精算の承認とExcel出力', a: '「給与」タブの交通費精算一覧から承認・却下します。承認待ちの左側にあるチェックを入れると、まとめて承認できます。承認済みのものは月を指定してExcelファイルに出力でき、経理処理に使えます。承認した金額は、同じ対象月の給与を新規作成する際に支給項目「交通費精算」として自動で入ります。' },
@@ -7711,7 +7750,7 @@ function AdminTopNav({ tab, setTab, correctionCount, leaveCount, performanceCoun
   );
 }
 
-function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, onDecideLeave, onDecidePerformance, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onChangeLoginEmail, onDecideMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
+function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, onDecideLeave, onDecidePerformance, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onChangeLoginEmail, onDecideMonthlyConfirm, onCancelMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
   const [tab, setTab] = useState('dashboard'); // dashboard | attendance | requests | leave | performance | accounts
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
@@ -8017,6 +8056,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, onDecide, o
           confirmations={monthlyConfirmations}
           isMasterAdmin={isMasterAdmin}
           onDecide={onDecideMonthlyConfirm}
+          onCancel={onCancelMonthlyConfirm}
           isDesktop={isDesktop}
         />
       )}
@@ -9121,7 +9161,7 @@ function MonthlyAttendanceConfirmSection({ records, confirmations, onSubmit }) {
 }
 
 // ---- 月次勤怠の確定（管理者側）----
-function AdminMonthlyConfirmTab({ confirmations, isMasterAdmin, onDecide, isDesktop }) {
+function AdminMonthlyConfirmTab({ confirmations, isMasterAdmin, onDecide, onCancel, isDesktop }) {
   const [comment, setComment] = useState({});
   const [running, setRunning] = useState(false);
   const setMemo = (id, v) => setComment((prev) => ({ ...prev, [id]: v }));
@@ -9133,6 +9173,13 @@ function AdminMonthlyConfirmTab({ confirmations, isMasterAdmin, onDecide, isDesk
   const decide = async (id, stage, decision) => {
     setRunning(true);
     await onDecide(id, stage, decision, comment[id]);
+    setRunning(false);
+  };
+
+  const cancelConfirm = async (id) => {
+    if (!window.confirm('この月の勤怠の確定を取り消します。スタッフへ通知され、給与明細の公開も止まります。よろしいですか。')) return;
+    setRunning(true);
+    await onCancel(id, comment[id]);
     setRunning(false);
   };
 
@@ -9162,6 +9209,24 @@ function AdminMonthlyConfirmTab({ confirmations, isMasterAdmin, onDecide, isDesk
       {c.staffNote && <div className="text-[11.5px] text-slate-500 mb-2">本人メモ：{c.staffNote}</div>}
       {c.adminComment && <div className="text-[11.5px] text-slate-400 mb-2">管理者コメント：{c.adminComment}</div>}
       {c.masterComment && <div className="text-[11.5px] text-slate-400 mb-2">マスター管理者コメント：{c.masterComment}</div>}
+
+      {!stage && c.status === 'confirmed' && isMasterAdmin && (
+        <div className="space-y-2 border-t border-slate-100 pt-2.5">
+          <input
+            value={comment[c.id] || ''}
+            onChange={(e) => setMemo(c.id, e.target.value)}
+            placeholder="取り消しの理由（任意・本人に通知されます）"
+            className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-[12.5px]"
+          />
+          <button
+            onClick={() => cancelConfirm(c.id)}
+            disabled={running}
+            className="w-full py-1.5 rounded-lg border border-rose-200 text-[12px] font-bold text-rose-600 disabled:text-slate-300"
+          >
+            確定を取り消す
+          </button>
+        </div>
+      )}
 
       {stage && (
         <div className="space-y-2">
@@ -9226,7 +9291,12 @@ function AdminMonthlyConfirmTab({ confirmations, isMasterAdmin, onDecide, isDesk
         list={waitingMaster}
         stage={isMasterAdmin ? 'master' : null}
       />
-      <Section title="確定済み・差し戻し（直近20件）" list={others} stage={null} />
+      <Section
+        title="確定済み・差し戻し（直近20件）"
+        note={isMasterAdmin ? '確定後に修正が必要になった場合は、「確定を取り消す」で差し戻しに戻せます。' : '確定の取り消しはマスター管理者のみが行えます。'}
+        list={others}
+        stage={null}
+      />
     </div>
   );
 }
