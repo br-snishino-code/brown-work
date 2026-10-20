@@ -1044,7 +1044,6 @@ const rowToCommuteClaim = (row) => ({
   id: row.id,
   employeeId: row.employee_id,
   employeeName: row.employees?.name || '',
-  workplace: row.workplace || '',
   targetMonth: row.target_month || '',
   submittedDate: row.submitted_date,
   items: Array.isArray(row.items) ? row.items : [],
@@ -2618,7 +2617,6 @@ function AttendanceApp() {
       .from('commute_expense_claims')
       .insert({
         employee_id: employeeId,
-        workplace: payload.workplace || null,
         target_month: payload.targetMonth,
         submitted_date: payload.submittedDate,
         items: payload.items,
