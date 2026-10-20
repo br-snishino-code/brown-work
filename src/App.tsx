@@ -3419,18 +3419,6 @@ function BankAccountFields({ form, setForm }) {
 
   const patch = (next) => setForm((prev) => ({ ...prev, ...next }));
 
-  const onBankCode = (raw) => {
-    const code = onlyDigits(raw).slice(0, 4);
-    const name = banks && banks[code] ? banks[code] : '';
-    const bankChanged = code !== form.bankCode;
-    patch({
-      bankCode: code,
-      ...(name ? { bankName: name } : {}),
-      ...(bankChanged ? { branchCode: '', branchName: '' } : {}),
-    });
-    if (name) loadZenginBranches().then(setBranches);
-  };
-
   const onBankName = (raw) => {
     const code = bankEntries.length > 0 ? lookupCode(bankEntries, raw, bankShortKey) : '';
     const bankChanged = code && code !== form.bankCode;
@@ -3463,27 +3451,18 @@ function BankAccountFields({ form, setForm }) {
     <div className="space-y-3.5">
       <div className="text-[12px] font-bold text-slate-500 border-b border-slate-100 pb-2">口座情報（給与振込先）</div>
       <div className="text-[11.5px] text-slate-400 -mt-1">
-        ご本人名義の口座をご登録ください。コードと名称は、どちらか一方を入力すると、もう一方が自動で入ります。
+        ご本人名義の口座をご登録ください。銀行名は候補から選べます。支店はコードと名称のどちらか一方を入力すると、もう一方が自動で入ります。
       </div>
 
-      <div className="grid grid-cols-[110px_1fr] gap-3">
-        <Field label="銀行コード">
-          <input
-            name="bankCode" autoComplete="off" inputMode="numeric"
-            value={form.bankCode} onChange={(e) => onBankCode(e.target.value)}
-            placeholder="0158" className={monoClass}
-          />
-        </Field>
-        <Field label="銀行名">
-          <input
-            name="bankName" autoComplete="off" list="zengin-banks"
-            value={form.bankName} onChange={(e) => onBankName(e.target.value)}
-            placeholder="例）京都銀行" className={inputClass}
-          />
-        </Field>
-      </div>
+      <Field label="銀行名">
+        <input
+          name="bankName" autoComplete="off" list="zengin-banks"
+          value={form.bankName} onChange={(e) => onBankName(e.target.value)}
+          placeholder="例）京都銀行" className={inputClass}
+        />
+      </Field>
       {form.bankName && !bankResolved && (
-        <div className="text-[11.5px] text-amber-700">銀行が特定できませんでした。候補から選ぶか、銀行コード（4桁）をご入力ください。</div>
+        <div className="text-[11.5px] text-amber-700">銀行が特定できませんでした。候補の一覧からお選びください。</div>
       )}
 
       <div className="grid grid-cols-[110px_1fr] gap-3">
@@ -6055,7 +6034,7 @@ const HELP_ADMIN = [
   {
     category: 'スタッフの登録・管理',
     items: [
-      { q: 'スタッフアカウントを新しく作るには', a: '「人材」→「スタッフ管理」→「スタッフ一覧・登録」を開くと、右側に登録フォームがあります。姓名・ふりがな・メールアドレス・仮パスワード・入職日・役割を入力して作成します。作成すると、そのメールアドレス宛にログインURLと仮パスワードを記載した案内メールが自動で送られます。仮パスワードは「自動生成」ボタンでも作れます。' },
+      { q: 'スタッフアカウントを新しく作るには', a: 'アカウントを作成できるのはマスター管理者のみです。「人材」→「スタッフ管理」→「スタッフ一覧・登録」を開くと、右側に登録フォームがあります。姓名・ふりがな・メールアドレス・仮パスワード・入職日・役割を入力して作成します。作成すると、そのメールアドレス宛にログインURLと仮パスワードを記載した案内メールが自動で送られます。仮パスワードは「自動生成」ボタンでも作れます。管理者の画面には登録フォームは表示されません。' },
       { q: '大人数をまとめて登録したい', a: 'スタッフ一覧の右上にある「CSV一括登録」を使います。表示される形式にあわせてCSVファイルを用意し、アップロードしてください。' },
       { q: '退職者の処理はどうしますか', a: 'スタッフの「詳細」を開き、基本タブの退職日を入力して保存します。退職日を入れたスタッフは、一覧の絞り込みで「在籍のみ」にすると非表示になります。アカウント自体は残るため、過去の勤怠や給与は参照できます。' },
       { q: 'パスワードを再発行するには', a: 'スタッフ一覧の各行にある鍵のアイコンを押すと、仮パスワードを設定できます。設定した仮パスワードは本人に直接お伝えください。本人が次にログインした際、新しいパスワードの設定画面が表示されます。' },
@@ -9262,9 +9241,11 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
         <Users size={15} className="text-slate-400" />
         <h2 className="font-bold text-[13.5px]">スタッフ一覧</h2>
         <span className="text-[11px] text-slate-400">{filteredEmployeeAccounts.length}名 / 全{employeeAccounts.length}名</span>
-        <button onClick={() => setCsvModalOpen(true)} className="ml-auto flex items-center gap-1 text-[12px] font-bold text-slate-500 border border-slate-200 rounded-lg px-2.5 py-1.5">
-          <Download size={13} className="rotate-180" /> CSV一括登録
-        </button>
+        {isMasterAdmin && (
+          <button onClick={() => setCsvModalOpen(true)} className="ml-auto flex items-center gap-1 text-[12px] font-bold text-slate-500 border border-slate-200 rounded-lg px-2.5 py-1.5">
+            <Download size={13} className="rotate-180" /> CSV一括登録
+          </button>
+        )}
         {isMasterAdmin && (
           <button
             onClick={runFullBackup}
@@ -9274,7 +9255,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
             <Download size={13} /> {backingUp ? '作成中…' : 'データバックアップ'}
           </button>
         )}
-        {!isDesktop && (
+        {!isDesktop && isMasterAdmin && (
           <button onClick={() => setShowForm((v) => !v)} className="flex items-center gap-1 text-[12px] font-bold text-amber-600">
             <UserPlus size={14} /> 追加
           </button>
@@ -9379,7 +9360,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
     </div>
   );
 
-  const formCard = (showForm || isDesktop) && (
+  const formCard = isMasterAdmin && (showForm || isDesktop) && (
     <form onSubmit={submit} className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 space-y-3.5 h-fit">
       <h3 className="font-bold text-[13.5px] mb-1">新しいアカウントを作成</h3>
       <div className="grid grid-cols-2 gap-3">
@@ -9456,7 +9437,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
 
   const modals = (
     <>
-      {csvModalOpen && (
+      {csvModalOpen && isMasterAdmin && (
         <CsvImportModal
           onClose={() => setCsvModalOpen(false)}
           onAddAccount={onAddAccount}
@@ -9488,7 +9469,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onUpdateDates, onDe
   if (isDesktop) {
     return (
       <div className="space-y-4">
-        <div className="grid grid-cols-[1fr_320px] gap-5 items-start">
+        <div className={formCard ? 'grid grid-cols-[1fr_320px] gap-5 items-start' : ''}>
           {listCard}
           {formCard}
         </div>
