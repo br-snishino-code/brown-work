@@ -786,7 +786,7 @@ function ToastView({ toast }) {
 // 以降のコンポーネント（LoginScreenなど）は一切変更していません。
 // ============================================================
 
-const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, performanceReports: [], payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, employeeAttendanceSchedules: {}, announcements: [], yearEndAdjustments: [], commuteExpenseClaims: [], resignationReasons: [], monthlyConfirmations: [], shiftPeriods: [], shiftRequests: [], settings: {} };
+const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, performanceReports: [], payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, employeeAttendanceSchedules: {}, announcements: [], yearEndAdjustments: [], commuteExpenseClaims: [], resignationReasons: [], monthlyConfirmations: [], shiftPeriods: [], shiftRequests: [], shiftTablesReady: true, settings: {} };
 
 // 管理者宛の通知メールの送信先（app_settings の key）
 const SETTING_ADMIN_NOTIFY_EMAIL = 'admin_notify_email';
@@ -1226,6 +1226,8 @@ async function fetchAllData() {
   // シフト希望（SQL未実行でも画面が落ちないよう、エラー時は空扱いにする）
   const shiftPeriods = shiftPeriodRes?.error ? [] : (shiftPeriodRes?.data || []).map(rowToShiftPeriod);
   const shiftRequests = shiftRequestRes?.error ? [] : (shiftRequestRes?.data || []).map(rowToShiftRequest);
+  // SQLが未実行だとテーブルが無く、取得に失敗する。画面でお知らせするために持っておく
+  const shiftTablesReady = !shiftPeriodRes?.error && !shiftRequestRes?.error;
 
   // アプリ全体の設定（SQL未実行でも画面が落ちないよう、エラー時は空扱いにする）
   const settings = {};
@@ -1273,6 +1275,7 @@ async function fetchAllData() {
     monthlyConfirmations,
     shiftPeriods,
     shiftRequests,
+    shiftTablesReady,
     settings,
   };
 }
@@ -7815,7 +7818,7 @@ function PaidLeaveSummaryTab({ employeeAccounts, leaveRequests, isDesktop }) {
 }
 
 // ---- 管理者：シフト希望の受付と一覧 ----
-function ShiftAdminTab({ employeeAccounts, periods = [], requests = [], onSavePeriod, onNotifyEmployee, isDesktop }) {
+function ShiftAdminTab({ employeeAccounts, periods = [], requests = [], tablesReady = true, onSavePeriod, onNotifyEmployee, isDesktop }) {
   const nextMonth = (() => {
     const d = new Date();
     const y = d.getMonth() === 11 ? d.getFullYear() + 1 : d.getFullYear();
@@ -7946,6 +7949,22 @@ function ShiftAdminTab({ employeeAccounts, periods = [], requests = [], onSavePe
       </div>
     );
   };
+
+  if (!tablesReady) {
+    return (
+      <div className="rounded-2xl border border-rose-200 bg-rose-50 px-5 py-6">
+        <div className="flex items-center gap-2">
+          <AlertTriangle size={16} className="text-rose-600" />
+          <h2 className="text-[14px] font-bold text-rose-800">シフトの準備ができていません</h2>
+        </div>
+        <div className="mt-2 text-[12.5px] leading-relaxed text-rose-700">
+          データベースにシフト用のテーブルがありません。Supabase の SQL Editor で
+          <b> supabase/34_shift_requests.sql </b>
+          を実行してください。実行後、この画面を再読み込みすると使えるようになります。
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">
@@ -9585,6 +9604,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
         <ShiftAdminTab
           employeeAccounts={employeeAccounts}
           periods={data.shiftPeriods || []}
+          tablesReady={data.shiftTablesReady !== false}
           requests={data.shiftRequests || []}
           onSavePeriod={onSaveShiftPeriod}
           onNotifyEmployee={onNotifyEmployee}
