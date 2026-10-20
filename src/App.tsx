@@ -1621,7 +1621,9 @@ function AttendanceApp() {
   const [leaveModalOpen, setLeaveModalOpen] = useState(false);
   const [performanceModal, setPerformanceModal] = useState(null);
   const [employeeTab, setEmployeeTab] = useState('attendance');
-  const [topTab, setTopTab] = useState('attendance'); // attendance | labor | hr | payroll
+  const [topTab, setTopTab] = useState('attendance'); // attendance | labor | requests(スタッフ) | hr(管理) | payroll | help
+  // 各種申請タブの中でいま開いている申請（null = 候補の一覧）
+  const [requestTab, setRequestTab] = useState(null);
   // 管理者が自分の打刻・申請画面を開いているかどうか
   const [personalMode, setPersonalMode] = useState(false);
   const [viewMode, setViewMode] = useState(() => (typeof window !== 'undefined' && window.matchMedia('(min-width: 1024px)').matches ? 'desktop' : 'mobile'));
@@ -3377,13 +3379,35 @@ function AttendanceApp() {
     setPendingAdminTab(alertTargets.length === 1 ? alertTargets[0].tab : 'dashboard');
   };
 
+  // 各種申請（スタッフ画面）の未提出の目印
+  const myMonthlyConfirm = (data.monthlyConfirmations || []).find(
+    (c) => c.employeeId === employeeId && c.targetMonth === commuteClaimTargetMonthKey
+  );
+  const needsMonthlyConfirm = !myMonthlyConfirm || myMonthlyConfirm.status === 'draft' || myMonthlyConfirm.status === 'rejected';
+  const requestBadges = {
+    monthly: needsMonthlyConfirm ? '未提出' : null,
+    commute: needsCommuteClaimReminder ? '未提出' : null,
+  };
+  const openRequest = (key) => {
+    setTopTab('requests');
+    setRequestTab(key);
+  };
+  // スタッフ画面には「人材」タブがなく、管理画面には「各種申請」タブがないため、行き先を読み替える
+  const effectiveTopTab = showStaffScreens
+    ? (topTab === 'hr' ? 'requests' : topTab)
+    : (topTab === 'requests' ? 'hr' : topTab);
+
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-900">
       <div ref={appHeaderRef} className="sticky top-0 z-20">
         <div style={{ paddingTop: 'env(safe-area-inset-top)' }} className="bg-slate-950">
           <GlobalTopTabs
-            topTab={topTab}
+            topTab={effectiveTopTab}
             setTopTab={setTopTab}
+            staffMode={showStaffScreens}
+            requestItems={STAFF_REQUEST_ITEMS}
+            requestBadges={requestBadges}
+            onSelectRequest={(key) => setRequestTab(key)}
             session={session}
             personalMode={personalMode}
             setPersonalMode={setPersonalMode}
@@ -3398,8 +3422,8 @@ function AttendanceApp() {
           />
         </div>
       </div>
-      <main className={isDesktop ? 'max-w-6xl mx-auto px-6 pb-16 pt-8' : `max-w-3xl mx-auto px-4 pt-6 ${showStaffScreens && topTab === 'attendance' ? 'pb-24' : 'pb-10'}`}>
-        {topTab === 'labor' && (
+      <main className={isDesktop ? 'max-w-6xl mx-auto px-6 pb-16 pt-8' : `max-w-3xl mx-auto px-4 pt-6 ${showStaffScreens && effectiveTopTab === 'attendance' ? 'pb-24' : 'pb-10'}`}>
+        {effectiveTopTab === 'labor' && (
           <div className="space-y-5">
             {!showStaffScreens && session.role === 'master_admin' && (
               <ProfileChangeNoticeCard
@@ -3432,25 +3456,62 @@ function AttendanceApp() {
             )}
           </div>
         )}
-        {topTab === 'help' && (
+        {effectiveTopTab === 'help' && (
           <HelpTab session={session} isDesktop={isDesktop} />
         )}
-        {topTab === 'hr' && (
-          showStaffScreens ? (
-            <div className="space-y-5">
+        {effectiveTopTab === 'requests' && showStaffScreens && (
+          <div className="space-y-5">
+            <StaffRequestNav active={requestTab} onSelect={setRequestTab} badges={requestBadges} />
+            {requestTab === 'leave' && (
+              <LeaveView
+                leaveRequests={myLeaveRequests}
+                leaveTotal={myLeaveTotal}
+                leaveUsed={myLeaveUsed}
+                hireDate={session.hireDate}
+                onOpenLeaveModal={() => setLeaveModalOpen(true)}
+                isDesktop={isDesktop}
+              />
+            )}
+            {requestTab === 'monthly' && (
+              <MonthlyAttendanceConfirmSection
+                session={session}
+                records={employeeRecords}
+                confirmations={(data.monthlyConfirmations || []).filter((c) => c.employeeId === employeeId)}
+                commuteClaims={data.commuteExpenseClaims.filter((c) => c.employeeId === employeeId)}
+                onSubmit={submitMonthlyAttendanceConfirmation}
+                onSubmitCommute={submitCommuteExpenseClaim}
+                onUpdateCommute={updateCommuteExpenseClaim}
+                onSaveCommuteDraft={saveCommuteExpenseDraft}
+                onSaveAttendanceDraft={saveMonthlyAttendanceDraft}
+              />
+            )}
+            {requestTab === 'commute' && (
+              <CommuteExpenseClaimSection
+                session={session}
+                claims={data.commuteExpenseClaims.filter((c) => c.employeeId === employeeId)}
+                onSubmit={submitCommuteExpenseClaim}
+                onUpdate={updateCommuteExpenseClaim}
+                onSaveDraft={saveCommuteExpenseDraft}
+              />
+            )}
+            {requestTab === 'yearend' && (
               <YearEndAdjustmentSection
                 session={session}
                 requests={data.yearEndAdjustments.filter((r) => r.employeeId === employeeId)}
                 onSubmit={submitYearEndAdjustment}
               />
+            )}
+            {requestTab === 'profile' && (
               <ProfileRequestView
                 session={session}
                 requests={data.profileUpdateRequests.filter((r) => r.employeeId === employeeId)}
                 onSubmit={submitProfileUpdateRequest}
               />
-            </div>
-          ) : (
-            <div className="space-y-5">
+            )}
+          </div>
+        )}
+        {effectiveTopTab === 'hr' && !showStaffScreens && (
+          <div className="space-y-5">
               <AdminYearEndAdjustmentTab
                 requests={data.yearEndAdjustments}
                 onDecide={decideYearEndAdjustment}
@@ -3461,20 +3522,12 @@ function AttendanceApp() {
                 onDecide={decideProfileUpdateRequest}
                 isDesktop={isDesktop}
               />
-            </div>
-          )
+          </div>
         )}
-        {topTab === 'payroll' && (
+        {effectiveTopTab === 'payroll' && (
           showStaffScreens ? (
             <div className="space-y-5">
               <PayslipView records={data.payrollRecords.filter((p) => p.employeeId === employeeId && p.status === 'published')} employeeName={session.name} />
-              <CommuteExpenseClaimSection
-                session={session}
-                claims={data.commuteExpenseClaims.filter((c) => c.employeeId === employeeId)}
-                onSubmit={submitCommuteExpenseClaim}
-                onUpdate={updateCommuteExpenseClaim}
-                onSaveDraft={saveCommuteExpenseDraft}
-              />
             </div>
           ) : (
             <div className="space-y-5">
@@ -3501,29 +3554,22 @@ function AttendanceApp() {
             </div>
           )
         )}
-        {topTab === 'attendance' && (showStaffScreens ? (
+        {effectiveTopTab === 'attendance' && (showStaffScreens ? (
           <div className="space-y-5">
             {isDesktop && (
-              <div className="flex items-center bg-white rounded-2xl border border-slate-200 p-1.5 text-[12px] font-bold max-w-2xl shadow-sm">
+              <div className="flex items-center bg-white rounded-2xl border border-slate-200 p-1.5 text-[12px] font-bold max-w-md shadow-sm">
                 {[
-                  ['attendance','勤怠'],['leave','休暇申請'],['performance','実績']
+                  ['attendance','勤怠'],['performance','実績']
                 ].map(([key,label]) => <button key={key} onClick={() => setEmployeeTab(key)} className={`flex-1 py-2.5 rounded-xl transition-colors ${employeeTab === key ? 'bg-slate-950 text-white' : 'text-slate-500 hover:bg-slate-50'}`}>{label}</button>)}
               </div>
             )}
-            {employeeTab === 'attendance' && (
-              <MonthlyAttendanceConfirmSection
-                session={session}
-                records={employeeRecords}
-                confirmations={(data.monthlyConfirmations || []).filter((c) => c.employeeId === employeeId)}
-                commuteClaims={data.commuteExpenseClaims.filter((c) => c.employeeId === employeeId)}
-                onSubmit={submitMonthlyAttendanceConfirmation}
-                onSubmitCommute={submitCommuteExpenseClaim}
-                onUpdateCommute={updateCommuteExpenseClaim}
-                onSaveCommuteDraft={saveCommuteExpenseDraft}
-                onSaveAttendanceDraft={saveMonthlyAttendanceDraft}
+            {employeeTab !== 'performance' && needsMonthlyConfirm && (
+              <MonthlyConfirmReminderCard
+                targetMonth={commuteClaimTargetMonthKey}
+                onOpen={() => openRequest('monthly')}
               />
             )}
-            {employeeTab === 'attendance' && (
+            {employeeTab !== 'performance' && (
               <EmployeeView
                 now={now}
                 todayRecord={todayRecord}
@@ -3544,17 +3590,7 @@ function AttendanceApp() {
                 onSavePatterns={savePatterns}
                 needsCommuteClaimReminder={needsCommuteClaimReminder}
                 commuteClaimTargetMonth={commuteClaimTargetMonthKey}
-                onGoToCommuteClaim={() => setTopTab('payroll')}
-                isDesktop={isDesktop}
-              />
-            )}
-            {employeeTab === 'leave' && (
-              <LeaveView
-                leaveRequests={myLeaveRequests}
-                leaveTotal={myLeaveTotal}
-                leaveUsed={myLeaveUsed}
-                hireDate={session.hireDate}
-                onOpenLeaveModal={() => setLeaveModalOpen(true)}
+                onGoToCommuteClaim={() => openRequest('commute')}
                 isDesktop={isDesktop}
               />
             )}
@@ -3624,11 +3660,11 @@ function AttendanceApp() {
           onSubmit={submitPerformanceReport}
         />
       )}
-      {showStaffScreens && !isDesktop && topTab === 'attendance' && (
+      {showStaffScreens && !isDesktop && effectiveTopTab === 'attendance' && (
         <nav className="fixed inset-x-3 bottom-3 z-40 mx-auto max-w-md rounded-[22px] border border-slate-200/80 bg-white/95 p-1.5 shadow-2xl backdrop-blur">
-          <div className="grid grid-cols-4 gap-1">
+          <div className="grid grid-cols-2 gap-1">
             {[
-              ['attendance','勤怠',Clock],['leave','休暇',Palmtree],['performance','実績',BarChart3]
+              ['attendance','勤怠',Clock],['performance','実績',BarChart3]
             ].map(([key,label,Icon]) => <button key={key} onClick={() => setEmployeeTab(key)} className={`flex flex-col items-center gap-1 rounded-2xl py-2 text-[10px] font-bold transition ${employeeTab === key ? 'bg-slate-950 text-white' : 'text-slate-400'}`}><Icon size={17}/>{label}</button>)}
           </div>
         </nav>
@@ -4731,25 +4767,39 @@ function GlobalTopTabs({
   topTab, setTopTab, session, personalMode, setPersonalMode,
   alertCount = 0, alertHint = '要対応の一覧を開く', onAlertClick, onLogout, viewMode, onToggleViewMode,
   cloudStatusLabel, cloudStatusClass,
+  staffMode = false, requestItems = [], requestBadges = {}, onSelectRequest,
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [requestMenuOpen, setRequestMenuOpen] = useState(false);
   const menuRef = useRef(null);
+  const requestMenuRef = useRef(null);
 
   useEffect(() => {
     const onClickOutside = (e) => {
       if (menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(false);
+      if (requestMenuRef.current && !requestMenuRef.current.contains(e.target)) setRequestMenuOpen(false);
     };
     document.addEventListener('mousedown', onClickOutside);
     return () => document.removeEventListener('mousedown', onClickOutside);
   }, []);
 
-  const allTabs = [
-    { key: 'attendance', label: '勤怠', icon: <Clock size={14} /> },
-    { key: 'labor', label: '労務', icon: <Briefcase size={14} /> },
-    { key: 'hr', label: '人材', icon: <UserCog size={14} /> },
-    { key: 'payroll', label: '給与', icon: <Wallet size={14} /> },
-    { key: 'help', label: 'ヘルプ', icon: <HelpCircle size={14} /> },
-  ];
+  // スタッフ画面は「各種申請」タブ、管理画面は「人材」タブ
+  const allTabs = staffMode
+    ? [
+        { key: 'attendance', label: '勤怠', icon: <Clock size={14} /> },
+        { key: 'labor', label: '労務', icon: <Briefcase size={14} /> },
+        { key: 'requests', label: '各種申請', icon: <ClipboardList size={14} />, hasMenu: true },
+        { key: 'payroll', label: '給与', icon: <Wallet size={14} /> },
+        { key: 'help', label: 'ヘルプ', icon: <HelpCircle size={14} /> },
+      ]
+    : [
+        { key: 'attendance', label: '勤怠', icon: <Clock size={14} /> },
+        { key: 'labor', label: '労務', icon: <Briefcase size={14} /> },
+        { key: 'hr', label: '人材', icon: <UserCog size={14} /> },
+        { key: 'payroll', label: '給与', icon: <Wallet size={14} /> },
+        { key: 'help', label: 'ヘルプ', icon: <HelpCircle size={14} /> },
+      ];
+  const hasRequestBadge = requestItems.some((it) => requestBadges[it.key]);
   // 権限を制限された管理者は、許可されたタブのみ表示（スタッフ・マスター管理者は全タブ表示）。
   // ただし「自分の勤怠」表示中は本人の画面なので、タブ制限はかけない。
   const isRestrictedAdmin = session?.role === 'admin' && !personalMode;
@@ -4787,7 +4837,7 @@ function GlobalTopTabs({
   );
 
   return (
-    <div className="bg-slate-950 text-slate-300">
+    <div className="relative bg-slate-950 text-slate-300">
       <div className="max-w-6xl mx-auto px-4">
         <div className="flex items-center gap-2">
           <div className="hidden lg:flex items-center gap-2 shrink-0 pr-1">
@@ -4802,13 +4852,25 @@ function GlobalTopTabs({
             {tabs.map((t) => (
               <button
                 key={t.key}
-                onClick={() => setTopTab(t.key)}
-                className={`flex items-center gap-1.5 px-2.5 sm:px-3.5 py-3 text-[12.5px] font-bold border-b-2 transition-colors whitespace-nowrap shrink-0 ${
+                onClick={() => {
+                  if (t.hasMenu) {
+                    setTopTab(t.key);
+                    setRequestMenuOpen((v) => !(v && topTab === t.key));
+                  } else {
+                    setTopTab(t.key);
+                    setRequestMenuOpen(false);
+                  }
+                }}
+                className={`relative flex items-center gap-1.5 px-2.5 sm:px-3.5 py-3 text-[12.5px] font-bold border-b-2 transition-colors whitespace-nowrap shrink-0 ${
                   topTab === t.key ? 'text-white border-amber-500' : 'text-slate-400 border-transparent hover:text-slate-200'
                 }`}
               >
                 {t.icon}
                 {t.label}
+                {t.hasMenu && <ChevronDown size={12} className="opacity-70" />}
+                {t.hasMenu && hasRequestBadge && (
+                  <span className="absolute top-2 right-0 w-1.5 h-1.5 rounded-full bg-amber-500" />
+                )}
               </button>
             ))}
           </div>
@@ -4880,6 +4942,137 @@ function GlobalTopTabs({
             )}
           </div>
         )}
+      </div>
+
+      {/* 「各種申請」を押したときに出る申請の候補 */}
+      {requestMenuOpen && requestItems.length > 0 && (
+        <div ref={requestMenuRef} className="absolute inset-x-0 top-full z-50">
+          <div className="max-w-6xl mx-auto px-4">
+            <div className="mt-1.5 w-full sm:w-[360px] sm:ml-24 lg:ml-[9.5rem] bg-white rounded-2xl border border-slate-200 shadow-2xl overflow-hidden">
+              <div className="px-4 pt-3 pb-1.5 text-[10.5px] font-bold tracking-wide text-slate-400">申請する</div>
+              {requestItems.map((it) => {
+                const Icon = it.icon;
+                const badge = requestBadges[it.key];
+                return (
+                  <button
+                    key={it.key}
+                    onClick={() => { setRequestMenuOpen(false); if (onSelectRequest) onSelectRequest(it.key); }}
+                    className="flex w-full items-start gap-2.5 px-4 py-2.5 text-left hover:bg-slate-50 border-l-[3px] border-transparent hover:border-amber-600 transition-colors"
+                  >
+                    <Icon size={16} className="mt-0.5 text-amber-600 shrink-0" />
+                    <span className="flex-1 min-w-0">
+                      <span className="flex items-center gap-1.5">
+                        <span className="text-[13px] font-bold text-slate-800">{it.label}</span>
+                        {badge && (
+                          <span className="rounded-full bg-amber-600 px-1.5 py-[1px] text-[10px] font-bold text-white">{badge}</span>
+                        )}
+                      </span>
+                      <span className="block text-[11px] text-slate-500 mt-0.5">{it.desc}</span>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// 各種申請の候補（スタッフ画面）
+const STAFF_REQUEST_ITEMS = [
+  { key: 'leave', label: '休暇申請', desc: '有休・欠勤などの申請と残日数', icon: Palmtree },
+  { key: 'monthly', label: '月次勤怠申請', desc: '前月分の勤怠（交通費とまとめて提出）', icon: CheckCircle2 },
+  { key: 'commute', label: '交通費申請', desc: '立て替えた交通費の精算', icon: Wallet },
+  { key: 'yearend', label: '年末調整', desc: '年末調整の書類を提出', icon: FileText },
+  { key: 'profile', label: '個人情報の変更申請', desc: '氏名・住所・口座などの変更', icon: UserCog },
+];
+
+// 勤怠画面から月次勤怠申請へ誘導するお知らせ
+function MonthlyConfirmReminderCard({ targetMonth, onOpen }) {
+  return (
+    <div className="rounded-2xl border border-amber-500 bg-amber-50 px-4 py-3.5 flex items-center gap-3 flex-wrap">
+      <AlertTriangle size={16} className="text-amber-600 shrink-0" />
+      <div className="flex-1 min-w-[12rem]">
+        <div className="text-[12.5px] font-bold text-amber-900">
+          {monthKeyLabel(targetMonth)}分の月次勤怠申請がまだ提出されていません
+        </div>
+        <div className="mt-0.5 text-[11px] text-amber-700">交通費とまとめて提出できます</div>
+      </div>
+      <button
+        onClick={onOpen}
+        className="shrink-0 rounded-lg bg-amber-600 px-3 py-2 text-[12px] font-bold text-white active:brightness-95"
+      >
+        各種申請へ
+      </button>
+    </div>
+  );
+}
+
+// 各種申請タブの中の切り替え。未選択のときは候補を一覧で出す。
+function StaffRequestNav({ active, onSelect, badges = {} }) {
+  if (!active) {
+    return (
+      <div className="space-y-3">
+        <h2 className="font-bold text-[15px] text-slate-800">各種申請</h2>
+        <div className="space-y-2.5">
+          {STAFF_REQUEST_ITEMS.map((it) => {
+            const Icon = it.icon;
+            const badge = badges[it.key];
+            return (
+              <button
+                key={it.key}
+                onClick={() => onSelect(it.key)}
+                className={`flex w-full items-center gap-3 rounded-2xl border bg-white px-4 py-4 text-left shadow-sm transition-colors hover:bg-slate-50 ${badge ? 'border-amber-500' : 'border-slate-200'}`}
+              >
+                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-amber-50">
+                  <Icon size={18} className="text-amber-600" />
+                </span>
+                <span className="flex-1 min-w-0">
+                  <span className="flex items-center gap-1.5 flex-wrap">
+                    <span className="text-[14px] font-bold text-slate-800">{it.label}</span>
+                    {badge && (
+                      <span className="rounded-full bg-amber-600 px-1.5 py-[1px] text-[10px] font-bold text-white">{badge}</span>
+                    )}
+                  </span>
+                  <span className="mt-0.5 block text-[11.5px] text-slate-500">{it.desc}</span>
+                </span>
+                <ChevronRight size={16} className="shrink-0 text-slate-300" />
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <button
+        onClick={() => onSelect(null)}
+        className="flex items-center gap-1 text-[12.5px] font-bold text-slate-500 hover:text-slate-700"
+      >
+        <ChevronLeft size={14} /> 各種申請の一覧へ
+      </button>
+      <div className="-mx-1 flex gap-1.5 overflow-x-auto px-1 pb-1">
+        {STAFF_REQUEST_ITEMS.map((it) => {
+          const badge = badges[it.key];
+          return (
+            <button
+              key={it.key}
+              onClick={() => onSelect(it.key)}
+              className={`shrink-0 whitespace-nowrap rounded-xl border px-3 py-2 text-[12px] font-bold transition-colors ${
+                active === it.key
+                  ? 'border-slate-950 bg-slate-950 text-white'
+                  : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50'
+              }`}
+            >
+              {it.label}
+              {badge && <span className={`ml-1.5 ${active === it.key ? 'text-amber-300' : 'text-amber-600'}`}>●</span>}
+            </button>
+          );
+        })}
       </div>
     </div>
   );
@@ -6967,6 +7160,14 @@ function TurnoverAnalysisTab({ employeeAccounts, resignationReasons = [], isDesk
 // ---- ヘルプ（操作Q&A） ----
 const HELP_STAFF = [
   {
+    category: '画面の構成',
+    items: [
+      { q: '画面の上のタブはどう分かれていますか', a: '「勤怠」＝打刻と勤怠一覧・実績、「労務」＝会社からのお知らせ、「各種申請」＝申請の入口、「給与」＝給与明細、「ヘルプ」＝この画面です。スマートフォンでも同じ並びです。' },
+      { q: '申請はどこからしますか', a: 'すべて「各種申請」タブからです。押すと「休暇申請」「月次勤怠申請」「交通費申請」「年末調整」「個人情報の変更申請」の候補が出るので、必要なものを選んでください。未提出のものがあるときはタブに印が付きます。' },
+      { q: '月次勤怠申請とは', a: '前月分の勤怠を確認して提出する手続きです。「各種申請」→「月次勤怠申請」から、交通費とまとめて提出できます。提出すると管理者が確認し、最後にマスター管理者が最終承認して確定します。確定後にその月の給与明細が公開されます。未提出のときは「勤怠」タブにもお知らせが出ます。' },
+    ],
+  },
+  {
     category: '打刻',
     items: [
       { q: '出勤・退勤の打刻はどこからしますか', a: '「勤怠」タブを開くと、画面の中央に大きな打刻ボタンが表示されます。出勤時は「出勤」、退勤時は「退勤」を押してください。押した時刻がそのまま記録されます。' },
@@ -6980,10 +7181,10 @@ const HELP_STAFF = [
   {
     category: '休暇',
     items: [
-      { q: '有給休暇の申請方法を教えてください', a: '「勤怠」タブの休暇申請から、種別で「有休」を選び、開始日・終了日・理由を入力して送信します。管理者が承認すると確定します。残日数は申請画面の上部に表示されます。' },
+      { q: '有給休暇の申請方法を教えてください', a: '「各種申請」タブを押して「休暇申請」を選び、種別で「有休」を選び、開始日・終了日・理由を入力して送信します。管理者が承認すると確定します。残日数は申請画面の上部に表示されます。' },
       { q: '半日だけ休みたいときは', a: '有休を選んで、開始日と終了日を同じ日にすると「半休」の選択肢が出ます。半休を選ぶと0.5日として計算されます。' },
       { q: '有休の残日数はどこで見られますか', a: '休暇申請の画面上部に「有休残日数」として表示されています。入職日からの勤続期間に応じて、労働基準法の基準で自動計算されています。' },
-      { q: '振替休暇や代休はどう申請しますか', a: '休暇申請の種別で「振休」「代休」「特別休暇」を選んでください。手順は有休と同じです。' },
+      { q: '振替休暇や代休はどう申請しますか', a: '「各種申請」→「休暇申請」の種別で「振休」「代休」「特別休暇」を選んでください。手順は有休と同じです。' },
       { q: '申請した休暇を取り消したい', a: 'ご自身では取り消せません。管理者にご連絡ください。' },
     ],
   },
@@ -6992,9 +7193,9 @@ const HELP_STAFF = [
     items: [
       { q: '給与明細はどこで見られますか', a: '「給与」タブを開くと、公開済みの給与明細が一覧で表示されます。明細をクリックすると内訳が確認でき、印刷もできます。' },
       { q: '交通費の申請はいつまでですか', a: '毎月1日が締め切りです。前月分の交通費を、翌月1日までに申請してください。期限までに未提出の場合、打刻時にお知らせが表示されます。' },
-      { q: '交通費の申請方法を教えてください', a: '「勤怠」タブの「月次勤怠の確定申請」で、勤怠と一緒に入力して提出できます。交通費だけを申請する場合は「給与」タブの交通費精算からも申請できます。日付・区間・金額を入力して申請します。経路検索のリンクがあるので、運賃の確認に利用してください。複数件をまとめて登録できます。一度申請した区間は運賃を覚えているため、次回は乗駅・降駅を入れるだけで金額が入ります。その月に交通費が無い場合も、空のまま「0円」として申請できます。0円で申請しようとすると、入力漏れでないかの確認が表示されます。入力の途中で「一時保存する」を押すと、申請せずに内容を残せます。月の途中でこまめに入力しておき、締切前に申請する使い方ができます。一時保存した内容は一覧の「続きを入力する」から再開できます。車通勤などで交通費を個別に申請する方は、管理者がスタッフ詳細の「交通費精算の申請方法」を「個別に申請する」に設定すると、勤怠の確定申請の画面に交通費の欄が出なくなります。月ごとに「今月はまとめて申請する」へ切り替えることもできます。' },
-      { q: '申請した交通費を間違えました', a: '承認される前であれば、交通費精算の一覧にある「修正する」から内容を直せます。修正して送信すると、改めて承認待ちになります。承認済みのものは修正できないため、管理者にご相談ください。' },
-      { q: '年末調整の書類はどう出しますか', a: '「人材」タブの年末調整から、必要事項を入力して提出します。提出時期になったら管理者からお知らせがあります。' },
+      { q: '交通費の申請方法を教えてください', a: '「各種申請」タブを押して「月次勤怠申請」を選ぶと、勤怠と一緒に入力して提出できます。交通費だけを申請する場合は「各種申請」→「交通費申請」からも申請できます。日付・区間・金額を入力して申請します。経路検索のリンクがあるので、運賃の確認に利用してください。複数件をまとめて登録できます。一度申請した区間は運賃を覚えているため、次回は乗駅・降駅を入れるだけで金額が入ります。その月に交通費が無い場合も、空のまま「0円」として申請できます。0円で申請しようとすると、入力漏れでないかの確認が表示されます。入力の途中で「一時保存する」を押すと、申請せずに内容を残せます。月の途中でこまめに入力しておき、締切前に申請する使い方ができます。一時保存した内容は一覧の「続きを入力する」から再開できます。車通勤などで交通費を個別に申請する方は、管理者がスタッフ詳細の「交通費精算の申請方法」を「個別に申請する」に設定すると、勤怠の確定申請の画面に交通費の欄が出なくなります。月ごとに「今月はまとめて申請する」へ切り替えることもできます。' },
+      { q: '申請した交通費を間違えました', a: '承認される前であれば、「各種申請」→「交通費申請」の一覧にある「修正する」から内容を直せます。修正して送信すると、改めて承認待ちになります。承認済みのものは修正できないため、管理者にご相談ください。' },
+      { q: '年末調整の書類はどう出しますか', a: '「各種申請」タブを押して「年末調整」を選び、必要事項を入力して提出します。提出時期になったら管理者からお知らせがあります。' },
     ],
   },
   {
@@ -7002,7 +7203,7 @@ const HELP_STAFF = [
     items: [
       { q: 'パスワードを忘れました', a: 'ログイン画面の「パスワードをお忘れですか？」から再設定できます。うまくいかない場合は管理者に連絡してください。管理者が仮パスワードを再発行します。' },
       { q: '初めてログインするときの流れは', a: '管理者から届いた案内メールのURLを開き、メールアドレスと仮パスワードでログインします。続けてご自身のパスワードを設定し、ご登録情報（ふりがな・生年月日・連絡先・郵便番号・現住所・住民票の住所・配偶者の有無・世帯主・緊急連絡先・給与振込先の口座情報・マイナンバー）を入力すると利用開始です。いずれも必須のため、通帳とマイナンバーカードをお手元にご用意ください。' },
-      { q: '住所や氏名が変わりました', a: '「人材」タブのプロフィール変更申請から、変更内容を入力して申請してください。氏名・ふりがな・連絡先・住所・世帯・緊急連絡先・給与振込先の口座情報を申請できます。管理者が承認すると反映されます。生年月日・入職日・雇用形態などは申請できないため、管理者にご相談ください。' },
+      { q: '住所や氏名が変わりました', a: '「各種申請」タブを押して「個人情報の変更申請」を選び、変更内容を入力して申請してください。氏名・ふりがな・連絡先・住所・世帯・緊急連絡先・給与振込先の口座情報を申請できます。管理者が承認すると反映されます。生年月日・入職日・雇用形態などは申請できないため、管理者にご相談ください。' },
       { q: 'スマートフォンで使えますか', a: '使えます。ブラウザで同じURLを開いてログインしてください。画面はスマートフォン用に自動で切り替わります。ホーム画面に追加しておくとアプリのように使えます。パソコンでご覧の場合、画面右上の「PC表示」を押すとスマートフォン向けの表示に切り替えられます。' },
     ],
   },
@@ -9545,7 +9746,7 @@ function MonthlyAttendanceConfirmSection({ session, records, confirmations, comm
                 <div className="space-y-1.5">
                   <div className="text-[11.5px] text-slate-500">
                     交通費は個別に申請する設定になっています。この画面では交通費を提出しません。
-                    「給与」タブの交通費精算書からご申請ください。
+                    「各種申請」→「交通費申請」からご申請ください。
                   </div>
                   <button
                     onClick={() => setBundleCommute(true)}
