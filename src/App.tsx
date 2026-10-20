@@ -3344,21 +3344,21 @@ function AttendanceApp() {
     <div className="min-h-screen bg-slate-50 font-sans text-slate-900">
       <div ref={appHeaderRef} className="sticky top-0 z-20">
         <div style={{ paddingTop: 'env(safe-area-inset-top)' }} className="bg-slate-950">
-          <GlobalTopTabs topTab={topTab} setTopTab={setTopTab} session={session} personalMode={personalMode} setPersonalMode={setPersonalMode} />
+          <GlobalTopTabs
+            topTab={topTab}
+            setTopTab={setTopTab}
+            session={session}
+            personalMode={personalMode}
+            setPersonalMode={setPersonalMode}
+            alertCount={pendingCorrectionCount + pendingLeaveCount + pendingPerformanceCount + missingPunchCount}
+            onAlertClick={() => { setTopTab('attendance'); setPersonalMode(false); }}
+            onLogout={handleLogout}
+            viewMode={viewMode}
+            onToggleViewMode={() => setViewMode((v) => (v === 'desktop' ? 'mobile' : 'desktop'))}
+            cloudStatusLabel={cloudStatusLabel}
+            cloudStatusClass={cloudStatusClass}
+          />
         </div>
-        <Header
-          session={session}
-          onLogout={handleLogout}
-          pendingCount={pendingCorrectionCount + pendingLeaveCount + pendingPerformanceCount}
-          missingPunchCount={missingPunchCount}
-          viewMode={viewMode}
-          onToggleViewMode={() => setViewMode((v) => (v === 'desktop' ? 'mobile' : 'desktop'))}
-          topTab={topTab}
-          personalMode={showStaffScreens}
-          onAlertClick={() => { setTopTab('attendance'); if (setPersonalMode) setPersonalMode(false); }}
-          cloudStatusLabel={cloudStatusLabel}
-          cloudStatusClass={cloudStatusClass}
-        />
       </div>
       <main className={isDesktop ? 'max-w-6xl mx-auto px-6 pb-16 pt-8' : `max-w-3xl mx-auto px-4 pt-6 ${showStaffScreens && topTab === 'attendance' ? 'pb-24' : 'pb-10'}`}>
         {topTab === 'labor' && (
@@ -4686,7 +4686,23 @@ function ResetPasswordRecoveryScreen({ toast, onDone }) {
   );
 }
 
-function GlobalTopTabs({ topTab, setTopTab, session, personalMode, setPersonalMode }) {
+// 上部バー。タブ・要対応・表示モードの切り替え・利用者メニューを1段にまとめる。
+function GlobalTopTabs({
+  topTab, setTopTab, session, personalMode, setPersonalMode,
+  alertCount = 0, onAlertClick, onLogout, viewMode, onToggleViewMode,
+  cloudStatusLabel, cloudStatusClass,
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef(null);
+
+  useEffect(() => {
+    const onClickOutside = (e) => {
+      if (menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onClickOutside);
+    return () => document.removeEventListener('mousedown', onClickOutside);
+  }, []);
+
   const allTabs = [
     { key: 'attendance', label: '勤怠', icon: <Clock size={14} /> },
     { key: 'labor', label: '労務', icon: <Briefcase size={14} /> },
@@ -4707,8 +4723,12 @@ function GlobalTopTabs({ topTab, setTopTab, session, personalMode, setPersonalMo
     }
   }, [isRestrictedAdmin, topTab, tabs.map((t) => t.key).join(',')]);
 
-  // 管理画面／自分の勤怠 の切り替え（PCはタブの右側、スマホはタブの下に全幅で表示）
-  const showToggle = (session?.role === 'admin' || session?.role === 'master_admin') && !!setPersonalMode;
+  const isAdminRole = session?.role === 'admin' || session?.role === 'master_admin';
+  const roleLabel = session?.role === 'master_admin' ? 'マスター管理者' : session?.role === 'admin' ? '管理者' : 'スタッフ';
+  const isDesktop = viewMode === 'desktop';
+
+  // 管理画面／自分の勤怠 の切り替え（PCはバーの右側、スマホはタブの下に全幅で表示）
+  const showToggle = isAdminRole && !!setPersonalMode;
   const modeToggle = (fullWidth) => (
     <div className={`flex items-center bg-white/10 rounded-lg p-0.5 text-[11px] font-bold ${fullWidth ? 'w-full' : ''}`}>
       <button
@@ -4729,13 +4749,21 @@ function GlobalTopTabs({ topTab, setTopTab, session, personalMode, setPersonalMo
   return (
     <div className="bg-slate-950 text-slate-300">
       <div className="max-w-6xl mx-auto px-4">
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-2">
+          <div className="hidden lg:flex items-center gap-2 shrink-0 pr-1">
+            <div className="w-7 h-7 rounded-lg bg-amber-600 flex items-center justify-center">
+              <Clock size={15} className="text-white" strokeWidth={2.4} />
+            </div>
+            <span className="text-white text-[13px] font-bold tracking-tight">Brown Work</span>
+            <span className="w-px h-5 bg-white/20 ml-1" />
+          </div>
+
           <div className="flex items-center gap-1 flex-1 min-w-0 overflow-x-auto">
             {tabs.map((t) => (
               <button
                 key={t.key}
                 onClick={() => setTopTab(t.key)}
-                className={`flex items-center gap-1.5 px-2.5 sm:px-4 py-2.5 text-[12.5px] font-bold border-b-2 transition-colors whitespace-nowrap shrink-0 ${
+                className={`flex items-center gap-1.5 px-2.5 sm:px-3.5 py-3 text-[12.5px] font-bold border-b-2 transition-colors whitespace-nowrap shrink-0 ${
                   topTab === t.key ? 'text-white border-amber-500' : 'text-slate-400 border-transparent hover:text-slate-200'
                 }`}
               >
@@ -4744,9 +4772,74 @@ function GlobalTopTabs({ topTab, setTopTab, session, personalMode, setPersonalMo
               </button>
             ))}
           </div>
+
+          {isAdminRole && alertCount > 0 && (
+            <button
+              onClick={onAlertClick}
+              title="要対応の一覧を開く"
+              className="hidden sm:flex items-center gap-1.5 shrink-0 rounded-lg bg-amber-600 hover:bg-amber-500 transition-colors px-2.5 py-1.5 text-[11px] font-bold text-white"
+            >
+              <Bell size={13} />
+              要対応 {alertCount}件
+            </button>
+          )}
+
           {showToggle && <div className="hidden sm:block shrink-0">{modeToggle(false)}</div>}
+
+          <div ref={menuRef} className="relative shrink-0">
+            <button
+              onClick={() => setMenuOpen((v) => !v)}
+              className="flex items-center gap-1.5 rounded-lg bg-white/10 hover:bg-white/20 transition-colors px-2 py-1.5"
+            >
+              <span className="w-5 h-5 rounded-full bg-slate-600 text-white text-[10px] font-bold flex items-center justify-center">
+                {(session?.name || '　').trim().charAt(0)}
+              </span>
+              <span className="hidden md:inline text-[11.5px] font-bold text-slate-200 max-w-[7rem] truncate">{session?.name}</span>
+              <ChevronDown size={12} className="text-slate-400" />
+            </button>
+            {menuOpen && (
+              <div className="absolute right-0 top-full mt-1.5 w-56 bg-white rounded-xl border border-slate-200 shadow-xl overflow-hidden z-50">
+                <div className="px-4 py-3 border-b border-slate-100">
+                  <div className="text-[13px] font-bold text-slate-800 truncate">{session?.name}</div>
+                  <div className="text-[11px] text-slate-400">{roleLabel}</div>
+                </div>
+                {cloudStatusLabel && (
+                  <div className="px-4 py-2.5 border-b border-slate-100 flex items-center justify-between">
+                    <span className="text-[11.5px] text-slate-500">同期の状態</span>
+                    <span className={`text-[10.5px] font-semibold rounded-full border px-2 py-0.5 ${cloudStatusClass}`}>{cloudStatusLabel}</span>
+                  </div>
+                )}
+                <button
+                  onClick={() => { setMenuOpen(false); if (onToggleViewMode) onToggleViewMode(); }}
+                  className="hidden md:flex w-full items-center gap-2 px-4 py-2.5 text-[12.5px] text-slate-600 hover:bg-slate-50 border-b border-slate-100"
+                >
+                  {isDesktop ? <Smartphone size={14} className="text-slate-400" /> : <Monitor size={14} className="text-slate-400" />}
+                  {isDesktop ? 'スマホ向けの表示に切り替える' : 'パソコン向けの表示に切り替える'}
+                </button>
+                <button
+                  onClick={() => { setMenuOpen(false); if (onLogout) onLogout(); }}
+                  className="flex w-full items-center gap-2 px-4 py-2.5 text-[12.5px] font-medium text-slate-600 hover:bg-slate-50"
+                >
+                  <LogoutIcon size={14} className="text-slate-400" /> ログアウト
+                </button>
+              </div>
+            )}
+          </div>
         </div>
-        {showToggle && <div className="sm:hidden pb-2">{modeToggle(true)}</div>}
+
+        {(showToggle || (isAdminRole && alertCount > 0)) && (
+          <div className="sm:hidden pb-2 flex items-center gap-2">
+            {showToggle && <div className="flex-1">{modeToggle(true)}</div>}
+            {isAdminRole && alertCount > 0 && (
+              <button
+                onClick={onAlertClick}
+                className="shrink-0 flex items-center gap-1.5 rounded-lg bg-amber-600 px-2.5 py-1.5 text-[11px] font-bold text-white"
+              >
+                <Bell size={13} /> {alertCount}
+              </button>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -4919,73 +5012,6 @@ function AnnouncementComposerModal({ onClose, onSubmit }) {
       </div>
     </div>,
     document.body
-  );
-}
-
-// 画面の見出しに使う、上部タブの名前
-const TOP_TAB_TITLE = { attendance: '勤怠', labor: '労務', hr: '人材', payroll: '給与', help: 'ヘルプ' };
-
-function Header({ session, onLogout, pendingCount, missingPunchCount, viewMode, onToggleViewMode, topTab, personalMode, onAlertClick, cloudStatusLabel, cloudStatusClass }) {
-  const alertCount = pendingCount + missingPunchCount;
-  const isDesktop = viewMode === 'desktop';
-  const isAdminRole = session.role === 'admin' || session.role === 'master_admin';
-  const roleLabel = session.role === 'master_admin' ? 'マスター管理者' : session.role === 'admin' ? '管理者' : 'スタッフ';
-  // いま開いている画面が分かるように見出しを変える
-  const title = !isAdminRole || personalMode
-    ? (topTab === 'attendance' ? '勤怠打刻' : `${TOP_TAB_TITLE[topTab] || ''}（自分の画面）`)
-    : `管理画面：${TOP_TAB_TITLE[topTab] || ''}`;
-  return (
-    <header className="bg-slate-800 text-white shadow-sm">
-      <div className={`${isDesktop ? 'max-w-6xl px-6' : 'max-w-3xl px-4'} mx-auto py-3.5 flex items-center justify-between`}>
-        <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-md bg-slate-950 flex items-center justify-center">
-            <Clock size={17} className="text-white" strokeWidth={2.4} />
-          </div>
-          <div>
-            <div className="font-bold text-[15px] leading-tight tracking-tight">{title}</div>
-            <div className="text-[10.5px] text-slate-400 leading-tight">{session.name}（{roleLabel}）</div>
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          {isAdminRole && alertCount > 0 && (
-            <button
-              onClick={onAlertClick}
-              title="要対応の一覧を開く"
-              className="flex items-center gap-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 transition-colors px-2.5 py-1.5 text-[11px] font-bold text-white"
-            >
-              <Bell size={13} />
-              要対応 {alertCount}件
-            </button>
-          )}
-          {cloudStatusLabel && (
-            <span className={`hidden sm:inline-flex items-center rounded-full border px-2.5 py-1 text-[10.5px] font-semibold ${cloudStatusClass}`}>
-              {cloudStatusLabel}
-            </span>
-          )}
-          <button
-            onClick={onToggleViewMode}
-            title={isDesktop ? 'スマホ向けの表示に切り替える' : 'パソコン向けの表示に切り替える'}
-            className="hidden md:flex items-center gap-1.5 rounded-lg bg-white/10 hover:bg-white/20 transition-colors px-2.5 py-1.5 text-[10.5px] font-bold text-slate-300"
-          >
-            {isDesktop ? <Monitor size={13} /> : <Smartphone size={13} />}
-            {isDesktop ? 'PC表示' : 'スマホ表示'}
-          </button>
-          <button
-            onClick={onLogout}
-            className="flex items-center gap-1 text-[12px] font-medium text-slate-300 bg-white/10 rounded-lg px-3 py-1.5"
-          >
-            <LogoutIcon size={13} /> ログアウト
-          </button>
-        </div>
-      </div>
-      {cloudStatusLabel && (
-        <div className="sm:hidden px-4 pb-2 -mt-1">
-          <span className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-[10px] font-semibold ${cloudStatusClass}`}>
-            {cloudStatusLabel}
-          </span>
-        </div>
-      )}
-    </header>
   );
 }
 
@@ -6946,30 +6972,30 @@ const HELP_ADMIN = [
   {
     category: 'スタッフの登録・管理',
     items: [
-      { q: 'スタッフアカウントを新しく作るには', a: 'アカウントを作成できるのはマスター管理者のみです。「勤怠」→「スタッフ管理」→「スタッフ一覧・登録」を開くと、右側に登録フォームがあります。姓名・ふりがな・メールアドレス・仮パスワード・入職日・役割を入力して作成します。作成すると、そのメールアドレス宛にログインURLと仮パスワードを記載した案内メールが自動で送られます。仮パスワードは「自動生成」ボタンでも作れます。管理者の画面には登録フォームは表示されません。' },
+      { q: 'スタッフアカウントを新しく作るには', a: 'アカウントを作成できるのはマスター管理者のみです。「勤怠」→「スタッフ一覧」を開くと、右側に登録フォームがあります。姓名・ふりがな・メールアドレス・仮パスワード・入職日・役割を入力して作成します。作成すると、そのメールアドレス宛にログインURLと仮パスワードを記載した案内メールが自動で送られます。仮パスワードは「自動生成」ボタンでも作れます。管理者の画面には登録フォームは表示されません。' },
       { q: '大人数をまとめて登録したい', a: 'スタッフ一覧の右上にある「CSV一括登録」を使います（マスター管理者のみ）。1行目の見出しは name,email,password,hireDate です。email はログインIDになるため、登録フォームと同じくメールアドレスでご入力ください。案内メールを送るかどうかは「ログイン案内メールを送る」のチェックで選べます（初期状態は送信しません）。送らない場合は、ログインURLと仮パスワードを別途ご本人にお伝えください。初回ログイン時のパスワード変更と個人情報の入力は、通常の登録と同じように求められます。' },
       { q: '郵便番号から住所は入りますか', a: '郵便番号を7桁まで入力すると、都道府県・市区町村・町名までが住所欄に自動で入ります。続けて番地・建物名をご入力ください。郵便番号を入れ直した場合も、番地はそのまま残して住所の前半だけが入れ替わります。住所を手入力済みの場合は自動入力されません。' },
       { q: '退職者の処理はどうしますか', a: 'スタッフの「詳細」を開き、基本タブの退職日を入力して保存します。退職日を入れたスタッフは、一覧の絞り込みで「在籍のみ」にすると非表示になります。アカウント自体は残るため、過去の勤怠や給与は参照できます。' },
       { q: 'ログインID（メールアドレス）を変えるには', a: 'スタッフ一覧の各行にあるメールのアイコンから変更できます（マスター管理者のみ）。新しいメールアドレスを入力すると、ログイン用のアドレスが切り替わります。パスワードは変わりません。連絡用メールアドレスも同時に変更するか、本人へお知らせメールを送るかを選べます。変更内容は監査ログに記録されます。' },
       { q: 'パスワードを再発行するには', a: 'スタッフ一覧の各行にある鍵のアイコンを押すと、仮パスワードを設定できます。設定した仮パスワードは本人に直接お伝えください。本人が次にログインした際、新しいパスワードの設定画面が表示されます。' },
-      { q: '通知メールの送信先を変えるには', a: '「勤怠」→「スタッフ管理」→「管理者権限」の一番上にある「通知メールの送信先」で指定します。カンマ区切りで複数指定でき、未設定の場合はマスター管理者の連絡用メールアドレスに届きます。マスター管理者のみが設定できます。なお管理者宛のメールは個人情報の変更申請と年末調整のときだけ送られます。勤怠修正・休暇申請・実績報告などは、画面右上のベルのお知らせでご確認ください。' },
-      { q: '管理者権限を与えるには', a: '「勤怠」→「スタッフ管理」→「管理者権限」から設定します。タブ単位（勤怠・労務・人材・給与）でアクセス範囲を制限できます。マスター管理者のみが操作できます。' },
+      { q: '通知メールの送信先を変えるには', a: '「勤怠」→「その他」→「管理者権限」の一番上にある「通知メールの送信先」で指定します。カンマ区切りで複数指定でき、未設定の場合はマスター管理者の連絡用メールアドレスに届きます。マスター管理者のみが設定できます。なお管理者宛のメールは個人情報の変更申請と年末調整のときだけ送られます。勤怠修正・休暇申請・実績報告などは、画面右上のベルのお知らせでご確認ください。' },
+      { q: '管理者権限を与えるには', a: '「勤怠」→「その他」→「管理者権限」から設定します。タブ単位（勤怠・労務・人材・給与）でアクセス範囲を制限できます。マスター管理者のみが操作できます。' },
     ],
   },
   {
     category: '勤怠の管理',
     items: [
-      { q: '勤怠修正申請を承認するには', a: '「勤怠」→「休暇・申請管理」に未承認の申請が一覧表示されます。内容を確認して承認または却下してください。承認すると勤怠記録が自動で書き換わります。' },
-      { q: '管理者が直接勤怠を修正できますか', a: 'できます。「勤怠」→「出勤管理」で対象のスタッフと日付を選び、時刻を直接編集してください。給与に反映させない修正の場合は、控除対象外のフラグを設定できます。' },
+      { q: '勤怠修正申請を承認するには', a: '「勤怠」→「休暇申請」に未承認の申請が一覧表示されます。内容を確認して承認または却下してください。承認すると勤怠記録が自動で書き換わります。' },
+      { q: '管理者が直接勤怠を修正できますか', a: 'できます。「勤怠」→「勤怠一覧」で対象のスタッフと日付を選び、時刻を直接編集してください。給与に反映させない修正の場合は、控除対象外のフラグを設定できます。' },
       { q: '打刻漏れはどこで分かりますか', a: 'ダッシュボードのアラート一覧に「打刻漏れ・打刻間違い」として件数が表示されます。クリックすると該当の一覧に移動します。' },
       { q: '位置情報のアラートとは', a: '打刻時に位置情報が5回以上連続で記録されなかったスタッフを検知しています。端末の設定で位置情報が拒否されている可能性があるため、本人に確認してください。' },
-      { q: '出勤規定日数の設定はどこですか', a: '「勤怠」→「スタッフ管理」→「出勤規定日数設定」で、グループ別・月別に設定します。給与計算の基礎になる日数です。' },
+      { q: '出勤規定日数の設定はどこですか', a: '「勤怠」→「その他」→「出勤規定日数設定」で、グループ別・月別に設定します。給与計算の基礎になる日数です。' },
     ],
   },
   {
     category: '休暇・有休',
     items: [
-      { q: '休暇申請を承認するには', a: '「勤怠」→「休暇・申請管理」から承認・却下します。承認すると有休残日数に反映されます。' },
+      { q: '休暇申請を承認するには', a: '「勤怠」→「休暇申請」から承認・却下します。承認すると有休残日数に反映されます。' },
       { q: '有休の付与日数はどう決まりますか', a: '入職日からの勤続期間に応じて、労働基準法39条の基準で自動計算されます（勤続6ヶ月で10日、以降1年ごとに加算、6年6ヶ月以降は20日）。スポット系のスタッフ種別で週の所定労働日数を設定している場合は比例付与の表を使います。' },
       { q: '自動計算と実態が違う場合は', a: 'スタッフの「詳細」→「業務・契約」タブにある「有休の手動調整」で、日数を加算・減算できます。繰越分の調整などに使ってください。' },
       { q: '有休の取得状況を集計したい', a: '「労務」タブの「有休取得状況」で確認できます。その年の取得合計、年5日の取得義務の対象人数、未達の懸念がある人数が表示されます。年を切り替えて過去分も見られます。' },
@@ -6979,8 +7005,8 @@ const HELP_ADMIN = [
   {
     category: '給与',
     items: [
-      { q: '給与計算の流れを教えてください', a: 'まず「勤怠」→「月次勤怠の確定」で、その月の勤怠を最終承認まで進めます。次に「給与」タブで対象月を選ぶと、勤怠記録から労働時間と残業時間が自動集計されます。承認済みの交通費精算も支給項目に自動で入ります。支給項目・控除項目を確認して下書き保存し、内容が確定したら「公開」します。公開するとスタッフ側の画面に明細が表示されます。勤怠が最終承認されるまで公開はできません。' },
-      { q: '月次勤怠の確定とは', a: '交通費と勤怠は、それぞれ「保存する」で途中まで残しておけます（順番は問いません）。内容がそろったら「勤怠と交通費をまとめて申請する」で一度に提出します。スタッフが前月分の勤怠を確認して確定申請し、管理者が内容を確認して承認、最後にマスター管理者が最終承認する流れです。マスター管理者が最初に確認した場合は、その承認だけで確定します。管理者ご本人の申請は、マスター管理者の承認のみで確定します。最終承認が済むと、その月の給与明細を公開できるようになります。「勤怠」→「月次勤怠の確定」で処理します。確定後に修正が必要になった場合は、マスター管理者が「確定を取り消す」で差し戻しに戻せます。取り消すとスタッフへ通知され、給与明細の公開も止まります。' },
+      { q: '給与計算の流れを教えてください', a: 'まず「勤怠」→「月次確定」で、その月の勤怠を最終承認まで進めます。次に「給与」タブで対象月を選ぶと、勤怠記録から労働時間と残業時間が自動集計されます。承認済みの交通費精算も支給項目に自動で入ります。支給項目・控除項目を確認して下書き保存し、内容が確定したら「公開」します。公開するとスタッフ側の画面に明細が表示されます。勤怠が最終承認されるまで公開はできません。' },
+      { q: '月次勤怠の確定とは', a: '交通費と勤怠は、それぞれ「保存する」で途中まで残しておけます（順番は問いません）。内容がそろったら「勤怠と交通費をまとめて申請する」で一度に提出します。スタッフが前月分の勤怠を確認して確定申請し、管理者が内容を確認して承認、最後にマスター管理者が最終承認する流れです。マスター管理者が最初に確認した場合は、その承認だけで確定します。管理者ご本人の申請は、マスター管理者の承認のみで確定します。最終承認が済むと、その月の給与明細を公開できるようになります。「勤怠」→「月次確定」で処理します。確定後に修正が必要になった場合は、マスター管理者が「確定を取り消す」で差し戻しに戻せます。取り消すとスタッフへ通知され、給与明細の公開も止まります。' },
       { q: '支給・控除の項目を追加するには', a: 'スタッフの「詳細」→「給与・口座」タブで、スタッフごとの固定的な支給項目・控除項目を登録できます。毎月の計算に自動で反映されます。' },
       { q: '標準報酬月額の設定はどこですか', a: 'スタッフの「詳細」→「社会保険」タブで設定します。等級表から選択でき、健康保険・厚生年金の保険料が自動計算されます。保険料率は別途「保険料率設定」で管理します。' },
       { q: '交通費精算の承認とExcel出力', a: '「給与」タブの交通費精算一覧から承認・却下します。承認できるのはマスター管理者のみです。承認待ちの左側にあるチェックを入れると、まとめて承認できます。承認済みのものは月を指定してExcelファイルに出力でき、経理処理に使えます。承認した金額は、同じ対象月の給与を新規作成する際に支給項目「交通費精算」として自動で入ります。承認する前に「内容を修正して承認」を選ぶと、金額や区間を直してから承認できます。修正した箇所は本人への通知に一覧で記載されます。承認後に修正が必要になった場合は、マスター管理者が「承認を取り消す」で差し戻しに戻せます。いずれの場合も、作成済みの給与明細の「交通費精算」の金額は自動で更新されます。' },
@@ -6991,8 +7017,8 @@ const HELP_ADMIN = [
     category: 'お知らせ・その他',
     items: [
       { q: 'お知らせを投稿するには', a: '「労務」タブの上部にある投稿フォームから、カテゴリ・タイトル・本文を入力して投稿します。ファイルの添付もできます。重要なものは固定表示にすると一番上に表示されます。' },
-      { q: 'データのバックアップを取るには', a: '「勤怠」→「スタッフ管理」→「スタッフ一覧・登録」の右上にある「データバックアップ」を押すと、全データがExcelファイルでダウンロードされます。マスター管理者のみ利用できます。月1回を目安に実行してください。マイナンバーを含むため、保管場所には十分ご注意ください。' },
-      { q: '監査ログとは何ですか', a: '誰がいつどの操作をしたかの記録です。「勤怠」→「スタッフ管理」→「監査ログ」で確認できます。承認・却下・アカウント操作などが記録されます。' },
+      { q: 'データのバックアップを取るには', a: '「勤怠」→「スタッフ一覧」の右上にある「データバックアップ」を押すと、全データがExcelファイルでダウンロードされます。マスター管理者のみ利用できます。月1回を目安に実行してください。マイナンバーを含むため、保管場所には十分ご注意ください。' },
+      { q: '監査ログとは何ですか', a: '誰がいつどの操作をしたかの記録です。「勤怠」→「その他」→「監査ログ」で確認できます。承認・却下・アカウント操作などが記録されます。' },
       { q: '「同期エラー」と表示されました', a: '通信が一時的に不安定な場合に表示されます。画面を再読み込み（Ctrl + Shift + R）すると復帰することが多いです。繰り返し発生する場合は開発者にご相談ください。' },
     ],
   },
@@ -7755,7 +7781,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
           {attendanceConfirmed ? (
             <>この月の勤怠は最終承認済みです。この内容をもとに給与計算を行えます。</>
           ) : monthlyConfirm ? (
-            <>この月の勤怠はまだ確定していません（現在：{MONTHLY_CONFIRM_STATUS_LABEL[monthlyConfirm.status]}）。「勤怠」→「月次勤怠の確定」で承認を進めてください。</>
+            <>この月の勤怠はまだ確定していません（現在：{MONTHLY_CONFIRM_STATUS_LABEL[monthlyConfirm.status]}）。「勤怠」→「月次確定」で承認を進めてください。</>
           ) : (
             <>この月の勤怠はまだ確定申請されていません。確定後の給与計算をおすすめします。</>
           )}
@@ -7895,44 +7921,61 @@ function AdminTopNav({ tab, setTab, correctionCount, leaveCount, performanceCoun
 
   const totalBadge = correctionCount + leaveCount + performanceCount + monthlyConfirmCount;
 
+  // よく使う項目は常に横並びで表示し、1クリックで開けるようにする。
+  // 残りは「その他」にまとめる。
+  const primaryItems = [
+    { tab: 'dashboard', label: 'ダッシュボード', icon: <LayoutGrid size={14} /> },
+    { tab: 'attendance', label: '勤怠一覧' },
+    { tab: 'requests', label: '勤怠修正', badge: correctionCount },
+    { tab: 'monthlyconfirm', label: '月次確定', badge: monthlyConfirmCount },
+    { tab: 'leave', label: '休暇申請', badge: leaveCount },
+    { tab: 'performance', label: '実績報告', badge: performanceCount },
+    { tab: 'accounts', label: 'スタッフ一覧' },
+  ];
+  const primaryTabs = primaryItems.map((i) => i.tab);
+  const otherItems = categories
+    .flatMap((c) => c.items)
+    .filter((i) => !primaryTabs.includes(i.tab));
+  const otherActive = otherItems.some((i) => i.tab === tab);
+
   return (
     <div ref={wrapRef} className="relative bg-white rounded-2xl border border-slate-200 shadow-sm">
-      <div className="flex items-center px-2">
-        <button
-          onClick={() => { setTab('dashboard'); setOpen(null); }}
-          className={`flex items-center gap-1.5 px-4 py-3 text-[13px] font-bold rounded-lg transition-colors ${tab === 'dashboard' ? 'text-slate-900' : 'text-slate-400 hover:text-slate-700'}`}
-        >
-          <LayoutGrid size={15} />
-          ダッシュボード
-        </button>
-        {categories.map((cat) => {
-          const catBadge = cat.items.reduce((s, i) => s + (i.badge || 0), 0);
-          const isActiveGroup = cat.tabs.includes(tab);
-          return (
-            <button
-              key={cat.key}
-              onClick={() => setOpen(open === cat.key ? null : cat.key)}
-              className={`relative px-4 py-3 text-[13px] font-bold rounded-lg transition-colors ${isActiveGroup || open === cat.key ? 'text-slate-900' : 'text-slate-400 hover:text-slate-700'}`}
-            >
-              {cat.label}
-              {catBadge > 0 && (
-                <span className="absolute top-1.5 -right-0.5 w-4 h-4 bg-amber-600 rounded-full text-[9px] flex items-center justify-center text-white font-bold">
-                  {catBadge}
-                </span>
-              )}
-            </button>
-          );
-        })}
+      <div className="flex items-center gap-0.5 px-2 overflow-x-auto">
+        {primaryItems.map((item) => (
+          <button
+            key={item.tab}
+            onClick={() => { setTab(item.tab); setOpen(null); }}
+            className={`flex items-center gap-1.5 px-3 py-3 text-[12.5px] font-bold rounded-lg transition-colors whitespace-nowrap shrink-0 ${
+              tab === item.tab ? 'text-slate-900 bg-slate-100' : 'text-slate-500 hover:text-slate-800'
+            }`}
+          >
+            {item.icon}
+            {item.label}
+            {item.badge > 0 && (
+              <span className="text-[10px] bg-amber-600 text-white rounded-full px-1.5 py-0.5 font-bold">{item.badge}</span>
+            )}
+          </button>
+        ))}
+        {otherItems.length > 0 && (
+          <button
+            onClick={() => setOpen(open === 'other' ? null : 'other')}
+            className={`flex items-center gap-1 px-3 py-3 text-[12.5px] font-bold rounded-lg transition-colors whitespace-nowrap shrink-0 ${
+              otherActive || open === 'other' ? 'text-slate-900 bg-slate-100' : 'text-slate-500 hover:text-slate-800'
+            }`}
+          >
+            その他
+            <ChevronDown size={13} />
+          </button>
+        )}
         {totalBadge > 0 && (
-          <span className="ml-auto mr-3 text-[11px] font-bold text-rose-600">未承認 合計 {totalBadge}件</span>
+          <span className="ml-auto mr-3 shrink-0 text-[11px] font-bold text-rose-600 whitespace-nowrap">未処理 合計 {totalBadge}件</span>
         )}
       </div>
-      <div className={`h-0.5 transition-all ${tab === 'dashboard' ? 'bg-transparent' : 'bg-slate-800'}`} />
 
-      {open && (
+      {open === 'other' && (
         <div className="absolute left-0 right-0 top-full mt-1 bg-white border border-slate-200 rounded-xl shadow-lg z-20 p-4">
-          <div className="grid grid-cols-3 gap-3">
-            {categories.find((c) => c.key === open).items.map((item) => (
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+            {otherItems.map((item) => (
               <button
                 key={item.tab}
                 onClick={() => { setTab(item.tab); setOpen(null); }}
