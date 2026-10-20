@@ -7,6 +7,7 @@
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
+    "check-names": "tsc --noEmit --jsx preserve --target es2020 --lib es2020,dom --moduleResolution bundler --skipLibCheck --noImplicitAny false src/App.tsx | grep 'Cannot find name' || true",
     "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {

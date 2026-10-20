@@ -2103,7 +2103,8 @@ function AttendanceApp() {
   // 交通費精算：前月分を毎月1日までに申請できているか（未提出・却下のままなら出勤時にリマインド）
   const commuteClaimTargetMonthKey = prevMonthKey(now);
   const hasSubmittedCommuteClaim = (data.commuteExpenseClaims || []).some(
-    (c) => c.employeeId === employeeId && c.targetMonth === commuteClaimTargetMonthKey && c.status !== 'rejected'
+    (c) => c.employeeId === employeeId && c.targetMonth === commuteClaimTargetMonthKey
+      && c.status !== 'rejected' && c.status !== 'draft'
   );
   const needsCommuteClaimReminder = !hasSubmittedCommuteClaim;
 
@@ -2823,6 +2824,38 @@ function AttendanceApp() {
     );
     await refreshData();
     show('交通費精算書を提出しました', 'success');
+    return true;
+  };
+
+  // 交通費精算書の一時保存（申請はせず、あとから続きを入力できる）
+  const saveCommuteExpenseDraft = async (payload) => {
+    const existing = (data.commuteExpenseClaims || []).find(
+      (c) => c.employeeId === employeeId && c.targetMonth === payload.targetMonth
+    );
+    if (existing && existing.status === 'approved') {
+      show('承認済みの月は保存できません', 'warn');
+      return false;
+    }
+    const row = {
+      employee_id: employeeId,
+      target_month: payload.targetMonth,
+      submitted_date: payload.submittedDate,
+      items: payload.items,
+      total_amount: payload.totalAmount,
+      status: 'draft',
+      admin_comment: null,
+      decided_at: null,
+    };
+    const { error } = existing
+      ? await supabase.from('commute_expense_claims').update(row).eq('id', existing.id)
+      : await supabase.from('commute_expense_claims').insert(row);
+    if (error) {
+      console.error('交通費の一時保存に失敗しました', error);
+      show(`一時保存に失敗しました：${error.message || ''}`, 'warn');
+      return false;
+    }
+    await refreshData();
+    show('入力内容を保存しました。あとから続きを入力できます', 'success');
     return true;
   };
 
@@ -9289,8 +9322,8 @@ function MonthlyAttendanceConfirmSection({ records, confirmations, commuteClaims
                 <Wallet size={14} className="text-slate-400" />
                 <span className="text-[12px] font-bold text-slate-600">交通費精算（同じ月の分）</span>
                 {commuteClaim && (
-                  <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full ${commuteClaim.status === 'approved' ? 'bg-emerald-50 text-emerald-600' : commuteClaim.status === 'rejected' ? 'bg-rose-50 text-rose-600' : 'bg-amber-50 text-amber-600'}`}>
-                    {commuteClaim.status === 'approved' ? '承認済み' : commuteClaim.status === 'rejected' ? '差し戻し' : '承認待ち'}
+                  <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full ${commuteClaim.status === 'approved' ? 'bg-emerald-50 text-emerald-600' : commuteClaim.status === 'rejected' ? 'bg-rose-50 text-rose-600' : commuteClaim.status === 'draft' ? 'bg-slate-100 text-slate-500' : 'bg-amber-50 text-amber-600'}`}>
+                    {commuteClaim.status === 'approved' ? '承認済み' : commuteClaim.status === 'rejected' ? '差し戻し' : commuteClaim.status === 'draft' ? '一時保存' : '承認待ち'}
                   </span>
                 )}
               </div>
@@ -9716,8 +9749,8 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate, onSav
     if (ok) resetForm();
   };
 
-  const statusLabel = { pending: '承認待ち', approved: '承認済み', rejected: '差し戻し' };
-  const statusClass = { pending: 'bg-amber-50 text-amber-600', approved: 'bg-emerald-50 text-emerald-600', rejected: 'bg-rose-50 text-rose-600' };
+  const statusLabel = { draft: '一時保存', pending: '承認待ち', approved: '承認済み', rejected: '差し戻し' };
+  const statusClass = { draft: 'bg-slate-100 text-slate-500', pending: 'bg-amber-50 text-amber-600', approved: 'bg-emerald-50 text-emerald-600', rejected: 'bg-rose-50 text-rose-600' };
 
   return (
     <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
