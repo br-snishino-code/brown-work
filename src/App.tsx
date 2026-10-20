@@ -1057,12 +1057,14 @@ const rowToCommuteClaim = (row) => ({
 
 // 月次勤怠の確定
 const MONTHLY_CONFIRM_STATUS_LABEL = {
+  draft: '一時保存',
   pending: '管理者の確認待ち',
   admin_approved: 'マスター管理者の最終承認待ち',
   confirmed: '確定済み',
   rejected: '差し戻し',
 };
 const MONTHLY_CONFIRM_STATUS_CLASS = {
+  draft: 'bg-slate-100 text-slate-500',
   pending: 'bg-amber-50 text-amber-600',
   admin_approved: 'bg-blue-50 text-blue-600',
   confirmed: 'bg-emerald-50 text-emerald-600',
@@ -2692,6 +2694,36 @@ function AttendanceApp() {
     return true;
   };
 
+  // 勤怠の一時保存（申請はせず、あとから続きを入力できる）
+  const saveMonthlyAttendanceDraft = async (targetMonth, summary, staffNote) => {
+    const existing = (data.monthlyConfirmations || []).find(
+      (c) => c.employeeId === employeeId && c.targetMonth === targetMonth
+    );
+    if (existing && existing.status === 'confirmed') {
+      show('この月の勤怠はすでに確定しています', 'warn');
+      return false;
+    }
+    const payload = {
+      employee_id: employeeId,
+      target_month: targetMonth,
+      status: 'draft',
+      summary,
+      staff_note: staffNote || null,
+      submitted_at: new Date().toISOString(),
+    };
+    const { error } = existing
+      ? await supabase.from('monthly_attendance_confirmations').update(payload).eq('id', existing.id)
+      : await supabase.from('monthly_attendance_confirmations').insert(payload);
+    if (error) {
+      console.error('勤怠の一時保存に失敗しました', error);
+      show(`一時保存に失敗しました：${error.message || ''}`, 'warn');
+      return false;
+    }
+    await refreshData();
+    show('勤怠の内容を保存しました。あとから申請できます', 'success');
+    return true;
+  };
+
   // 管理者による1次承認（stage: 'admin'）とマスター管理者による最終承認（stage: 'master'）
   const decideMonthlyAttendanceConfirmation = async (id, stage, decision, comment) => {
     const target = (data.monthlyConfirmations || []).find((c) => c.id === id);
@@ -3446,6 +3478,7 @@ function AttendanceApp() {
                 onSubmitCommute={submitCommuteExpenseClaim}
                 onUpdateCommute={updateCommuteExpenseClaim}
                 onSaveCommuteDraft={saveCommuteExpenseDraft}
+                onSaveAttendanceDraft={saveMonthlyAttendanceDraft}
               />
             )}
             {employeeTab === 'attendance' && (
@@ -6928,7 +6961,7 @@ const HELP_ADMIN = [
     category: '給与',
     items: [
       { q: '給与計算の流れを教えてください', a: 'まず「勤怠」→「月次勤怠の確定」で、その月の勤怠を最終承認まで進めます。次に「給与」タブで対象月を選ぶと、勤怠記録から労働時間と残業時間が自動集計されます。承認済みの交通費精算も支給項目に自動で入ります。支給項目・控除項目を確認して下書き保存し、内容が確定したら「公開」します。公開するとスタッフ側の画面に明細が表示されます。勤怠が最終承認されるまで公開はできません。' },
-      { q: '月次勤怠の確定とは', a: 'スタッフが前月分の勤怠を確認して確定申請し、管理者が内容を確認して承認、最後にマスター管理者が最終承認する流れです。マスター管理者が最初に確認した場合は、その承認だけで確定します。管理者ご本人の申請は、マスター管理者の承認のみで確定します。最終承認が済むと、その月の給与明細を公開できるようになります。「勤怠」→「月次勤怠の確定」で処理します。確定後に修正が必要になった場合は、マスター管理者が「確定を取り消す」で差し戻しに戻せます。取り消すとスタッフへ通知され、給与明細の公開も止まります。' },
+      { q: '月次勤怠の確定とは', a: '交通費と勤怠は、それぞれ「保存する」で途中まで残しておけます（順番は問いません）。内容がそろったら「勤怠と交通費をまとめて申請する」で一度に提出します。スタッフが前月分の勤怠を確認して確定申請し、管理者が内容を確認して承認、最後にマスター管理者が最終承認する流れです。マスター管理者が最初に確認した場合は、その承認だけで確定します。管理者ご本人の申請は、マスター管理者の承認のみで確定します。最終承認が済むと、その月の給与明細を公開できるようになります。「勤怠」→「月次勤怠の確定」で処理します。確定後に修正が必要になった場合は、マスター管理者が「確定を取り消す」で差し戻しに戻せます。取り消すとスタッフへ通知され、給与明細の公開も止まります。' },
       { q: '支給・控除の項目を追加するには', a: 'スタッフの「詳細」→「給与・口座」タブで、スタッフごとの固定的な支給項目・控除項目を登録できます。毎月の計算に自動で反映されます。' },
       { q: '標準報酬月額の設定はどこですか', a: 'スタッフの「詳細」→「社会保険」タブで設定します。等級表から選択でき、健康保険・厚生年金の保険料が自動計算されます。保険料率は別途「保険料率設定」で管理します。' },
       { q: '交通費精算の承認とExcel出力', a: '「給与」タブの交通費精算一覧から承認・却下します。承認できるのはマスター管理者のみです。承認待ちの左側にあるチェックを入れると、まとめて承認できます。承認済みのものは月を指定してExcelファイルに出力でき、経理処理に使えます。承認した金額は、同じ対象月の給与を新規作成する際に支給項目「交通費精算」として自動で入ります。承認する前に「内容を修正して承認」を選ぶと、金額や区間を直してから承認できます。修正した箇所は本人への通知に一覧で記載されます。承認後に修正が必要になった場合は、マスター管理者が「承認を取り消す」で差し戻しに戻せます。いずれの場合も、作成済みの給与明細の「交通費精算」の金額は自動で更新されます。' },
@@ -9204,9 +9237,10 @@ function AdminYearEndAdjustmentTab({ requests, onDecide, isDesktop }) {
 }
 
 // ---- 月次勤怠の確定（スタッフ側）----
-function MonthlyAttendanceConfirmSection({ session, records, confirmations, commuteClaims = [], onSubmit, onSubmitCommute, onUpdateCommute, onSaveCommuteDraft }) {
+function MonthlyAttendanceConfirmSection({ session, records, confirmations, commuteClaims = [], onSubmit, onSubmitCommute, onUpdateCommute, onSaveCommuteDraft, onSaveAttendanceDraft }) {
   const [targetMonth, setTargetMonth] = useState(() => prevMonthKey());
   const [note, setNote] = useState('');
+  const [noteLoadedFor, setNoteLoadedFor] = useState(null);
   const [saving, setSaving] = useState(false);
   const editor = useCommuteRows(commuteClaims);
 
@@ -9232,12 +9266,36 @@ function MonthlyAttendanceConfirmSection({ session, records, confirmations, comm
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [targetMonth, separateByDefault, commuteClaim?.id]);
 
+  // 保存済みのメモを読み込む（対象月を変えたときも）
+  useEffect(() => {
+    if (noteLoadedFor === targetMonth) return;
+    const saved = (confirmations || []).find((c) => c.targetMonth === targetMonth);
+    setNote(saved?.staffNote || '');
+    setNoteLoadedFor(targetMonth);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [targetMonth, confirmations]);
+
   // 対象月を変えたら、その月の交通費の内容を読み込み直す
   useEffect(() => {
     const claim = (commuteClaims || []).find((c) => c.targetMonth === targetMonth);
     editor.reset(claim ? [...(claim.items || []).map((r) => ({ ...emptyCommuteRow(), ...r })), emptyCommuteRow()] : undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [targetMonth, commuteClaim?.id]);
+
+  const summaryPayload = () => ({
+    days: summary.days,
+    workedMin: summary.workedMin,
+    overtimeMin: summary.overtimeMin,
+    lateMin: summary.lateMin,
+    earlyLeaveMin: summary.earlyLeaveMin,
+  });
+
+  // 勤怠の内容だけ保存する（申請はしない）
+  const saveAttendanceDraft = async () => {
+    setSaving(true);
+    await onSaveAttendanceDraft(targetMonth, summaryPayload(), note);
+    setSaving(false);
+  };
 
   // 交通費の入力内容だけ保存する（勤怠は申請しない）
   const saveCommuteDraft = async () => {
@@ -9266,13 +9324,7 @@ function MonthlyAttendanceConfirmSection({ session, records, confirmations, comm
       const commuteOk = commuteClaim ? await onUpdateCommute(commuteClaim.id, payload) : await onSubmitCommute(payload);
       if (!commuteOk) { setSaving(false); return; }
     }
-    const ok = await onSubmit(targetMonth, {
-      days: summary.days,
-      workedMin: summary.workedMin,
-      overtimeMin: summary.overtimeMin,
-      lateMin: summary.lateMin,
-      earlyLeaveMin: summary.earlyLeaveMin,
-    }, note);
+    const ok = await onSubmit(targetMonth, summaryPayload(), note);
     setSaving(false);
     if (ok) setNote('');
   };
@@ -9299,7 +9351,7 @@ function MonthlyAttendanceConfirmSection({ session, records, confirmations, comm
           <input
             type="month"
             value={targetMonth}
-            onChange={(e) => { setTargetMonth(e.target.value); setNote(''); }}
+            onChange={(e) => setTargetMonth(e.target.value)}
             className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]"
           />
         </Field>
@@ -9405,6 +9457,18 @@ function MonthlyAttendanceConfirmSection({ session, records, confirmations, comm
                 すでに申請済みです。内容を直して送信すると、もう一度はじめから承認を受けます。
               </div>
             )}
+            {current?.status === 'draft' && (
+              <div className="text-[11.5px] text-slate-500">
+                保存済みです（まだ申請されていません）。内容を確認のうえ、下のボタンから申請してください。
+              </div>
+            )}
+            <button
+              onClick={saveAttendanceDraft}
+              disabled={saving}
+              className="w-full py-2 rounded-lg border border-slate-300 disabled:border-slate-200 text-[12.5px] font-bold text-slate-600"
+            >
+              {saving ? '保存中…' : '勤怠の内容を保存する'}
+            </button>
             <button
               onClick={submit}
               disabled={saving || summary.days === 0}
@@ -9412,6 +9476,9 @@ function MonthlyAttendanceConfirmSection({ session, records, confirmations, comm
             >
               {saving ? '送信中…' : locked ? 'この内容で出し直す' : bundleCommute ? '勤怠と交通費をまとめて申請する' : '勤怠を確定申請する'}
             </button>
+            <div className="text-[11px] text-slate-400">
+              「保存する」は申請されません。交通費と勤怠をそれぞれ保存しておき、締切前にまとめて申請できます。
+            </div>
             {summary.days === 0 && (
               <div className="text-[11.5px] text-slate-400">この月の出勤記録がありません。対象月をご確認ください。</div>
             )}
@@ -9434,6 +9501,7 @@ function AdminMonthlyConfirmTab({ confirmations, accounts = [], commuteClaims = 
     const role = accounts.find((a) => a.id === c.employeeId)?.role;
     return role === 'admin' || role === 'master_admin';
   };
+  // 一時保存はスタッフが入力中のため、管理者の一覧には出さない
   const waitingAdmin = confirmations.filter((c) => c.status === 'pending' && !isAdminSubmitter(c));
   const waitingMaster = confirmations.filter(
     (c) => c.status === 'admin_approved' || (c.status === 'pending' && isAdminSubmitter(c))
