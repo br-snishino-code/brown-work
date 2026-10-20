@@ -10432,6 +10432,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
     setSavingAttendance(false);
   };
   const [form, setForm] = useState({
+    name: account.name || '',
     furigana: account.furigana || '',
     contactEmail: account.contactEmail || '',
     staffNumber: account.staffNumber || '',
@@ -10580,8 +10581,11 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
           <>
           <div ref={(el) => (sectionRefs.current.basic = el)} className="space-y-4">
             <div className="text-[12px] font-bold text-slate-500 border-b border-slate-100 pb-2">基本</div>
+              <Field label="氏名">
+                <input value={form.name} onChange={set('name')} placeholder="例）田中 花子" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
+              </Field>
               <Field label="ふりがな">
-                <input value={form.furigana} onChange={set('furigana')} placeholder="例）タナカ ハナコ" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
+                <input value={form.furigana} onChange={set('furigana')} placeholder="例）たなか はなこ" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
               </Field>
               <div className="grid grid-cols-2 gap-3">
                 <Field label="入職日">
