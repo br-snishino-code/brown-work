@@ -803,16 +803,16 @@ const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: 
 // 管理者宛の通知メールの送信先（app_settings の key）
 const SETTING_ADMIN_NOTIFY_EMAIL = 'admin_notify_email';
 
-// ---- 部署（メイングループ）ごとの入力フォーマット ----
-// app_settings に { "部署名": { shift: 'symbol'|'place'|'none', performance: 'eo'|'simple'|'none' } } を
-// JSON で1件だけ保存する。設定がない部署は下の既定値を使う。
+// ---- メイングループごとの入力フォーマット ----
+// app_settings に { "グループ名": { shift: 'symbol'|'place'|'none', performance: 'eo'|'simple'|'none' } } を
+// JSON で1件だけ保存する。設定がないグループは下の既定値を使う。
 const SETTING_GROUP_FORMATS = 'group_formats';
 
 // シフト希望の入力の型
 const SHIFT_FORMATS = {
   symbol: { label: '●×有給（3択）', desc: '1日ごとに 出勤可能／希望休／有給 から選びます' },
   place: { label: '活動場所を入力', desc: '希望休／有給は同じ。出勤できる日は活動場所を書きます' },
-  none: { label: '使わない', desc: 'この部署には「シフト希望」を表示しません' },
+  none: { label: '使わない', desc: 'このグループには「シフト希望」を表示しません' },
 };
 
 // 保存されている設定を読む。壊れていても画面は動かす
@@ -828,14 +828,14 @@ function parseGroupFormats(settings) {
   }
 }
 
-// 既定：eo業務は今までどおりの3択、それ以外の部署は活動場所の入力
+// 既定：eo業務は今までどおりの3択、それ以外のグループは活動場所の入力
 function shiftFormatKeyFor(group, settings) {
   const key = parseGroupFormats(settings)[group]?.shift;
   if (SHIFT_FORMATS[key]) return key;
   return group === EO_GROUP_NAME ? 'symbol' : 'place';
 }
 
-// 既定：eo業務はeo用の実績入力、それ以外の部署は実績入力を出さない
+// 既定：eo業務はeo用の実績入力、それ以外のグループは実績入力を出さない
 function performanceFormatKeyFor(group, settings) {
   const key = parseGroupFormats(settings)[group]?.performance;
   if (key === 'none' || PERFORMANCE_FORMATS[key]) return key;
@@ -2230,7 +2230,7 @@ function AttendanceApp() {
     }
   };
 
-  // 部署ごとの入力フォーマットを保存する（マスター管理者のみ）
+  // グループごとの入力フォーマットを保存する（マスター管理者のみ）
   const saveGroupFormats = async (map) => {
     const value = JSON.stringify(map || {});
     const { error } = await supabase.from('app_settings').upsert(
@@ -2247,7 +2247,7 @@ function AttendanceApp() {
       show('フォーマット設定の保存に失敗しました', 'warn');
       return false;
     }
-    await logAudit(session, '部署ごとの入力フォーマットを変更', Object.keys(map || {}).join('、') || '（なし）');
+    await logAudit(session, 'グループごとの入力フォーマットを変更', Object.keys(map || {}).join('、') || '（なし）');
     await refreshData();
     show('フォーマット設定を保存しました');
     return true;
@@ -3689,7 +3689,7 @@ function AttendanceApp() {
   );
   const needsMonthlyConfirm = !myMonthlyConfirm || myMonthlyConfirm.status === 'draft' || myMonthlyConfirm.status === 'rejected';
   // シフト希望：受付中の月があるときだけ各種申請に出す
-  // シフト希望の入力の型は、所属部署（メイングループ）の設定で決まる
+  // シフト希望の入力の型は、所属するメイングループの設定で決まる
   const myShiftFormatKey = shiftFormatKeyFor(session.mainGroup, data.settings);
   const openShiftPeriod = myShiftFormatKey === 'none' ? null : ((data.shiftPeriods || []).find(
     (p) => p.isOpen && (!p.targetEmployeeIds || p.targetEmployeeIds.length === 0 || p.targetEmployeeIds.includes(employeeId))
@@ -7595,7 +7595,7 @@ function EoPerformanceSection({ employeeId, session, onNotifyAdmin, isDesktop })
 }
 
 // ---- 簡易版の実績入力 ----
-// 日ごとに「件数」と「内容・備考」だけを書く形。eo業務以外の部署向け。
+// 日ごとに「件数」と「内容・備考」だけを書く形。eo業務以外のグループ向け。
 // 保存先はeo業務と同じ staff_new_performance の daily（形だけが違う）。
 function SimplePerformanceSection({ employeeId, onNotifyAdmin, isDesktop }) {
   const now = new Date();
@@ -7756,7 +7756,7 @@ function SimplePerformanceSection({ employeeId, onNotifyAdmin, isDesktop }) {
 }
 
 // ---- 実績入力のフォーマット ----
-// どの部署にどの型を使うかは「部署ごとのフォーマット」設定で決める。
+// どのグループにどの型を使うかは「グループごとの入力フォーマット」設定で決める。
 // 新しい型を足すときは、ここに1行足す。
 const PERFORMANCE_FORMATS = {
   eo: {
@@ -7773,32 +7773,38 @@ const PERFORMANCE_FORMATS = {
   },
 };
 
-// ---- 部署ごとの入力フォーマット設定（マスター管理者）----
-function GroupFormatSettingsTab({ employeeAccounts, settings, onSave, isDesktop }) {
-  const groups = Array.from(new Set(employeeAccounts.filter((a) => !a.resignationDate).map((a) => a.mainGroup).filter(Boolean))).sort();
+// ---- グループごとの入力フォーマット設定（マスター管理者）----
+// 出勤規定日数の設定と同じく、左でグループを選び、右で中身を決める
+function GroupFormatSettingsTab({ employeeAccounts, groupLeaveSchedules = {}, settings, onSave, isDesktop }) {
   const saved = parseGroupFormats(settings);
-  const [draft, setDraft] = useState(saved);
+  const existingGroups = Array.from(new Set(employeeAccounts.filter((a) => !a.resignationDate).map((a) => a.mainGroup).filter(Boolean)));
+  const knownGroups = Array.from(new Set([...existingGroups, ...Object.keys(groupLeaveSchedules || {}), ...Object.keys(saved)])).sort();
+
+  const [selectedGroup, setSelectedGroup] = useState(knownGroups[0] || '');
+  const [newGroupName, setNewGroupName] = useState('');
+  const [shiftKey, setShiftKey] = useState(() => shiftFormatKeyFor(knownGroups[0] || '', settings));
+  const [perfKey, setPerfKey] = useState(() => performanceFormatKeyFor(knownGroups[0] || '', settings));
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState(null);
 
-  // 他の画面で設定が変わったときに追従する
-  const savedText = JSON.stringify(saved);
-  useEffect(() => { setDraft(JSON.parse(savedText)); }, [savedText]);
-
-  const valueOf = (group, kind) => {
-    const picked = draft[group]?.[kind];
-    if (kind === 'shift') return SHIFT_FORMATS[picked] ? picked : shiftFormatKeyFor(group, settings);
-    return picked === 'none' || PERFORMANCE_FORMATS[picked] ? picked : performanceFormatKeyFor(group, settings);
+  const loadGroup = (groupName) => {
+    setSelectedGroup(groupName);
+    setShiftKey(shiftFormatKeyFor(groupName, settings));
+    setPerfKey(performanceFormatKeyFor(groupName, settings));
+    setSavedAt(null);
   };
-  const pick = (group, kind, value) => {
-    setDraft((prev) => ({ ...prev, [group]: { ...(prev[group] || {}), [kind]: value } }));
+
+  const addNewGroup = () => {
+    const name = newGroupName.trim();
+    if (!name) return;
+    setNewGroupName('');
+    loadGroup(name);
   };
 
   const save = async () => {
+    if (!selectedGroup) return;
     setSaving(true);
-    // 画面に出ている部署の分だけを、今の選択どおりに書き出す
-    const next = { ...draft };
-    groups.forEach((g) => { next[g] = { shift: valueOf(g, 'shift'), performance: valueOf(g, 'performance') }; });
+    const next = { ...saved, [selectedGroup]: { shift: shiftKey, performance: perfKey } };
     const ok = await onSave(next);
     setSaving(false);
     if (ok) setSavedAt(new Date());
@@ -7808,70 +7814,148 @@ function GroupFormatSettingsTab({ employeeAccounts, settings, onSave, isDesktop 
     ...Object.entries(PERFORMANCE_FORMATS).map(([key, f]) => [key, f.adminLabel || f.label]),
     ['none', '使わない（実績入力を表示しない）'],
   ];
-
-  const renderGroup = (g) => (
-    <div key={g} className="px-5 py-4 border-b border-slate-100 last:border-0">
-      <div className="text-[13.5px] font-bold text-slate-800 mb-2.5">{g}</div>
-      <div className={isDesktop ? 'grid grid-cols-2 gap-4' : 'space-y-3'}>
-        <div>
-          <div className="text-[11px] font-bold text-slate-400 mb-1">シフト希望</div>
-          <select
-            value={valueOf(g, 'shift')}
-            onChange={(e) => pick(g, 'shift', e.target.value)}
-            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px] bg-white"
-          >
-            {Object.entries(SHIFT_FORMATS).map(([key, f]) => (
-              <option key={key} value={key}>{f.label}</option>
-            ))}
-          </select>
-          <div className="mt-1 text-[11px] text-slate-400">{SHIFT_FORMATS[valueOf(g, 'shift')]?.desc}</div>
-        </div>
-        <div>
-          <div className="text-[11px] font-bold text-slate-400 mb-1">実績入力</div>
-          <select
-            value={valueOf(g, 'performance')}
-            onChange={(e) => pick(g, 'performance', e.target.value)}
-            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px] bg-white"
-          >
-            {perfOptions.map(([key, label]) => (
-              <option key={key} value={key}>{label}</option>
-            ))}
-          </select>
-          <div className="mt-1 text-[11px] text-slate-400">
-            {valueOf(g, 'performance') === 'none' ? 'この部署には「実績入力」を表示しません' : PERFORMANCE_FORMATS[valueOf(g, 'performance')]?.desc}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
+  const memberCount = employeeAccounts.filter((a) => !a.resignationDate && a.mainGroup === selectedGroup).length;
 
   return (
     <div className="space-y-5">
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-        <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
-          <Settings size={15} className="text-slate-400" />
-          <h2 className="font-bold text-[13.5px]">部署ごとの入力フォーマット</h2>
-        </div>
-        <div className="px-5 py-2.5 bg-slate-50 border-b border-slate-100 text-[11.5px] leading-relaxed text-slate-500">
-          スタッフの「各種申請」に出る、シフト希望と実績入力の形を部署（メイングループ）ごとに決めます。<br />
-          変更すると、その部署のスタッフの画面がすぐに切り替わります。提出済みの内容は消えません。
-        </div>
-        {groups.length === 0 ? (
-          <div className="px-5 py-8 text-center text-[12.5px] text-slate-300">メイングループが設定されたスタッフがいません</div>
-        ) : (
-          <div>{groups.map(renderGroup)}</div>
-        )}
+      <div className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 text-[11.5px] leading-relaxed text-blue-800">
+        メイングループごとに、スタッフの「各種申請」に出るシフト希望と実績入力の形を設定できます。
+        変更すると、そのグループのスタッフの画面がすぐに切り替わります。提出済みの内容は消えません。
+        グループを設定していないスタッフには、既定の形（シフト希望は活動場所の入力、実績入力は表示しない）が使われます。
       </div>
 
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-5 py-4 space-y-2">
-        <button
-          onClick={save}
-          disabled={saving || groups.length === 0}
-          className="w-full rounded-xl bg-amber-600 py-3 text-[14px] font-bold text-white disabled:bg-slate-200"
-        >
-          {saving ? '保存中…' : 'この内容で保存する'}
-        </button>
-        {savedAt && <div className="text-center text-[11px] text-slate-400">{savedAt.toLocaleTimeString('ja-JP')} に保存しました</div>}
+      <div className={isDesktop ? 'grid grid-cols-[240px_1fr] gap-5 items-start' : 'space-y-4'}>
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="px-4 py-3 border-b border-slate-100 text-[12px] font-bold text-slate-500">グループ一覧</div>
+          <div className="divide-y divide-slate-100 max-h-64 overflow-y-auto">
+            {knownGroups.length === 0 && <div className="px-4 py-6 text-center text-[12px] text-slate-300">グループがまだありません</div>}
+            {knownGroups.map((g) => (
+              <button
+                key={g}
+                onClick={() => loadGroup(g)}
+                className={`w-full text-left px-4 py-2.5 text-[13px] ${selectedGroup === g ? 'bg-slate-800 text-white font-bold' : 'text-slate-700 hover:bg-slate-50'}`}
+              >
+                {g}
+              </button>
+            ))}
+          </div>
+          <div className="p-3 border-t border-slate-100 flex gap-2">
+            <input
+              value={newGroupName}
+              onChange={(e) => setNewGroupName(e.target.value)}
+              placeholder="新しいグループ名"
+              className="flex-1 min-w-0 border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px]"
+            />
+            <button onClick={addNewGroup} className="shrink-0 rounded-lg border border-slate-300 px-3 py-1.5 text-[12px] font-bold text-slate-600">
+              追加
+            </button>
+          </div>
+        </div>
+
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2 flex-wrap">
+            <Settings size={15} className="text-slate-400" />
+            <h2 className="font-bold text-[13.5px]">{selectedGroup || 'グループを選んでください'}</h2>
+            {selectedGroup && <span className="text-[11.5px] text-slate-400">{memberCount}名</span>}
+          </div>
+          {!selectedGroup ? (
+            <div className="px-5 py-10 text-center text-[12.5px] text-slate-300">左の一覧からグループを選んでください</div>
+          ) : (
+            <>
+              <div className="px-5 py-4 space-y-4">
+                <div>
+                  <div className="text-[11px] font-bold text-slate-400 mb-1.5">シフト希望</div>
+                  <div className="space-y-2">
+                    {Object.entries(SHIFT_FORMATS).map(([key, f]) => (
+                      <label
+                        key={key}
+                        className={`flex items-start gap-2.5 rounded-xl border px-3.5 py-2.5 cursor-pointer ${shiftKey === key ? 'border-amber-500 bg-amber-50' : 'border-slate-200 bg-white hover:bg-slate-50'}`}
+                      >
+                        <input
+                          type="radio"
+                          name="shiftFormat"
+                          checked={shiftKey === key}
+                          onChange={() => setShiftKey(key)}
+                          className="mt-0.5 h-4 w-4 accent-amber-600"
+                        />
+                        <span className="flex-1 min-w-0">
+                          <span className="block text-[13px] font-bold text-slate-800">{f.label}</span>
+                          <span className="mt-0.5 block text-[11.5px] text-slate-500">{f.desc}</span>
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <div className="text-[11px] font-bold text-slate-400 mb-1.5">実績入力</div>
+                  <div className="space-y-2">
+                    {perfOptions.map(([key, label]) => (
+                      <label
+                        key={key}
+                        className={`flex items-start gap-2.5 rounded-xl border px-3.5 py-2.5 cursor-pointer ${perfKey === key ? 'border-amber-500 bg-amber-50' : 'border-slate-200 bg-white hover:bg-slate-50'}`}
+                      >
+                        <input
+                          type="radio"
+                          name="perfFormat"
+                          checked={perfKey === key}
+                          onChange={() => setPerfKey(key)}
+                          className="mt-0.5 h-4 w-4 accent-amber-600"
+                        />
+                        <span className="flex-1 min-w-0">
+                          <span className="block text-[13px] font-bold text-slate-800">{label}</span>
+                          <span className="mt-0.5 block text-[11.5px] text-slate-500">
+                            {key === 'none' ? 'このグループには「実績入力」を表示しません' : PERFORMANCE_FORMATS[key]?.desc}
+                          </span>
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              </div>
+              <div className="px-5 py-4 border-t border-slate-100 space-y-2">
+                <button
+                  onClick={save}
+                  disabled={saving}
+                  className="w-full rounded-xl bg-amber-600 py-3 text-[14px] font-bold text-white disabled:bg-slate-200"
+                >
+                  {saving ? '保存中…' : `「${selectedGroup}」の設定を保存する`}
+                </button>
+                {savedAt && <div className="text-center text-[11px] text-slate-400">{savedAt.toLocaleTimeString('ja-JP')} に保存しました</div>}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-100 text-[12.5px] font-bold text-slate-500">現在の設定</div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-[12.5px]">
+            <thead className="bg-slate-50 text-slate-500">
+              <tr className="text-left">
+                <th className="px-4 py-2 font-medium">グループ</th>
+                <th className="px-4 py-2 font-medium">シフト希望</th>
+                <th className="px-4 py-2 font-medium">実績入力</th>
+              </tr>
+            </thead>
+            <tbody>
+              {knownGroups.length === 0 ? (
+                <tr><td colSpan={3} className="px-4 py-6 text-center text-slate-300">グループがまだありません</td></tr>
+              ) : knownGroups.map((g) => {
+                const sk = shiftFormatKeyFor(g, settings);
+                const pk = performanceFormatKeyFor(g, settings);
+                return (
+                  <tr key={g} className="border-t border-slate-100">
+                    <td className="px-4 py-2.5 font-semibold text-slate-800 whitespace-nowrap">{g}</td>
+                    <td className="px-4 py-2.5 text-slate-600">{SHIFT_FORMATS[sk]?.label || sk}</td>
+                    <td className="px-4 py-2.5 text-slate-600">{pk === 'none' ? '使わない' : PERFORMANCE_FORMATS[pk]?.adminLabel || pk}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );
@@ -8763,7 +8847,8 @@ function ShiftAdminTab({ employeeAccounts, periods = [], requests = [], tablesRe
   const [targetMonth, setTargetMonth] = useState(() => (periods[0]?.targetMonth || nextMonth));
   const [deadline, setDeadline] = useState('');
   const [note, setNote] = useState('');
-  const [targetMode, setTargetMode] = useState('all'); // all | some
+  const [targetMode, setTargetMode] = useState('all'); // all | group | some
+  const [targetGroups, setTargetGroups] = useState([]);
   const [targetIds, setTargetIds] = useState([]);
   const [loadedFor, setLoadedFor] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -8773,7 +8858,13 @@ function ShiftAdminTab({ employeeAccounts, periods = [], requests = [], tablesRe
   const days = useMemo(() => shiftMonthDays(targetMonth), [targetMonth]);
   const allStaff = employeeAccounts.filter((a) => !a.resignationDate);
   // 対象者を絞っているときは、その方だけを一覧・件数・依頼の対象にする
-  const activeStaff = targetMode === 'some' ? allStaff.filter((a) => targetIds.includes(a.id)) : allStaff;
+  // メイングループの一覧と、選んだグループに属する方
+  const staffGroups = Array.from(new Set(allStaff.map((a) => a.mainGroup).filter(Boolean))).sort();
+  const groupTargetIds = allStaff.filter((a) => targetGroups.includes(a.mainGroup)).map((a) => a.id);
+  const activeStaff =
+    targetMode === 'some' ? allStaff.filter((a) => targetIds.includes(a.id))
+    : targetMode === 'group' ? allStaff.filter((a) => targetGroups.includes(a.mainGroup))
+    : allStaff;
   const monthRequests = requests.filter((r) => r.targetMonth === targetMonth);
   const byEmployee = {};
   monthRequests.forEach((r) => { byEmployee[r.employeeId] = r; });
@@ -8787,7 +8878,17 @@ function ShiftAdminTab({ employeeAccounts, periods = [], requests = [], tablesRe
     setDeadline(period?.deadline || '');
     setNote(period?.note || '');
     const ids = period?.targetEmployeeIds || [];
-    setTargetMode(ids.length > 0 ? 'some' : 'all');
+    // 保存されているのは人のIDのため、ちょうどグループ単位で一致するときは
+    // 「グループで選ぶ」の状態に戻す
+    const groups = Array.from(new Set(allStaff.map((a) => a.mainGroup).filter(Boolean)));
+    const matched = groups.filter((g) => {
+      const members = allStaff.filter((a) => a.mainGroup === g).map((a) => a.id);
+      return members.length > 0 && members.every((id) => ids.includes(id));
+    });
+    const matchedIds = allStaff.filter((a) => matched.includes(a.mainGroup)).map((a) => a.id);
+    const isGroupSelection = ids.length > 0 && matched.length > 0 && matchedIds.length === ids.length;
+    setTargetMode(ids.length === 0 ? 'all' : isGroupSelection ? 'group' : 'some');
+    setTargetGroups(isGroupSelection ? matched : []);
     setTargetIds(ids);
     setLoadedFor(targetMonth);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -8799,7 +8900,7 @@ function ShiftAdminTab({ employeeAccounts, periods = [], requests = [], tablesRe
       deadline,
       note,
       requestDays: Array.from(requestDays),
-      targetEmployeeIds: targetMode === 'some' ? targetIds : [],
+      targetEmployeeIds: targetMode === 'some' ? targetIds : targetMode === 'group' ? groupTargetIds : [],
       ...patch,
     });
     setSaving(false);
@@ -8983,12 +9084,48 @@ function ShiftAdminTab({ employeeAccounts, periods = [], requests = [], tablesRe
             </button>
             <button
               type="button"
+              onClick={() => setTargetMode('group')}
+              className={`rounded-lg border px-3 py-1.5 text-[12px] font-bold ${targetMode === 'group' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 bg-white text-slate-500'}`}
+            >
+              グループで選ぶ（{targetGroups.length}グループ）
+            </button>
+            <button
+              type="button"
               onClick={() => setTargetMode('some')}
               className={`rounded-lg border px-3 py-1.5 text-[12px] font-bold ${targetMode === 'some' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 bg-white text-slate-500'}`}
             >
-              選んだ方のみ（{targetIds.length}名）
+              個別に選ぶ（{targetIds.length}名）
             </button>
           </div>
+          {targetMode === 'group' && (
+            <div className="mt-2.5">
+              <div className="mb-1.5 text-[11px] text-slate-400">選んだメイングループに所属する方の「各種申請」にだけ表示されます。</div>
+              <div className="rounded-xl border border-slate-200 p-2">
+                <div className="grid grid-cols-2 gap-x-3 gap-y-1 sm:grid-cols-3">
+                  {staffGroups.length === 0 ? (
+                    <div className="col-span-full px-1.5 py-2 text-[12px] text-slate-300">メイングループが設定されたスタッフがいません</div>
+                  ) : staffGroups.map((g) => {
+                    const count = allStaff.filter((a) => a.mainGroup === g).length;
+                    return (
+                      <label key={g} className="flex items-center gap-2 rounded-md px-1.5 py-1 text-[12px] text-slate-700 hover:bg-slate-50">
+                        <input
+                          type="checkbox"
+                          checked={targetGroups.includes(g)}
+                          onChange={() => setTargetGroups((prev) => (prev.includes(g) ? prev.filter((x) => x !== g) : [...prev, g]))}
+                          className="h-4 w-4 accent-amber-600"
+                        />
+                        <span className="truncate">{g}（{count}名）</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+              <div className="mt-1.5 text-[11.5px] text-slate-500">対象 {groupTargetIds.length}名</div>
+              {groupTargetIds.length === 0 && (
+                <div className="mt-1 text-[11.5px] font-bold text-rose-600">対象者が0名のため、誰にも表示されません。</div>
+              )}
+            </div>
+          )}
           {targetMode === 'some' && (
             <div className="mt-2.5">
               <div className="mb-1.5 text-[11px] text-slate-400">チェックを入れた方の「各種申請」にだけ表示されます。</div>
@@ -10530,7 +10667,7 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
             { tab: 'accounts', label: 'スタッフ一覧・登録', sub: '入退職日・有休管理' },
             { tab: 'groupleave', label: '出勤規定日数設定', sub: 'グループ別・月別日数' },
             { tab: 'eoincentive', label: 'eo業務インセンティブ', sub: '新規実績・既存実績・支給額' },
-            { tab: 'groupformats', label: '部署ごとの入力フォーマット', sub: 'シフト希望・実績入力の形' },
+            { tab: 'groupformats', label: 'グループごとの入力フォーマット', sub: 'シフト希望・実績入力の形' },
             { tab: 'auditlog', label: '監査ログ', sub: '承認・操作の履歴' },
             { tab: 'adminperms', label: '管理者権限', sub: '管理者アカウント・権限設定' },
             { tab: 'resignreasons', label: '退職理由の設定', sub: '選択肢の追加・編集' },
@@ -11033,6 +11170,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
       {tab === 'groupformats' && isMasterAdmin && (
         <GroupFormatSettingsTab
           employeeAccounts={employeeAccounts}
+          groupLeaveSchedules={data.groupLeaveSchedules}
           settings={data.settings}
           onSave={onSaveGroupFormats}
           isDesktop={isDesktop}
