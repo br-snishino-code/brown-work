@@ -117,11 +117,18 @@ Deno.serve(async (req) => {
     }
 
     // 在籍スタッフを取得して、氏名で引けるようにする
-    const empRes = await rest('employees?select=id,name,resignation_date');
+    const [empRes, aliasRes] = await Promise.all([
+      rest('employees?select=id,name,resignation_date'),
+      rest('shift_name_aliases?select=sheet_name,employee_id'),
+    ]);
     if (!empRes.ok) {
       return json({ error: `スタッフの取得に失敗しました：${await empRes.text()}` }, 500);
     }
     const employees: { id: string; name: string; resignation_date: string | null }[] = await empRes.json();
+    const activeIds = new Set(employees.filter((e) => !e.resignation_date).map((e) => e.id));
+    const resignedNames = new Set(
+      employees.filter((e) => e.resignation_date).map((e) => normalizeName(e.name))
+    );
     const byName = new Map<string, string>();
     employees
       .filter((e) => !e.resignation_date)
@@ -132,8 +139,19 @@ Deno.serve(async (req) => {
         else byName.set(key, e.id);
       });
 
+    // 氏名の対応表。スプレッドシートの表記とスタッフを結びつける。
+    // 完全一致より優先するので、改姓や表記ゆれをここで吸収できる。
+    const aliasMap = new Map<string, string>();
+    if (aliasRes.ok) {
+      const aliases: { sheet_name: string; employee_id: string }[] = await aliasRes.json();
+      aliases.forEach((a) => {
+        if (activeIds.has(a.employee_id)) aliasMap.set(normalizeName(a.sheet_name), a.employee_id);
+      });
+    }
+
     const unmatched: string[] = [];
     const duplicated: string[] = [];
+    const resigned: string[] = [];
     const assignments: { employee_id: string; date: string; kind: string; place: string | null; source: string; imported_at: string }[] = [];
     const now = new Date().toISOString();
     let matchedRows = 0;
@@ -141,8 +159,14 @@ Deno.serve(async (req) => {
     for (const row of rows) {
       const name = normalizeName(String(row?.name || ''));
       if (!name) continue;
-      const employeeId = byName.get(name);
+      // 対応表 → 完全一致 の順に探す
+      const employeeId = aliasMap.get(name) ?? byName.get(name);
       if (employeeId === undefined) {
+        // 退職した方がシートに残っている場合は、黙って飛ばす
+        if (resignedNames.has(name)) {
+          if (!resigned.includes(name)) resigned.push(name);
+          continue;
+        }
         if (!unmatched.includes(name)) unmatched.push(name);
         continue;
       }
@@ -178,6 +202,17 @@ Deno.serve(async (req) => {
     const lastDay = new Date(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0).getDate();
     const from = `${month}-01`;
     const to = `${month}-${String(lastDay).padStart(2, '0')}`;
+
+    // 消す前に、いまの内容を読んでおく。あとで差分を出すため
+    const beforeMap = new Map<string, { kind: string; place: string | null }>();
+    const beforeRes = await rest(
+      `shift_assignments?select=employee_id,date,kind,place&employee_id=in.(${employeeIds.join(',')})&date=gte.${from}&date=lte.${to}`
+    );
+    if (beforeRes.ok) {
+      const beforeRows: { employee_id: string; date: string; kind: string; place: string | null }[] = await beforeRes.json();
+      beforeRows.forEach((r) => beforeMap.set(`${r.employee_id}|${r.date}`, { kind: r.kind, place: r.place }));
+    }
+
     const delRes = await rest(
       `shift_assignments?employee_id=in.(${employeeIds.join(',')})&date=gte.${from}&date=lte.${to}`,
       { method: 'DELETE' }
@@ -213,6 +248,59 @@ Deno.serve(async (req) => {
       }]),
     }).catch(() => undefined);
 
+    // 前回と違う日だけを履歴に残す
+    const changes: {
+      employee_id: string; date: string; target_month: string;
+      before_kind: string | null; before_place: string | null;
+      after_kind: string | null; after_place: string | null;
+    }[] = [];
+    const seen = new Set<string>();
+    assignments.forEach((a) => {
+      const key = `${a.employee_id}|${a.date}`;
+      seen.add(key);
+      const before = beforeMap.get(key);
+      const beforePlace = before ? (before.place || '') : '';
+      const afterPlace = a.place || '';
+      if (!before || before.kind !== a.kind || beforePlace !== afterPlace) {
+        changes.push({
+          employee_id: a.employee_id,
+          date: a.date,
+          target_month: month,
+          before_kind: before ? before.kind : null,
+          before_place: before ? before.place : null,
+          after_kind: a.kind,
+          after_place: a.place,
+        });
+      }
+    });
+    // 今回の取り込みに含まれなくなった日
+    beforeMap.forEach((before, key) => {
+      if (seen.has(key)) return;
+      const [employeeId, date] = key.split('|');
+      changes.push({
+        employee_id: employeeId,
+        date,
+        target_month: month,
+        before_kind: before.kind,
+        before_place: before.place,
+        after_kind: null,
+        after_place: null,
+      });
+    });
+
+    // 初回の取り込み（前回の内容が1件も無い）では履歴を残さない。
+    // 全日が「新しく入った」になり、変更のお知らせが全員に飛んでしまうため。
+    if (beforeMap.size > 0 && changes.length > 0) {
+      for (let i = 0; i < changes.length; i += 500) {
+        await rest('shift_assignment_changes', {
+          method: 'POST',
+          headers: { Prefer: 'return=minimal' },
+          body: JSON.stringify(changes.slice(i, i + 500)),
+        }).catch(() => undefined);
+      }
+    }
+
+    const changedEmployeeIds = Array.from(new Set(changes.map((c) => c.employee_id)));
     const workDays = assignments.filter((a) => a.kind === 'work').length;
     const paidDays = assignments.filter((a) => a.kind === 'paid').length;
     const offDays = assignments.filter((a) => a.kind === 'off').length;
@@ -223,7 +311,11 @@ Deno.serve(async (req) => {
       matchedRows,
       unmatchedNames: unmatched,
       duplicatedNames: duplicated,
+      resignedNames: resigned,
       assignmentCount: assignments.length,
+      changeCount: beforeMap.size > 0 ? changes.length : 0,
+      changedStaffCount: beforeMap.size > 0 ? changedEmployeeIds.length : 0,
+      firstImport: beforeMap.size === 0,
       workDays,
       paidDays,
       offDays,

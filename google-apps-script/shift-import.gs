@@ -791,6 +791,16 @@ function pushConfirmedShiftsPrompt() {
     if (result.duplicatedNames && result.duplicatedNames.length > 0) {
       msg += '\n\n【同姓同名のため送れなかった方】\n　' + result.duplicatedNames.join('\n　');
     }
+    if (result.resignedNames && result.resignedNames.length > 0) {
+      msg += '\n\n【退職済みのため飛ばした方】\n　' + result.resignedNames.join('、');
+    }
+    if (result.firstImport) {
+      msg += '\n\nこの月の初回の取り込みです。';
+    } else if (result.changeCount > 0) {
+      msg += '\n\n前回から ' + result.changedStaffCount + '名・' + result.changeCount + '日分 が変わりました。';
+    } else {
+      msg += '\n\n前回から変更はありませんでした。';
+    }
     ui.alert('送信しました', msg, ui.ButtonSet.OK);
   } catch (e) {
     ui.alert('送信に失敗しました', String(e.message || e), ui.ButtonSet.OK);

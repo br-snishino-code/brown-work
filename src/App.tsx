@@ -798,7 +798,7 @@ function ToastView({ toast }) {
 // 以降のコンポーネント（LoginScreenなど）は一切変更していません。
 // ============================================================
 
-const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, performanceReports: [], payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, employeeAttendanceSchedules: {}, announcements: [], yearEndAdjustments: [], commuteExpenseClaims: [], resignationReasons: [], monthlyConfirmations: [], shiftPeriods: [], shiftRequests: [], shiftTablesReady: true, bonusRecords: [], bonusTableReady: true, shiftAssignments: [], shiftAssignmentReady: true, shiftImportLogs: [], settings: {} };
+const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, performanceReports: [], payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, employeeAttendanceSchedules: {}, announcements: [], yearEndAdjustments: [], commuteExpenseClaims: [], resignationReasons: [], monthlyConfirmations: [], shiftPeriods: [], shiftRequests: [], shiftTablesReady: true, bonusRecords: [], bonusTableReady: true, shiftAssignments: [], shiftAssignmentReady: true, shiftImportLogs: [], shiftNameAliases: [], shiftChanges: [], settings: {} };
 
 // 管理者宛の通知メールの送信先（app_settings の key）
 const SETTING_ADMIN_NOTIFY_EMAIL = 'admin_notify_email';
@@ -1345,6 +1345,26 @@ const rowToAssignment = (row) => ({
   importedAt: row.imported_at,
 });
 
+// スプレッドシート上の氏名とスタッフの対応表
+const rowToShiftAlias = (row) => ({
+  sheetName: row.sheet_name,
+  employeeId: row.employee_id,
+  createdAt: row.created_at,
+});
+
+// 確定シフトの変更履歴
+const rowToShiftChange = (row) => ({
+  id: row.id,
+  employeeId: row.employee_id,
+  date: row.date,
+  targetMonth: row.target_month,
+  beforeKind: row.before_kind,
+  beforePlace: row.before_place || '',
+  afterKind: row.after_kind,
+  afterPlace: row.after_place || '',
+  changedAt: row.changed_at,
+});
+
 const rowToImportLog = (row) => ({
   id: row.id,
   targetMonth: row.target_month,
@@ -1423,6 +1443,8 @@ async function fetchAllData() {
     bonusRes,
     assignmentRes,
     importLogRes,
+    aliasRes,
+    shiftChangeRes,
   ] = await Promise.all([
     supabase.from('employees').select('*'),
     supabase.from('attendance_records').select('*'),
@@ -1446,6 +1468,8 @@ async function fetchAllData() {
     supabase.from('bonus_records').select('*, employees(name)').order('year', { ascending: false }),
     supabase.from('shift_assignments').select('*').order('date', { ascending: true }),
     supabase.from('shift_import_logs').select('*').order('imported_at', { ascending: false }).limit(20),
+    supabase.from('shift_name_aliases').select('*'),
+    supabase.from('shift_assignment_changes').select('*').order('changed_at', { ascending: false }).limit(500),
   ]);
 
   for (const res of [employeesRes, recordsRes, correctionsRes, leaveRes, perfRes, notifRes, payrollRes, auditRes, profileReqRes, groupLeaveRes, employeeAttendanceRes, announcementsRes, yearEndRes, commuteClaimsRes]) {
@@ -1471,6 +1495,8 @@ async function fetchAllData() {
   const shiftAssignments = assignmentRes?.error ? [] : (assignmentRes?.data || []).map(rowToAssignment);
   const shiftAssignmentReady = !assignmentRes?.error;
   const shiftImportLogs = importLogRes?.error ? [] : (importLogRes?.data || []).map(rowToImportLog);
+  const shiftNameAliases = aliasRes?.error ? [] : (aliasRes?.data || []).map(rowToShiftAlias);
+  const shiftChanges = shiftChangeRes?.error ? [] : (shiftChangeRes?.data || []).map(rowToShiftChange);
 
   // アプリ全体の設定（SQL未実行でも画面が落ちないよう、エラー時は空扱いにする）
   const settings = {};
@@ -1524,6 +1550,8 @@ async function fetchAllData() {
     shiftAssignments,
     shiftAssignmentReady,
     shiftImportLogs,
+    shiftNameAliases,
+    shiftChanges,
     settings,
   };
 }
@@ -2387,6 +2415,63 @@ function AttendanceApp() {
     await logAudit(session, 'グループごとの入力フォーマットを変更', Object.keys(map || {}).join('、') || '（なし）');
     await refreshData();
     show('フォーマット設定を保存しました');
+    return true;
+  };
+
+  // ---- シフト連携 ----
+  // スプレッドシート上の氏名とスタッフを結びつける
+  const saveShiftNameAlias = async (sheetName, targetEmployeeId) => {
+    const { error } = await supabase.from('shift_name_aliases').upsert(
+      { sheet_name: sheetName, employee_id: targetEmployeeId, created_by: session.id },
+      { onConflict: 'sheet_name' }
+    );
+    if (error) {
+      console.error('氏名の対応表の保存に失敗しました', error);
+      show('氏名の対応表の保存に失敗しました', 'warn');
+      return false;
+    }
+    const name = employeeAccounts.find((a) => a.id === targetEmployeeId)?.name || '';
+    await logAudit(session, 'シフトの氏名対応を登録', `${sheetName} → ${name}`, targetEmployeeId, name);
+    await refreshData();
+    show(`「${sheetName}」を ${name} さんに結びつけました。次の取り込みから反映されます。`);
+    return true;
+  };
+
+  const deleteShiftNameAlias = async (sheetName) => {
+    const { error } = await supabase.from('shift_name_aliases').delete().eq('sheet_name', sheetName);
+    if (error) {
+      console.error('氏名の対応表の削除に失敗しました', error);
+      show('氏名の対応表の削除に失敗しました', 'warn');
+      return;
+    }
+    await refreshData();
+    show('対応を解除しました');
+  };
+
+  // シフトの公開をスタッフへ知らせる
+  const announceShift = async (targetMonth, targetIds, changesByEmployee) => {
+    if (!targetIds || targetIds.length === 0) return false;
+    const label = monthKeyLabel(targetMonth);
+    for (const id of targetIds) {
+      const changes = (changesByEmployee && changesByEmployee[id]) || [];
+      const lines = changes.slice(0, 10).map((c) => {
+        const before = c.beforeKind == null ? '未定'
+          : c.beforeKind === 'work' ? (c.beforePlace || '出勤')
+          : c.beforeKind === 'paid' ? '有給' : '休み';
+        const after = c.afterKind == null ? '未定'
+          : c.afterKind === 'work' ? (c.afterPlace || '出勤')
+          : c.afterKind === 'paid' ? '有給' : '休み';
+        return `${dateLabel(c.date)}　${before} → ${after}`;
+      });
+      const body = changes.length > 0
+        ? `${label}のシフトが変更されました。\n${lines.join('\n')}${changes.length > 10 ? `\nほか${changes.length - 10}件` : ''}\n「各種申請」→「シフト表」からご確認ください。`
+        : `${label}のシフトが公開されました。「各種申請」→「シフト表」からご確認ください。`;
+      // eslint-disable-next-line no-await-in-loop
+      await notifyEmployeeInApp(id, `【シフト】${label}${changes.length > 0 ? 'の変更' : 'のシフトを公開しました'}`, body);
+    }
+    await logAudit(session, 'シフトの公開を通知', `${label}・${targetIds.length}名`);
+    await refreshData();
+    show(`${targetIds.length}名にお知らせを送りました`);
     return true;
   };
 
@@ -4133,6 +4218,9 @@ function AttendanceApp() {
             onUpdateAdminAccess={updateAdminAccess}
             onSaveAdminNotifyEmail={saveAdminNotifyEmail}
             onSaveGroupFormats={saveGroupFormats}
+            onSaveShiftAlias={saveShiftNameAlias}
+            onDeleteShiftAlias={deleteShiftNameAlias}
+            onAnnounceShift={announceShift}
             onChangeLoginEmail={handleChangeLoginEmail}
             onDecideMonthlyConfirm={decideMonthlyAttendanceConfirmation}
             onCancelMonthlyConfirm={cancelMonthlyAttendanceConfirmation}
@@ -8799,6 +8887,10 @@ const HELP_ADMIN = [
       { q: '勤怠修正申請を承認するには', a: '「勤怠」→「休暇申請」に未承認の申請が一覧表示されます。内容を確認して承認または却下してください。承認すると勤怠記録が自動で書き換わります。' },
       { q: '管理者が直接勤怠を修正できますか', a: 'できます。「勤怠」→「勤怠一覧」で対象のスタッフと日付を選び、時刻を直接編集してください。給与に反映させない修正の場合は、控除対象外のフラグを設定できます。' },
       { q: '打刻漏れはどこで分かりますか', a: '「勤怠」→「勤怠修正」を開くと、上部に赤い枠で日付とスタッフ名が表示されます。各行の「この日の勤怠を修正する」を押すと、その日のそのスタッフに絞り込んだ勤怠一覧へ移動し、退勤時刻をその場で入力できます。ダッシュボードのアラート一覧にも件数が表示されます。' },
+      { q: 'シフトの氏名が一致しないときは', a: '「勤怠」→「シフト」の確定シフトのカードに、一致しなかった氏名が出ます。その場で該当のスタッフを選んで「結びつける」を押すと対応が登録され、次の取り込みから自動で一致します。改姓や表記ゆれがある方はこれで対応してください。退職した方がシートに残っている場合は、自動で飛ばすので登録は不要です。' },
+      { q: 'シフトの公開をスタッフに知らせるには', a: '「勤怠」→「シフト」の確定シフトのカードから送れます。「全員に知らせる」と、直近の取り込みで内容が変わった方だけに送る「変更があった◯名に知らせる」の2つがあります。変更があった方へのお知らせには、どの日がどう変わったかが入ります。アプリ内のお知らせのみで、メールは送りません。' },
+      { q: 'シフトの変更履歴は見られますか', a: '「勤怠」→「シフト」の確定シフトのカードに「変更履歴」として残ります。誰のどの日が、何から何に変わったかと、変わった日時が分かります。その月の初回の取り込みは履歴に残りません。' },
+      { q: '出勤予定なのに打刻がない日を知るには', a: 'ダッシュボードのお知らせ一覧と、「勤怠」→「シフト」の確定シフトのカードに出ます。確定シフトで出勤になっている日のうち、出勤打刻がないものを拾っています。シフトが休みの日の打刻漏れは含みません。' },
       { q: '確定シフトはどう取り込みますか', a: 'スプレッドシートで組んだシフト表から取り込みます。シフト表を開いて「Brown Work」→「確定シフトを送る」を押すと、Brown Work に反映されます。自動で送る設定もできます。取り込んだ内容は「勤怠」→「シフト」の一番上で確認でき、氏名が一致しなかった方がいればそこに表示されます。' },
       { q: 'シフト外の出勤とは', a: 'スタッフが提出したシフトで「休み」「有給」になっている日に出勤した記録です。打刻は止めずに、確認画面を出したうえで記録に印を付けています。ダッシュボードと勤怠一覧の上部に直近30日分が出るほか、打刻された時点でお知らせも届きます。応援や代打での出勤はこれにあたるため、理由を見てご判断ください。' },
       { q: '位置情報のアラートとは', a: '打刻時に位置情報が5回以上連続で記録されなかったスタッフを検知しています。端末の設定で位置情報が拒否されている可能性があるため、本人に確認してください。' },
@@ -9005,10 +9097,17 @@ function PaidLeaveSummaryTab({ employeeAccounts, leaveRequests, isDesktop }) {
 
 // ---- 管理者：シフト希望の受付と一覧 ----
 // 管理者側：取り込んだ確定シフトの確認
-function ConfirmedShiftAdminCard({ employeeAccounts, assignments = [], importLogs = [], tableReady = true, isDesktop }) {
+function ConfirmedShiftAdminCard({
+  employeeAccounts, assignments = [], importLogs = [], aliases = [], changes = [],
+  shiftRequests = [], records = {}, tableReady = true,
+  onSaveAlias, onDeleteAlias, onAnnounce, isDesktop,
+}) {
   const now = new Date();
   const [month, setMonth] = useState(`${now.getFullYear()}-${pad(now.getMonth() + 1)}`);
   const [open, setOpen] = useState(false);
+  const [aliasPick, setAliasPick] = useState({});
+  const [announcing, setAnnouncing] = useState(false);
+  const [showChanges, setShowChanges] = useState(false);
 
   if (!tableReady) {
     return (
@@ -9053,6 +9152,66 @@ function ConfirmedShiftAdminCard({ employeeAccounts, assignments = [], importLog
   // その日に出勤する人数
   const workCount = (dateKey) => monthAssignments.filter((a) => a.date === dateKey && a.kind === 'work').length;
 
+  // 氏名が一致しなかった方（対応表に未登録のものだけ）
+  const aliasNames = new Set(aliases.map((a) => a.sheetName));
+  const unmatchedNames = (lastLog?.unmatchedNames || []).filter((n) => !aliasNames.has(n));
+
+  // 最後に取り込んだのがいつか。しばらく届いていないときは注意を出す
+  const lastImportedAt = importLogs.length > 0 ? importLogs[0].importedAt : null;
+  const daysSinceImport = lastImportedAt
+    ? Math.floor((Date.now() - new Date(lastImportedAt).getTime()) / 86400000)
+    : null;
+
+  // 出勤予定なのに打刻がない日（今日より前のみ）
+  const todayStr = todayKey();
+  const missingClockIns = monthAssignments
+    .filter((a) => a.kind === 'work' && a.date < todayStr)
+    .map((a) => ({ ...a, account: staff.find((x) => x.id === a.employeeId) }))
+    .filter((a) => a.account && !(records[a.employeeId] || {})[a.date]?.clockIn)
+    .sort((a, b) => b.date.localeCompare(a.date));
+
+  // シフト希望と食い違っている日（希望は休み・有給なのに出勤が入っている）
+  const requestConflicts = monthAssignments
+    .filter((a) => a.kind === 'work')
+    .map((a) => {
+      const req = shiftRequests.find((r) => r.employeeId === a.employeeId && r.targetMonth === month);
+      const wish = req?.answers?.[a.date];
+      if (!wish) return null;
+      const kind = shiftAnswerKind(wish);
+      if (kind !== 'off' && kind !== 'paid') return null;
+      return { ...a, wish: kind === 'paid' ? '有給' : '希望休', account: staff.find((x) => x.id === a.employeeId) };
+    })
+    .filter((x) => x && x.account)
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  // 直近の取り込みで変わった人
+  const monthChanges = changes.filter((c) => c.targetMonth === month);
+  const latestChangeAt = monthChanges.length > 0 ? monthChanges[0].changedAt : null;
+  const recentChanges = latestChangeAt
+    ? monthChanges.filter((c) => Math.abs(new Date(c.changedAt).getTime() - new Date(latestChangeAt).getTime()) < 60000)
+    : [];
+  const changesByEmployee = {};
+  recentChanges.forEach((c) => {
+    changesByEmployee[c.employeeId] = changesByEmployee[c.employeeId] || [];
+    changesByEmployee[c.employeeId].push(c);
+  });
+  Object.values(changesByEmployee).forEach((list) => list.sort((a, b) => a.date.localeCompare(b.date)));
+  const changedIds = Object.keys(changesByEmployee);
+
+  const announce = async (ids, withChanges) => {
+    if (ids.length === 0) return;
+    const text = withChanges
+      ? `変更があった${ids.length}名に、変更内容つきのお知らせを送ります。よろしいですか？`
+      : `${monthKeyLabel(month)}のシフトについて、${ids.length}名にお知らせを送ります。よろしいですか？`;
+    if (!window.confirm(text)) return;
+    setAnnouncing(true);
+    await onAnnounce(month, ids, withChanges ? changesByEmployee : null);
+    setAnnouncing(false);
+  };
+
+  const kindLabel = (kind, place) =>
+    kind == null ? '未定' : kind === 'work' ? (place || '出勤') : kind === 'paid' ? '有給' : '休み';
+
   return (
     <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
       <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2 flex-wrap">
@@ -9084,6 +9243,56 @@ function ConfirmedShiftAdminCard({ employeeAccounts, assignments = [], importLog
         )}
       </div>
 
+      {/* 氏名が一致しなかった方。登録するまで出し続ける */}
+      {unmatchedNames.length > 0 && (
+        <div className="px-5 py-3.5 border-b border-slate-100 bg-rose-50">
+          <div className="flex items-center gap-2">
+            <AlertTriangle size={15} className="text-rose-600 shrink-0" />
+            <div className="text-[12.5px] font-bold text-rose-800">
+              氏名が一致しなかった方が{unmatchedNames.length}名います（この方のシフトは入っていません）
+            </div>
+          </div>
+          <div className="mt-1 text-[11px] text-rose-700">
+            スプレッドシート上の表記とスタッフを結びつけると、次の取り込みから自動で一致します。
+          </div>
+          <div className="mt-2 space-y-2">
+            {unmatchedNames.map((n) => (
+              <div key={n} className="flex items-center gap-2 flex-wrap">
+                <span className="min-w-[7rem] text-[12.5px] font-bold text-slate-800">{n}</span>
+                <span className="text-[12px] text-slate-400">→</span>
+                <select
+                  value={aliasPick[n] || ''}
+                  onChange={(e) => setAliasPick((prev) => ({ ...prev, [n]: e.target.value }))}
+                  className="flex-1 min-w-[10rem] border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white"
+                >
+                  <option value="">スタッフを選ぶ</option>
+                  {staff.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                </select>
+                <button
+                  onClick={() => aliasPick[n] && onSaveAlias(n, aliasPick[n])}
+                  disabled={!aliasPick[n]}
+                  className="shrink-0 rounded-lg bg-rose-600 disabled:bg-slate-200 px-3 py-1.5 text-[12px] font-bold text-white"
+                >
+                  結びつける
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* しばらく取り込まれていないときの注意 */}
+      {daysSinceImport != null && daysSinceImport >= 3 && (
+        <div className="px-5 py-3 border-b border-slate-100 bg-amber-50 flex items-start gap-2">
+          <AlertTriangle size={15} className="text-amber-600 mt-0.5 shrink-0" />
+          <div className="text-[11.5px] text-amber-800">
+            <span className="font-bold">最後の取り込みから{daysSinceImport}日経っています。</span>
+            スプレッドシート側の自動送信が止まっている可能性があります。
+            「Brown Work」→「自動取り込みの状態を見る」でご確認ください。
+          </div>
+        </div>
+      )}
+
       {monthAssignments.length === 0 ? (
         <div className="px-5 py-8 text-center text-[12.5px] text-slate-300">取り込まれたシフトはありません</div>
       ) : (
@@ -9102,6 +9311,94 @@ function ConfirmedShiftAdminCard({ employeeAccounts, assignments = [], importLog
               <div className="font-mono text-[15px] font-bold text-slate-800">{monthAssignments.filter((a) => a.kind === 'paid').length}日</div>
             </div>
           </div>
+
+          {/* シフトの公開を知らせる */}
+          {onAnnounce && (
+            <div className="px-5 py-3 border-b border-slate-100 flex items-center gap-2 flex-wrap">
+              <div className="flex-1 min-w-[12rem] text-[11.5px] text-slate-500">
+                {changedIds.length > 0
+                  ? `直近の取り込みで ${changedIds.length}名・${recentChanges.length}日分 が変わりました`
+                  : 'シフトを公開したことをスタッフに知らせます'}
+              </div>
+              {changedIds.length > 0 && (
+                <button
+                  onClick={() => announce(changedIds, true)}
+                  disabled={announcing}
+                  className="shrink-0 rounded-lg bg-amber-600 disabled:bg-slate-200 px-3 py-2 text-[12px] font-bold text-white"
+                >
+                  {announcing ? '送信中…' : `変更があった${changedIds.length}名に知らせる`}
+                </button>
+              )}
+              <button
+                onClick={() => announce(withShift.map((a) => a.id), false)}
+                disabled={announcing}
+                className="shrink-0 rounded-lg border border-slate-300 disabled:opacity-60 px-3 py-2 text-[12px] font-bold text-slate-600"
+              >
+                全員（{withShift.length}名）に知らせる
+              </button>
+            </div>
+          )}
+
+          {/* 変更履歴 */}
+          {monthChanges.length > 0 && (
+            <div className="border-b border-slate-100">
+              <button onClick={() => setShowChanges((v) => !v)} className="w-full px-5 py-2.5 text-left text-[12px] font-bold text-slate-500">
+                変更履歴（{monthChanges.length}件）{showChanges ? ' を閉じる' : ' を見る'}
+              </button>
+              {showChanges && (
+                <div className="max-h-64 overflow-y-auto divide-y divide-slate-100 border-t border-slate-100">
+                  {monthChanges.slice(0, 200).map((c) => {
+                    const acc = staff.find((x) => x.id === c.employeeId);
+                    return (
+                      <div key={c.id} className="px-5 py-2 flex items-center gap-2 flex-wrap text-[12px]">
+                        <span className="w-24 shrink-0 font-bold text-slate-700 truncate">{acc ? acc.name : '（退職者）'}</span>
+                        <span className="w-20 shrink-0 font-mono text-slate-500">{dateLabel(c.date)}</span>
+                        <span className="text-slate-400">{kindLabel(c.beforeKind, c.beforePlace)}</span>
+                        <span className="text-slate-300">→</span>
+                        <span className="font-bold text-slate-800">{kindLabel(c.afterKind, c.afterPlace)}</span>
+                        <span className="ml-auto text-[10px] text-slate-300">{new Date(c.changedAt).toLocaleString('ja-JP')}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* シフト希望と食い違っている日 */}
+          {requestConflicts.length > 0 && (
+            <div className="px-5 py-3 border-b border-slate-100 bg-amber-50">
+              <div className="text-[12.5px] font-bold text-amber-900">
+                シフト希望と食い違っている日が{requestConflicts.length}件あります
+              </div>
+              <div className="mt-1 space-y-0.5 text-[11.5px] text-amber-800">
+                {requestConflicts.slice(0, 10).map((c) => (
+                  <div key={`${c.employeeId}-${c.date}`}>
+                    {dateLabel(c.date)}　<EmployeeLink id={c.employeeId} name={c.account.name} />　
+                    希望は{c.wish} → {c.place || '出勤'}
+                  </div>
+                ))}
+                {requestConflicts.length > 10 && <div>ほか{requestConflicts.length - 10}件</div>}
+              </div>
+            </div>
+          )}
+
+          {/* 出勤予定なのに打刻がない日 */}
+          {missingClockIns.length > 0 && (
+            <div className="px-5 py-3 border-b border-slate-100 bg-rose-50">
+              <div className="text-[12.5px] font-bold text-rose-800">
+                出勤予定なのに打刻がない日が{missingClockIns.length}件あります
+              </div>
+              <div className="mt-1 space-y-0.5 text-[11.5px] text-rose-700">
+                {missingClockIns.slice(0, 10).map((m) => (
+                  <div key={`${m.employeeId}-${m.date}`}>
+                    {dateLabel(m.date)}　<EmployeeLink id={m.employeeId} name={m.account.name} />　{m.place || '出勤'}
+                  </div>
+                ))}
+                {missingClockIns.length > 10 && <div>ほか{missingClockIns.length - 10}件</div>}
+              </div>
+            </div>
+          )}
 
           <button onClick={() => setOpen((v) => !v)} className="w-full px-5 py-2.5 text-[12px] font-bold text-slate-500 border-b border-slate-100">
             {open ? '一覧を閉じる' : 'スタッフごとの一覧を見る'}
@@ -9872,11 +10169,12 @@ function RecentActionsCard({ logs = [], onOpenAll }) {
   );
 }
 
-function AdminDashboardTab({ missingCount, correctionCount, leaveCount, performanceCount, gpsAlertCount, contractAlertCount, offShiftAlerts = [], clockInApprovalCount = 0, employeeCount, todayPresentCount = 0, monthOvertimeMin = 0, paidLeaveShortages = [], announcements = [], notifications = [], onNavigate, onNavigateTop, onOpenNotification, isDesktop, todayStatus = null, monthClosing = null, auditLogs = [] }) {
+function AdminDashboardTab({ missingCount, correctionCount, leaveCount, performanceCount, gpsAlertCount, contractAlertCount, offShiftAlerts = [], shiftNoClockInCount = 0, clockInApprovalCount = 0, employeeCount, todayPresentCount = 0, monthOvertimeMin = 0, paidLeaveShortages = [], announcements = [], notifications = [], onNavigate, onNavigateTop, onOpenNotification, isDesktop, todayStatus = null, monthClosing = null, auditLogs = [] }) {
   const alertRows = [
     { label: '打刻漏れ・打刻間違い', count: missingCount, tab: 'requests', icon: <AlertTriangle size={14} /> },
     { label: '位置情報が5回以上連続で未記録', count: gpsAlertCount, tab: 'attendance', icon: <MapPin size={14} /> },
     { label: 'シフト外の出勤（直近30日）', count: offShiftAlerts.length, tab: 'attendance', icon: <CalendarDays size={14} /> },
+    { label: '出勤予定なのに打刻がない日', count: shiftNoClockInCount, tab: 'shift', icon: <ListChecks size={14} /> },
     { label: '契約更新が必要なスタッフがいます', count: contractAlertCount, tab: 'accounts', icon: <FileText size={14} /> },
     { label: '有休の年5日取得が不足しています', count: paidLeaveShortages.length, tab: 'leave', icon: <Palmtree size={14} /> },
   ];
@@ -11098,7 +11396,7 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
   );
 }
 
-function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAdminTab = null, onConsumeRequestedAdminTab, onDecide, onDecideLeave, onDecidePerformance, onDecideCommute, onNotifyEmployee, onSaveShiftPeriod, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onSaveGroupFormats, onChangeLoginEmail, onDecideMonthlyConfirm, onCancelMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
+function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAdminTab = null, onConsumeRequestedAdminTab, onDecide, onDecideLeave, onDecidePerformance, onDecideCommute, onNotifyEmployee, onSaveShiftPeriod, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onSaveGroupFormats, onSaveShiftAlias, onDeleteShiftAlias, onAnnounceShift, onChangeLoginEmail, onDecideMonthlyConfirm, onCancelMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
   const [tab, setTab] = useState('dashboard'); // dashboard | attendance | requests | leave | performance | accounts
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
@@ -11122,6 +11420,20 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
   });
 
   const gpsAlerts = computeGpsAlertEmployees(employeeAccounts, data.records);
+  // 出勤予定なのに打刻がない日（今日より前・直近60日）
+  const shiftNoClockIn = (() => {
+    const since = new Date();
+    since.setDate(since.getDate() - 60);
+    const sinceKey = todayKey(since);
+    const todayStr2 = todayKey();
+    const activeIds = new Set(employeeAccounts.filter((a) => !a.resignationDate).map((a) => a.id));
+    return (data.shiftAssignments || []).filter(
+      (a) => a.kind === 'work' && a.date >= sinceKey && a.date < todayStr2
+        && activeIds.has(a.employeeId)
+        && !(data.records[a.employeeId] || {})[a.date]?.clockIn
+    );
+  })();
+
   // シフト上は休みの日に出勤した記録（直近30日）
   const offShiftAlerts = (() => {
     const since = new Date();
@@ -11431,7 +11743,14 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
           employeeAccounts={employeeAccounts}
           assignments={data.shiftAssignments || []}
           importLogs={data.shiftImportLogs || []}
+          aliases={data.shiftNameAliases || []}
+          changes={data.shiftChanges || []}
+          shiftRequests={data.shiftRequests || []}
+          records={data.records}
           tableReady={data.shiftAssignmentReady !== false}
+          onSaveAlias={onSaveShiftAlias}
+          onDeleteAlias={onDeleteShiftAlias}
+          onAnnounce={onAnnounceShift}
           isDesktop={isDesktop}
         />
         <ShiftAdminTab
@@ -11465,6 +11784,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
           performanceCount={performancePending.length}
           gpsAlertCount={gpsAlerts.length}
           offShiftAlerts={offShiftAlerts}
+          shiftNoClockInCount={shiftNoClockIn.length}
           contractAlertCount={contractAlerts.length}
           clockInApprovalCount={clockInApprovalCount}
           employeeCount={employeeAccounts.length}
