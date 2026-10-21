@@ -13,7 +13,7 @@ create table if not exists public.employees (
   id uuid primary key references auth.users(id) on delete cascade,
   username text not null unique,
   name text not null,
-  role text not null default 'employee' check (role in ('employee', 'admin')),
+  role text not null default 'employee' check (role in ('employee', 'admin', 'master_admin')),
   hire_date date,
   resignation_date date,
   created_at timestamptz not null default now()
@@ -124,7 +124,22 @@ set search_path = public
 as $$
   select exists (
     select 1 from public.employees e
-    where e.id = auth.uid() and e.role = 'admin'
+    where e.id = auth.uid() and e.role in ('admin', 'master_admin')
+  );
+$$;
+
+-- マスター管理者判定ヘルパー（マイナンバー・交通費承認など、
+-- マスター管理者だけに許す操作で使う）
+create or replace function public.is_master_admin()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1 from public.employees e
+    where e.id = auth.uid() and e.role = 'master_admin'
   );
 $$;
 
