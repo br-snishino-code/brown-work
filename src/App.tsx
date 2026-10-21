@@ -3637,6 +3637,20 @@ function AttendanceApp() {
                 onOpen={() => setTopTab('hr')}
               />
             )}
+            {showStaffScreens && (
+              <MyRequestStatusCard
+                items={buildMyRequests({
+                  corrections: myCorrections,
+                  leaveRequests: myLeaveRequests,
+                  monthlyConfirmations: (data.monthlyConfirmations || []).filter((c) => c.employeeId === employeeId),
+                  commuteClaims: data.commuteExpenseClaims.filter((c) => c.employeeId === employeeId),
+                  yearEndAdjustments: data.yearEndAdjustments.filter((r) => r.employeeId === employeeId),
+                  profileRequests: data.profileUpdateRequests.filter((r) => r.employeeId === employeeId),
+                  shiftRequests: (data.shiftRequests || []).filter((r) => r.employeeId === employeeId),
+                })}
+                onOpen={openRequest}
+              />
+            )}
             {/* 配信・削除のボタンは管理画面のときだけ。スタッフ画面では閲覧のみ */}
             <AnnouncementsView
               announcements={data.announcements}
@@ -5355,6 +5369,118 @@ function ShiftRequestSection({ session, period, request, onSubmit, formatKey = '
           <div className="text-center text-[11px] text-slate-400">受付が終了しているため提出できません。管理者にご相談ください。</div>
         )}
       </div>
+    </div>
+  );
+}
+
+// ---- 進行中の手続き（スタッフ）----
+// 休暇・月次勤怠・交通費・年末調整・個人情報・勤怠修正・シフトの申請状況を、種類をまたいで1枚にまとめる
+const MY_REQUEST_STATE = {
+  draft: { label: '一時保存', cls: 'bg-slate-100 text-slate-500', open: true },
+  pending: { label: '確認中', cls: 'bg-amber-50 text-amber-700', open: true },
+  admin_approved: { label: '最終承認待ち', cls: 'bg-amber-50 text-amber-700', open: true },
+  rejected: { label: '差し戻し', cls: 'bg-rose-50 text-rose-600', open: true },
+  approved: { label: '完了', cls: 'bg-emerald-50 text-emerald-700', open: false },
+  confirmed: { label: '確定済み', cls: 'bg-emerald-50 text-emerald-700', open: false },
+  submitted: { label: '提出済み', cls: 'bg-emerald-50 text-emerald-700', open: false },
+};
+
+function buildMyRequests({ corrections = [], leaveRequests = [], monthlyConfirmations = [], commuteClaims = [], yearEndAdjustments = [], profileRequests = [], shiftRequests = [] }) {
+  const out = [];
+  corrections.forEach((c) => out.push({
+    id: `cor-${c.id}`, kind: '勤怠修正', tab: null,
+    title: `${dateLabel(c.date)}の打刻修正`, status: c.status, at: c.submittedAt, memo: '',
+  }));
+  leaveRequests.forEach((l) => out.push({
+    id: `lv-${l.id}`, kind: '休暇申請', tab: 'leave',
+    title: `${l.type || '休暇'} ${dateLabel(l.startDate)}${l.endDate && l.endDate !== l.startDate ? `〜${dateLabel(l.endDate)}` : ''}`,
+    status: l.status, at: l.submittedAt, memo: '',
+  }));
+  monthlyConfirmations.forEach((m) => out.push({
+    id: `mc-${m.id}`, kind: '月次勤怠申請', tab: 'monthly',
+    title: `${monthKeyLabel(m.targetMonth)}分`, status: m.status, at: m.submittedAt,
+    memo: m.masterComment || m.adminComment || '',
+  }));
+  commuteClaims.forEach((c) => out.push({
+    id: `cm-${c.id}`, kind: '交通費申請', tab: 'commute',
+    title: `${monthKeyLabel(c.targetMonth)}分 ${formatYen(c.totalAmount)}`, status: c.status,
+    at: c.createdAt, memo: c.adminComment || '',
+  }));
+  yearEndAdjustments.forEach((y) => out.push({
+    id: `ye-${y.id}`, kind: '年末調整', tab: 'yearend',
+    title: `${y.year}年分`, status: y.status, at: y.submittedAt, memo: y.adminComment || '',
+  }));
+  profileRequests.forEach((r) => out.push({
+    id: `pr-${r.id}`, kind: '個人情報の変更', tab: 'profile',
+    title: Object.keys(r.requestedChanges || {})
+      .map((k) => PROFILE_EDITABLE_FIELDS.find((f) => f.key === k)?.label.replace(/（.*）/, '') || k)
+      .slice(0, 3).join('、') || '変更申請',
+    status: r.status, at: r.submittedAt, memo: r.adminMemo || '',
+  }));
+  shiftRequests.forEach((r) => out.push({
+    id: `sh-${r.id}`, kind: 'シフト希望', tab: 'shift',
+    title: `${monthKeyLabel(r.targetMonth)}分`, status: 'submitted', at: r.submittedAt, memo: '',
+  }));
+  return out.sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')));
+}
+
+function MyRequestStatusCard({ items, onOpen }) {
+  const [showDone, setShowDone] = useState(false);
+  const openItems = items.filter((it) => MY_REQUEST_STATE[it.status]?.open);
+  const shown = (showDone ? items : openItems).slice(0, showDone ? 40 : 20);
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+      <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+        <ListChecks size={15} className="text-slate-400" />
+        <h2 className="font-bold text-[13.5px]">進行中の手続き</h2>
+        {openItems.length > 0 && (
+          <span className="text-[10.5px] font-bold text-white bg-amber-600 rounded-full px-2 py-0.5">{openItems.length}件</span>
+        )}
+        <button
+          onClick={() => setShowDone((v) => !v)}
+          className="ml-auto text-[11px] font-bold text-slate-400 hover:text-slate-700"
+        >
+          {showDone ? '進行中のみ' : '完了も見る'}
+        </button>
+      </div>
+      {shown.length === 0 ? (
+        <div className="px-5 py-8 text-center text-[12.5px] text-slate-300">
+          {showDone ? '手続きの記録はありません' : '進行中の手続きはありません'}
+        </div>
+      ) : (
+        <div className="divide-y divide-slate-100">
+          {shown.map((it) => {
+            const state = MY_REQUEST_STATE[it.status] || { label: it.status, cls: 'bg-slate-100 text-slate-500' };
+            const body = (
+              <>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[12.5px] font-bold text-slate-800">{it.kind}</span>
+                  <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10.5px] font-bold ${state.cls}`}>{state.label}</span>
+                </div>
+                <div className="mt-0.5 flex items-center justify-between gap-2">
+                  <span className="text-[12px] text-slate-500 truncate">{it.title}</span>
+                  <span className="shrink-0 text-[10.5px] text-slate-300">
+                    {it.at ? new Date(it.at).toLocaleDateString('ja-JP') : ''}
+                  </span>
+                </div>
+                {it.memo && (
+                  <div className="mt-1.5 rounded-lg bg-amber-50 border border-amber-100 px-2.5 py-1.5 text-[11px] text-amber-800">
+                    管理者コメント：{it.memo}
+                  </div>
+                )}
+              </>
+            );
+            return it.tab && onOpen ? (
+              <button key={it.id} onClick={() => onOpen(it.tab)} className="w-full text-left px-5 py-3 hover:bg-slate-50">
+                {body}
+              </button>
+            ) : (
+              <div key={it.id} className="px-5 py-3">{body}</div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
