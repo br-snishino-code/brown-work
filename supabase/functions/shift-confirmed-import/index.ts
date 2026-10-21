@@ -18,7 +18,7 @@
 // セルの中身の読み方：
 //   空欄                     → 休み
 //   記号だけ（●○★☆△×など） → 休み（文字が1つも入っていないセル）
-//   調整中・未定             → 登録しない（アプリ上は「未定」と表示）
+//   調整中など               → その文言のまま活動場所として残す
 //   有給を含む               → 有給
 //   それ以外（店舗名など）    → 出勤。その文字列を活動場所とする
 //
@@ -75,11 +75,8 @@ const HAS_LETTER = /[\p{L}\p{N}]/u;
 // 休みを表す言葉。文字が入っていても休みとして扱う
 const OFF_WORDS = ['休', '公休', '休み', '欠勤', '休日'];
 
-// まだ決まっていない日。休みでも出勤でもないため、登録せずに飛ばす
-const UNDECIDED_WORDS = ['調整中', '未定', '確認中', '検討中', 'TBD'];
-
 // セルの文字から、出勤・休み・有給と活動場所を決める。
-// null を返した日は「未定」として、何も登録しない。
+// 「調整中」などの書き込みも、その文言のまま活動場所として残す。
 function readCell(raw: unknown): Cell | null {
   const text = String(raw ?? '').replace(/\u3000/g, ' ').trim();
   if (!text) return { kind: 'off', place: '' };
@@ -87,7 +84,6 @@ function readCell(raw: unknown): Cell | null {
   // 記号だけのセル（● ○ ★ ☆ △ × など）は休み。長音記号だけのセルも含める
   const core = text.replace(/[^\p{L}\p{N}]/gu, '').replace(/[ーｰ―]/g, '');
   if (!core || !HAS_LETTER.test(text)) return { kind: 'off', place: '' };
-  if (UNDECIDED_WORDS.indexOf(core) >= 0) return null;
   if (OFF_WORDS.indexOf(core) >= 0) return { kind: 'off', place: '' };
   return { kind: 'work', place: text };
 }
