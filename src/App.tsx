@@ -2755,7 +2755,7 @@ function AttendanceApp() {
     await notifyEmployeeInApp(
       request.employeeId,
       `【個人情報変更${decision === 'approved' ? '承認' : '却下'}】`,
-      `個人情報の変更申請が${decision === 'approved' ? '承認され、反映されました' : '却下されました'}。${memo ? `管理者コメント：${memo}` : ''}`,
+      `個人情報の変更申請が${decision === 'approved' ? '承認され、反映されました' : '却下されました'}。画面右上のアイコン →「登録情報の閲覧・変更」からご確認いただけます。${memo ? `管理者コメント：${memo}` : ''}`,
       id
     );
     await refreshData();
@@ -3624,6 +3624,7 @@ function AttendanceApp() {
             topTab={effectiveTopTab}
             setTopTab={setTopTab}
             staffMode={showStaffScreens}
+            onOpenProfile={() => setTopTab('profile')}
             wide={isDesktop && !showStaffScreens}
             requestItems={staffRequestItems}
             requestBadges={requestBadges}
@@ -3660,7 +3661,7 @@ function AttendanceApp() {
                   profileRequests: data.profileUpdateRequests.filter((r) => r.employeeId === employeeId),
                   shiftRequests: (data.shiftRequests || []).filter((r) => r.employeeId === employeeId),
                 })}
-                onOpen={openRequest}
+                onOpen={(key) => (key === 'profile' ? setTopTab('profile') : openRequest(key))}
               />
             )}
             {/* 配信・削除のボタンは管理画面のときだけ。スタッフ画面では閲覧のみ */}
@@ -3690,6 +3691,22 @@ function AttendanceApp() {
         )}
         {effectiveTopTab === 'help' && (
           <HelpTab session={session} isDesktop={isDesktop} />
+        )}
+        {/* 登録情報の閲覧・変更。右上のメニューから開く */}
+        {effectiveTopTab === 'profile' && (
+          <div className="space-y-5">
+            <button
+              onClick={() => setTopTab('attendance')}
+              className="flex items-center gap-1 text-[12.5px] font-bold text-slate-500 hover:text-slate-800"
+            >
+              <ChevronLeft size={14} /> 勤怠の画面へ戻る
+            </button>
+            <ProfileRequestView
+              session={session}
+              requests={data.profileUpdateRequests.filter((r) => r.employeeId === employeeId)}
+              onSubmit={submitProfileUpdateRequest}
+            />
+          </div>
         )}
         {effectiveTopTab === 'requests' && showStaffScreens && (
           <div className="space-y-5">
@@ -3743,13 +3760,6 @@ function AttendanceApp() {
                 session={session}
                 requests={data.yearEndAdjustments.filter((r) => r.employeeId === employeeId)}
                 onSubmit={submitYearEndAdjustment}
-              />
-            )}
-            {requestTab === 'profile' && (
-              <ProfileRequestView
-                session={session}
-                requests={data.profileUpdateRequests.filter((r) => r.employeeId === employeeId)}
-                onSubmit={submitProfileUpdateRequest}
               />
             )}
           </div>
@@ -4989,7 +4999,7 @@ function ResetPasswordRecoveryScreen({ toast, onDone }) {
 // 上部バー。タブ・表示モードの切り替え・利用者メニューを1段にまとめる。
 function GlobalTopTabs({
   topTab, setTopTab, session, personalMode, setPersonalMode,
-  onLogout, viewMode, onToggleViewMode,
+  onLogout, viewMode, onToggleViewMode, onOpenProfile,
   cloudStatusLabel, cloudStatusClass,
   staffMode = false, requestItems = [], requestBadges = {}, onSelectRequest, wide = false,
 }) {
@@ -5116,6 +5126,14 @@ function GlobalTopTabs({
                     <span className={`text-[10.5px] font-semibold rounded-full border px-2 py-0.5 ${cloudStatusClass}`}>{cloudStatusLabel}</span>
                   </div>
                 )}
+                {onOpenProfile && (
+                  <button
+                    onClick={() => { setMenuOpen(false); onOpenProfile(); }}
+                    className="flex w-full items-center gap-2 px-4 py-2.5 text-[12.5px] font-medium text-slate-600 hover:bg-slate-50 border-b border-slate-100"
+                  >
+                    <UserCog size={14} className="text-slate-400" /> 登録情報の閲覧・変更
+                  </button>
+                )}
                 <button
                   onClick={() => { setMenuOpen(false); if (onToggleViewMode) onToggleViewMode(); }}
                   className="hidden md:flex w-full items-center gap-2 px-4 py-2.5 text-[12.5px] text-slate-600 hover:bg-slate-50 border-b border-slate-100"
@@ -5153,7 +5171,6 @@ const STAFF_REQUEST_ITEMS = [
   // 表示名・説明は PERFORMANCE_FORMATS の定義で上書きされる。
   { key: 'performance', label: '実績入力', desc: '担当業務の実績を入力して保存', icon: BarChart3, byGroup: true },
   { key: 'yearend', label: '年末調整', desc: '年末調整の書類を提出', icon: FileText },
-  { key: 'profile', label: '個人情報の変更申請', desc: '氏名・住所・口座などの変更', icon: UserCog },
 ];
 
 // ---- シフト希望 ----
@@ -8211,7 +8228,7 @@ const HELP_STAFF = [
     category: '画面の構成',
     items: [
       { q: '画面の上のタブはどう分かれていますか', a: '「勤怠」＝打刻と勤怠履歴、「労務」＝会社からのお知らせ、「各種申請」＝申請の入口、「給与」＝給与明細、「ヘルプ」＝この画面です。スマートフォンでも同じ並びです。' },
-      { q: '申請はどこからしますか', a: 'すべて「各種申請」タブからです。開くと「休暇申請」「月次勤怠申請」「交通費申請」「年末調整」「個人情報の変更申請」が一覧で並ぶので、必要なものを選んでください。eo業務など、実績を入力する業務の方は「実績入力」も同じ場所にあります。未提出のものがあるときはタブに印が付きます。' },
+      { q: '申請はどこからしますか', a: '休暇・月次勤怠・交通費・年末調整などは「各種申請」タブからです。開くと一覧で並ぶので、必要なものを選んでください。実績を入力する業務の方は「実績入力」も同じ場所にあります。未提出のものがあるときはタブに印が付きます。ご自身の登録情報の確認と変更申請だけは、画面右上のアイコンを押して「登録情報の閲覧・変更」から行います。' },
       { q: 'シフト希望はどこから出しますか', a: '受付が始まると「各種申請」に「シフト希望」が出ます。1日ごとに「●（出勤可能）」「×（希望休）」「有給（SVへ報告済み）」から選び、すべての日を選ぶと提出できます。★が付いている日は出勤依頼日（土日祝）です。「残りを●にする」で未選択の日をまとめて●にできます。締切前であれば、提出後も同じ画面から出し直せます。受付が終わると項目は表示されなくなります。' },
       { q: '実績はどこで入力しますか', a: '「各種申請」→「実績入力」です。入力する項目は、所属している業務によって自動で切り替わります。対象の年月を選び、新規実績・既存実績（アップセルLTV）を日ごとに入力します。入力の途中でも「実績の内容を保存する」で保存でき、新規・既存の両方がまとめて保存されます。保存していない入力があるときは「未保存」と表示され、対象月を切り替えようとすると確認が出ます。' },
       { q: '月次勤怠申請とは', a: '前月分の勤怠を確認して提出する手続きです。「各種申請」→「月次勤怠申請」から、交通費とまとめて提出できます。提出すると管理者が確認し、最後にマスター管理者が最終承認して確定します。確定後にその月の給与明細が公開されます。未提出のときは「勤怠」タブにもお知らせが出ます。' },
@@ -8253,7 +8270,7 @@ const HELP_STAFF = [
     items: [
       { q: 'パスワードを忘れました', a: 'ログイン画面の「パスワードをお忘れですか？」から再設定できます。うまくいかない場合は管理者に連絡してください。管理者が仮パスワードを再発行します。' },
       { q: '初めてログインするときの流れは', a: '管理者から届いた案内メールのURLを開き、メールアドレスと仮パスワードでログインします。続けてご自身のパスワードを設定し、ご登録情報（ふりがな・生年月日・連絡先・郵便番号・現住所・住民票の住所・配偶者の有無・世帯主・緊急連絡先・給与振込先の口座情報・マイナンバー）を入力すると利用開始です。いずれも必須のため、通帳とマイナンバーカードをお手元にご用意ください。' },
-      { q: '住所や氏名が変わりました', a: '「各種申請」タブを押して「個人情報の変更申請」を選び、変更内容を入力して申請してください。氏名・ふりがな・連絡先・住所・世帯・緊急連絡先・給与振込先の口座情報を申請できます。管理者が承認すると反映されます。生年月日・入職日・雇用形態などは申請できないため、管理者にご相談ください。' },
+      { q: '住所や氏名が変わりました', a: '画面右上のアイコンを押して「登録情報の閲覧・変更」を選び、「変更を申請」から変更内容を入力して申請してください。氏名・ふりがな・連絡先・住所・世帯・緊急連絡先・給与振込先の口座情報を申請できます。管理者が承認すると反映されます。生年月日・入職日・雇用形態などは申請できないため、管理者にご相談ください。' },
       { q: 'スマートフォンで使えますか', a: '使えます。ブラウザで同じURLを開いてログインしてください。画面はスマートフォン用に自動で切り替わります。ホーム画面に追加しておくとアプリのように使えます。パソコンでご覧の場合、画面右上の「PC表示」を押すとスマートフォン向けの表示に切り替えられます。' },
     ],
   },
