@@ -5899,7 +5899,8 @@ function SchedulePatternCard({ now, patterns, activePatternNo, onSetActivePatter
                     type="time"
                     value={p.startTime}
                     onChange={(e) => setFormField(p.patternNo, 'startTime', e.target.value)}
-                    className="w-full min-w-0 border border-slate-200 rounded-lg px-2.5 py-2.5 font-mono text-[16px]"
+                    style={{ WebkitAppearance: 'none', appearance: 'none' }}
+                    className="block w-full min-w-0 max-w-full box-border bg-white border border-slate-200 rounded-lg px-2.5 py-2.5 font-mono text-[16px]"
                   />
                 </label>
                 <label className="min-w-0">
@@ -5908,7 +5909,8 @@ function SchedulePatternCard({ now, patterns, activePatternNo, onSetActivePatter
                     type="time"
                     value={p.endTime}
                     onChange={(e) => setFormField(p.patternNo, 'endTime', e.target.value)}
-                    className="w-full min-w-0 border border-slate-200 rounded-lg px-2.5 py-2.5 font-mono text-[16px]"
+                    style={{ WebkitAppearance: 'none', appearance: 'none' }}
+                    className="block w-full min-w-0 max-w-full box-border bg-white border border-slate-200 rounded-lg px-2.5 py-2.5 font-mono text-[16px]"
                   />
                 </label>
               </div>
@@ -6232,10 +6234,10 @@ function CorrectionModal({ dateKey, record, onClose, onSubmit }) {
         </div>
         <div className="px-5 py-4 space-y-4">
           <Field label="出勤時刻">
-            <input type="time" value={clockIn} onChange={(e) => setClockIn(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2.5 font-mono text-[16px]" />
+            <input type="time" value={clockIn} onChange={(e) => setClockIn(e.target.value)} style={{ WebkitAppearance: 'none', appearance: 'none' }} className="block w-full min-w-0 max-w-full box-border bg-white border border-slate-200 rounded-lg px-3 py-2.5 font-mono text-[16px]" />
           </Field>
           <Field label="退勤時刻">
-            <input type="time" value={clockOut} onChange={(e) => setClockOut(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2.5 font-mono text-[16px]" />
+            <input type="time" value={clockOut} onChange={(e) => setClockOut(e.target.value)} style={{ WebkitAppearance: 'none', appearance: 'none' }} className="block w-full min-w-0 max-w-full box-border bg-white border border-slate-200 rounded-lg px-3 py-2.5 font-mono text-[16px]" />
           </Field>
           <Field label="休憩時間（分）">
             <input type="number" min="0" step="5" value={breakMinutes} onChange={(e) => setBreakMinutes(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2.5 font-mono text-[16px]" />
