@@ -6968,7 +6968,7 @@ function performanceFormatFor(mainGroup) {
 }
 
 // 管理者用：eo業務グループのインセンティブ集計
-function EoAdminIncentiveTab({ employeeAccounts, isDesktop }) {
+function EoAdminIncentiveTab({ employeeAccounts, onNotifyEmployee, isDesktop }) {
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
   const [month, setMonth] = useState(now.getMonth() + 1);
@@ -6977,6 +6977,7 @@ function EoAdminIncentiveTab({ employeeAccounts, isDesktop }) {
   const [existingRows, setExistingRows] = useState([]);
   const [flags, setFlags] = useState({ cancel_target_met: false, empake_target_met: false, upsell_target_met: false });
   const [savingFlags, setSavingFlags] = useState(false);
+  const [reminding, setReminding] = useState(false);
 
   const eoStaff = employeeAccounts.filter((a) => a.mainGroup === EO_GROUP_NAME);
   const eoIds = eoStaff.map((a) => a.id);
@@ -7039,8 +7040,30 @@ function EoAdminIncentiveTab({ employeeAccounts, isDesktop }) {
       { cancelTargetMet: flags.cancel_target_met, empakeTargetMet: flags.empake_target_met, upsellTargetMet: flags.upsell_target_met },
       rankOf(a.id)
     );
-    return { account: a, newPoints, existingPoints, empakeCount, rank: rankOf(a.id), incentive };
+    return { account: a, newPoints, existingPoints, empakeCount, rank: rankOf(a.id), incentive, submittedAt: newRow?.submitted_at || null };
   });
+
+  // まだ実績を提出していないスタッフ
+  const notSubmittedRows = rows.filter((r) => !r.submittedAt);
+  const remind = async () => {
+    if (notSubmittedRows.length === 0 || !onNotifyEmployee) return;
+    if (!window.confirm(`${year}年${month}月分の実績について、未提出の${notSubmittedRows.length}名に提出のお願いを送ります。よろしいですか？`)) return;
+    setReminding(true);
+    for (const r of notSubmittedRows) {
+      // eslint-disable-next-line no-await-in-loop
+      await onNotifyEmployee(
+        r.account.id,
+        `【ご提出のお願い】${year}年${month}月分の実績`,
+        `${year}年${month}月分の実績がまだ提出されていません。「各種申請」→「実績入力」からご提出ください。`,
+        null,
+        [
+          `${year}年${month}月分の実績がまだ提出されていません。`,
+          '「各種申請」→「実績入力」からご提出ください。',
+        ]
+      );
+    }
+    setReminding(false);
+  };
 
   const years = [now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1];
   const months = Array.from({ length: 12 }, (_, i) => i + 1);
@@ -7079,6 +7102,31 @@ function EoAdminIncentiveTab({ employeeAccounts, isDesktop }) {
           </button>
         </div>
 
+        {rows.length > 0 && (
+          <div className={`rounded-xl border px-4 py-3 flex items-center gap-3 flex-wrap ${notSubmittedRows.length > 0 ? 'border-amber-500 bg-amber-50' : 'border-emerald-200 bg-emerald-50'}`}>
+            <div className="min-w-[14rem] flex-1">
+              <div className={`text-[12.5px] font-bold ${notSubmittedRows.length > 0 ? 'text-amber-900' : 'text-emerald-800'}`}>
+                実績の提出 {rows.length - notSubmittedRows.length}／{rows.length}名
+              </div>
+              {notSubmittedRows.length > 0 && (
+                <div className="mt-0.5 text-[11px] text-amber-700">
+                  未提出：{notSubmittedRows.slice(0, 8).map((r) => r.account.name).join('、')}
+                  {notSubmittedRows.length > 8 ? ` ほか${notSubmittedRows.length - 8}名` : ''}
+                </div>
+              )}
+            </div>
+            {notSubmittedRows.length > 0 && onNotifyEmployee && (
+              <button
+                onClick={remind}
+                disabled={reminding}
+                className="shrink-0 rounded-lg bg-amber-600 disabled:bg-slate-200 px-3.5 py-2 text-[12px] font-bold text-white"
+              >
+                {reminding ? '送信中…' : `未提出の${notSubmittedRows.length}名に依頼を送る`}
+              </button>
+            )}
+          </div>
+        )}
+
         <div className="text-[11px] text-slate-400 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
           10G付帯率（40%未満で半額）は自動では正確に判定できないため、参考値をもとにスタッフ側の画面で表示のみ行っています。個別に上書きが必要な場合は開発者にご相談ください。
         </div>
@@ -7095,6 +7143,7 @@ function EoAdminIncentiveTab({ employeeAccounts, isDesktop }) {
               <thead>
                 <tr className="text-left text-[11px] text-slate-400 border-b border-slate-100">
                   <th className="px-4 py-2 font-medium">氏名</th>
+                  <th className="px-4 py-2 font-medium">提出</th>
                   <th className="px-4 py-2 font-medium">新規Pt(調整後)</th>
                   <th className="px-4 py-2 font-medium">既存(LTV)Pt</th>
                   <th className="px-4 py-2 font-medium">エンパケ</th>
@@ -7108,6 +7157,15 @@ function EoAdminIncentiveTab({ employeeAccounts, isDesktop }) {
                 {rows.map((r) => (
                   <tr key={r.account.id} className="border-b border-slate-100 last:border-0">
                     <td className="px-4 py-2.5 font-semibold text-slate-800"><EmployeeLink id={r.account.id} name={r.account.name} /></td>
+                    <td className="px-4 py-2.5 whitespace-nowrap">
+                      {r.submittedAt ? (
+                        <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10.5px] font-bold text-emerald-700">
+                          提出済み {dateLabel(String(r.submittedAt).slice(0, 10))}
+                        </span>
+                      ) : (
+                        <span className="rounded-full bg-rose-50 px-2 py-0.5 text-[10.5px] font-bold text-rose-600">未提出</span>
+                      )}
+                    </td>
                     <td className="px-4 py-2.5 font-mono">{r.incentive.newPointsForJudge}P</td>
                     <td className="px-4 py-2.5 font-mono">{r.existingPoints}P</td>
                     <td className="px-4 py-2.5 font-mono">{r.empakeCount}枚</td>
@@ -9677,7 +9735,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
       )}
 
       {tab === 'eoincentive' && (
-        <EoAdminIncentiveTab employeeAccounts={employeeAccounts} isDesktop={isDesktop} />
+        <EoAdminIncentiveTab employeeAccounts={employeeAccounts} onNotifyEmployee={onNotifyEmployee} isDesktop={isDesktop} />
       )}
 
       {tab === 'performance' && (
