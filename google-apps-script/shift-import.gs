@@ -31,6 +31,7 @@ var PUSH_FINGERPRINT_PROP = 'SHIFT_PUSH_FINGERPRINT_';
 var LAST_PUSH_PROP = 'SHIFT_PUSH_LAST_RUN';
 var CONFIRMED_SHEET_PROP = 'CONFIRMED_SHEET_NAME';
 var NAME_COLUMN_PROP = 'CONFIRMED_NAME_COLUMN';
+var START_ROW_PROP = 'CONFIRMED_START_ROW';
 // 見出しにこの文字が入っている列を氏名の列とみなす
 var NAME_HEADER_WORDS = ['スタッフ名', '氏名', '名前', '社員名', '従業員名'];
 
@@ -404,19 +405,28 @@ function buildConfirmedPayload(sheet, month) {
   var values = sheet.getDataRange().getValues();
   if (values.length === 0) throw new Error('シートが空です。');
 
-  // 見出し行と、日付が始まる列を探す
-  var headerRow = -1;
-  var dateCols = [];
-  for (var r = 0; r < Math.min(values.length, 15); r++) {
+  // 日付の見出し行を探す。
+  // 1枚のシートに店舗ごとの表とスタッフごとの表が縦に並んでいることがあるため、
+  // 見出し行が複数あるときは「いちばん下の見出し行」を使い、その下から読む。
+  var headerRows = [];
+  var dateColsByRow = {};
+  for (var r = 0; r < values.length; r++) {
     var cols = [];
     for (var c = 0; c < values[r].length; c++) {
       if (looksLikeDayHeader(values[r][c])) cols.push(c);
     }
-    if (cols.length >= 20) { headerRow = r; dateCols = cols; break; }
+    if (cols.length >= 20) { headerRows.push(r); dateColsByRow[r] = cols; }
   }
-  if (headerRow < 0) {
+  if (headerRows.length === 0) {
     throw new Error('日付の見出し行が見つかりませんでした。「1(日)」のように日付が並んだ行がある表をお使いください。');
   }
+  var headerRow = headerRows[headerRows.length - 1];
+  var dateCols = dateColsByRow[headerRow];
+
+  // 読み始める行。設定があればそれを使う
+  var startRow = headerRow + 1;
+  var fixedStart = PropertiesService.getScriptProperties().getProperty(START_ROW_PROP);
+  if (fixedStart && Number(fixedStart) > 0) startRow = Number(fixedStart) - 1;
 
   // 氏名の列を決める。
   //   1. 設定があればそれを使う
@@ -432,12 +442,16 @@ function buildConfirmedPayload(sheet, month) {
   }
 
   if (nameCol < 0) {
-    for (var hc = 0; hc < firstDateCol; hc++) {
-      var head = String(values[headerRow][hc] == null ? '' : values[headerRow][hc]).replace(/\s/g, '');
-      for (var w = 0; w < NAME_HEADER_WORDS.length; w++) {
-        if (head.indexOf(NAME_HEADER_WORDS[w]) >= 0) { nameCol = hc; break; }
+    // 見出しの文字は、いちばん上の見出し行にだけ書かれていることがある
+    for (var hr = 0; hr < headerRows.length && nameCol < 0; hr++) {
+      var hrow = values[headerRows[hr]];
+      for (var hc = 0; hc < firstDateCol; hc++) {
+        var head = String(hrow[hc] == null ? '' : hrow[hc]).replace(/\s/g, '');
+        for (var w = 0; w < NAME_HEADER_WORDS.length; w++) {
+          if (head.indexOf(NAME_HEADER_WORDS[w]) >= 0) { nameCol = hc; break; }
+        }
+        if (nameCol >= 0) break;
       }
-      if (nameCol >= 0) break;
     }
   }
 
@@ -445,7 +459,7 @@ function buildConfirmedPayload(sheet, month) {
     var bestCount = -1;
     for (var col = 0; col < firstDateCol; col++) {
       var count = 0;
-      for (var row = headerRow + 1; row < values.length; row++) {
+      for (var row = startRow; row < values.length; row++) {
         var v = String(values[row][col] == null ? '' : values[row][col]).trim();
         // 姓だけの列と取り違えないよう、空白を含む氏名を優先して数える
         if (v && isNaN(Number(v)) && /\s/.test(v.replace(/\u3000/g, ' '))) count++;
@@ -457,7 +471,7 @@ function buildConfirmedPayload(sheet, month) {
 
   var lastDay = new Date(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0).getDate();
   var rows = [];
-  for (var row2 = headerRow + 1; row2 < values.length; row2++) {
+  for (var row2 = startRow; row2 < values.length; row2++) {
     var name = String(values[row2][nameCol] == null ? '' : values[row2][nameCol]).replace(/　/g, ' ').trim();
     if (!name) continue;
     var cells = {};
@@ -475,7 +489,15 @@ function buildConfirmedPayload(sheet, month) {
     if (any) rows.push({ name: name, cells: cells });
   }
 
-  return { month: month, sheetName: sheet.getName(), rows: rows, nameColumn: nameCol + 1, headerRow: headerRow + 1 };
+  return {
+    month: month,
+    sheetName: sheet.getName(),
+    rows: rows,
+    nameColumn: nameCol + 1,
+    headerRow: headerRow + 1,
+    startRow: startRow + 1,
+    headerRowCount: headerRows.length
+  };
 }
 
 /** 送る内容から指紋を作る */
@@ -554,7 +576,7 @@ function pushConfirmedShiftsPrompt() {
       'シート：' + sheet.getName() + '\n' +
       '対象月：' + month + '\n' +
       '人数：' + payload.rows.length + '名\n' +
-      '氏名の列：' + columnLetter(payload.nameColumn) + '列（' + payload.nameColumn + '列目）　見出し行：' + payload.headerRow + '行目\n\n' +
+      '氏名の列：' + columnLetter(payload.nameColumn) + '列　見出し行：' + payload.headerRow + '行目　読み始め：' + payload.startRow + '行目\n\n' +
       '読み取り例\n' + sample.join('\n') + '\n\n' +
       '（空欄は休み、有給は有給として送ります）\n\n' +
       'この内容で送ってよろしいですか？',
@@ -633,9 +655,26 @@ function setConfirmedReadSettings() {
     props.deleteProperty(NAME_COLUMN_PROP);
   }
 
+  var nowStart = props.getProperty(START_ROW_PROP) || '（自動）';
+  var res3 = ui.prompt(
+    '読み始める行',
+    'スタッフの個人シフトが始まる行を入力してください（例：457）。\n今の設定：' + nowStart +
+    '\n\n空のまま OK を押すと自動で決めます。' +
+    '\n（日付の見出し行が複数あるときは、いちばん下の見出し行の次から読みます）',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (res3.getSelectedButton() !== ui.Button.OK) return;
+  var startRow = res3.getResponseText().trim();
+  if (startRow) {
+    if (!/^\d+$/.test(startRow) || Number(startRow) < 1) { ui.alert('行番号は数字で入力してください。'); return; }
+    props.setProperty(START_ROW_PROP, startRow);
+  } else {
+    props.deleteProperty(START_ROW_PROP);
+  }
+
   ui.alert(
     '設定しました',
-    'シート：' + (name || '（自動）') + '\n氏名の列：' + (col || '（自動）') +
+    'シート：' + (name || '（自動）') + '\n氏名の列：' + (col || '（自動）') + '\n読み始める行：' + (startRow || '（自動）') +
     '\n\n「確定シフトを送る」で読み取り内容をご確認ください。',
     ui.ButtonSet.OK
   );
