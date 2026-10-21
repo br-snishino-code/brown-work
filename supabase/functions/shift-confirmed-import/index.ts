@@ -16,9 +16,10 @@
 //     }
 //
 // セルの中身の読み方：
-//   空欄          → 休み
-//   有給を含む    → 有給
-//   それ以外      → 出勤。その文字列を活動場所とする
+//   空欄                     → 休み
+//   記号だけ（●○★☆△×など） → 休み
+//   有給を含む               → 有給
+//   それ以外（店舗名など）    → 出勤。その文字列を活動場所とする
 //
 // 氏名は employees.name との完全一致で突き合わせる。
 // 一致しなかった氏名は unmatchedNames として返すので、呼び出し元で表示する。
@@ -63,13 +64,17 @@ const normalizeName = (value: string) =>
 
 type Cell = { kind: 'work' | 'off' | 'paid'; place: string };
 
+// 記号だけのセル。確定シフトでは、出勤する日には活動場所（店舗名）が書かれるため、
+// 記号だけの日（●○★☆△×など）はすべて休みとして扱う。
+//   ● … シフト希望では出勤可能だが、調整の結果その日は休みになった
+const SYMBOL_ONLY = /^[●○★☆◎▲△■□◇◆♦×✕✖╳xX*＊\-ー—－~〜\s]+$/;
+
 // セルの文字から、出勤・休み・有給と活動場所を決める
 function readCell(raw: unknown): Cell {
   const text = String(raw ?? '').replace(/　/g, ' ').trim();
   if (!text) return { kind: 'off', place: '' };
   if (text.includes('有給') || text.includes('有休')) return { kind: 'paid', place: '' };
-  // 「×」だけ、「休」だけの表記も休みとして扱う
-  if (/^[×x✕✖╳－ー—-]+$/i.test(text) || text === '休') return { kind: 'off', place: '' };
+  if (text === '休' || text === '公休' || SYMBOL_ONLY.test(text)) return { kind: 'off', place: '' };
   return { kind: 'work', place: text };
 }
 
