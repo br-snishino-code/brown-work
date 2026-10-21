@@ -483,8 +483,29 @@ function findConfirmedSheet() {
 
 /** シートを読んで、送る形に組み立てる */
 function buildConfirmedPayload(sheet, month) {
-  var values = sheet.getDataRange().getValues();
+  var range = sheet.getDataRange();
+  var values = range.getValues();
   if (values.length === 0) throw new Error('シートが空です。');
+
+  // 結合セルは左上にしか値が入らない。他のセルにも同じ値を入れておく。
+  // （2日分をまとめて1マスに書いている場合に、2日目が抜けるのを防ぐ）
+  try {
+    var merged = range.getMergedRanges();
+    for (var mi = 0; mi < merged.length; mi++) {
+      var m = merged[mi];
+      var r0 = m.getRow() - 1, c0 = m.getColumn() - 1;
+      var nr = m.getNumRows(), nc = m.getNumColumns();
+      var mv = values[r0] ? values[r0][c0] : '';
+      if (mv === '' || mv === null || mv === undefined) continue;
+      for (var rr = r0; rr < r0 + nr && rr < values.length; rr++) {
+        for (var cc = c0; cc < c0 + nc && cc < values[rr].length; cc++) {
+          if (values[rr][cc] === '' || values[rr][cc] === null) values[rr][cc] = mv;
+        }
+      }
+    }
+  } catch (e) {
+    // 結合セルが取得できない環境でも、そのまま読み進める
+  }
 
   // 日付の見出し行を探す。
   // 1枚のシートに店舗ごとの表とスタッフごとの表が縦に並んでいることがあるため、
@@ -603,17 +624,40 @@ function buildConfirmedPayload(sheet, month) {
   }
 
   var lastDay = new Date(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0).getDate();
+
+  // 日にち → 列 の対応を作る。
+  // その区間の見出し行を優先し、足りない日は他の見出し行から補う。
+  // （見出し行によっては一部の日が書かれていないことがあるため）
+  var dayToCol = {};
+  for (var dc = 0; dc < dateCols.length; dc++) {
+    var dnum = dayNumberOf(values[headerRow][dateCols[dc]]);
+    if (dnum >= 1 && dnum <= lastDay && dayToCol[dnum] === undefined) dayToCol[dnum] = dateCols[dc];
+  }
+  for (var hx = headerRows.length - 1; hx >= 0; hx--) {
+    var otherCols = dateColsByRow[headerRows[hx]];
+    for (var oc = 0; oc < otherCols.length; oc++) {
+      var onum = dayNumberOf(values[headerRows[hx]][otherCols[oc]]);
+      if (onum >= 1 && onum <= lastDay && dayToCol[onum] === undefined) dayToCol[onum] = otherCols[oc];
+    }
+  }
+  var foundDays = 0;
+  var missingDays = [];
+  for (var dd = 1; dd <= lastDay; dd++) {
+    if (dayToCol[dd] === undefined) missingDays.push(dd);
+    else foundDays++;
+  }
+
   var rows = [];
   for (var row2 = startRow; row2 <= endRow && row2 < values.length; row2++) {
     var name = String(values[row2][nameCol] == null ? '' : values[row2][nameCol]).replace(/　/g, ' ').trim();
     if (!name) continue;
     var cells = {};
     var any = false;
-    for (var d = 0; d < dateCols.length; d++) {
-      var day = dayNumberOf(values[headerRow][dateCols[d]]);
-      if (!day || day > lastDay) continue;
+    for (var day = 1; day <= lastDay; day++) {
+      var col = dayToCol[day];
+      if (col === undefined) continue;
       var key = month + '-' + ('0' + day).slice(-2);
-      var raw = values[row2][dateCols[d]];
+      var raw = values[row2][col];
       var text = String(raw == null ? '' : raw).replace(/　/g, ' ').trim();
       cells[key] = text;
       if (text) any = true;
@@ -631,7 +675,10 @@ function buildConfirmedPayload(sheet, month) {
     startRow: startRow + 1,
     endRow: endRow + 1,
     headerRowCount: headerRows.length,
-    headerRowList: headerRows.map(function (r) { return r + 1; })
+    headerRowList: headerRows.map(function (r) { return r + 1; }),
+    foundDays: foundDays,
+    lastDay: lastDay,
+    missingDays: missingDays
   };
 }
 
@@ -720,7 +767,9 @@ function pushConfirmedShiftsPrompt() {
       '人数：' + payload.rows.length + '名\n' +
       '氏名の列：' + columnLetter(payload.nameColumn) + '列　見出し行：' + payload.headerRow + '行目\n' +
       '読み取る範囲：' + payload.startRow + '〜' + payload.endRow + '行目' +
-      '（日付の見出し行：' + payload.headerRowList.join('、') + '行目）\n\n' +
+      '（日付の見出し行：' + payload.headerRowList.join('、') + '行目）\n' +
+      '読み取れた日数：' + payload.foundDays + '／' + payload.lastDay + '日' +
+      (payload.missingDays.length > 0 ? '　※' + payload.missingDays.join('、') + '日 の列が見つかりません' : '') + '\n\n' +
       '読み取り例\n' + sample.join('\n') + '\n\n' +
       '（空欄は休み、有給は有給として送ります）\n\n' +
       'この内容で送ってよろしいですか？',
