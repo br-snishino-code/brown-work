@@ -5892,7 +5892,7 @@ function SchedulePatternCard({ now, patterns, activePatternNo, onSetActivePatter
                   className="flex-1 min-w-0 border border-slate-200 rounded-lg px-2 py-1.5 text-[12.5px]"
                 />
               </div>
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 min-w-0">
                 <label className="min-w-0">
                   <span className="mb-1 block text-[11px] font-medium text-slate-400">始業</span>
                   <input
