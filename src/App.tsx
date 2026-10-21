@@ -798,7 +798,7 @@ function ToastView({ toast }) {
 // 以降のコンポーネント（LoginScreenなど）は一切変更していません。
 // ============================================================
 
-const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, performanceReports: [], payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, employeeAttendanceSchedules: {}, announcements: [], yearEndAdjustments: [], commuteExpenseClaims: [], resignationReasons: [], monthlyConfirmations: [], shiftPeriods: [], shiftRequests: [], shiftTablesReady: true, settings: {} };
+const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, performanceReports: [], payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, employeeAttendanceSchedules: {}, announcements: [], yearEndAdjustments: [], commuteExpenseClaims: [], resignationReasons: [], monthlyConfirmations: [], shiftPeriods: [], shiftRequests: [], shiftTablesReady: true, staffProcedures: [], procedureTableReady: true, settings: {} };
 
 // 管理者宛の通知メールの送信先（app_settings の key）
 const SETTING_ADMIN_NOTIFY_EMAIL = 'admin_notify_email';
@@ -902,6 +902,7 @@ const rowToAccount = (row) => ({
   hourlyWage: row.hourly_wage != null ? Number(row.hourly_wage) : 0,
   monthlySalary: row.monthly_salary != null ? Number(row.monthly_salary) : 0,
   birthDate: row.birth_date || '',
+  gender: row.gender || '',
   staffType: row.staff_type || '社員',
   mainGroup: row.main_group || '',
   subGroup: row.sub_group || '',
@@ -1073,6 +1074,7 @@ const rowToAudit = (row) => ({
 const PROFILE_EDITABLE_FIELDS = [
   { key: 'name', label: '氏名', group: '本人情報' },
   { key: 'furigana', label: 'ふりがな', group: '本人情報' },
+  { key: 'gender', label: '性別', group: '本人情報', type: 'select', options: ['男性', '女性', '回答しない'] },
 
   { key: 'contactEmail', label: '連絡用メールアドレス', group: 'ご連絡先' },
   { key: 'phone', label: '電話番号（ハイフン含む）', group: 'ご連絡先', format: formatPhone },
@@ -1227,6 +1229,22 @@ const rowToShiftPeriod = (row) => ({
   openedAt: row.opened_at,
 });
 
+const rowToProcedure = (row) => ({
+  id: row.id,
+  employeeId: row.employee_id,
+  employeeName: row.employees?.name || '',
+  type: row.type,
+  status: row.status || 'draft',
+  details: row.details || {},
+  staffNote: row.staff_note || '',
+  adminComment: row.admin_comment || '',
+  requestedBy: row.requested_by || null,
+  requestedAt: row.requested_at,
+  submittedAt: row.submitted_at,
+  decidedAt: row.decided_at,
+  createdAt: row.created_at,
+});
+
 const rowToShiftRequest = (row) => ({
   id: row.id,
   employeeId: row.employee_id,
@@ -1272,6 +1290,7 @@ async function fetchAllData() {
     monthlyConfirmRes,
     shiftPeriodRes,
     shiftRequestRes,
+    procedureRes,
   ] = await Promise.all([
     supabase.from('employees').select('*'),
     supabase.from('attendance_records').select('*'),
@@ -1292,6 +1311,7 @@ async function fetchAllData() {
     supabase.from('monthly_attendance_confirmations').select('*, employees(name)').order('target_month', { ascending: false }),
     supabase.from('shift_request_periods').select('*').order('target_month', { ascending: false }),
     supabase.from('shift_request_answers').select('*, employees(name)').order('target_month', { ascending: false }),
+    supabase.from('staff_procedures').select('*, employees(name)').order('created_at', { ascending: false }),
   ]);
 
   for (const res of [employeesRes, recordsRes, correctionsRes, leaveRes, perfRes, notifRes, payrollRes, auditRes, profileReqRes, groupLeaveRes, employeeAttendanceRes, announcementsRes, yearEndRes, commuteClaimsRes]) {
@@ -1308,6 +1328,10 @@ async function fetchAllData() {
   const shiftRequests = shiftRequestRes?.error ? [] : (shiftRequestRes?.data || []).map(rowToShiftRequest);
   // SQLが未実行だとテーブルが無く、取得に失敗する。画面でお知らせするために持っておく
   const shiftTablesReady = !shiftPeriodRes?.error && !shiftRequestRes?.error;
+
+  // 各種手続き（SQL未実行でも画面が落ちないよう、エラー時は空扱いにする）
+  const staffProcedures = procedureRes?.error ? [] : (procedureRes?.data || []).map(rowToProcedure);
+  const procedureTableReady = !procedureRes?.error;
 
   // アプリ全体の設定（SQL未実行でも画面が落ちないよう、エラー時は空扱いにする）
   const settings = {};
@@ -1356,6 +1380,8 @@ async function fetchAllData() {
     shiftPeriods,
     shiftRequests,
     shiftTablesReady,
+    staffProcedures,
+    procedureTableReady,
     settings,
   };
 }
@@ -2222,6 +2248,102 @@ function AttendanceApp() {
     return true;
   };
 
+  // ---- 各種手続き（退職・産休・育休）----
+  const saveProcedure = async ({ id, type, details, staffNote }, submit = false) => {
+    const now = new Date().toISOString();
+    const patch = {
+      employee_id: employeeId,
+      type,
+      details,
+      staff_note: staffNote || '',
+      status: submit ? 'pending' : 'draft',
+      updated_at: now,
+      ...(submit ? { submitted_at: now } : {}),
+    };
+    const query = id
+      ? supabase.from('staff_procedures').update(patch).eq('id', id)
+      : supabase.from('staff_procedures').insert(patch);
+    const { error } = await query;
+    if (error) {
+      console.error('手続きの保存に失敗しました', error);
+      show('手続きの保存に失敗しました', 'warn');
+      return false;
+    }
+    if (submit) {
+      await notifyAdmin(`${session.name}さんより「${procedureTypeOf(type)?.label || type}」が提出されました`);
+    }
+    await refreshData();
+    show(submit ? '手続きを提出しました' : '入力内容を保存しました');
+    return true;
+  };
+
+  const withdrawProcedure = async (procedure) => {
+    if (!window.confirm('この手続きを取り消します。入力した内容は消えます。よろしいですか。')) return;
+    const { error } = await supabase.from('staff_procedures').delete().eq('id', procedure.id);
+    if (error) {
+      console.error('手続きの取り消しに失敗しました', error);
+      show('手続きの取り消しに失敗しました', 'warn');
+      return;
+    }
+    await refreshData();
+    show('手続きを取り消しました');
+  };
+
+  // 管理者側：状態を進める／差し戻す
+  const decideProcedure = async (id, status, comment) => {
+    const now = new Date().toISOString();
+    const { error } = await supabase
+      .from('staff_procedures')
+      .update({
+        status,
+        admin_comment: comment || '',
+        updated_at: now,
+        ...(status === 'completed' || status === 'rejected' ? { decided_at: now } : {}),
+      })
+      .eq('id', id);
+    if (error) {
+      console.error('手続きの更新に失敗しました', error);
+      show('手続きの更新に失敗しました', 'warn');
+      return false;
+    }
+    const target = (data.staffProcedures || []).find((p) => p.id === id);
+    if (target) {
+      const label = procedureTypeOf(target.type)?.label || target.type;
+      const text =
+        status === 'completed' ? `「${label}」の対応が完了しました。`
+        : status === 'rejected' ? `「${label}」について確認したい点があります。内容をご確認のうえ、再度ご提出ください。`
+        : `「${label}」の対応を開始しました。`;
+      await notifyEmployeeInApp(target.employeeId, `【${label}】${PROCEDURE_STATUS[status]?.label || ''}`, `${text}${comment ? `管理者コメント：${comment}` : ''}`);
+    }
+    await refreshData();
+    show('手続きを更新しました');
+    return true;
+  };
+
+  // 管理者側：スタッフへ入力を依頼する
+  const requestProcedure = async (targetEmployeeId, type) => {
+    const now = new Date().toISOString();
+    const { error } = await supabase.from('staff_procedures').insert({
+      employee_id: targetEmployeeId,
+      type,
+      status: 'draft',
+      details: {},
+      requested_by: session.id,
+      requested_at: now,
+      updated_at: now,
+    });
+    if (error) {
+      console.error('入力依頼に失敗しました', error);
+      show('入力依頼に失敗しました', 'warn');
+      return false;
+    }
+    const label = procedureTypeOf(type)?.label || type;
+    await notifyEmployeeInApp(targetEmployeeId, `【入力のお願い】${label}`, `「${label}」の入力をお願いいたします。「各種申請」→「各種手続き」からご入力ください。`);
+    await refreshData();
+    show('入力依頼を送りました');
+    return true;
+  };
+
   // 管理者宛の通知メールの送信先を保存する（マスター管理者のみ）
   const saveAdminNotifyEmail = async (value) => {
     const trimmed = String(value || '').trim();
@@ -2647,6 +2769,7 @@ function AttendanceApp() {
       leaveAdjustment: 'leave_adjustment',
       scheduledWeeklyDays: 'scheduled_weekly_days',
       jobTitle: 'job_title',
+      gender: 'gender',
       contractStart: 'contract_start',
       contractEnd: 'contract_end',
       mustChangePassword: 'must_change_password',
@@ -3660,6 +3783,7 @@ function AttendanceApp() {
                   yearEndAdjustments: data.yearEndAdjustments.filter((r) => r.employeeId === employeeId),
                   profileRequests: data.profileUpdateRequests.filter((r) => r.employeeId === employeeId),
                   shiftRequests: (data.shiftRequests || []).filter((r) => r.employeeId === employeeId),
+                  procedures: (data.staffProcedures || []).filter((p) => p.employeeId === employeeId),
                 })}
                 onOpen={(key) => (key === 'profile' ? setTopTab('profile') : openRequest(key))}
               />
@@ -3754,6 +3878,16 @@ function AttendanceApp() {
             )}
             {requestTab === 'performance' && PerformanceFormatSection && (
               <PerformanceFormatSection employeeId={session.id} session={session} onNotifyAdmin={notifyAdmin} isDesktop={isDesktop} />
+            )}
+            {requestTab === 'procedure' && (
+              <ProcedureSection
+                session={session}
+                procedures={(data.staffProcedures || []).filter((p) => p.employeeId === employeeId)}
+                tableReady={data.procedureTableReady !== false}
+                onSave={(payload) => saveProcedure(payload, false)}
+                onSubmit={(payload) => saveProcedure(payload, true)}
+                onWithdraw={withdrawProcedure}
+              />
             )}
             {requestTab === 'yearend' && (
               <YearEndAdjustmentSection
@@ -3869,6 +4003,8 @@ function AttendanceApp() {
             onUpdateAdminAccess={updateAdminAccess}
             onSaveAdminNotifyEmail={saveAdminNotifyEmail}
             onSaveGroupFormats={saveGroupFormats}
+            onDecideProcedure={decideProcedure}
+            onRequestProcedure={requestProcedure}
             onChangeLoginEmail={handleChangeLoginEmail}
             onDecideMonthlyConfirm={decideMonthlyAttendanceConfirmation}
             onCancelMonthlyConfirm={cancelMonthlyAttendanceConfirmation}
@@ -4274,6 +4410,7 @@ const PROFILE_SETUP_SECTIONS = [
       { key: 'name', label: 'お名前', placeholder: '例）田中 花子', required: true, note: '管理者が登録した内容が入っています。誤りがあればご修正ください。' },
       { key: 'furigana', label: 'ふりがな', placeholder: '例）たなか はなこ', required: true },
       { key: 'birthDate', label: '生年月日', type: 'date', required: true, autoComplete: 'bday' },
+      { key: 'gender', label: '性別', type: 'select', options: ['男性', '女性', '回答しない'] },
     ],
   },
   {
@@ -5171,7 +5308,482 @@ const STAFF_REQUEST_ITEMS = [
   // 表示名・説明は PERFORMANCE_FORMATS の定義で上書きされる。
   { key: 'performance', label: '実績入力', desc: '担当業務の実績を入力して保存', icon: BarChart3, byGroup: true },
   { key: 'yearend', label: '年末調整', desc: '年末調整の書類を提出', icon: FileText },
+  { key: 'procedure', label: '各種手続き', desc: '退職・産前産後休業・育児休業', icon: Briefcase },
 ];
+
+// スタッフ側：各種手続きの一覧と入力
+function ProcedureSection({ session, procedures, tableReady = true, onSave, onSubmit, onWithdraw }) {
+  const [openType, setOpenType] = useState(null);
+  const [form, setForm] = useState({});
+  const [note, setNote] = useState('');
+  const [editingId, setEditingId] = useState(null);
+  const [saving, setSaving] = useState(false);
+
+  if (!tableReady) {
+    return (
+      <div className="rounded-2xl border border-rose-200 bg-rose-50 px-5 py-6">
+        <div className="flex items-center gap-2">
+          <AlertTriangle size={16} className="text-rose-600" />
+          <h2 className="text-[14px] font-bold text-rose-800">手続きの準備ができていません</h2>
+        </div>
+        <div className="mt-2 text-[12.5px] leading-relaxed text-rose-700">
+          データベースに手続き用のテーブルがありません。管理者にご連絡ください。
+        </div>
+      </div>
+    );
+  }
+
+  const start = (type, existing) => {
+    setOpenType(type);
+    setEditingId(existing?.id || null);
+    setForm(existing?.details || {});
+    setNote(existing?.staffNote || '');
+  };
+  const close = () => { setOpenType(null); setEditingId(null); setForm({}); setNote(''); };
+
+  const typeDef = openType ? procedureTypeOf(openType) : null;
+  const missing = typeDef ? typeDef.fields.filter((f) => f.required && !String(form[f.key] || '').trim()) : [];
+
+  const save = async () => {
+    setSaving(true);
+    const ok = await onSave({ id: editingId, type: openType, details: form, staffNote: note });
+    setSaving(false);
+    if (ok) close();
+  };
+  const submit = async () => {
+    if (!window.confirm(`${typeDef.label}を提出します。よろしいですか？`)) return;
+    setSaving(true);
+    const ok = await onSubmit({ id: editingId, type: openType, details: form, staffNote: note });
+    setSaving(false);
+    if (ok) close();
+  };
+
+  // 入力画面
+  if (typeDef) {
+    return (
+      <div className="space-y-3">
+        <button onClick={close} className="flex items-center gap-1 text-[12.5px] font-bold text-slate-500 hover:text-slate-800">
+          <ChevronLeft size={14} /> 手続きの一覧へ
+        </button>
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+            <typeDef.icon size={15} className="text-slate-400" />
+            <h2 className="font-bold text-[13.5px]">{typeDef.label}</h2>
+          </div>
+          {typeDef.note && (
+            <div className="px-5 py-2.5 bg-slate-50 border-b border-slate-100 text-[11.5px] leading-relaxed text-slate-500">{typeDef.note}</div>
+          )}
+          <div className="px-5 py-4 space-y-3.5">
+            {typeDef.fields.map((f) => (
+              <Field key={f.key} label={`${f.label}${f.required ? '' : '（任意）'}`}>
+                {f.type === 'select' ? (
+                  <select
+                    value={form[f.key] || ''}
+                    onChange={(e) => setForm((cur) => ({ ...cur, [f.key]: e.target.value }))}
+                    className="block w-full min-w-0 max-w-full box-border border border-slate-200 rounded-lg px-3 py-2 text-[16px] bg-white"
+                  >
+                    {!form[f.key] && <option value="">選択してください</option>}
+                    {f.options.map((o) => <option key={o} value={o}>{o}</option>)}
+                  </select>
+                ) : f.type === 'textarea' ? (
+                  <textarea
+                    value={form[f.key] || ''}
+                    onChange={(e) => setForm((cur) => ({ ...cur, [f.key]: e.target.value }))}
+                    rows={2}
+                    placeholder={f.placeholder || ''}
+                    className="block w-full min-w-0 max-w-full box-border border border-slate-200 rounded-lg px-3 py-2 text-[16px] resize-none"
+                  />
+                ) : (
+                  <input
+                    type={f.type || 'text'}
+                    value={form[f.key] || ''}
+                    onChange={(e) => setForm((cur) => ({ ...cur, [f.key]: e.target.value }))}
+                    placeholder={f.placeholder || ''}
+                    style={f.type === 'date' ? { WebkitAppearance: 'none', appearance: 'none' } : undefined}
+                    className={`block w-full min-w-0 max-w-full box-border border border-slate-200 rounded-lg px-3 py-2 text-[16px] bg-white ${f.type === 'date' ? 'font-mono' : ''}`}
+                  />
+                )}
+              </Field>
+            ))}
+            <Field label="管理者へのメモ（任意）">
+              <textarea
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                rows={2}
+                placeholder="ご相談ごとがあればご記入ください"
+                className="block w-full min-w-0 max-w-full box-border border border-slate-200 rounded-lg px-3 py-2 text-[16px] resize-none"
+              />
+            </Field>
+          </div>
+        </div>
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-5 py-4 space-y-2">
+          <div className="flex gap-2">
+            <button
+              onClick={save}
+              disabled={saving}
+              className="flex-1 rounded-xl border border-slate-300 py-3 text-[13.5px] font-bold text-slate-600 disabled:opacity-60"
+            >
+              {saving ? '保存中…' : '一時保存'}
+            </button>
+            <button
+              onClick={submit}
+              disabled={saving || missing.length > 0}
+              className="flex-1 rounded-xl bg-amber-600 py-3 text-[13.5px] font-bold text-white disabled:bg-slate-200"
+            >
+              {saving ? '送信中…' : '提出する'}
+            </button>
+          </div>
+          {missing.length > 0 && (
+            <div className="text-center text-[11px] text-slate-400">
+              {missing.map((f) => f.label).join('、')} を入力すると提出できます
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // 一覧画面
+  const mine = procedures.slice().sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+  const open = mine.filter(isOpenProcedure);
+
+  return (
+    <div className="space-y-5">
+      {open.length > 0 && (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+            <ListChecks size={15} className="text-slate-400" />
+            <h2 className="font-bold text-[13.5px]">進行中の手続き</h2>
+          </div>
+          <div className="divide-y divide-slate-100">
+            {open.map((p) => {
+              const def = procedureTypeOf(p.type);
+              const st = PROCEDURE_STATUS[p.status] || PROCEDURE_STATUS.draft;
+              const editable = p.status === 'draft' || p.status === 'rejected';
+              return (
+                <div key={p.id} className="px-5 py-3.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[13px] font-bold text-slate-800">{def?.label || p.type}</span>
+                    <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10.5px] font-bold ${st.cls}`}>{st.label}</span>
+                  </div>
+                  {p.requestedAt && p.status === 'draft' && (
+                    <div className="mt-1 text-[11.5px] text-amber-700">管理者から入力の依頼が届いています</div>
+                  )}
+                  {p.adminComment && (
+                    <div className="mt-1.5 rounded-lg bg-amber-50 border border-amber-100 px-2.5 py-1.5 text-[11.5px] text-amber-800">
+                      管理者コメント：{p.adminComment}
+                    </div>
+                  )}
+                  <div className="mt-2 flex gap-2">
+                    <button
+                      onClick={() => start(p.type, p)}
+                      className="flex-1 rounded-lg border border-slate-300 py-2 text-[12px] font-bold text-slate-600"
+                    >
+                      {editable ? '続きを入力する' : '内容を見る・直す'}
+                    </button>
+                    {p.status === 'draft' && onWithdraw && (
+                      <button
+                        onClick={() => onWithdraw(p)}
+                        className="shrink-0 rounded-lg border border-slate-200 px-3 py-2 text-[12px] font-bold text-slate-400"
+                      >
+                        取り消す
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      <div className="space-y-3">
+        <h2 className="font-bold text-[14px] text-slate-800">手続きを始める</h2>
+        <div className="space-y-2.5">
+          {PROCEDURE_TYPES.map((t) => {
+            const Icon = t.icon;
+            return (
+              <button
+                key={t.key}
+                onClick={() => start(t.key, null)}
+                className="flex w-full items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-4 text-left shadow-sm hover:bg-slate-50"
+              >
+                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-amber-50">
+                  <Icon size={18} className="text-amber-600" />
+                </span>
+                <span className="flex-1 min-w-0">
+                  <span className="block text-[14px] font-bold text-slate-800">{t.label}</span>
+                  <span className="mt-0.5 block text-[11.5px] text-slate-500">{t.desc}</span>
+                </span>
+                <ChevronRight size={16} className="shrink-0 text-slate-300" />
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {mine.filter((p) => !isOpenProcedure(p)).length > 0 && (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="px-5 py-3.5 border-b border-slate-100">
+            <h2 className="font-bold text-[13.5px]">完了した手続き</h2>
+          </div>
+          <div className="divide-y divide-slate-100">
+            {mine.filter((p) => !isOpenProcedure(p)).map((p) => (
+              <button key={p.id} onClick={() => start(p.type, p)} className="w-full text-left px-5 py-3 hover:bg-slate-50">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[12.5px] font-bold text-slate-700">{procedureTypeOf(p.type)?.label || p.type}</span>
+                  <span className="shrink-0 rounded-full bg-emerald-50 px-2 py-0.5 text-[10.5px] font-bold text-emerald-700">完了</span>
+                </div>
+                <div className="mt-0.5 text-[10.5px] text-slate-300">
+                  {p.decidedAt ? new Date(p.decidedAt).toLocaleDateString('ja-JP') : ''}
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// 管理者側：各種手続きの一覧と対応
+function AdminProcedureTab({ procedures = [], employeeAccounts = [], tableReady = true, onDecide, onRequest, isDesktop }) {
+  const [comment, setComment] = useState({});
+  const [running, setRunning] = useState(false);
+  const [requestType, setRequestType] = useState(PROCEDURE_TYPES[0].key);
+  const [requestTarget, setRequestTarget] = useState('');
+  const [showDone, setShowDone] = useState(false);
+  const setMemo = (id, v) => setComment((m) => ({ ...m, [id]: v }));
+
+  if (!tableReady) {
+    return (
+      <div className="rounded-2xl border border-rose-200 bg-rose-50 px-5 py-6">
+        <div className="flex items-center gap-2">
+          <AlertTriangle size={16} className="text-rose-600" />
+          <h2 className="text-[14px] font-bold text-rose-800">手続きの準備ができていません</h2>
+        </div>
+        <div className="mt-2 text-[12.5px] leading-relaxed text-rose-700">
+          データベースに手続き用のテーブルがありません。Supabase の SQL Editor で
+          <b> supabase/40_gender_and_procedures.sql </b>
+          を実行してください。実行後、この画面を再読み込みすると使えるようになります。
+        </div>
+      </div>
+    );
+  }
+
+  const sorted = procedures.slice().sort((a, b) => String(b.submittedAt || b.createdAt || '').localeCompare(String(a.submittedAt || a.createdAt || '')));
+  const waiting = sorted.filter((p) => p.status === 'pending');
+  const working = sorted.filter((p) => p.status === 'in_progress' || p.status === 'rejected');
+  const drafts = sorted.filter((p) => p.status === 'draft');
+  const done = sorted.filter((p) => p.status === 'completed');
+
+  const act = async (id, status) => {
+    setRunning(true);
+    await onDecide(id, status, comment[id]);
+    setRunning(false);
+  };
+
+  const sendRequest = async () => {
+    if (!requestTarget) return;
+    const label = procedureTypeOf(requestType)?.label || requestType;
+    const name = employeeAccounts.find((a) => a.id === requestTarget)?.name || '';
+    if (!window.confirm(`${name}さんに「${label}」の入力依頼を送ります。よろしいですか？`)) return;
+    setRunning(true);
+    const ok = await onRequest(requestTarget, requestType);
+    setRunning(false);
+    if (ok) setRequestTarget('');
+  };
+
+  const renderCard = (p, actions) => {
+    const def = procedureTypeOf(p.type);
+    const st = PROCEDURE_STATUS[p.status] || PROCEDURE_STATUS.draft;
+    return (
+      <div key={p.id} className="px-5 py-4 border-b border-slate-100 last:border-0">
+        <div className="flex items-center justify-between gap-2 mb-1.5 flex-wrap">
+          <span className="text-[13px] font-semibold text-slate-800">
+            <EmployeeLink id={p.employeeId} name={p.employeeName} /> ・ {def?.label || p.type}
+          </span>
+          <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10.5px] font-bold ${st.cls}`}>{st.label}</span>
+        </div>
+        <div className="text-[10.5px] text-slate-400 mb-2">
+          {p.submittedAt ? `提出 ${new Date(p.submittedAt).toLocaleString('ja-JP')}` : p.requestedAt ? `入力依頼 ${new Date(p.requestedAt).toLocaleDateString('ja-JP')}` : ''}
+        </div>
+        {def && Object.keys(p.details || {}).length > 0 && (
+          <div className="rounded-lg bg-slate-50 px-3 py-2 mb-2 space-y-0.5">
+            {def.fields.filter((f) => String(p.details?.[f.key] || '').trim()).map((f) => (
+              <div key={f.key} className="flex items-start justify-between gap-3 text-[12px]">
+                <span className="text-slate-400 shrink-0">{f.label}</span>
+                <span className="font-medium text-slate-700 text-right break-all whitespace-pre-wrap">
+                  {f.type === 'date' ? dateLabel(p.details[f.key]) : p.details[f.key]}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+        {p.staffNote && <div className="text-[12px] text-slate-500 mb-2">本人メモ：{p.staffNote}</div>}
+        {p.adminComment && <div className="text-[11.5px] text-slate-400 mb-2">管理者コメント：{p.adminComment}</div>}
+        {actions && (
+          <>
+            <textarea
+              value={comment[p.id] ?? ''}
+              onChange={(e) => setMemo(p.id, e.target.value)}
+              rows={2}
+              placeholder="スタッフに送るコメント（任意）"
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[12.5px] resize-none mb-2"
+            />
+            <div className="flex gap-2 flex-wrap">{actions}</div>
+          </>
+        )}
+      </div>
+    );
+  };
+
+  const btn = (label, onClick, cls) => (
+    <button key={label} onClick={onClick} disabled={running} className={`flex-1 min-w-[6rem] rounded-lg py-2 text-[12.5px] font-bold disabled:opacity-60 ${cls}`}>
+      {label}
+    </button>
+  );
+
+  const section = (title, list, render, note) => (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+      <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+        <Briefcase size={15} className="text-slate-400" />
+        <h2 className="font-bold text-[13.5px]">{title}</h2>
+        {list.length > 0 && <span className="ml-auto text-[10.5px] font-bold text-white bg-amber-600 rounded-full px-2 py-0.5">{list.length}件</span>}
+      </div>
+      {note && <div className="px-5 py-2 bg-slate-50 border-b border-slate-100 text-[11.5px] text-slate-500">{note}</div>}
+      {list.length === 0 ? (
+        <div className="px-5 py-8 text-center text-[12.5px] text-slate-300">対象はありません</div>
+      ) : (
+        <div>{list.map(render)}</div>
+      )}
+    </div>
+  );
+
+  return (
+    <div className="space-y-5">
+      {section('確認待ちの手続き', waiting, (p) => renderCard(p, [
+        btn('差し戻す', () => act(p.id, 'rejected'), 'border border-slate-200 text-slate-500'),
+        btn('対応中にする', () => act(p.id, 'in_progress'), 'border border-sky-300 text-sky-700'),
+        btn('完了にする', () => act(p.id, 'completed'), 'bg-emerald-600 text-white'),
+      ]), 'スタッフから提出された手続きです。')}
+
+      {section('対応中・差し戻し', working, (p) => renderCard(p, [
+        btn('差し戻す', () => act(p.id, 'rejected'), 'border border-slate-200 text-slate-500'),
+        btn('完了にする', () => act(p.id, 'completed'), 'bg-emerald-600 text-white'),
+      ]))}
+
+      {section('入力待ち（依頼済み・下書き）', drafts, (p) => renderCard(p, null), 'スタッフが入力中、または入力依頼を送った手続きです。')}
+
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+          <Mail size={15} className="text-slate-400" />
+          <h2 className="font-bold text-[13.5px]">入力依頼を送る</h2>
+        </div>
+        <div className="px-5 py-4 space-y-3">
+          <div className={isDesktop ? 'grid grid-cols-2 gap-3' : 'space-y-3'}>
+            <Field label="手続きの種類">
+              <select value={requestType} onChange={(e) => setRequestType(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px] bg-white">
+                {PROCEDURE_TYPES.map((t) => <option key={t.key} value={t.key}>{t.label}</option>)}
+              </select>
+            </Field>
+            <Field label="対象のスタッフ">
+              <select value={requestTarget} onChange={(e) => setRequestTarget(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px] bg-white">
+                <option value="">選択してください</option>
+                {employeeAccounts.filter((a) => !a.resignationDate).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+              </select>
+            </Field>
+          </div>
+          <button
+            onClick={sendRequest}
+            disabled={running || !requestTarget}
+            className="w-full rounded-xl bg-amber-600 py-3 text-[13.5px] font-bold text-white disabled:bg-slate-200"
+          >
+            {running ? '送信中…' : '入力依頼を送る'}
+          </button>
+          <div className="text-center text-[11px] text-slate-400">アプリ内のお知らせでご連絡します（メールは送りません）</div>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        <button onClick={() => setShowDone((v) => !v)} className="w-full px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+          <CheckCircle2 size={15} className="text-slate-400" />
+          <h2 className="font-bold text-[13.5px]">完了した手続き</h2>
+          <span className="ml-auto text-[11px] font-bold text-slate-400">{showDone ? '閉じる' : `${done.length}件を見る`}</span>
+        </button>
+        {showDone && (done.length === 0 ? (
+          <div className="px-5 py-8 text-center text-[12.5px] text-slate-300">完了した手続きはありません</div>
+        ) : (
+          <div>{done.map((p) => renderCard(p, null))}</div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ---- 各種手続き（退職・産前産後休業・育児休業）----
+// 種類ごとに入力項目が違うため、項目はここにまとめて定義する。
+// 追加したいときは PROCEDURE_TYPES に1つ足す。
+const PROCEDURE_TYPES = [
+  {
+    key: 'resignation',
+    label: '退職の手続き',
+    desc: '退職日・最終出勤日・返却物などの連絡',
+    icon: LogoutIcon,
+    note: '退職が決まりましたら、まず上長にご相談のうえご入力ください。',
+    fields: [
+      { key: 'resignDate', label: '退職希望日', type: 'date', required: true },
+      { key: 'lastWorkDate', label: '最終出勤日', type: 'date', required: true },
+      { key: 'reason', label: '退職の理由', type: 'textarea', placeholder: '例）一身上の都合により' },
+      { key: 'paidLeavePlan', label: '有給休暇の消化希望', type: 'select', options: ['消化を希望する', '消化しない', '相談したい'] },
+      { key: 'returnItems', label: '返却予定の貸与品', type: 'textarea', placeholder: '例）制服一式、社員証、鍵、スマートフォン' },
+      { key: 'afterAddress', label: '退職後のご住所', placeholder: '源泉徴収票などの送付先' },
+      { key: 'afterPhone', label: '退職後のご連絡先（電話）' },
+    ],
+  },
+  {
+    key: 'maternity',
+    label: '産前産後休業の手続き',
+    desc: '出産予定日と休業の予定を連絡',
+    icon: Palmtree,
+    note: '母子健康手帳の写しなど、書類のご提出は別途ご案内します。',
+    fields: [
+      { key: 'dueDate', label: '出産予定日', type: 'date', required: true },
+      { key: 'leaveStart', label: '産前休業の開始希望日', type: 'date' },
+      { key: 'leaveEnd', label: '産後休業の終了予定日', type: 'date' },
+      { key: 'multiple', label: '多胎（双子以上）', type: 'select', options: ['いいえ', 'はい'] },
+      { key: 'contactDuringLeave', label: '休業中のご連絡先', placeholder: '電話番号・メールなど' },
+    ],
+  },
+  {
+    key: 'childcare',
+    label: '育児休業の手続き',
+    desc: '育休の期間と復職予定を連絡',
+    icon: Users,
+    note: '配偶者の育休取得状況によって期間が変わる場合があります。',
+    fields: [
+      { key: 'childName', label: 'お子さまの氏名', required: true },
+      { key: 'childBirthDate', label: 'お子さまの生年月日（予定日）', type: 'date', required: true },
+      { key: 'leaveStart', label: '育児休業の開始希望日', type: 'date', required: true },
+      { key: 'leaveEnd', label: '育児休業の終了予定日', type: 'date' },
+      { key: 'returnDate', label: '復職の予定日', type: 'date' },
+      { key: 'spouseLeave', label: '配偶者の育休取得', type: 'select', options: ['取得しない', '取得する', '未定'] },
+      { key: 'contactDuringLeave', label: '休業中のご連絡先', placeholder: '電話番号・メールなど' },
+    ],
+  },
+];
+
+const procedureTypeOf = (key) => PROCEDURE_TYPES.find((t) => t.key === key) || null;
+
+const PROCEDURE_STATUS = {
+  draft: { label: '一時保存', cls: 'bg-slate-100 text-slate-500' },
+  pending: { label: '確認中', cls: 'bg-amber-50 text-amber-700' },
+  in_progress: { label: '対応中', cls: 'bg-sky-50 text-sky-700' },
+  completed: { label: '完了', cls: 'bg-emerald-50 text-emerald-700' },
+  rejected: { label: '差し戻し', cls: 'bg-rose-50 text-rose-600' },
+};
+// まだ終わっていない手続き
+const isOpenProcedure = (p) => p.status !== 'completed';
 
 // ---- シフト希望 ----
 const SHIFT_ANSWERS = [
@@ -5410,12 +6022,14 @@ const MY_REQUEST_STATE = {
   pending: { label: '確認中', cls: 'bg-amber-50 text-amber-700', open: true },
   admin_approved: { label: '最終承認待ち', cls: 'bg-amber-50 text-amber-700', open: true },
   rejected: { label: '差し戻し', cls: 'bg-rose-50 text-rose-600', open: true },
+  in_progress: { label: '対応中', cls: 'bg-sky-50 text-sky-700', open: true },
+  completed: { label: '完了', cls: 'bg-emerald-50 text-emerald-700', open: false },
   approved: { label: '完了', cls: 'bg-emerald-50 text-emerald-700', open: false },
   confirmed: { label: '確定済み', cls: 'bg-emerald-50 text-emerald-700', open: false },
   submitted: { label: '提出済み', cls: 'bg-emerald-50 text-emerald-700', open: false },
 };
 
-function buildMyRequests({ corrections = [], leaveRequests = [], monthlyConfirmations = [], commuteClaims = [], yearEndAdjustments = [], profileRequests = [], shiftRequests = [] }) {
+function buildMyRequests({ corrections = [], leaveRequests = [], monthlyConfirmations = [], commuteClaims = [], yearEndAdjustments = [], profileRequests = [], shiftRequests = [], procedures = [] }) {
   const out = [];
   corrections.forEach((c) => out.push({
     id: `cor-${c.id}`, kind: '勤怠修正', tab: null,
@@ -5450,6 +6064,11 @@ function buildMyRequests({ corrections = [], leaveRequests = [], monthlyConfirma
   shiftRequests.forEach((r) => out.push({
     id: `sh-${r.id}`, kind: 'シフト希望', tab: 'shift',
     title: `${monthKeyLabel(r.targetMonth)}分`, status: 'submitted', at: r.submittedAt, memo: '',
+  }));
+  procedures.forEach((p) => out.push({
+    id: `pc-${p.id}`, kind: procedureTypeOf(p.type)?.label || '各種手続き', tab: 'procedure',
+    title: p.status === 'draft' && p.requestedAt ? '管理者から入力の依頼が届いています' : '',
+    status: p.status, at: p.submittedAt || p.createdAt, memo: p.adminComment || '',
   }));
   return out.sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')));
 }
@@ -8270,6 +8889,7 @@ const HELP_STAFF = [
     items: [
       { q: 'パスワードを忘れました', a: 'ログイン画面の「パスワードをお忘れですか？」から再設定できます。うまくいかない場合は管理者に連絡してください。管理者が仮パスワードを再発行します。' },
       { q: '初めてログインするときの流れは', a: '管理者から届いた案内メールのURLを開き、メールアドレスと仮パスワードでログインします。続けてご自身のパスワードを設定し、ご登録情報（ふりがな・生年月日・連絡先・郵便番号・現住所・住民票の住所・配偶者の有無・世帯主・緊急連絡先・給与振込先の口座情報・マイナンバー）を入力すると利用開始です。いずれも必須のため、通帳とマイナンバーカードをお手元にご用意ください。' },
+      { q: '退職・産休・育休の手続きは', a: '「各種申請」タブの「各種手続き」から行います。退職の手続き・産前産後休業の手続き・育児休業の手続きの3つがあり、必要な内容を入力して提出すると管理者へ届きます。途中まででも「一時保存」で残せます。提出後は 確認中 → 対応中 → 完了 と進み、状況は労務タブの「進行中の手続き」でも確認できます。' },
       { q: '住所や氏名が変わりました', a: '画面右上のアイコンを押して「登録情報の閲覧・変更」を選び、「変更を申請」から変更内容を入力して申請してください。氏名・ふりがな・連絡先・住所・世帯・緊急連絡先・給与振込先の口座情報を申請できます。管理者が承認すると反映されます。生年月日・入職日・雇用形態などは申請できないため、管理者にご相談ください。' },
       { q: 'スマートフォンで使えますか', a: '使えます。ブラウザで同じURLを開いてログインしてください。画面はスマートフォン用に自動で切り替わります。ホーム画面に追加しておくとアプリのように使えます。パソコンでご覧の場合、画面右上の「PC表示」を押すとスマートフォン向けの表示に切り替えられます。' },
     ],
@@ -9849,7 +10469,7 @@ function PayrollMetric({ label, value }) {
   );
 }
 
-function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveCount, performanceCount, monthlyConfirmCount = 0, approvalCount = 0, shiftPendingCount = 0, isMasterAdmin }) {
+function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveCount, performanceCount, monthlyConfirmCount = 0, approvalCount = 0, shiftPendingCount = 0, procedureCount = 0, isMasterAdmin }) {
   const [open, setOpen] = useState(null);
   const wrapRef = useRef(null);
 
@@ -9875,9 +10495,10 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
     {
       key: 'leave-group',
       label: '休暇・申請管理',
-      tabs: ['leave', 'performance'],
+      tabs: ['leave', 'procedures', 'performance'],
       items: [
         { tab: 'leave', label: '休暇申請', sub: '承認・却下', badge: leaveCount },
+        { tab: 'procedures', label: '各種手続き', sub: '退職・産休・育休', badge: procedureCount },
         { tab: 'performance', label: '実績報告（過去分）', sub: '記録の確認', badge: performanceCount },
       ],
     },
@@ -9904,7 +10525,7 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
     },
   ];
 
-  const totalBadge = attendanceCount + correctionCount + leaveCount + performanceCount + monthlyConfirmCount;
+  const totalBadge = attendanceCount + correctionCount + leaveCount + performanceCount + monthlyConfirmCount + procedureCount;
 
   // よく使う項目は常に横並びで表示し、1クリックで開けるようにする。
   // 残りは「その他」にまとめる。
@@ -9983,7 +10604,7 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
   );
 }
 
-function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAdminTab = null, onConsumeRequestedAdminTab, onDecide, onDecideLeave, onDecidePerformance, onDecideCommute, onNotifyEmployee, onSaveShiftPeriod, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onSaveGroupFormats, onChangeLoginEmail, onDecideMonthlyConfirm, onCancelMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
+function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAdminTab = null, onConsumeRequestedAdminTab, onDecide, onDecideLeave, onDecidePerformance, onDecideCommute, onNotifyEmployee, onSaveShiftPeriod, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onSaveGroupFormats, onDecideProcedure, onRequestProcedure, onChangeLoginEmail, onDecideMonthlyConfirm, onCancelMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
   const [tab, setTab] = useState('dashboard'); // dashboard | attendance | requests | leave | performance | accounts
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
@@ -9996,6 +10617,8 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
   const leaveDecided = data.leaveRequests.filter((l) => l.status !== 'pending').slice(0, 8);
   const performancePending = data.performanceReports.filter((r) => r.status === 'pending');
   const performanceDecided = data.performanceReports.filter((r) => r.status !== 'pending');
+  // 確認待ちの手続きの件数
+  const procedurePendingCount = (data.staffProcedures || []).filter((p) => p.status === 'pending').length;
   const today = todayKey();
 
   const missing = [];
@@ -10271,6 +10894,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
         monthlyConfirmCount={monthlyConfirmCount}
         approvalCount={approvalItems.length}
         shiftPendingCount={shiftPendingCount}
+        procedureCount={procedurePendingCount}
         isMasterAdmin={isMasterAdmin}
       />
 
@@ -10371,6 +10995,17 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
 
       {tab === 'resignreasons' && isMasterAdmin && (
         <ResignationReasonSettings reasons={data.resignationReasons} onRefresh={onRefresh} isDesktop={isDesktop} />
+      )}
+
+      {tab === 'procedures' && (
+        <AdminProcedureTab
+          procedures={data.staffProcedures || []}
+          employeeAccounts={employeeAccounts}
+          tableReady={data.procedureTableReady !== false}
+          onDecide={onDecideProcedure}
+          onRequest={onRequestProcedure}
+          isDesktop={isDesktop}
+        />
       )}
 
       {tab === 'groupformats' && isMasterAdmin && (
@@ -12836,6 +13471,7 @@ function ProfileRequestModal({ session, onClose, onSubmit }) {
               <Field label={f.label}>
                 {f.type === 'select' ? (
                   <select value={form[f.key]} onChange={set(f.key)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px] bg-white">
+                    {!form[f.key] && <option value="">未設定</option>}
                     {f.options.map((o) => <option key={o} value={o}>{o}</option>)}
                   </select>
                 ) : (
@@ -14400,6 +15036,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
     emergencyContactPhone: account.emergencyContactPhone || '',
     emergencyContactAddress: account.emergencyContactAddress || '',
     birthDate: account.birthDate || '',
+    gender: account.gender || '',
     staffType: account.staffType || '社員',
     mainGroup: account.mainGroup || '',
     subGroup: account.subGroup || '',
@@ -14534,6 +15171,12 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
               </Field>
               <Field label="ふりがな">
                 <input value={form.furigana} onChange={set('furigana')} placeholder="例）たなか はなこ" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" />
+              </Field>
+              <Field label="性別">
+                <select value={form.gender} onChange={set('gender')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white">
+                  <option value="">未設定</option>
+                  {['男性', '女性', '回答しない'].map((g) => <option key={g} value={g}>{g}</option>)}
+                </select>
               </Field>
               <div className="grid grid-cols-2 gap-3">
                 <Field label="入職日">
