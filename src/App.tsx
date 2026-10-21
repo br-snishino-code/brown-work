@@ -997,6 +997,8 @@ const rowToRecord = (row) => ({
   clockInPayDeductionNote: row.clock_in_pay_deduction_note,
   clockOutPayDeduction: row.clock_out_pay_deduction,
   clockOutPayDeductionNote: row.clock_out_pay_deduction_note,
+  offShift: !!row.off_shift,
+  offShiftNote: row.off_shift_note || '',
 });
 
 const rowToCorrection = (row) => ({
@@ -2400,6 +2402,8 @@ function AttendanceApp() {
         scheduled_end: activePattern?.endTime || SCHEDULED_END,
         clock_in_location: loc,
         clock_out_location: null,
+        off_shift: confirm.offShift ? true : null,
+        off_shift_note: confirm.offShift ? (confirm.offShiftNote || '') : null,
       },
       { onConflict: 'employee_id,date' }
     );
@@ -2408,6 +2412,13 @@ function AttendanceApp() {
       return;
     }
     await refreshData();
+    if (confirm.offShift) {
+      await notifyAdmin(
+        `【シフト外の出勤】${session.name}さん`,
+        `${session.name}さんが、シフト上は休みの日に出勤しました（${confirm.offShiftNote ? `理由：${confirm.offShiftNote}` : '理由の記入なし'}）。`,
+        today
+      );
+    }
     const needsApproval = NEEDS_APPROVAL_STATUSES.includes(confirm.status);
     if (needsApproval) {
       const reasonLabel = CLOCK_IN_STATUS_LABEL[confirm.status] || confirm.status;
@@ -3931,6 +3942,7 @@ function AttendanceApp() {
                 now={now}
                 todayRecord={todayRecord}
                 onClockIn={handleClockIn}
+                todayShift={shiftForDate(data.shiftRequests, employeeId, today)}
                 onClockOut={handleClockOut}
                 onBreakStart={handleBreakStart}
                 onBreakEnd={handleBreakEnd}
@@ -5295,6 +5307,24 @@ const SHIFT_PLACE_ANSWERS = [
   { key: 'paid', label: '有給', full: '有給（SV報告済）', cls: 'bg-teal-700 text-white border-teal-700' },
 ];
 
+// ある日のシフトを引く。いまは「シフト希望」を元にしている。
+// 確定シフトを取り込めるようになったら、ここだけを差し替えればよい。
+function shiftForDate(shiftRequests, employeeId, dateKey) {
+  if (!dateKey) return null;
+  const month = dateKey.slice(0, 7);
+  const req = (shiftRequests || []).find((r) => r.employeeId === employeeId && r.targetMonth === month);
+  if (!req) return null;
+  const value = req.answers?.[dateKey];
+  if (!value) return null;
+  return {
+    kind: shiftAnswerKind(value),   // 'ok' | 'off' | 'paid'
+    place: shiftAnswerPlace(value).trim(),
+    text: shiftAnswerText(value),
+    // 休みとして出している日
+    isRest: shiftAnswerKind(value) === 'off' || shiftAnswerKind(value) === 'paid',
+  };
+}
+
 // 対象月の日付を並べる（祝日と曜日の情報つき）
 function shiftMonthDays(targetMonth) {
   const [y, m] = targetMonth.split('-').map(Number);
@@ -5959,7 +5989,58 @@ function NotificationsAllModal({ notifications, onMarkRead, onMarkAllRead, onClo
   );
 }
 
-function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, historyDates, records, corrections, onOpenCorrection, notifications, onMarkNotificationRead, onMarkAllNotificationsRead, schedulePatterns = [], activePatternNo, onSetActivePattern, onSavePatterns, needsCommuteClaimReminder, commuteClaimTargetMonth, onGoToCommuteClaim, isDesktop }) {
+// シフト上は休みの日に出勤しようとしたときの確認
+function OffShiftConfirmModal({ shift, onClose, onContinue }) {
+  const [note, setNote] = useState('');
+  const label = shift?.kind === 'paid' ? '有給' : '休み';
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-end sm:items-center justify-center" onClick={onClose}>
+      <div
+        className="bg-white w-full sm:max-w-md sm:rounded-2xl rounded-t-2xl overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
+          <AlertTriangle size={17} className="text-amber-600" />
+          <h3 className="font-bold text-[15px] text-slate-800">今日はシフト上「{label}」です</h3>
+        </div>
+        <div className="px-5 py-4 space-y-3">
+          <div className="text-[12.5px] leading-relaxed text-slate-600">
+            提出されたシフトでは、今日は{label}になっています。<br />
+            日付や端末を取り違えていないか、もう一度ご確認ください。<br />
+            応援や代打などで出勤される場合は、そのまま進んでいただけます。
+          </div>
+          <Field label="出勤する理由（任意）">
+            <input
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              placeholder="例）亀岡店の応援"
+              className="block w-full min-w-0 max-w-full box-border border border-slate-200 rounded-lg px-3 py-2 text-[16px]"
+            />
+          </Field>
+          <div className="text-[11px] text-slate-400">
+            出勤すると、シフト外の出勤として管理者にお知らせが届きます。
+          </div>
+        </div>
+        <div className="px-5 py-4 border-t border-slate-100 flex gap-2">
+          <button
+            onClick={onClose}
+            className="flex-1 rounded-xl border border-slate-300 py-3 text-[13.5px] font-bold text-slate-600"
+          >
+            やめる
+          </button>
+          <button
+            onClick={() => onContinue(note)}
+            className="flex-1 rounded-xl bg-amber-600 py-3 text-[13.5px] font-bold text-white"
+          >
+            出勤する
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EmployeeView({ now, todayRecord, todayShift = null, onClockIn, onClockOut, geoStatus, historyDates, records, corrections, onOpenCorrection, notifications, onMarkNotificationRead, onMarkAllNotificationsRead, schedulePatterns = [], activePatternNo, onSetActivePattern, onSavePatterns, needsCommuteClaimReminder, commuteClaimTargetMonth, onGoToCommuteClaim, isDesktop }) {
   const status = computeDayStatus(todayRecord);
   const canClockIn = !todayRecord?.clockIn;
   const canClockOut = todayRecord?.clockIn && !todayRecord?.clockOut;
@@ -5969,6 +6050,9 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
   const [viewMonth, setViewMonth] = useState(thisMonthKey);
   // お知らせの全件表示
   const [notifyAllOpen, setNotifyAllOpen] = useState(false);
+  // シフト上は休みの日に出勤しようとしたときの確認
+  const [offShiftOpen, setOffShiftOpen] = useState(false);
+  const [offShiftPayload, setOffShiftPayload] = useState(null);
   const viewMonthDate = new Date(Number(viewMonth.slice(0, 4)), Number(viewMonth.slice(5, 7)) - 1, 1);
   const isThisMonth = viewMonth === thisMonthKey;
   const shiftViewMonth = (diff) => {
@@ -5996,7 +6080,11 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
   const [clockOutConfirmOpen, setClockOutConfirmOpen] = useState(false);
   const [commuteReminderOpen, setCommuteReminderOpen] = useState(false);
   const primaryAction = canClockIn
-    ? (hasBlockingMissing ? undefined : () => (needsCommuteClaimReminder ? setCommuteReminderOpen(true) : setClockInConfirmOpen(true)))
+    ? (hasBlockingMissing ? undefined : () => (
+        todayShift?.isRest ? setOffShiftOpen(true)
+        : needsCommuteClaimReminder ? setCommuteReminderOpen(true)
+        : setClockInConfirmOpen(true)
+      ))
     : canClockOut
       ? () => setClockOutConfirmOpen(true)
       : undefined;
@@ -6059,6 +6147,24 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
           <div className="text-center border-x border-slate-100"><div className="text-[10px] text-slate-400">退勤</div><div className="mt-1 font-mono text-[14px] font-bold text-slate-800">{todayRecord?.clockOut ? hhmm(new Date(todayRecord.clockOut)) : '--:--'}</div></div>
           <div className="text-center"><div className="text-[10px] text-slate-400">休憩（自動）</div><div className="mt-1 font-mono text-[14px] font-bold text-slate-800">{todayRecord?.clockIn ? `${todayBreak}分` : '--'}</div></div>
         </div>
+        {todayShift && (
+          <div className={`px-6 pb-4 ${todayShift.isRest ? '' : ''}`}>
+            <div className={`rounded-xl border px-3.5 py-2.5 flex items-center gap-2 flex-wrap ${
+              todayShift.isRest ? 'border-amber-500 bg-amber-50' : 'border-slate-200 bg-slate-50'
+            }`}>
+              <CalendarDays size={14} className={todayShift.isRest ? 'text-amber-600' : 'text-slate-400'} />
+              <span className={`text-[11.5px] font-bold ${todayShift.isRest ? 'text-amber-900' : 'text-slate-500'}`}>今日のシフト</span>
+              <span className={`ml-auto text-[12.5px] font-bold ${todayShift.isRest ? 'text-amber-900' : 'text-slate-700'}`}>
+                {todayShift.kind === 'off' ? '休み' : todayShift.kind === 'paid' ? '有給' : todayShift.place || '出勤'}
+              </span>
+            </div>
+            {todayRecord?.offShift && (
+              <div className="mt-1.5 text-center text-[10.5px] text-amber-700">
+                シフト外の出勤として記録されています{todayRecord.offShiftNote ? `（${todayRecord.offShiftNote}）` : ''}
+              </div>
+            )}
+          </div>
+        )}
         <div className="px-6 pb-4 flex items-center justify-center gap-1.5 text-[10.5px] text-slate-400">
           <MapPin size={11} />{geoStatus === 'loading' ? '位置情報を取得中…' : geoStatus === 'denied' ? '位置情報が許可されていません' : '打刻時に位置情報を記録'}
         </div>
@@ -6261,12 +6367,28 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
     <div className="grid grid-cols-[420px_1fr] gap-6 items-start">
       {clockSection}
       {historySection}
+      {offShiftOpen && (
+        <OffShiftConfirmModal
+          shift={todayShift}
+          onClose={() => setOffShiftOpen(false)}
+          onContinue={(note) => {
+            setOffShiftPayload({ offShift: true, offShiftNote: note });
+            setOffShiftOpen(false);
+            if (needsCommuteClaimReminder) setCommuteReminderOpen(true);
+            else setClockInConfirmOpen(true);
+          }}
+        />
+      )}
       {clockInConfirmOpen && (
         <ClockInConfirmModal
           now={now}
           standardMinutes={standardStartMinutes}
-          onClose={() => setClockInConfirmOpen(false)}
-          onConfirm={async (payload) => { await onClockIn(payload); setClockInConfirmOpen(false); }}
+          onClose={() => { setClockInConfirmOpen(false); setOffShiftPayload(null); }}
+          onConfirm={async (payload) => {
+            await onClockIn({ ...payload, ...(offShiftPayload || {}) });
+            setClockInConfirmOpen(false);
+            setOffShiftPayload(null);
+          }}
         />
       )}
       {clockOutConfirmOpen && (
@@ -6291,12 +6413,28 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
     <div className="space-y-5">
       {clockSection}
       {historySection}
+      {offShiftOpen && (
+        <OffShiftConfirmModal
+          shift={todayShift}
+          onClose={() => setOffShiftOpen(false)}
+          onContinue={(note) => {
+            setOffShiftPayload({ offShift: true, offShiftNote: note });
+            setOffShiftOpen(false);
+            if (needsCommuteClaimReminder) setCommuteReminderOpen(true);
+            else setClockInConfirmOpen(true);
+          }}
+        />
+      )}
       {clockInConfirmOpen && (
         <ClockInConfirmModal
           now={now}
           standardMinutes={standardStartMinutes}
-          onClose={() => setClockInConfirmOpen(false)}
-          onConfirm={async (payload) => { await onClockIn(payload); setClockInConfirmOpen(false); }}
+          onClose={() => { setClockInConfirmOpen(false); setOffShiftPayload(null); }}
+          onConfirm={async (payload) => {
+            await onClockIn({ ...payload, ...(offShiftPayload || {}) });
+            setClockInConfirmOpen(false);
+            setOffShiftPayload(null);
+          }}
         />
       )}
       {clockOutConfirmOpen && (
@@ -8350,6 +8488,7 @@ const HELP_STAFF = [
       { q: '打刻の時刻を間違えました', a: '打刻をやり直すことはできませんが、修正申請を出せば直せます。手順は打刻忘れと同じで、「勤怠一覧」から該当日の修正申請を出してください。' },
       { q: '休憩時間はどう記録されますか', a: '休憩は原則1時間として自動的に差し引かれます。実際の休憩時間が大きく異なる場合は、管理者にご相談ください。' },
       { q: '定時より早く帰る／遅くまで残る場合は', a: '退勤打刻時に理由を選ぶ画面が出ます。残業の場合は「残業」を選んでください。管理者の承認が必要になります。早退の場合も、該当する理由を選択してください。' },
+      { q: '今日のシフトはどこで見られますか', a: '打刻画面の下に「今日のシフト」として表示されます。シフト上が休み・有給の日に出勤を押すと確認画面が出ますが、応援や代打の場合はそのまま出勤できます。理由を入力しておくと管理者に伝わります。' },
       { q: '打刻した場所は記録されますか', a: '記録されます。不正打刻の防止のため、打刻時の位置情報を取得しています。スマートフォンで位置情報の許可を求められた場合は「許可」を選んでください。許可しないと打刻が記録されても位置情報が空になり、管理者側にアラートが出ます。' },
     ],
   },
@@ -8410,6 +8549,7 @@ const HELP_ADMIN = [
       { q: '勤怠修正申請を承認するには', a: '「勤怠」→「休暇申請」に未承認の申請が一覧表示されます。内容を確認して承認または却下してください。承認すると勤怠記録が自動で書き換わります。' },
       { q: '管理者が直接勤怠を修正できますか', a: 'できます。「勤怠」→「勤怠一覧」で対象のスタッフと日付を選び、時刻を直接編集してください。給与に反映させない修正の場合は、控除対象外のフラグを設定できます。' },
       { q: '打刻漏れはどこで分かりますか', a: '「勤怠」→「勤怠修正」を開くと、上部に赤い枠で日付とスタッフ名が表示されます。各行の「この日の勤怠を修正する」を押すと、その日のそのスタッフに絞り込んだ勤怠一覧へ移動し、退勤時刻をその場で入力できます。ダッシュボードのアラート一覧にも件数が表示されます。' },
+      { q: 'シフト外の出勤とは', a: 'スタッフが提出したシフトで「休み」「有給」になっている日に出勤した記録です。打刻は止めずに、確認画面を出したうえで記録に印を付けています。ダッシュボードと勤怠一覧の上部に直近30日分が出るほか、打刻された時点でお知らせも届きます。応援や代打での出勤はこれにあたるため、理由を見てご判断ください。' },
       { q: '位置情報のアラートとは', a: '打刻時に位置情報が5回以上連続で記録されなかったスタッフを検知しています。端末の設定で位置情報が拒否されている可能性があるため、本人に確認してください。' },
       { q: '出勤規定日数の設定はどこですか', a: '「勤怠」→「その他」→「出勤規定日数設定」で、グループ別・月別に設定します。給与計算の基礎になる日数です。' },
     ],
@@ -9257,10 +9397,11 @@ function RecentActionsCard({ logs = [], onOpenAll }) {
   );
 }
 
-function AdminDashboardTab({ missingCount, correctionCount, leaveCount, performanceCount, gpsAlertCount, contractAlertCount, clockInApprovalCount = 0, employeeCount, todayPresentCount = 0, monthOvertimeMin = 0, paidLeaveShortages = [], announcements = [], notifications = [], onNavigate, onNavigateTop, onOpenNotification, isDesktop, todayStatus = null, monthClosing = null, auditLogs = [] }) {
+function AdminDashboardTab({ missingCount, correctionCount, leaveCount, performanceCount, gpsAlertCount, contractAlertCount, offShiftAlerts = [], clockInApprovalCount = 0, employeeCount, todayPresentCount = 0, monthOvertimeMin = 0, paidLeaveShortages = [], announcements = [], notifications = [], onNavigate, onNavigateTop, onOpenNotification, isDesktop, todayStatus = null, monthClosing = null, auditLogs = [] }) {
   const alertRows = [
     { label: '打刻漏れ・打刻間違い', count: missingCount, tab: 'requests', icon: <AlertTriangle size={14} /> },
     { label: '位置情報が5回以上連続で未記録', count: gpsAlertCount, tab: 'attendance', icon: <MapPin size={14} /> },
+    { label: 'シフト外の出勤（直近30日）', count: offShiftAlerts.length, tab: 'attendance', icon: <CalendarDays size={14} /> },
     { label: '契約更新が必要なスタッフがいます', count: contractAlertCount, tab: 'accounts', icon: <FileText size={14} /> },
     { label: '有休の年5日取得が不足しています', count: paidLeaveShortages.length, tab: 'leave', icon: <Palmtree size={14} /> },
   ];
@@ -10506,6 +10647,22 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
   });
 
   const gpsAlerts = computeGpsAlertEmployees(employeeAccounts, data.records);
+  // シフト上は休みの日に出勤した記録（直近30日）
+  const offShiftAlerts = (() => {
+    const since = new Date();
+    since.setDate(since.getDate() - 30);
+    const sinceKey = todayKey(since);
+    const out = [];
+    employeeAccounts.forEach((acc) => {
+      const recs = data.records[acc.id] || {};
+      Object.entries(recs).forEach(([dateKey, r]) => {
+        if (r?.offShift && dateKey >= sinceKey) {
+          out.push({ employeeId: acc.id, employeeName: acc.name, dateKey, note: r.offShiftNote || '' });
+        }
+      });
+    });
+    return out.sort((a, b) => b.dateKey.localeCompare(a.dateKey));
+  })();
   const contractAlertDate = new Date();
   contractAlertDate.setDate(contractAlertDate.getDate() + 30);
   const contractAlertKey = todayKey(contractAlertDate);
@@ -10823,6 +10980,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
           leaveCount={leavePending.length}
           performanceCount={performancePending.length}
           gpsAlertCount={gpsAlerts.length}
+          offShiftAlerts={offShiftAlerts}
           contractAlertCount={contractAlerts.length}
           clockInApprovalCount={clockInApprovalCount}
           employeeCount={employeeAccounts.length}
@@ -10842,7 +11000,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
       )}
 
       {tab === 'attendance' && (
-        <AttendanceAdminTab data={data} employeeAccounts={employeeAccounts} gpsAlerts={gpsAlerts} focus={attendanceFocus} onConsumeFocus={() => setAttendanceFocus(null)} onAdminUpdateAttendance={onAdminUpdateAttendance} onAdminUpdateAttendanceBatch={onAdminUpdateAttendanceBatch} isDesktop={isDesktop} />
+        <AttendanceAdminTab data={data} employeeAccounts={employeeAccounts} gpsAlerts={gpsAlerts} offShiftAlerts={offShiftAlerts} focus={attendanceFocus} onConsumeFocus={() => setAttendanceFocus(null)} onAdminUpdateAttendance={onAdminUpdateAttendance} onAdminUpdateAttendanceBatch={onAdminUpdateAttendanceBatch} isDesktop={isDesktop} />
       )}
 
       {tab === 'accounts' && (
@@ -11236,7 +11394,7 @@ function PerformanceAdminTab({ pending, decided, onDecide, isDesktop }) {
 }
 
 
-function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], focus = null, onConsumeFocus, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, isDesktop }) {
+function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAlerts = [], focus = null, onConsumeFocus, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, isDesktop }) {
   const now = new Date();
   const [dateFilter, setDateFilter] = useState(todayKey());
   const [employeeFilter, setEmployeeFilter] = useState('all');
@@ -11439,6 +11597,24 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], focus = nu
                 </div>
               );
             })}
+          </div>
+        </div>
+      )}
+
+      {offShiftAlerts.length > 0 && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 flex items-start gap-2.5">
+          <CalendarDays size={15} className="text-amber-600 mt-0.5 shrink-0" />
+          <div className="text-[12px] text-amber-800">
+            <div className="font-bold mb-0.5">シフト上は休みの日に出勤した記録があります（直近30日・{offShiftAlerts.length}件）</div>
+            <div className="space-y-0.5">
+              {offShiftAlerts.slice(0, 8).map((a) => (
+                <div key={`${a.employeeId}-${a.dateKey}`}>
+                  {dateLabel(a.dateKey)}　<EmployeeLink id={a.employeeId} name={a.employeeName} />
+                  {a.note ? `（${a.note}）` : ''}
+                </div>
+              ))}
+              {offShiftAlerts.length > 8 && <div>ほか{offShiftAlerts.length - 8}件</div>}
+            </div>
           </div>
         </div>
       )}
