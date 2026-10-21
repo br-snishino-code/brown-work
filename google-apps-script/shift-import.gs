@@ -26,15 +26,22 @@ var SHEET_PREFIX = 'シフト希望_';
 // 前回取り込んだ内容の指紋と、最後に動いた時刻を覚えておくための名前
 var FINGERPRINT_PROP = 'SHIFT_IMPORT_FINGERPRINT_';
 var LAST_RUN_PROP = 'SHIFT_IMPORT_LAST_RUN';
+// 確定シフトを送るときに使うもの
+var PUSH_FINGERPRINT_PROP = 'SHIFT_PUSH_FINGERPRINT_';
+var LAST_PUSH_PROP = 'SHIFT_PUSH_LAST_RUN';
+var CONFIRMED_SHEET_PROP = 'CONFIRMED_SHEET_NAME';
 
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('Brown Work')
     .addItem('シフト希望を取り込む', 'importShiftRequestsPrompt')
+    .addItem('確定シフトを送る', 'pushConfirmedShiftsPrompt')
     .addSeparator()
     .addItem('自動取り込みの間隔を選ぶ', 'chooseTriggerInterval')
     .addItem('自動取り込みの状態を見る', 'showTriggerStatus')
     .addItem('自動取り込みを解除', 'removeDailyTrigger')
+    .addSeparator()
+    .addItem('確定シフトのシート名を指定', 'setConfirmedSheetName')
     .addToUi();
 }
 
@@ -237,14 +244,18 @@ function chooseTriggerInterval() {
 /** 指定された間隔でトリガーを作り直す */
 function setTriggerInterval(key) {
   removeTriggersOnly();
-  var builder = ScriptApp.newTrigger('importNextMonthShiftRequests').timeBased();
-  switch (key) {
-    case 'm5':  builder.everyMinutes(5); break;
-    case 'm15': builder.everyMinutes(15); break;
-    case 'm30': builder.everyMinutes(30); break;
-    default:    builder.atHour(6).everyDays(1); key = 'daily'; break;
-  }
-  builder.create();
+  // シフト希望の取り込みと、確定シフトの送信を同じ間隔で動かす
+  ['importNextMonthShiftRequests', 'pushConfirmedShiftsAuto'].forEach(function (fn) {
+    var builder = ScriptApp.newTrigger(fn).timeBased();
+    switch (key) {
+      case 'm5':  builder.everyMinutes(5); break;
+      case 'm15': builder.everyMinutes(15); break;
+      case 'm30': builder.everyMinutes(30); break;
+      default:    builder.atHour(6).everyDays(1); break;
+    }
+    builder.create();
+  });
+  if (['m5', 'm15', 'm30'].indexOf(key) < 0) key = 'daily';
   PropertiesService.getScriptProperties().setProperty(INTERVAL_PROP, key);
 }
 
@@ -256,6 +267,7 @@ function showTriggerStatus() {
   for (var i = 0; i < triggers.length; i++) {
     if (triggers[i].getHandlerFunction() === 'importNextMonthShiftRequests') running = true;
   }
+  var lastPush = PropertiesService.getScriptProperties().getProperty(LAST_PUSH_PROP);
   if (!running) {
     ui.alert('自動取り込みの状態', '今は自動取り込みを設定していません。', ui.ButtonSet.OK);
     return;
@@ -269,7 +281,8 @@ function showTriggerStatus() {
   ui.alert(
     '自動取り込みの状態',
     '間隔：' + label + '\n' +
-    '最後に動いた時刻：' + (last || '記録なし'),
+    'シフト希望の取り込み：' + (last || '記録なし') + '\n' +
+    '確定シフトの送信：' + (lastPush || '記録なし'),
     ui.ButtonSet.OK
   );
 }
@@ -282,9 +295,10 @@ function createDailyTrigger() {
 
 /** トリガーだけを消す（メッセージを出さない） */
 function removeTriggersOnly() {
+  var mine = ['importNextMonthShiftRequests', 'pushConfirmedShiftsAuto'];
   var triggers = ScriptApp.getProjectTriggers();
   for (var i = 0; i < triggers.length; i++) {
-    if (triggers[i].getHandlerFunction() === 'importNextMonthShiftRequests') {
+    if (mine.indexOf(triggers[i].getHandlerFunction()) >= 0) {
       ScriptApp.deleteTrigger(triggers[i]);
     }
   }
@@ -295,4 +309,259 @@ function removeDailyTrigger() {
   removeTriggersOnly();
   PropertiesService.getScriptProperties().deleteProperty(INTERVAL_PROP);
   SpreadsheetApp.getUi().alert('自動取り込みを解除しました。');
+}
+
+// ============================================================
+// 確定シフトを Brown Work へ送る
+// ============================================================
+//
+// 読み取り方：
+//   ・見出し行は「1(日)」「2(月)」…のようなセルが並んでいる行を自動で探す
+//   ・氏名は、日付が始まる列より左にある列から自動で探す
+//   ・対象月は、ファイル名（例：2026年11月スタッフ勤務シフト）から読み取る
+//     読み取れないときは入力を求める
+//
+// セルの中身：
+//   空欄        → 休み
+//   有給を含む  → 有給
+//   それ以外    → 出勤。その文字をそのまま活動場所として送る
+
+/** 日付の見出しらしいセルか（「1(日)」「12(金)」など） */
+function looksLikeDayHeader(value) {
+  var text = String(value == null ? '' : value).replace(/　/g, ' ').trim();
+  return /^\d{1,2}\s*[（(][日月火水木金土][）)]$/.test(text) || /^\d{1,2}$/.test(text);
+}
+
+/** 見出しセルから日にちの数字を取り出す */
+function dayNumberOf(value) {
+  var m = String(value == null ? '' : value).match(/\d{1,2}/);
+  return m ? Number(m[0]) : 0;
+}
+
+/** ファイル名やシート名から対象月（YYYY-MM）を推測する */
+function guessTargetMonth(sheet) {
+  var fileName = SpreadsheetApp.getActiveSpreadsheet().getName();
+  var m = fileName.match(/(20\d{2})\s*年\s*(\d{1,2})\s*月/);
+  if (m) return m[1] + '-' + ('0' + m[2]).slice(-2);
+
+  // ファイル名に年が無い場合、シート名の「11月」と今の年から組み立てる
+  var sm = String(sheet.getName()).match(/(\d{1,2})\s*月/);
+  if (sm) {
+    var month = Number(sm[1]);
+    var now = new Date();
+    var year = now.getFullYear();
+    // 12月のシートを1月に開いたときなど、前後の年を考える
+    if (now.getMonth() + 1 >= 10 && month <= 3) year += 1;
+    if (now.getMonth() + 1 <= 3 && month >= 10) year -= 1;
+    return year + '-' + ('0' + month).slice(-2);
+  }
+  return '';
+}
+
+/** 確定シフトのシートを選ぶ。設定があればそれ、無ければ「〇月」の名前を探す */
+function findConfirmedSheet() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var saved = PropertiesService.getScriptProperties().getProperty(CONFIRMED_SHEET_PROP);
+  if (saved) {
+    var bySaved = ss.getSheetByName(saved);
+    if (bySaved) return bySaved;
+  }
+  var sheets = ss.getSheets();
+  for (var i = 0; i < sheets.length; i++) {
+    if (/^\d{1,2}\s*月$/.test(sheets[i].getName())) return sheets[i];
+  }
+  // 見つからなければ、今開いているシート
+  return ss.getActiveSheet();
+}
+
+/** シートを読んで、送る形に組み立てる */
+function buildConfirmedPayload(sheet, month) {
+  var values = sheet.getDataRange().getValues();
+  if (values.length === 0) throw new Error('シートが空です。');
+
+  // 見出し行と、日付が始まる列を探す
+  var headerRow = -1;
+  var dateCols = [];
+  for (var r = 0; r < Math.min(values.length, 15); r++) {
+    var cols = [];
+    for (var c = 0; c < values[r].length; c++) {
+      if (looksLikeDayHeader(values[r][c])) cols.push(c);
+    }
+    if (cols.length >= 20) { headerRow = r; dateCols = cols; break; }
+  }
+  if (headerRow < 0) {
+    throw new Error('日付の見出し行が見つかりませんでした。「1(日)」のように日付が並んだ行がある表をお使いください。');
+  }
+
+  // 氏名の列を探す。日付の左側で、名前らしい文字がいちばん多く入っている列
+  var firstDateCol = dateCols[0];
+  var nameCol = 0;
+  var bestCount = -1;
+  for (var col = 0; col < firstDateCol; col++) {
+    var count = 0;
+    for (var row = headerRow + 1; row < values.length; row++) {
+      var v = String(values[row][col] == null ? '' : values[row][col]).trim();
+      if (v && isNaN(Number(v))) count++;
+    }
+    if (count > bestCount) { bestCount = count; nameCol = col; }
+  }
+
+  var lastDay = new Date(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0).getDate();
+  var rows = [];
+  for (var row2 = headerRow + 1; row2 < values.length; row2++) {
+    var name = String(values[row2][nameCol] == null ? '' : values[row2][nameCol]).replace(/　/g, ' ').trim();
+    if (!name) continue;
+    var cells = {};
+    var any = false;
+    for (var d = 0; d < dateCols.length; d++) {
+      var day = dayNumberOf(values[headerRow][dateCols[d]]);
+      if (!day || day > lastDay) continue;
+      var key = month + '-' + ('0' + day).slice(-2);
+      var raw = values[row2][dateCols[d]];
+      var text = String(raw == null ? '' : raw).replace(/　/g, ' ').trim();
+      cells[key] = text;
+      if (text) any = true;
+    }
+    // 1日も入っていない行は、空行や区切り行とみなして送らない
+    if (any) rows.push({ name: name, cells: cells });
+  }
+
+  return { month: month, sheetName: sheet.getName(), rows: rows, nameColumn: nameCol + 1, headerRow: headerRow + 1 };
+}
+
+/** 送る内容から指紋を作る */
+function buildPushFingerprint(payload) {
+  var parts = [payload.month];
+  for (var i = 0; i < payload.rows.length; i++) {
+    var row = payload.rows[i];
+    var keys = Object.keys(row.cells).sort();
+    var line = row.name;
+    for (var k = 0; k < keys.length; k++) line += '\u0001' + keys[k] + '=' + row.cells[keys[k]];
+    parts.push(line);
+  }
+  var bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, parts.join('\u0003'), Utilities.Charset.UTF_8);
+  var hex = '';
+  for (var b = 0; b < bytes.length; b++) hex += ('0' + (bytes[b] & 0xff).toString(16)).slice(-2);
+  return hex;
+}
+
+/** Brown Work へ送る */
+function sendConfirmedShifts(payload) {
+  var props = PropertiesService.getScriptProperties();
+  var baseUrl = (props.getProperty('SUPABASE_URL') || '').replace(/\/+$/, '');
+  var apiKey = props.getProperty('SHIFT_API_KEY') || '';
+  if (!baseUrl || !apiKey) {
+    throw new Error('スクリプト プロパティに SUPABASE_URL と SHIFT_API_KEY を設定してください。');
+  }
+  var response = UrlFetchApp.fetch(baseUrl + '/functions/v1/shift-confirmed-import', {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { 'x-api-key': apiKey },
+    payload: JSON.stringify({ month: payload.month, sheetName: payload.sheetName, rows: payload.rows }),
+    muteHttpExceptions: true
+  });
+  var code = response.getResponseCode();
+  var body = response.getContentText();
+  if (code !== 200) {
+    var message = body;
+    try { message = JSON.parse(body).error || body; } catch (ignore) {}
+    throw new Error('APIエラー（' + code + '）：' + message);
+  }
+  return JSON.parse(body);
+}
+
+/** メニューから：確認してから送る */
+function pushConfirmedShiftsPrompt() {
+  var ui = SpreadsheetApp.getUi();
+  try {
+    var sheet = findConfirmedSheet();
+    var month = guessTargetMonth(sheet);
+    if (!month) {
+      var ask = ui.prompt('確定シフトを送る', '対象月を YYYY-MM の形式で入力してください（例：2026-11）', ui.ButtonSet.OK_CANCEL);
+      if (ask.getSelectedButton() !== ui.Button.OK) return;
+      month = ask.getResponseText().trim();
+      if (!/^\d{4}-\d{2}$/.test(month)) { ui.alert('対象月の形式が違います。'); return; }
+    }
+
+    var payload = buildConfirmedPayload(sheet, month);
+    if (payload.rows.length === 0) {
+      ui.alert('送れる行がありませんでした', 'シート「' + sheet.getName() + '」から氏名とシフトを読み取れませんでした。', ui.ButtonSet.OK);
+      return;
+    }
+
+    // 読み取った内容を見せてから確認する
+    var sample = [];
+    for (var i = 0; i < Math.min(3, payload.rows.length); i++) {
+      var r = payload.rows[i];
+      var keys = Object.keys(r.cells).sort();
+      var preview = [];
+      for (var k = 0; k < Math.min(5, keys.length); k++) {
+        preview.push(Number(keys[k].slice(-2)) + '日:' + (r.cells[keys[k]] || '休'));
+      }
+      sample.push('　' + r.name + ' … ' + preview.join('、') + ' …');
+    }
+    var res = ui.alert(
+      '確定シフトを送ります',
+      'シート：' + sheet.getName() + '\n' +
+      '対象月：' + month + '\n' +
+      '人数：' + payload.rows.length + '名\n' +
+      '氏名の列：' + payload.nameColumn + '列目　見出し行：' + payload.headerRow + '行目\n\n' +
+      '読み取り例\n' + sample.join('\n') + '\n\n' +
+      '（空欄は休み、有給は有給として送ります）\n\n' +
+      'この内容で送ってよろしいですか？',
+      ui.ButtonSet.OK_CANCEL
+    );
+    if (res !== ui.Button.OK) return;
+
+    var result = sendConfirmedShifts(payload);
+    PropertiesService.getScriptProperties().setProperty(PUSH_FINGERPRINT_PROP + month, buildPushFingerprint(payload));
+    PropertiesService.getScriptProperties().setProperty(LAST_PUSH_PROP, Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy/MM/dd HH:mm'));
+
+    var msg = month + '分を送りました。\n' +
+      '　反映：' + result.matchedRows + '／' + result.totalRows + '名　' + result.assignmentCount + '件\n' +
+      '　出勤 ' + result.workDays + '日　有給 ' + result.paidDays + '日　休み ' + result.offDays + '日';
+    if (result.unmatchedNames && result.unmatchedNames.length > 0) {
+      msg += '\n\n【氏名が一致しなかった方】\n　' + result.unmatchedNames.join('\n　') +
+             '\n\nBrown Work の登録氏名と、表記（姓と名の間の半角スペースなど）をそろえてください。';
+    }
+    if (result.duplicatedNames && result.duplicatedNames.length > 0) {
+      msg += '\n\n【同姓同名のため送れなかった方】\n　' + result.duplicatedNames.join('\n　');
+    }
+    ui.alert('送信しました', msg, ui.ButtonSet.OK);
+  } catch (e) {
+    ui.alert('送信に失敗しました', String(e.message || e), ui.ButtonSet.OK);
+  }
+}
+
+/** 自動実行用：内容が変わっていたときだけ送る */
+function pushConfirmedShiftsAuto() {
+  var sheet = findConfirmedSheet();
+  var month = guessTargetMonth(sheet);
+  if (!month) return;
+  var payload = buildConfirmedPayload(sheet, month);
+  if (payload.rows.length === 0) return;
+
+  var props = PropertiesService.getScriptProperties();
+  props.setProperty(LAST_PUSH_PROP, Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy/MM/dd HH:mm'));
+
+  var fingerprint = buildPushFingerprint(payload);
+  if (props.getProperty(PUSH_FINGERPRINT_PROP + month) === fingerprint) return;
+
+  sendConfirmedShifts(payload);
+  props.setProperty(PUSH_FINGERPRINT_PROP + month, fingerprint);
+}
+
+/** 読み取るシートを手で指定したいとき用 */
+function setConfirmedSheetName() {
+  var ui = SpreadsheetApp.getUi();
+  var res = ui.prompt('確定シフトのシート名', '読み取るシート（タブ）の名前を入力してください。空のまま OK を押すと自動で探します。', ui.ButtonSet.OK_CANCEL);
+  if (res.getSelectedButton() !== ui.Button.OK) return;
+  var name = res.getResponseText().trim();
+  if (name) {
+    PropertiesService.getScriptProperties().setProperty(CONFIRMED_SHEET_PROP, name);
+    ui.alert('シート「' + name + '」から読み取ります。');
+  } else {
+    PropertiesService.getScriptProperties().deleteProperty(CONFIRMED_SHEET_PROP);
+    ui.alert('自動で探す設定に戻しました。');
+  }
 }
