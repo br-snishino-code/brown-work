@@ -798,7 +798,7 @@ function ToastView({ toast }) {
 // 以降のコンポーネント（LoginScreenなど）は一切変更していません。
 // ============================================================
 
-const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, performanceReports: [], payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, employeeAttendanceSchedules: {}, announcements: [], yearEndAdjustments: [], commuteExpenseClaims: [], resignationReasons: [], monthlyConfirmations: [], shiftPeriods: [], shiftRequests: [], shiftTablesReady: true, staffProcedures: [], procedureTableReady: true, settings: {} };
+const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, performanceReports: [], payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, employeeAttendanceSchedules: {}, announcements: [], yearEndAdjustments: [], commuteExpenseClaims: [], resignationReasons: [], monthlyConfirmations: [], shiftPeriods: [], shiftRequests: [], shiftTablesReady: true, staffProcedures: [], procedureTableReady: true, bonusRecords: [], bonusTableReady: true, settings: {} };
 
 // 管理者宛の通知メールの送信先（app_settings の key）
 const SETTING_ADMIN_NOTIFY_EMAIL = 'admin_notify_email';
@@ -1229,6 +1229,25 @@ const rowToShiftPeriod = (row) => ({
   openedAt: row.opened_at,
 });
 
+const rowToBonus = (row) => ({
+  id: row.id,
+  employeeId: row.employee_id,
+  employeeName: row.employees?.name || '',
+  year: row.year,
+  seq: row.seq || 1,
+  title: row.title || '',
+  paymentDate: row.payment_date || '',
+  paymentItems: Array.isArray(row.payment_items) ? row.payment_items : [],
+  deductionItems: Array.isArray(row.deduction_items) ? row.deduction_items : [],
+  totalAmount: Number(row.total_amount) || 0,
+  status: row.status || 'draft',
+  notes: row.notes || '',
+  publishedAt: row.published_at,
+});
+
+// 賞与の呼び名。第1回＝夏季、第2回＝冬季として既定の名前を作る
+const bonusDefaultTitle = (year, seq) => `${year}年 ${seq === 1 ? '夏季' : seq === 2 ? '冬季' : `第${seq}回`}賞与`;
+
 const rowToProcedure = (row) => ({
   id: row.id,
   employeeId: row.employee_id,
@@ -1291,6 +1310,7 @@ async function fetchAllData() {
     shiftPeriodRes,
     shiftRequestRes,
     procedureRes,
+    bonusRes,
   ] = await Promise.all([
     supabase.from('employees').select('*'),
     supabase.from('attendance_records').select('*'),
@@ -1312,6 +1332,7 @@ async function fetchAllData() {
     supabase.from('shift_request_periods').select('*').order('target_month', { ascending: false }),
     supabase.from('shift_request_answers').select('*, employees(name)').order('target_month', { ascending: false }),
     supabase.from('staff_procedures').select('*, employees(name)').order('created_at', { ascending: false }),
+    supabase.from('bonus_records').select('*, employees(name)').order('year', { ascending: false }),
   ]);
 
   for (const res of [employeesRes, recordsRes, correctionsRes, leaveRes, perfRes, notifRes, payrollRes, auditRes, profileReqRes, groupLeaveRes, employeeAttendanceRes, announcementsRes, yearEndRes, commuteClaimsRes]) {
@@ -1332,6 +1353,10 @@ async function fetchAllData() {
   // 各種手続き（SQL未実行でも画面が落ちないよう、エラー時は空扱いにする）
   const staffProcedures = procedureRes?.error ? [] : (procedureRes?.data || []).map(rowToProcedure);
   const procedureTableReady = !procedureRes?.error;
+
+  // 賞与明細（SQL未実行でも画面が落ちないよう、エラー時は空扱いにする）
+  const bonusRecords = bonusRes?.error ? [] : (bonusRes?.data || []).map(rowToBonus);
+  const bonusTableReady = !bonusRes?.error;
 
   // アプリ全体の設定（SQL未実行でも画面が落ちないよう、エラー時は空扱いにする）
   const settings = {};
@@ -1382,6 +1407,8 @@ async function fetchAllData() {
     shiftTablesReady,
     staffProcedures,
     procedureTableReady,
+    bonusRecords,
+    bonusTableReady,
     settings,
   };
 }
@@ -2246,6 +2273,73 @@ function AttendanceApp() {
     await refreshData();
     show('フォーマット設定を保存しました');
     return true;
+  };
+
+  // ---- 賞与明細 ----
+  const saveBonus = async (payload) => {
+    const { error } = await supabase.from('bonus_records').upsert(
+      {
+        employee_id: payload.employeeId,
+        year: payload.year,
+        seq: payload.seq,
+        title: payload.title || null,
+        payment_date: payload.paymentDate,
+        payment_items: payload.paymentItems,
+        deduction_items: payload.deductionItems,
+        total_amount: payload.totalAmount,
+        notes: payload.notes || null,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'employee_id,year,seq' }
+    );
+    if (error) {
+      console.error('賞与明細の保存に失敗しました', error);
+      show('賞与明細の保存に失敗しました', 'warn');
+      return false;
+    }
+    await refreshData();
+    show('賞与明細を保存しました');
+    return true;
+  };
+
+  const publishBonus = async (id) => {
+    const { error } = await supabase
+      .from('bonus_records')
+      .update({ status: 'published', published_at: new Date().toISOString() })
+      .eq('id', id);
+    if (error) {
+      console.error('賞与明細の公開に失敗しました', error);
+      show('賞与明細の公開に失敗しました', 'warn');
+      return false;
+    }
+    const record = (data.bonusRecords || []).find((b) => b.id === id);
+    if (record) {
+      const label = record.title || bonusDefaultTitle(record.year, record.seq);
+      await notifyEmployeeUser(
+        record.employeeId,
+        `【賞与明細】${label}`,
+        `${label}の明細が公開されました。「給与」タブからご確認ください。`,
+        null,
+        [`${label}の明細を公開しました。`, '下記よりご確認ください。']
+      );
+      await logAudit(session, '賞与明細を公開', label, record.employeeId, record.employeeName);
+    }
+    await refreshData();
+    show('賞与明細を公開しました');
+    return true;
+  };
+
+  const deleteBonus = async (record) => {
+    const label = record.title || bonusDefaultTitle(record.year, record.seq);
+    if (!window.confirm(`${record.employeeName}さんの「${label}」を削除します。よろしいですか。`)) return;
+    const { error } = await supabase.from('bonus_records').delete().eq('id', record.id);
+    if (error) {
+      console.error('賞与明細の削除に失敗しました', error);
+      show('賞与明細の削除に失敗しました', 'warn');
+      return;
+    }
+    await refreshData();
+    show('賞与明細を削除しました');
   };
 
   // ---- 各種手続き（退職・産休・育休）----
@@ -3919,6 +4013,7 @@ function AttendanceApp() {
           showStaffScreens ? (
             <div className="space-y-5">
               <PayslipView records={data.payrollRecords.filter((p) => p.employeeId === employeeId && p.status === 'published')} employeeName={session.name} />
+              <BonusSlipView records={(data.bonusRecords || []).filter((b) => b.employeeId === employeeId && b.status === 'published')} employeeName={session.name} />
             </div>
           ) : (
             <div className="space-y-5">
@@ -3933,6 +4028,15 @@ function AttendanceApp() {
                 onSaveDraft={savePayrollDraft}
                 onPublish={publishPayroll}
                 onUpdateWage={updateEmployeeProfile}
+                isDesktop={isDesktop}
+              />
+              <BonusAdminTab
+                employeeAccounts={employeeAccounts}
+                bonusRecords={data.bonusRecords || []}
+                tableReady={data.bonusTableReady !== false}
+                onSave={saveBonus}
+                onPublish={publishBonus}
+                onDelete={deleteBonus}
                 isDesktop={isDesktop}
               />
               <AdminCommuteExpenseClaimsTab
@@ -8889,6 +8993,7 @@ const HELP_STAFF = [
     items: [
       { q: 'パスワードを忘れました', a: 'ログイン画面の「パスワードをお忘れですか？」から再設定できます。うまくいかない場合は管理者に連絡してください。管理者が仮パスワードを再発行します。' },
       { q: '初めてログインするときの流れは', a: '管理者から届いた案内メールのURLを開き、メールアドレスと仮パスワードでログインします。続けてご自身のパスワードを設定し、ご登録情報（ふりがな・生年月日・連絡先・郵便番号・現住所・住民票の住所・配偶者の有無・世帯主・緊急連絡先・給与振込先の口座情報・マイナンバー）を入力すると利用開始です。いずれも必須のため、通帳とマイナンバーカードをお手元にご用意ください。' },
+      { q: '賞与明細はどこで見られますか', a: '「給与」タブの給与明細の下に「賞与明細」として表示されます。公開された分だけが並び、「印刷・PDF保存」からPDFとして保存できます。' },
       { q: '退職・産休・育休の手続きは', a: '「各種申請」タブの「各種手続き」から行います。退職の手続き・産前産後休業の手続き・育児休業の手続きの3つがあり、必要な内容を入力して提出すると管理者へ届きます。途中まででも「一時保存」で残せます。提出後は 確認中 → 対応中 → 完了 と進み、状況は労務タブの「進行中の手続き」でも確認できます。' },
       { q: '住所や氏名が変わりました', a: '画面右上のアイコンを押して「登録情報の閲覧・変更」を選び、「変更を申請」から変更内容を入力して申請してください。氏名・ふりがな・連絡先・住所・世帯・緊急連絡先・給与振込先の口座情報を申請できます。管理者が承認すると反映されます。生年月日・入職日・雇用形態などは申請できないため、管理者にご相談ください。' },
       { q: 'スマートフォンで使えますか', a: '使えます。ブラウザで同じURLを開いてログインしてください。画面はスマートフォン用に自動で切り替わります。ホーム画面に追加しておくとアプリのように使えます。パソコンでご覧の場合、画面右上の「PC表示」を押すとスマートフォン向けの表示に切り替えられます。' },
@@ -8906,7 +9011,7 @@ const HELP_ADMIN = [
       { q: '退職者の処理はどうしますか', a: 'スタッフの「詳細」を開き、基本タブの退職日を入力して保存します。退職日を入れたスタッフは、一覧の絞り込みで「在籍のみ」にすると非表示になります。アカウント自体は残るため、過去の勤怠や給与は参照できます。' },
       { q: 'ログインID（メールアドレス）を変えるには', a: 'スタッフ一覧の各行にあるメールのアイコンから変更できます（マスター管理者のみ）。新しいメールアドレスを入力すると、ログイン用のアドレスが切り替わります。パスワードは変わりません。連絡用メールアドレスも同時に変更するか、本人へお知らせメールを送るかを選べます。変更内容は監査ログに記録されます。' },
       { q: 'パスワードを再発行するには', a: 'スタッフ一覧の各行にある鍵のアイコンを押すと、仮パスワードを設定できます。設定した仮パスワードは本人に直接お伝えください。本人が次にログインした際、新しいパスワードの設定画面が表示されます。' },
-      { q: 'スタッフにメールが届くのはどんなときですか', a: 'アカウントの作成（案内メール）、ログインIDの変更（送信を選んだ場合）、年末調整の入力依頼、年末調整の差し戻し、給与明細の公開、ダッシュボードの「未提出の◯名にお知らせを送る」の6つです。月次勤怠の確定・差し戻し・確定の取り消し、交通費の承認・差し戻し・承認の取り消し、個人情報の変更申請の承認・却下、年末調整の承認は、スタッフ画面の「管理者からのお知らせ」にのみ表示され、メールは送られません。' },
+      { q: 'スタッフにメールが届くのはどんなときですか', a: 'アカウントの作成（案内メール）、ログインIDの変更（送信を選んだ場合）、年末調整の入力依頼、年末調整の差し戻し、給与明細の公開、賞与明細の公開、ダッシュボードの「未提出の◯名にお知らせを送る」の6つです。月次勤怠の確定・差し戻し・確定の取り消し、交通費の承認・差し戻し・承認の取り消し、個人情報の変更申請の承認・却下、年末調整の承認は、スタッフ画面の「管理者からのお知らせ」にのみ表示され、メールは送られません。' },
       { q: '通知メールの送信先を変えるには', a: '「勤怠」→「その他」→「管理者権限」の一番上にある「通知メールの送信先」で指定します。カンマ区切りで複数指定でき、未設定の場合はマスター管理者の連絡用メールアドレスに届きます。マスター管理者のみが設定できます。なお管理者宛のメールは個人情報の変更申請と年末調整のときだけ送られます。勤怠修正・休暇申請・実績報告などは、画面右上のベルのお知らせでご確認ください。' },
       { q: '管理者権限を与えるには', a: '「勤怠」→「その他」→「管理者権限」から設定します。タブ単位（勤怠・労務・人材・給与）でアクセス範囲を制限できます。マスター管理者のみが操作できます。' },
     ],
@@ -10051,6 +10156,396 @@ function printPayslip(p, employeeName) {
   win.document.close();
   win.focus();
   setTimeout(() => win.print(), 300);
+}
+
+// 管理者側：賞与明細の作成と公開
+const BONUS_DEFAULT_PAYMENTS = ['賞与'];
+const BONUS_DEFAULT_DEDUCTIONS = ['健康保険料', '厚生年金保険料', '雇用保険料', '所得税'];
+
+function BonusAdminTab({ employeeAccounts, bonusRecords = [], tableReady = true, onSave, onPublish, onDelete, isDesktop }) {
+  const now = new Date();
+  const [year, setYear] = useState(now.getFullYear());
+  const [seq, setSeq] = useState(now.getMonth() + 1 >= 10 || now.getMonth() + 1 <= 3 ? 2 : 1);
+  const [selectedId, setSelectedId] = useState('');
+  const [form, setForm] = useState(null);
+  const [saving, setSaving] = useState(false);
+
+  if (!tableReady) {
+    return (
+      <div className="rounded-2xl border border-rose-200 bg-rose-50 px-5 py-6">
+        <div className="flex items-center gap-2">
+          <AlertTriangle size={16} className="text-rose-600" />
+          <h2 className="text-[14px] font-bold text-rose-800">賞与明細の準備ができていません</h2>
+        </div>
+        <div className="mt-2 text-[12.5px] leading-relaxed text-rose-700">
+          データベースに賞与用のテーブルがありません。Supabase の SQL Editor で
+          <b> supabase/41_bonus_records.sql </b>
+          を実行してください。実行後、この画面を再読み込みすると使えるようになります。
+        </div>
+      </div>
+    );
+  }
+
+  const staff = employeeAccounts.filter((a) => !a.resignationDate);
+  const periodRecords = bonusRecords.filter((b) => b.year === year && b.seq === seq);
+  const byEmployee = {};
+  periodRecords.forEach((b) => { byEmployee[b.employeeId] = b; });
+
+  const openEditor = (employeeId) => {
+    const existing = byEmployee[employeeId];
+    setSelectedId(employeeId);
+    setForm(existing
+      ? {
+          title: existing.title || bonusDefaultTitle(year, seq),
+          paymentDate: existing.paymentDate || '',
+          paymentItems: existing.paymentItems.length ? existing.paymentItems : BONUS_DEFAULT_PAYMENTS.map((label) => ({ label, amount: '' })),
+          deductionItems: existing.deductionItems.length ? existing.deductionItems : BONUS_DEFAULT_DEDUCTIONS.map((label) => ({ label, amount: '' })),
+          notes: existing.notes || '',
+        }
+      : {
+          title: bonusDefaultTitle(year, seq),
+          paymentDate: '',
+          paymentItems: BONUS_DEFAULT_PAYMENTS.map((label) => ({ label, amount: '' })),
+          deductionItems: BONUS_DEFAULT_DEDUCTIONS.map((label) => ({ label, amount: '' })),
+          notes: '',
+        });
+  };
+  const close = () => { setSelectedId(''); setForm(null); };
+
+  const setItem = (group, i, key, value) => setForm((f) => {
+    const next = [...f[group]];
+    next[i] = { ...next[i], [key]: value };
+    return { ...f, [group]: next };
+  });
+  const addItem = (group) => setForm((f) => ({ ...f, [group]: [...f[group], { label: '', amount: '' }] }));
+  const removeItem = (group, i) => setForm((f) => ({ ...f, [group]: f[group].filter((_, idx) => idx !== i) }));
+
+  const cleanItems = (items) => (items || [])
+    .filter((it) => String(it.label || '').trim() || String(it.amount || '').trim())
+    .map((it) => ({ label: String(it.label || '').trim(), amount: Number(it.amount) || 0 }));
+
+  const paymentTotal = form ? sumItems(cleanItems(form.paymentItems)) : 0;
+  const deductionTotal = form ? sumItems(cleanItems(form.deductionItems)) : 0;
+  const netTotal = paymentTotal - deductionTotal;
+
+  const save = async () => {
+    setSaving(true);
+    const ok = await onSave({
+      employeeId: selectedId,
+      year,
+      seq,
+      title: form.title,
+      paymentDate: form.paymentDate || null,
+      paymentItems: cleanItems(form.paymentItems),
+      deductionItems: cleanItems(form.deductionItems),
+      totalAmount: netTotal,
+      notes: form.notes,
+    });
+    setSaving(false);
+    if (ok) close();
+  };
+
+  const publishAll = async () => {
+    const targets = periodRecords.filter((b) => b.status !== 'published');
+    if (targets.length === 0) return;
+    if (!window.confirm(`下書きの${targets.length}件を公開します。スタッフへお知らせとメールが届きます。よろしいですか？`)) return;
+    setSaving(true);
+    for (const b of targets) {
+      // eslint-disable-next-line no-await-in-loop
+      await onPublish(b.id);
+    }
+    setSaving(false);
+  };
+
+  const years = [now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1];
+
+  // 入力画面
+  if (form) {
+    const name = staff.find((a) => a.id === selectedId)?.name || '';
+    const existing = byEmployee[selectedId];
+    const itemRows = (group, title) => (
+      <div className="space-y-2">
+        <div className="text-[11.5px] font-bold text-slate-500">{title}</div>
+        {form[group].map((it, i) => (
+          <div key={i} className="flex items-center gap-2">
+            <input
+              value={it.label}
+              onChange={(e) => setItem(group, i, 'label', e.target.value)}
+              placeholder="項目名"
+              className="flex-1 min-w-0 box-border border border-slate-200 rounded-lg px-2.5 py-2 text-[13px]"
+            />
+            <input
+              type="number"
+              inputMode="numeric"
+              value={it.amount}
+              onChange={(e) => setItem(group, i, 'amount', e.target.value)}
+              placeholder="0"
+              className="w-28 shrink-0 box-border border border-slate-200 rounded-lg px-2.5 py-2 text-[13px] font-mono text-right"
+            />
+            <button onClick={() => removeItem(group, i)} className="shrink-0 text-slate-300 hover:text-rose-500">
+              <Trash2 size={15} />
+            </button>
+          </div>
+        ))}
+        <button onClick={() => addItem(group)} className="flex items-center gap-1 text-[12px] font-bold text-slate-500">
+          <Plus size={13} /> 項目を足す
+        </button>
+      </div>
+    );
+
+    return (
+      <div className="space-y-4">
+        <button onClick={close} className="flex items-center gap-1 text-[12.5px] font-bold text-slate-500 hover:text-slate-800">
+          <ChevronLeft size={14} /> 一覧へ戻る
+        </button>
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2 flex-wrap">
+            <Wallet size={15} className="text-slate-400" />
+            <h2 className="font-bold text-[13.5px]">{name} さんの賞与明細</h2>
+            {existing?.status === 'published' && (
+              <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10.5px] font-bold text-emerald-700">公開済み</span>
+            )}
+          </div>
+          <div className="px-5 py-4 space-y-4">
+            <div className={isDesktop ? 'grid grid-cols-2 gap-3' : 'space-y-3'}>
+              <Field label="名称">
+                <input
+                  value={form.title}
+                  onChange={(e) => setForm((f) => ({ ...f, title: e.target.value }))}
+                  className="w-full box-border border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]"
+                />
+              </Field>
+              <Field label="支給日">
+                <input
+                  type="date"
+                  value={form.paymentDate}
+                  onChange={(e) => setForm((f) => ({ ...f, paymentDate: e.target.value }))}
+                  style={{ WebkitAppearance: 'none', appearance: 'none' }}
+                  className="w-full box-border border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px] bg-white"
+                />
+              </Field>
+            </div>
+            {itemRows('paymentItems', '支給')}
+            {itemRows('deductionItems', '控除')}
+            <Field label="備考（明細に印刷されます）">
+              <textarea
+                value={form.notes}
+                onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))}
+                rows={2}
+                className="w-full box-border border border-slate-200 rounded-lg px-3 py-2 text-[13px] resize-none"
+              />
+            </Field>
+            <div className="rounded-xl bg-slate-50 px-4 py-3 space-y-1.5">
+              <Row label="支給合計" value={formatYen(paymentTotal)} />
+              <Row label="控除合計" value={formatYen(deductionTotal)} />
+              <div className="flex items-center justify-between pt-1.5 border-t border-slate-200">
+                <span className="text-[12.5px] font-bold text-slate-700">差引支給額</span>
+                <span className="font-mono text-[17px] font-bold text-slate-900">{formatYen(netTotal)}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-5 py-4 space-y-2">
+          <button
+            onClick={save}
+            disabled={saving}
+            className="w-full rounded-xl bg-amber-600 py-3 text-[14px] font-bold text-white disabled:bg-slate-200"
+          >
+            {saving ? '保存中…' : existing?.status === 'published' ? 'この内容で上書きする' : '下書きとして保存する'}
+          </button>
+          {existing?.status === 'published' && (
+            <div className="text-center text-[11px] text-slate-400">公開済みのため、保存するとスタッフの画面にもすぐ反映されます</div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // 一覧画面
+  const drafts = periodRecords.filter((b) => b.status !== 'published');
+  return (
+    <div className="space-y-5">
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2 flex-wrap">
+          <Wallet size={15} className="text-slate-400" />
+          <h2 className="font-bold text-[13.5px]">賞与明細</h2>
+          <select value={year} onChange={(e) => setYear(Number(e.target.value))} className="ml-auto border border-slate-200 rounded-lg px-2 py-1.5 text-[12.5px] bg-white">
+            {years.map((y) => <option key={y} value={y}>{y}年</option>)}
+          </select>
+          <select value={seq} onChange={(e) => setSeq(Number(e.target.value))} className="border border-slate-200 rounded-lg px-2 py-1.5 text-[12.5px] bg-white">
+            <option value={1}>夏季（第1回）</option>
+            <option value={2}>冬季（第2回）</option>
+            <option value={3}>第3回</option>
+          </select>
+        </div>
+        <div className="px-5 py-2.5 bg-slate-50 border-b border-slate-100 text-[11.5px] text-slate-500">
+          スタッフを選んで金額を入力し、下書き保存します。公開するとスタッフの「給与」タブに表示され、お知らせとメールが届きます。
+        </div>
+        {drafts.length > 0 && (
+          <div className="px-5 py-3 border-b border-slate-100 bg-amber-50 flex items-center gap-3 flex-wrap">
+            <div className="flex-1 min-w-[12rem] text-[12.5px] font-bold text-amber-900">下書きが{drafts.length}件あります</div>
+            <button
+              onClick={publishAll}
+              disabled={saving}
+              className="shrink-0 rounded-lg bg-amber-600 disabled:bg-slate-200 px-3.5 py-2 text-[12px] font-bold text-white"
+            >
+              {saving ? '公開中…' : `下書きの${drafts.length}件をまとめて公開する`}
+            </button>
+          </div>
+        )}
+        <div className="divide-y divide-slate-100">
+          {staff.length === 0 ? (
+            <div className="px-5 py-8 text-center text-[12.5px] text-slate-300">在籍中のスタッフがいません</div>
+          ) : staff.map((a) => {
+            const b = byEmployee[a.id];
+            return (
+              <div key={a.id} className="px-5 py-3 flex items-center gap-3 flex-wrap">
+                <span className="min-w-[7rem] flex-1 text-[13px] font-semibold text-slate-800">
+                  <EmployeeLink id={a.id} name={a.name} />
+                </span>
+                <span className="font-mono text-[13.5px] font-bold text-slate-700 w-28 text-right">
+                  {b ? formatYen(b.totalAmount) : '—'}
+                </span>
+                <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10.5px] font-bold ${
+                  !b ? 'bg-slate-100 text-slate-400' : b.status === 'published' ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'
+                }`}>
+                  {!b ? '未作成' : b.status === 'published' ? '公開済み' : '下書き'}
+                </span>
+                <button
+                  onClick={() => openEditor(a.id)}
+                  className="shrink-0 rounded-lg border border-slate-300 px-3 py-1.5 text-[12px] font-bold text-slate-600"
+                >
+                  {b ? '編集' : '作成'}
+                </button>
+                {b && b.status !== 'published' && (
+                  <button
+                    onClick={() => onPublish(b.id)}
+                    className="shrink-0 rounded-lg bg-emerald-600 px-3 py-1.5 text-[12px] font-bold text-white"
+                  >
+                    公開
+                  </button>
+                )}
+                {b && onDelete && (
+                  <button onClick={() => onDelete(b)} className="shrink-0 text-slate-300 hover:text-rose-500">
+                    <Trash2 size={15} />
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// 賞与明細の印刷・PDF保存
+function printBonusSlip(b, employeeName) {
+  const win = window.open('', '_blank', 'width=480,height=700');
+  if (!win) return;
+  const title = b.title || bonusDefaultTitle(b.year, b.seq);
+  const paymentTotal = sumItems(b.paymentItems || []);
+  const deductionTotal = sumItems(b.deductionItems || []);
+  const rowsHtml = (items) => (items || []).map((it) => `<tr><td class="label">${it.label || '（項目名なし）'}</td><td class="value">${formatYen(Number(it.amount) || 0)}</td></tr>`).join('');
+  const html = `<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><title>賞与明細 ${title}</title>
+<style>
+  body { font-family: -apple-system, "Hiragino Sans", sans-serif; padding: 32px; color: #1e293b; }
+  h1 { font-size: 18px; margin-bottom: 4px; }
+  .sub { color: #64748b; font-size: 12px; margin-bottom: 16px; }
+  h2 { font-size: 12.5px; color: #64748b; margin: 18px 0 4px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  td { padding: 6px 0; border-bottom: 1px solid #e2e8f0; }
+  td.label { color: #475569; }
+  td.value { text-align: right; font-family: monospace; }
+  .subtotal td { font-weight: bold; border-top: 1px solid #94a3b8; }
+  .total td { font-weight: bold; font-size: 16px; border-top: 2px solid #1e293b; border-bottom: none; padding-top: 12px; }
+  .note { margin-top: 24px; font-size: 10.5px; color: #94a3b8; }
+</style></head>
+<body>
+  <h1>賞与明細</h1>
+  <div class="sub">${employeeName} 様　／　${title}${b.paymentDate ? `　／　支給日 ${dateLabel(b.paymentDate)}` : ''}</div>
+  <h2>支給</h2>
+  <table>
+    ${rowsHtml(b.paymentItems)}
+    <tr class="subtotal"><td>支給合計</td><td class="value">${formatYen(paymentTotal)}</td></tr>
+  </table>
+  ${(b.deductionItems || []).length > 0 ? `<h2>控除</h2>
+  <table>
+    ${rowsHtml(b.deductionItems)}
+    <tr class="subtotal"><td>控除合計</td><td class="value">${formatYen(deductionTotal)}</td></tr>
+  </table>` : ''}
+  <table>
+    <tr class="total"><td>差引支給額</td><td class="value">${formatYen(b.totalAmount)}</td></tr>
+  </table>
+  ${b.notes ? `<div class="note">${b.notes}</div>` : ''}
+  <div class="note">※内容に不明点があれば、管理者へお問い合わせください。</div>
+</body></html>`;
+  win.document.write(html);
+  win.document.close();
+  win.focus();
+  win.print();
+}
+
+// スタッフ側：賞与明細の一覧
+function BonusSlipView({ records, employeeName }) {
+  const sorted = [...records].sort((a, b) => (a.year !== b.year ? b.year - a.year : b.seq - a.seq));
+  return (
+    <div className="space-y-4">
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-5 py-3.5">
+        <h2 className="font-bold text-[14px] text-slate-800 flex items-center gap-2"><Wallet size={16} className="text-slate-400" />賞与明細</h2>
+      </div>
+      {sorted.length === 0 ? (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-6 py-10 text-center text-[12.5px] text-slate-300">
+          公開されている賞与明細はまだありません
+        </div>
+      ) : (
+        <div className="grid gap-4 sm:grid-cols-2">
+          {sorted.map((b) => (
+            <div key={b.id} className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+              <div className="px-5 py-3.5 border-b border-slate-100 flex items-center justify-between gap-2">
+                <span className="font-bold text-[14px] text-slate-800">{b.title || bonusDefaultTitle(b.year, b.seq)}</span>
+                <span className="shrink-0 text-[10.5px] font-bold text-emerald-600 bg-emerald-50 px-2 py-1 rounded-full">公開済み</span>
+              </div>
+              <div className="px-5 py-4 space-y-2">
+                {b.paymentDate && <Row label="支給日" value={dateLabel(b.paymentDate)} />}
+
+                <div className="text-[11px] font-bold text-slate-400 pt-2">支給</div>
+                {(b.paymentItems || []).map((it, i) => <Row key={i} label={it.label || '項目'} value={formatYen(Number(it.amount) || 0)} />)}
+                <div className="flex items-center justify-between pt-1 border-t border-slate-100">
+                  <span className="text-[12px] font-bold text-slate-600">支給合計</span>
+                  <span className="font-mono font-bold text-slate-800">{formatYen(sumItems(b.paymentItems || []))}</span>
+                </div>
+
+                {(b.deductionItems || []).length > 0 && (
+                  <>
+                    <div className="text-[11px] font-bold text-slate-400 pt-2">控除</div>
+                    {b.deductionItems.map((it, i) => <Row key={i} label={it.label || '項目'} value={formatYen(Number(it.amount) || 0)} />)}
+                    <div className="flex items-center justify-between pt-1 border-t border-slate-100">
+                      <span className="text-[12px] font-bold text-slate-600">控除合計</span>
+                      <span className="font-mono font-bold text-slate-800">{formatYen(sumItems(b.deductionItems))}</span>
+                    </div>
+                  </>
+                )}
+
+                <div className="flex items-center justify-between pt-2 mt-2 border-t border-slate-100">
+                  <span className="text-[12.5px] font-bold text-slate-700">差引支給額</span>
+                  <span className="font-mono text-[18px] font-bold text-slate-900">{formatYen(b.totalAmount)}</span>
+                </div>
+                {b.notes && <div className="text-[11.5px] text-slate-500 pt-1">{b.notes}</div>}
+                <button
+                  onClick={() => printBonusSlip(b, employeeName)}
+                  className="w-full mt-2 py-2 rounded-lg border border-slate-200 text-[12px] font-bold text-slate-600 flex items-center justify-center gap-1.5"
+                >
+                  <Download size={13} /> 印刷・PDF保存
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function PayslipView({ records, employeeName }) {
