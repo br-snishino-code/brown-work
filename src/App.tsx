@@ -1412,7 +1412,19 @@ async function sendEmailBestEffort(toEmail, subject, text) {
 // シフト希望が届いたらGoogleスプレッドシートに反映（未設定でも申請処理自体は失敗させない）
 async function markNotificationRead(id) {
   try {
-    await supabase.from('notifications').update({ is_read: true }).eq('id', id);
+    const { error } = await supabase.from('notifications').update({ is_read: true }).eq('id', id);
+    if (error) console.error('既読処理に失敗しました', error);
+  } catch (e) {
+    console.error('既読処理に失敗しました', e);
+  }
+}
+
+// まとめて既読にする。1件ずつ更新すると遅いため、1回の更新で済ませる
+async function markNotificationsRead(ids) {
+  if (!ids || ids.length === 0) return;
+  try {
+    const { error } = await supabase.from('notifications').update({ is_read: true }).in('id', ids);
+    if (error) console.error('既読処理に失敗しました', error);
   } catch (e) {
     console.error('既読処理に失敗しました', e);
   }
@@ -3812,6 +3824,7 @@ function AttendanceApp() {
                 onOpenCorrection={(dateKey) => setCorrectionModal(dateKey)}
                 notifications={data.notifications.filter((n) => n.toEmployeeId === employeeId)}
                 onMarkNotificationRead={async (id) => { await markNotificationRead(id); await refreshData(); }}
+                onMarkAllNotificationsRead={async (ids) => { await markNotificationsRead(ids); await refreshData(); }}
                 schedulePatterns={schedulePatterns}
                 activePatternNo={activePatternNo}
                 onSetActivePattern={setActivePatternNo}
@@ -5745,7 +5758,7 @@ function AnnouncementComposerModal({ onClose, onSubmit }) {
 }
 
 // 管理者からのお知らせの全件一覧。月で絞り込める
-function NotificationsAllModal({ notifications, onMarkRead, onClose }) {
+function NotificationsAllModal({ notifications, onMarkRead, onMarkAllRead, onClose }) {
   const [monthFilter, setMonthFilter] = useState('all');
   const [unreadOnly, setUnreadOnly] = useState(false);
 
@@ -5755,11 +5768,13 @@ function NotificationsAllModal({ notifications, onMarkRead, onClose }) {
     .filter((n) => !unreadOnly || !n.isRead);
   const unreadCount = notifications.filter((n) => !n.isRead).length;
 
+  const [marking, setMarking] = useState(false);
   const markAll = async () => {
-    for (const n of notifications.filter((x) => !x.isRead)) {
-      // eslint-disable-next-line no-await-in-loop
-      await onMarkRead(n.id);
-    }
+    const ids = notifications.filter((x) => !x.isRead).map((x) => x.id);
+    if (ids.length === 0) return;
+    setMarking(true);
+    await onMarkAllRead(ids);
+    setMarking(false);
   };
 
   return (
@@ -5789,7 +5804,9 @@ function NotificationsAllModal({ notifications, onMarkRead, onClose }) {
             未読のみ
           </button>
           {unreadCount > 0 && (
-            <button onClick={markAll} className="ml-auto text-[12px] font-bold text-slate-500">すべて既読にする</button>
+            <button onClick={markAll} disabled={marking} className="ml-auto text-[12px] font-bold text-slate-500 disabled:text-slate-300">
+              {marking ? '処理中…' : 'すべて既読にする'}
+            </button>
           )}
         </div>
         <div className="flex-1 overflow-y-auto divide-y divide-slate-100">
@@ -5817,7 +5834,7 @@ function NotificationsAllModal({ notifications, onMarkRead, onClose }) {
   );
 }
 
-function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, historyDates, records, corrections, onOpenCorrection, notifications, onMarkNotificationRead, schedulePatterns = [], activePatternNo, onSetActivePattern, onSavePatterns, needsCommuteClaimReminder, commuteClaimTargetMonth, onGoToCommuteClaim, isDesktop }) {
+function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, historyDates, records, corrections, onOpenCorrection, notifications, onMarkNotificationRead, onMarkAllNotificationsRead, schedulePatterns = [], activePatternNo, onSetActivePattern, onSavePatterns, needsCommuteClaimReminder, commuteClaimTargetMonth, onGoToCommuteClaim, isDesktop }) {
   const status = computeDayStatus(todayRecord);
   const canClockIn = !todayRecord?.clockIn;
   const canClockOut = todayRecord?.clockIn && !todayRecord?.clockOut;
@@ -5981,6 +5998,7 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
         <NotificationsAllModal
           notifications={notifications || []}
           onMarkRead={onMarkNotificationRead}
+          onMarkAllRead={onMarkAllNotificationsRead}
           onClose={() => setNotifyAllOpen(false)}
         />
       )}
@@ -12601,15 +12619,6 @@ const PROFILE_READONLY_FIELDS = [
   { key: 'contractEnd', label: '契約終了日', type: 'date' },
 ];
 
-// 社会保険の加入状況（閲覧のみ）
-const PROFILE_INSURANCE_FIELDS = [
-  { key: 'healthInsuranceStatus', label: '健康保険' },
-  { key: 'healthInsuranceAcquiredDate', label: '　資格取得日', type: 'date' },
-  { key: 'pensionStatus', label: '厚生年金' },
-  { key: 'pensionAcquiredDate', label: '　資格取得日', type: 'date' },
-  { key: 'employmentInsuranceStatus', label: '雇用保険' },
-  { key: 'employmentInsuranceAcquiredDate', label: '　資格取得日', type: 'date' },
-];
 
 function ProfileRequestView({ session, requests, onSubmit }) {
   const [modalOpen, setModalOpen] = useState(false);
@@ -12729,29 +12738,6 @@ function ProfileRequestView({ session, requests, onSubmit }) {
         )}
         <div className="px-5 py-2.5 bg-slate-50 text-[10.5px] text-slate-400 border-t border-slate-100">
           家族・配偶者の情報の変更については管理者へ相談ください。
-        </div>
-      </div>
-
-      {/* 社会保険（閲覧のみ） */}
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-        <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
-          <ShieldCheck size={15} className="text-slate-400" />
-          <h2 className="font-bold text-[13.5px] text-slate-800">社会保険の加入状況</h2>
-        </div>
-        <div className="divide-y divide-slate-100">
-          {PROFILE_INSURANCE_FIELDS.map((f) => {
-            const raw = session[f.key] || '';
-            const value = raw && f.type === 'date' ? dateLabel(raw) : raw;
-            return (
-              <div key={f.key} className="px-5 py-2.5 flex items-center justify-between gap-3 text-[13px]">
-                <span className="text-slate-400 shrink-0 whitespace-pre">{f.label}</span>
-                <span className={`font-medium text-right break-all ${value === '加入' ? 'text-emerald-700' : 'text-slate-700'}`}>{value || '未設定'}</span>
-              </div>
-            );
-          })}
-        </div>
-        <div className="px-5 py-2.5 bg-slate-50 text-[10.5px] text-slate-400 border-t border-slate-100">
-          加入・喪失の手続きは会社が行います。内容に相違があるときは管理者へご連絡ください。
         </div>
       </div>
 
