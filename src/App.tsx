@@ -11167,6 +11167,10 @@ function AdminMonthlyConfirmTab({ confirmations, accounts = [], commuteClaims = 
   const [comment, setComment] = useState({});
   const [running, setRunning] = useState(false);
   const setMemo = (id, v) => setComment((prev) => ({ ...prev, [id]: v }));
+  // 確定済み・差し戻しの絞り込み（過去分も取り消せるようにするため）
+  const [doneMonth, setDoneMonth] = useState('all');
+  const [doneName, setDoneName] = useState('');
+  const [doneLimit, setDoneLimit] = useState(20);
 
   // 管理者・マスター管理者本人の申請は、管理者による1次確認を挟まず
   // マスター管理者の承認のみで確定させる
@@ -11179,7 +11183,14 @@ function AdminMonthlyConfirmTab({ confirmations, accounts = [], commuteClaims = 
   const waitingMaster = confirmations.filter(
     (c) => c.status === 'admin_approved' || (c.status === 'pending' && isAdminSubmitter(c))
   );
-  const others = confirmations.filter((c) => c.status === 'confirmed' || c.status === 'rejected').slice(0, 20);
+  const doneAll = confirmations
+    .filter((c) => c.status === 'confirmed' || c.status === 'rejected')
+    .sort((a, b) => String(b.targetMonth || '').localeCompare(String(a.targetMonth || '')));
+  const doneMonths = Array.from(new Set(doneAll.map((c) => c.targetMonth).filter(Boolean)));
+  const doneFiltered = doneAll
+    .filter((c) => doneMonth === 'all' || c.targetMonth === doneMonth)
+    .filter((c) => !doneName.trim() || (c.employeeName || '').includes(doneName.trim()));
+  const others = doneFiltered.slice(0, doneLimit);
 
   const decide = async (id, stage, decision) => {
     setRunning(true);
@@ -11288,19 +11299,21 @@ function AdminMonthlyConfirmTab({ confirmations, accounts = [], commuteClaims = 
     </div>
   );
 
-  const renderSection = ({ title, note, list, stage }) => (
+  const renderSection = ({ title, note, list, stage, total, filter, more }) => (
     <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
       <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
         <CheckCircle2 size={15} className="text-slate-400" />
         <h2 className="font-bold text-[13.5px]">{title}</h2>
-        {list.length > 0 && <span className="ml-auto text-[10.5px] font-bold text-white bg-amber-600 rounded-full px-2 py-0.5">{list.length}件</span>}
+        {(total ?? list.length) > 0 && <span className="ml-auto text-[10.5px] font-bold text-white bg-amber-600 rounded-full px-2 py-0.5">{total ?? list.length}件</span>}
       </div>
       {note && <div className="px-5 py-2 bg-slate-50 border-b border-slate-100 text-[11.5px] text-slate-500">{note}</div>}
+      {filter && <div className="px-5 py-2.5 border-b border-slate-100">{filter}</div>}
       {list.length === 0 ? (
         <div className="px-5 py-8 text-center text-[12.5px] text-slate-300">対象はありません</div>
       ) : (
         <div>{list.map((c) => renderCard(c, stage))}</div>
       )}
+      {more}
     </div>
   );
 
@@ -11312,7 +11325,41 @@ function AdminMonthlyConfirmTab({ confirmations, accounts = [], commuteClaims = 
       {renderSection({ title: isMasterAdmin ? 'あなたの最終承認待ち' : 'マスター管理者の最終承認待ち', note: isMasterAdmin
           ? '管理者が1次確認を済ませたもの、および管理者ご本人の申請です。承認すると勤怠が確定し、その月の給与計算に進めます。'
           : '管理者の確認が済んだもの、および管理者ご本人の申請です。マスター管理者の承認をお待ちください。', list: waitingMaster, stage: isMasterAdmin ? 'master' : null })}
-      {renderSection({ title: "確定済み・差し戻し（直近20件）", note: isMasterAdmin ? '確定後に修正が必要になった場合は、「確定を取り消す」で差し戻しに戻せます。' : '確定の取り消しはマスター管理者のみが行えます。', list: others, stage: null })}
+      {renderSection({
+        title: '確定済み・差し戻し',
+        note: isMasterAdmin ? '確定後に修正が必要になった場合は、「確定を取り消す」で差し戻しに戻せます。過去の月も対象月で絞り込めば取り消せます。' : '確定の取り消しはマスター管理者のみが行えます。',
+        list: others,
+        stage: null,
+        total: doneFiltered.length,
+        filter: (
+          <div className="flex items-center gap-2 flex-wrap">
+            <select
+              value={doneMonth}
+              onChange={(e) => { setDoneMonth(e.target.value); setDoneLimit(20); }}
+              className="border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white"
+            >
+              <option value="all">すべての月</option>
+              {doneMonths.map((m) => (
+                <option key={m} value={m}>{monthKeyLabel(m)}分</option>
+              ))}
+            </select>
+            <input
+              value={doneName}
+              onChange={(e) => { setDoneName(e.target.value); setDoneLimit(20); }}
+              placeholder="氏名で絞り込む"
+              className="flex-1 min-w-[8rem] border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px]"
+            />
+          </div>
+        ),
+        more: doneFiltered.length > others.length ? (
+          <button
+            onClick={() => setDoneLimit((n) => n + 40)}
+            className="w-full py-3 text-[12.5px] font-bold text-slate-500 border-t border-slate-100"
+          >
+            さらに表示（残り{doneFiltered.length - others.length}件）
+          </button>
+        ) : null,
+      })}
     </div>
   );
 }
