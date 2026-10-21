@@ -3462,49 +3462,6 @@ function AttendanceApp() {
   // 管理者は「管理画面」と「自分の画面（打刻・申請）」を切り替えて使う
   const isAdminRole = session.role === 'admin' || session.role === 'master_admin';
   const showStaffScreens = !isAdminRole || personalMode;
-  const pendingCorrectionCount = data.corrections.filter((c) => c.status === 'pending').length;
-  const pendingLeaveCount = data.leaveRequests.filter((l) => l.status === 'pending').length;
-  const pendingPerformanceCount = data.performanceReports.filter((r) => r.status === 'pending').length;
-  const missingPunchCount = employeeAccounts.reduce((sum, acc) => {
-    const recs = data.records[acc.id] || {};
-    return sum + Object.keys(recs).filter((k) => k !== today && recs[k]?.clockIn && !recs[k]?.clockOut).length;
-  }, 0);
-  // 遅刻・早出などで承認待ちになっている出勤・退勤（それぞれ1件として数える）
-  const clockInApprovalCount = employeeAccounts.reduce((sum, acc) => {
-    const recs = data.records[acc.id] || {};
-    return sum + Object.values(recs).reduce(
-      (n, r) => n + (r?.clockInApproval === 'pending' ? 1 : 0) + (r?.clockOutApproval === 'pending' ? 1 : 0),
-      0
-    );
-  }, 0);
-  // 月次勤怠の確定：自分が処理すべき件数（管理者は1次、マスター管理者は両方）
-  const monthlyConfirmPendingCount = (data.monthlyConfirmations || []).filter((c) => {
-    const submitterRole = data.accounts.find((a) => a.id === c.employeeId)?.role;
-    const bySelfAdmin = submitterRole === 'admin' || submitterRole === 'master_admin';
-    if (c.status === 'pending') return session.role === 'master_admin' ? true : !bySelfAdmin;
-    if (c.status === 'admin_approved') return session.role === 'master_admin';
-    return false;
-  }).length;
-
-  // 「要対応」を押したとき、未処理が1種類だけならその画面へ直接移動する
-  const alertTargets = [
-    { tab: 'requests', count: pendingCorrectionCount + missingPunchCount },
-    { tab: 'leave', count: pendingLeaveCount },
-    { tab: 'performance', count: pendingPerformanceCount },
-    { tab: 'monthlyconfirm', count: monthlyConfirmPendingCount },
-    { tab: 'attendance', count: clockInApprovalCount },
-  ].filter((t) => t.count > 0);
-  const alertCount = alertTargets.reduce((sum, t) => sum + t.count, 0);
-  const ADMIN_TAB_LABEL = { requests: '勤怠修正', leave: '休暇申請', performance: '実績報告', monthlyconfirm: '月次確定', attendance: '勤怠一覧', dashboard: 'ダッシュボード' };
-  const alertHint = alertTargets.length === 1
-    ? `${ADMIN_TAB_LABEL[alertTargets[0].tab]}を開く`
-    : '要対応の一覧（ダッシュボード）を開く';
-  const openAlertTarget = () => {
-    setTopTab('attendance');
-    setPersonalMode(false);
-    setPendingAdminTab(alertTargets.length === 1 ? alertTargets[0].tab : 'dashboard');
-  };
-
   // 各種申請（スタッフ画面）の未提出の目印
   const myMonthlyConfirm = (data.monthlyConfirmations || []).find(
     (c) => c.employeeId === employeeId && c.targetMonth === commuteClaimTargetMonthKey
@@ -3559,9 +3516,6 @@ function AttendanceApp() {
             session={session}
             personalMode={personalMode}
             setPersonalMode={setPersonalMode}
-            alertCount={alertCount}
-            alertHint={alertHint}
-            onAlertClick={openAlertTarget}
             onLogout={handleLogout}
             viewMode={viewMode}
             onToggleViewMode={() => setViewMode((v) => (v === 'desktop' ? 'mobile' : 'desktop'))}
@@ -4898,10 +4852,10 @@ function ResetPasswordRecoveryScreen({ toast, onDone }) {
   );
 }
 
-// 上部バー。タブ・要対応・表示モードの切り替え・利用者メニューを1段にまとめる。
+// 上部バー。タブ・表示モードの切り替え・利用者メニューを1段にまとめる。
 function GlobalTopTabs({
   topTab, setTopTab, session, personalMode, setPersonalMode,
-  alertCount = 0, alertHint = '要対応の一覧を開く', onAlertClick, onLogout, viewMode, onToggleViewMode,
+  onLogout, viewMode, onToggleViewMode,
   cloudStatusLabel, cloudStatusClass,
   staffMode = false, requestItems = [], requestBadges = {}, onSelectRequest, wide = false,
 }) {
@@ -5003,17 +4957,6 @@ function GlobalTopTabs({
             ))}
           </div>
 
-          {isAdminRole && alertCount > 0 && (
-            <button
-              onClick={onAlertClick}
-              title={alertHint}
-              className="hidden sm:flex items-center gap-1.5 shrink-0 rounded-lg bg-amber-600 hover:bg-amber-500 transition-colors px-2.5 py-1.5 text-[11px] font-bold text-white"
-            >
-              <Bell size={13} />
-              要対応 {alertCount}件
-            </button>
-          )}
-
           {showToggle && <div className="hidden sm:block shrink-0">{modeToggle(false)}</div>}
 
           <div ref={menuRef} className="relative shrink-0">
@@ -5057,18 +5000,8 @@ function GlobalTopTabs({
           </div>
         </div>
 
-        {(showToggle || (isAdminRole && alertCount > 0)) && (
-          <div className="sm:hidden pb-2 flex items-center gap-2">
-            {showToggle && <div className="flex-1">{modeToggle(true)}</div>}
-            {isAdminRole && alertCount > 0 && (
-              <button
-                onClick={onAlertClick}
-                className="shrink-0 flex items-center gap-1.5 rounded-lg bg-amber-600 px-2.5 py-1.5 text-[11px] font-bold text-white"
-              >
-                <Bell size={13} /> {alertCount}
-              </button>
-            )}
-          </div>
+        {showToggle && (
+          <div className="sm:hidden pb-2">{modeToggle(true)}</div>
         )}
       </div>
 
