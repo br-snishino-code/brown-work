@@ -12342,7 +12342,18 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
       };
     });
 
-  const escapeCsv = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+  // CSVの1項目を安全な形にする。
+  // = + - @ などで始まる文字列は、ExcelやGoogleスプレッドシートが
+  // 「数式」として実行してしまう（CSVインジェクション）。
+  // スタッフ名などの自由入力がそのまま数式になるのを防ぐため、
+  // 先頭にシングルクォートを足して文字列として扱わせる。
+  const escapeCsv = (value) => {
+    let text = String(value ?? '');
+    // ただの数値（-5 など）はそのまま。数式になりうるものだけを文字列化する
+    const isPlainNumber = /^-?\d+(\.\d+)?$/.test(text);
+    if (!isPlainNumber && /^[=+\-@\t\r]/.test(text)) text = `'${text}`;
+    return `"${text.replace(/"/g, '""')}"`;
+  };
   const exportCsv = () => {
     const header = ['スタッフ名','日付','出勤','実打刻','出勤区分','退勤','実打刻','退勤区分','休憩(分)','実働','残業','遅刻(分)','早退(分)','状態'];
     const body = rows.map((r) => [r.employeeName,r.date,r.clockIn,r.clockInActual,r.clockInStatusLabel,r.clockOut,r.clockOutActual,r.clockOutStatusLabel,r.breakMin,minutesToHHMM(r.workedMin),minutesToHHMM(r.overtimeMin),r.lateMin,r.earlyLeaveMin,r.status]);
