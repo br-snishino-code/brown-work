@@ -3625,10 +3625,12 @@ function AttendanceApp() {
                 onOpen={() => setTopTab('hr')}
               />
             )}
-            {/* 労務タブは閲覧のみ。お知らせの配信・削除は管理画面から行う */}
+            {/* 配信・削除のボタンは管理画面のときだけ。スタッフ画面では閲覧のみ */}
             <AnnouncementsView
               announcements={data.announcements}
-              isAdmin={false}
+              isAdmin={!showStaffScreens && (session.role === 'admin' || session.role === 'master_admin')}
+              onSubmit={submitAnnouncement}
+              onDelete={deleteAnnouncement}
               onGetFileUrl={getAnnouncementFileUrl}
               isDesktop={isDesktop}
             />
@@ -3818,9 +3820,6 @@ function AttendanceApp() {
             onUpdateAdminAccess={updateAdminAccess}
             onSaveAdminNotifyEmail={saveAdminNotifyEmail}
             onSaveGroupFormats={saveGroupFormats}
-            onSubmitAnnouncement={submitAnnouncement}
-            onDeleteAnnouncement={deleteAnnouncement}
-            onGetAnnouncementFileUrl={getAnnouncementFileUrl}
             onChangeLoginEmail={handleChangeLoginEmail}
             onDecideMonthlyConfirm={decideMonthlyAttendanceConfirmation}
             onCancelMonthlyConfirm={cancelMonthlyAttendanceConfirmation}
@@ -8061,7 +8060,7 @@ const HELP_ADMIN = [
   {
     category: 'お知らせ・その他',
     items: [
-      { q: 'お知らせを投稿するには', a: '管理画面の「その他」→「お知らせ配信」から、カテゴリ・タイトル・本文を入力して投稿します。ファイルの添付もできます。重要なものは固定表示にすると一番上に表示されます。投稿したお知らせは、スタッフの「労務」タブに表示されます。' },
+      { q: 'お知らせを投稿するには', a: '管理画面の「労務」タブ上部にある投稿フォームから、カテゴリ・タイトル・本文を入力して投稿します。ファイルの添付もできます。重要なものは固定表示にすると一番上に表示されます。スタッフ画面に切り替えているときは投稿ボタンは出ません。' },
       { q: 'データのバックアップを取るには', a: '「勤怠」→「スタッフ一覧」の右上にある「データバックアップ」を押すと、全データがExcelファイルでダウンロードされます。マスター管理者のみ利用できます。月1回を目安に実行してください。マイナンバーを含むため、保管場所には十分ご注意ください。' },
       { q: '監査ログとは何ですか', a: '誰がいつどの操作をしたかの記録です。「勤怠」→「その他」→「監査ログ」で確認できます。承認・却下・アカウント操作などが記録されます。' },
       { q: '「同期エラー」と表示されました', a: '通信が一時的に不安定な場合に表示されます。画面を再読み込み（Ctrl + Shift + R）すると復帰することが多いです。繰り返し発生する場合は開発者にご相談ください。' },
@@ -9616,11 +9615,10 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
     {
       key: 'staff-group',
       label: 'スタッフ管理',
-      tabs: isMasterAdmin ? ['accounts', 'announce', 'groupleave', 'eoincentive', 'groupformats', 'auditlog', 'adminperms', 'resignreasons'] : ['accounts', 'announce', 'groupleave', 'eoincentive', 'auditlog'],
+      tabs: isMasterAdmin ? ['accounts', 'groupleave', 'eoincentive', 'groupformats', 'auditlog', 'adminperms', 'resignreasons'] : ['accounts', 'groupleave', 'eoincentive', 'auditlog'],
       items: isMasterAdmin
         ? [
             { tab: 'accounts', label: 'スタッフ一覧・登録', sub: '入退職日・有休管理' },
-            { tab: 'announce', label: 'お知らせ配信', sub: '労務タブへの掲示・ファイル添付' },
             { tab: 'groupleave', label: '出勤規定日数設定', sub: 'グループ別・月別日数' },
             { tab: 'eoincentive', label: 'eo業務インセンティブ', sub: '新規実績・既存実績・支給額' },
             { tab: 'groupformats', label: '部署ごとの入力フォーマット', sub: 'シフト希望・実績入力の形' },
@@ -9630,7 +9628,6 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
           ]
         : [
             { tab: 'accounts', label: 'スタッフ一覧・登録', sub: '入退職日・有休管理' },
-            { tab: 'announce', label: 'お知らせ配信', sub: '労務タブへの掲示・ファイル添付' },
             { tab: 'groupleave', label: '出勤規定日数設定', sub: 'グループ別・月別日数' },
             { tab: 'eoincentive', label: 'eo業務インセンティブ', sub: '新規実績・既存実績・支給額' },
             { tab: 'auditlog', label: '監査ログ', sub: '承認・操作の履歴' },
@@ -9717,7 +9714,7 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
   );
 }
 
-function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAdminTab = null, onConsumeRequestedAdminTab, onDecide, onDecideLeave, onDecidePerformance, onDecideCommute, onNotifyEmployee, onSaveShiftPeriod, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onSaveGroupFormats, onSubmitAnnouncement, onDeleteAnnouncement, onGetAnnouncementFileUrl, onChangeLoginEmail, onDecideMonthlyConfirm, onCancelMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
+function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAdminTab = null, onConsumeRequestedAdminTab, onDecide, onDecideLeave, onDecidePerformance, onDecideCommute, onNotifyEmployee, onSaveShiftPeriod, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onSaveGroupFormats, onChangeLoginEmail, onDecideMonthlyConfirm, onCancelMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
   const [tab, setTab] = useState('dashboard'); // dashboard | attendance | requests | leave | performance | accounts
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
@@ -10105,17 +10102,6 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
 
       {tab === 'resignreasons' && isMasterAdmin && (
         <ResignationReasonSettings reasons={data.resignationReasons} onRefresh={onRefresh} isDesktop={isDesktop} />
-      )}
-
-      {tab === 'announce' && (
-        <AnnouncementsView
-          announcements={data.announcements}
-          isAdmin
-          onSubmit={onSubmitAnnouncement}
-          onDelete={onDeleteAnnouncement}
-          onGetFileUrl={onGetAnnouncementFileUrl}
-          isDesktop={isDesktop}
-        />
       )}
 
       {tab === 'groupformats' && isMasterAdmin && (
