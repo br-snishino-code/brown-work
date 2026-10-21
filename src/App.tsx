@@ -5209,7 +5209,8 @@ function ShiftRequestSection({ session, period, request, onSubmit, formatKey = '
   const renderDay = (d) => {
     const picked = answers[d.key];
     const kind = shiftAnswerKind(picked);
-    const isRequest = requestDays.has(d.key);
+    // 活動場所を入力する型では、出勤依頼日（★）の印はつけない
+    const isRequest = !isPlaceFormat && requestDays.has(d.key);
     return (
       <div
         key={d.key}
@@ -5279,8 +5280,7 @@ function ShiftRequestSection({ session, period, request, onSubmit, formatKey = '
             {isPlaceFormat ? (
               <>
                 出勤 ＝ 出勤できる日。活動場所を入力してください<br />
-                × ＝ 希望休　／　有給 ＝ SVへ報告済みの有給<br />
-                <span className="font-bold text-amber-700">★</span> の日は出勤依頼日です（土日祝）
+                × ＝ 希望休　／　有給 ＝ SVへ報告済みの有給
               </>
             ) : (
               <>
