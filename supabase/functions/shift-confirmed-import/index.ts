@@ -30,7 +30,11 @@
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
-const EXPORT_KEY = Deno.env.get('SHIFT_EXPORT_KEY') || '';
+// この関数は確定シフトを「書き込む」ため、読み取り専用の
+// shift-requests-export とは別の合言葉を使えるようにしてある。
+// SHIFT_IMPORT_KEY を設定していればそちらを使い、
+// 設定していなければ従来どおり SHIFT_EXPORT_KEY を使う（互換のため）。
+const EXPORT_KEY = Deno.env.get('SHIFT_IMPORT_KEY') || Deno.env.get('SHIFT_EXPORT_KEY') || '';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -55,6 +59,71 @@ const rest = (path: string, init: RequestInit = {}) =>
       ...(init.headers || {}),
     },
   });
+
+// ============================================================
+// 合言葉の照合
+// ============================================================
+// 1. 長さによらず同じ時間で比べる（合っている文字数を
+//    応答時間から推測されないようにするため）。
+// 2. 同じ相手が短時間に何度も間違えたら遮断する。
+// 3. 間違いは api_access_failures に記録し、管理者が見られるようにする。
+const FAIL_WINDOW_MINUTES = 15;
+const FAIL_LIMIT = 20;
+
+async function constantTimeEqual(a: string, b: string): Promise<boolean> {
+  const enc = new TextEncoder();
+  const keyData = crypto.getRandomValues(new Uint8Array(32));
+  const key = await crypto.subtle.importKey(
+    'raw', keyData, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
+  );
+  const [ha, hb] = await Promise.all([
+    crypto.subtle.sign('HMAC', key, enc.encode(a)),
+    crypto.subtle.sign('HMAC', key, enc.encode(b)),
+  ]);
+  const va = new Uint8Array(ha);
+  const vb = new Uint8Array(hb);
+  let diff = 0;
+  for (let i = 0; i < va.length; i++) diff |= va[i] ^ vb[i];
+  return diff === 0;
+}
+
+const clientIp = (req: Request) =>
+  (req.headers.get('x-forwarded-for') || '').split(',')[0].trim() || 'unknown';
+
+async function checkApiKey(req: Request, expected: string): Promise<Response | null> {
+  const ip = clientIp(req);
+  const since = new Date(Date.now() - FAIL_WINDOW_MINUTES * 60_000).toISOString();
+
+  try {
+    const res = await rest(
+      `api_access_failures?select=id&client_ip=eq.${encodeURIComponent(ip)}` +
+        `&occurred_at=gte.${since}&limit=${FAIL_LIMIT + 1}`,
+    );
+    const rows = await res.json().catch(() => []);
+    if (Array.isArray(rows) && rows.length > FAIL_LIMIT) {
+      return json(
+        { error: `合言葉の間違いが続いたため、${FAIL_WINDOW_MINUTES}分ほどお待ちください` },
+        429,
+      );
+    }
+  } catch (_) { /* 記録が使えなくても本来の処理は続ける */ }
+
+  const given = req.headers.get('x-api-key') || '';
+  if (await constantTimeEqual(given, expected)) return null;
+
+  try {
+    await rest('api_access_failures', {
+      method: 'POST',
+      body: JSON.stringify({
+        function_name: 'shift-confirmed-import',
+        client_ip: ip,
+        reason: given ? '合言葉が違う' : '合言葉が無い',
+      }),
+    });
+  } catch (_) { /* 記録に失敗しても拒否はする */ }
+
+  return json({ error: '合言葉が違います' }, 401);
+}
 
 // 氏名の表記ゆれを吸収する。全角空白・前後の空白・連続した空白をそろえる
 const normalizeName = (value: string) =>
@@ -95,11 +164,10 @@ Deno.serve(async (req) => {
 
   try {
     if (!EXPORT_KEY) {
-      return json({ error: 'SHIFT_EXPORT_KEY が設定されていません' }, 500);
+      return json({ error: 'SHIFT_EXPORT_KEY（または SHIFT_IMPORT_KEY）が設定されていません' }, 500);
     }
-    if ((req.headers.get('x-api-key') || '') !== EXPORT_KEY) {
-      return json({ error: '合言葉が違います' }, 401);
-    }
+    const denied = await checkApiKey(req, EXPORT_KEY);
+    if (denied) return denied;
     if (req.method !== 'POST') {
       return json({ error: 'POST で呼び出してください' }, 405);
     }

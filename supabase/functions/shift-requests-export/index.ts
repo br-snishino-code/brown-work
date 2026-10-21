@@ -25,6 +25,87 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-api-key',
 };
 
+// ============================================================
+// 合言葉の照合（共通）
+// ============================================================
+// 1. 文字列を1文字ずつ比べると、合っている文字数によって
+//    返ってくるまでの時間がわずかに変わる。それを手がかりに
+//    合言葉を1文字ずつ当てられないよう、長さによらず
+//    同じ時間で比べる（両方をHMACにしてから比べる）。
+// 2. 同じ相手が短時間に何度も間違えたら遮断する（総当たり対策）。
+// 3. 間違いは api_access_failures に記録して、管理者が見られるようにする。
+const FAIL_WINDOW_MINUTES = 15;
+const FAIL_LIMIT = 20;
+
+async function constantTimeEqual(a: string, b: string): Promise<boolean> {
+  const enc = new TextEncoder();
+  const keyData = crypto.getRandomValues(new Uint8Array(32));
+  const key = await crypto.subtle.importKey(
+    'raw', keyData, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
+  );
+  const [ha, hb] = await Promise.all([
+    crypto.subtle.sign('HMAC', key, enc.encode(a)),
+    crypto.subtle.sign('HMAC', key, enc.encode(b)),
+  ]);
+  const va = new Uint8Array(ha);
+  const vb = new Uint8Array(hb);
+  let diff = 0;
+  for (let i = 0; i < va.length; i++) diff |= va[i] ^ vb[i];
+  return diff === 0;
+}
+
+const clientIp = (req: Request) =>
+  (req.headers.get('x-forwarded-for') || '').split(',')[0].trim() || 'unknown';
+
+// 失敗の記録と遮断の判定。合言葉が合っていれば null、
+// 合っていなければ返すべき Response を返す。
+async function checkApiKey(
+  req: Request,
+  functionName: string,
+  expected: string,
+): Promise<Response | null> {
+  const ip = clientIp(req);
+  const headers = {
+    apikey: SERVICE_ROLE_KEY,
+    Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
+    'Content-Type': 'application/json',
+  };
+  const since = new Date(Date.now() - FAIL_WINDOW_MINUTES * 60_000).toISOString();
+
+  // 直近の失敗回数を数える（数えられなくても処理は止めない）
+  try {
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/api_access_failures` +
+        `?select=id&client_ip=eq.${encodeURIComponent(ip)}&occurred_at=gte.${since}&limit=${FAIL_LIMIT + 1}`,
+      { headers },
+    );
+    const rows = await res.json().catch(() => []);
+    if (Array.isArray(rows) && rows.length > FAIL_LIMIT) {
+      return json(
+        { error: `合言葉の間違いが続いたため、${FAIL_WINDOW_MINUTES}分ほどお待ちください` },
+        429,
+      );
+    }
+  } catch (_) { /* 記録が使えなくても本来の処理は続ける */ }
+
+  const given = req.headers.get('x-api-key') || '';
+  if (await constantTimeEqual(given, expected)) return null;
+
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/api_access_failures`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        function_name: functionName,
+        client_ip: ip,
+        reason: given ? '合言葉が違う' : '合言葉が無い',
+      }),
+    });
+  } catch (_) { /* 記録に失敗しても拒否はする */ }
+
+  return json({ error: '合言葉が違います' }, 401);
+}
+
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), {
     status,
@@ -51,10 +132,8 @@ Deno.serve(async (req) => {
     if (!EXPORT_KEY) {
       return json({ error: 'SHIFT_EXPORT_KEY が設定されていません' }, 500);
     }
-    const key = req.headers.get('x-api-key') || '';
-    if (key !== EXPORT_KEY) {
-      return json({ error: '合言葉が違います' }, 401);
-    }
+    const denied = await checkApiKey(req, 'shift-requests-export', EXPORT_KEY);
+    if (denied) return denied;
 
     const url = new URL(req.url);
     const month = url.searchParams.get('month') || '';
