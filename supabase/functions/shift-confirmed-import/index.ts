@@ -17,7 +17,8 @@
 //
 // セルの中身の読み方：
 //   空欄                     → 休み
-//   記号だけ（●○★☆△×など） → 休み
+//   記号だけ（●○★☆△×など） → 休み（文字が1つも入っていないセル）
+//   調整中・未定             → 登録しない（アプリ上は「未定」と表示）
 //   有給を含む               → 有給
 //   それ以外（店舗名など）    → 出勤。その文字列を活動場所とする
 //
@@ -64,17 +65,30 @@ const normalizeName = (value: string) =>
 
 type Cell = { kind: 'work' | 'off' | 'paid'; place: string };
 
-// 記号だけのセル。確定シフトでは、出勤する日には活動場所（店舗名）が書かれるため、
-// 記号だけの日（●○★☆△×など）はすべて休みとして扱う。
+// 出勤かどうかは「活動場所が書かれているか」で決める。
+// 確定シフトでは、出勤する日に店舗名などを書く運用のため、
+// 文字（ひらがな・カタカナ・漢字・英字・数字）が1つも入っていないセルは休みとする。
+//   ● ○ ★ ☆ △ × などの記号だけの日 … 休み
 //   ● … シフト希望では出勤可能だが、調整の結果その日は休みになった
-const SYMBOL_ONLY = /^[●○★☆◎▲△■□◇◆♦×✕✖╳xX*＊\-ー—－~〜\s]+$/;
+const HAS_LETTER = /[\p{L}\p{N}]/u;
 
-// セルの文字から、出勤・休み・有給と活動場所を決める
-function readCell(raw: unknown): Cell {
-  const text = String(raw ?? '').replace(/　/g, ' ').trim();
+// 休みを表す言葉。文字が入っていても休みとして扱う
+const OFF_WORDS = ['休', '公休', '休み', '欠勤', '休日'];
+
+// まだ決まっていない日。休みでも出勤でもないため、登録せずに飛ばす
+const UNDECIDED_WORDS = ['調整中', '未定', '確認中', '検討中', 'TBD'];
+
+// セルの文字から、出勤・休み・有給と活動場所を決める。
+// null を返した日は「未定」として、何も登録しない。
+function readCell(raw: unknown): Cell | null {
+  const text = String(raw ?? '').replace(/\u3000/g, ' ').trim();
   if (!text) return { kind: 'off', place: '' };
   if (text.includes('有給') || text.includes('有休')) return { kind: 'paid', place: '' };
-  if (text === '休' || text === '公休' || SYMBOL_ONLY.test(text)) return { kind: 'off', place: '' };
+  // 記号だけのセル（● ○ ★ ☆ △ × など）は休み。長音記号だけのセルも含める
+  const core = text.replace(/[^\p{L}\p{N}]/gu, '').replace(/[ーｰ―]/g, '');
+  if (!core || !HAS_LETTER.test(text)) return { kind: 'off', place: '' };
+  if (UNDECIDED_WORDS.indexOf(core) >= 0) return null;
+  if (OFF_WORDS.indexOf(core) >= 0) return { kind: 'off', place: '' };
   return { kind: 'work', place: text };
 }
 
@@ -146,6 +160,7 @@ Deno.serve(async (req) => {
         if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
         if (!date.startsWith(`${month}-`)) continue;
         const cell = readCell(raw);
+        if (!cell) continue;   // 未定の日は登録しない
         assignments.push({
           employee_id: employeeId,
           date,
