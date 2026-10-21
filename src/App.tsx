@@ -3605,7 +3605,7 @@ function AttendanceApp() {
               />
             )}
             {requestTab === 'performance' && PerformanceFormatSection && (
-              <PerformanceFormatSection employeeId={session.id} isDesktop={isDesktop} />
+              <PerformanceFormatSection employeeId={session.id} session={session} onNotifyAdmin={notifyAdmin} isDesktop={isDesktop} />
             )}
             {requestTab === 'yearend' && (
               <YearEndAdjustmentSection
@@ -5893,18 +5893,24 @@ function SchedulePatternCard({ now, patterns, activePatternNo, onSetActivePatter
                 />
               </div>
               <div className="grid grid-cols-2 gap-2">
-                <input
-                  type="time"
-                  value={p.startTime}
-                  onChange={(e) => setFormField(p.patternNo, 'startTime', e.target.value)}
-                  className="w-full min-w-0 border border-slate-200 rounded-lg px-2 py-1.5 font-mono text-[12.5px]"
-                />
-                <input
-                  type="time"
-                  value={p.endTime}
-                  onChange={(e) => setFormField(p.patternNo, 'endTime', e.target.value)}
-                  className="w-full min-w-0 border border-slate-200 rounded-lg px-2 py-1.5 font-mono text-[12.5px]"
-                />
+                <label className="min-w-0">
+                  <span className="mb-1 block text-[11px] font-medium text-slate-400">始業</span>
+                  <input
+                    type="time"
+                    value={p.startTime}
+                    onChange={(e) => setFormField(p.patternNo, 'startTime', e.target.value)}
+                    className="w-full min-w-0 border border-slate-200 rounded-lg px-2.5 py-2.5 font-mono text-[16px]"
+                  />
+                </label>
+                <label className="min-w-0">
+                  <span className="mb-1 block text-[11px] font-medium text-slate-400">終業</span>
+                  <input
+                    type="time"
+                    value={p.endTime}
+                    onChange={(e) => setFormField(p.patternNo, 'endTime', e.target.value)}
+                    className="w-full min-w-0 border border-slate-200 rounded-lg px-2.5 py-2.5 font-mono text-[16px]"
+                  />
+                </label>
               </div>
             </div>
           ))}
@@ -6226,13 +6232,13 @@ function CorrectionModal({ dateKey, record, onClose, onSubmit }) {
         </div>
         <div className="px-5 py-4 space-y-4">
           <Field label="出勤時刻">
-            <input type="time" value={clockIn} onChange={(e) => setClockIn(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
+            <input type="time" value={clockIn} onChange={(e) => setClockIn(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2.5 font-mono text-[16px]" />
           </Field>
           <Field label="退勤時刻">
-            <input type="time" value={clockOut} onChange={(e) => setClockOut(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
+            <input type="time" value={clockOut} onChange={(e) => setClockOut(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2.5 font-mono text-[16px]" />
           </Field>
           <Field label="休憩時間（分）">
-            <input type="number" min="0" step="5" value={breakMinutes} onChange={(e) => setBreakMinutes(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
+            <input type="number" min="0" step="5" value={breakMinutes} onChange={(e) => setBreakMinutes(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2.5 font-mono text-[16px]" />
           </Field>
           <Field label="修正理由">
             <textarea value={reason} onChange={(e) => setReason(e.target.value)} rows={3} placeholder="例）打刻を忘れたため" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] resize-none" />
@@ -6735,7 +6741,7 @@ function EoExistingPerfTable({ year, month, daily, onUpdateDay }) {
   );
 }
 
-function EoPerformanceSection({ employeeId, isDesktop }) {
+function EoPerformanceSection({ employeeId, session, onNotifyAdmin, isDesktop }) {
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
   const [month, setMonth] = useState(now.getMonth() + 1);
@@ -6749,6 +6755,8 @@ function EoPerformanceSection({ employeeId, isDesktop }) {
   // 入力したまま保存していない状態を見えるようにする（途中保存のため）
   const [dirty, setDirty] = useState(false);
   const [savedAt, setSavedAt] = useState(null);
+  const [submittedAt, setSubmittedAt] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -6759,6 +6767,7 @@ function EoPerformanceSection({ employeeId, isDesktop }) {
       setTabletIssues(String(np?.tablet_issues ?? 0));
       setCancellations(String(np?.cancellations ?? 0));
       setExistingDaily(ep?.daily || {});
+      setSubmittedAt(np?.submitted_at || null);
       setDirty(false);
       setSavedAt(null);
       setLoading(false);
@@ -6789,14 +6798,43 @@ function EoPerformanceSection({ employeeId, isDesktop }) {
   const approxG10Rate = computeApproxG10Rate(newDaily);
   const adjustedNewPoints = monthNewPoints - (Number(tabletIssues) || 0) * 2 - (Number(cancellations) || 0) * 3;
 
-  // 新規・既存の両方をまとめて保存する（シートを切り替えても入力が消えないようにするため）
+  // 新規・既存の両方をまとめて書き込む（シートを切り替えても入力が消えないようにするため）
+  const writeAll = async (extra) => {
+    await saveNewPerf(employeeId, year, month, {
+      daily: newDaily,
+      tablet_issues: Number(tabletIssues) || 0,
+      cancellations: Number(cancellations) || 0,
+      ...(extra || {}),
+    });
+    await saveExistingPerf(employeeId, year, month, existingDaily);
+  };
+
+  // 一時保存：内容だけを残す。提出の状態は変えない
   const save = async () => {
     setSaving(true);
-    await saveNewPerf(employeeId, year, month, { daily: newDaily, tablet_issues: Number(tabletIssues) || 0, cancellations: Number(cancellations) || 0 });
-    await saveExistingPerf(employeeId, year, month, existingDaily);
+    await writeAll();
     setSaving(false);
     setDirty(false);
     setSavedAt(new Date());
+  };
+
+  // 提出：提出日時を記録し、管理者へお知らせを送る
+  const submit = async () => {
+    if (!window.confirm(`${year}年${month}月分の実績を提出します。よろしいですか？`)) return;
+    setSubmitting(true);
+    const now = new Date();
+    await writeAll({ submitted_at: now.toISOString() });
+    if (onNotifyAdmin && session) {
+      await onNotifyAdmin(
+        `【実績提出】${session.name} - ${year}年${month}月分`,
+        `${session.name}さんが${year}年${month}月分の実績を提出しました（新規獲得${monthNewPoints}P・既存${monthExistingPoints}P）。`,
+        null
+      );
+    }
+    setSubmitting(false);
+    setDirty(false);
+    setSavedAt(now);
+    setSubmittedAt(now.toISOString());
   };
 
   const years = [now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1];
@@ -6809,6 +6847,13 @@ function EoPerformanceSection({ employeeId, isDesktop }) {
         <h2 className="font-bold text-[13.5px]">実績入力</h2>
         {dirty && (
           <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10.5px] font-bold text-amber-700">未保存</span>
+        )}
+        {submittedAt ? (
+          <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10.5px] font-bold text-emerald-700">
+            提出済み {dateLabel(String(submittedAt).slice(0, 10))}
+          </span>
+        ) : (
+          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10.5px] font-bold text-slate-500">未提出</span>
         )}
         <div className="ml-auto flex items-center gap-2">
           <select
@@ -6829,7 +6874,7 @@ function EoPerformanceSection({ employeeId, isDesktop }) {
       </div>
 
       <div className="px-5 pt-3 text-[11.5px] text-slate-500">
-        入力の途中でも「実績の内容を保存する」で保存できます。新規・既存の両方がまとめて保存され、あとから続きを入力できます。
+        入力の途中は「一時保存」で残せます。新規・既存の両方がまとめて保存されます。内容がそろったら「提出する」を押してください。提出後も修正して出し直せます。
       </div>
 
       <div className="px-5 pt-3 flex gap-2">
@@ -6872,15 +6917,30 @@ function EoPerformanceSection({ employeeId, isDesktop }) {
           ) : (
             <EoExistingPerfTable year={year} month={month} daily={existingDaily} onUpdateDay={updateExistingDay} />
           )}
-          <button onClick={save} disabled={saving} className="mt-4 w-full py-2.5 rounded-lg bg-amber-600 disabled:bg-slate-300 text-white text-[13px] font-bold">
-            {saving ? '保存中…' : '実績の内容を保存する'}
-          </button>
+          <div className="mt-4 flex gap-2">
+            <button
+              onClick={save}
+              disabled={saving || submitting}
+              className="flex-1 py-2.5 rounded-lg border border-slate-300 disabled:border-slate-200 text-[13px] font-bold text-slate-600"
+            >
+              {saving ? '保存中…' : '一時保存'}
+            </button>
+            <button
+              onClick={submit}
+              disabled={saving || submitting}
+              className="flex-1 py-2.5 rounded-lg bg-amber-600 disabled:bg-slate-300 text-white text-[13px] font-bold"
+            >
+              {submitting ? '送信中…' : submittedAt ? 'この内容で出し直す' : '提出する'}
+            </button>
+          </div>
           <div className="mt-1.5 text-center text-[11px] text-slate-400">
             {dirty
               ? '保存していない入力があります'
               : savedAt
                 ? `保存しました（${hhmm(savedAt)}）`
-                : '入力の途中でも保存できます'}
+                : submittedAt
+                  ? '提出済みです。修正したら、もう一度提出してください'
+                  : '入力の途中でも「一時保存」で残せます'}
           </div>
         </div>
       )}
@@ -11710,6 +11770,20 @@ function AdminCommuteExpenseClaimsTab({ claims, isMasterAdmin = false, onDecide,
   );
 }
 
+// 変更申請ができない、閲覧のみの登録情報
+const PROFILE_READONLY_FIELDS = [
+  { key: 'username', label: 'ログインID' },
+  { key: 'birthDate', label: '生年月日', type: 'date' },
+  { key: 'hireDate', label: '入職日', type: 'date' },
+  { key: 'staffType', label: '雇用形態' },
+  { key: 'jobTitle', label: '役職' },
+  { key: 'mainGroup', label: 'メイングループ' },
+  { key: 'subGroup', label: 'サブグループ' },
+  { key: 'nearestStation', label: '最寄り駅' },
+  { key: 'contractStart', label: '契約開始日', type: 'date' },
+  { key: 'contractEnd', label: '契約終了日', type: 'date' },
+];
+
 function ProfileRequestView({ session, requests, onSubmit }) {
   const [modalOpen, setModalOpen] = useState(false);
   const pending = requests.filter((r) => r.status === 'pending');
@@ -11741,7 +11815,29 @@ function ProfileRequestView({ session, requests, onSubmit }) {
           ))}
         </div>
         <div className="px-5 py-2.5 bg-slate-50 text-[10.5px] text-slate-400 border-t border-slate-100">
-          変更は管理者の承認後に反映されます。生年月日・入職日・スタッフ種別などの変更はご相談ください。
+          変更は管理者の承認後に反映されます。
+        </div>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+          <FileText size={15} className="text-slate-400" />
+          <h2 className="font-bold text-[13.5px] text-slate-800">登録情報</h2>
+        </div>
+        <div className="divide-y divide-slate-100">
+          {PROFILE_READONLY_FIELDS.map((f) => {
+            const raw = session[f.key] || '';
+            const value = raw && f.type === 'date' ? dateLabel(raw) : raw;
+            return (
+              <div key={f.key} className="px-5 py-2.5 flex items-center justify-between gap-3 text-[13px]">
+                <span className="text-slate-400 shrink-0">{f.label}</span>
+                <span className="font-medium text-slate-700 text-right break-all">{value || '未設定'}</span>
+              </div>
+            );
+          })}
+        </div>
+        <div className="px-5 py-2.5 bg-slate-50 text-[10.5px] text-slate-400 border-t border-slate-100">
+          自身の情報の変更については管理者へ相談ください。
         </div>
       </div>
 
