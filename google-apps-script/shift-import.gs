@@ -32,6 +32,7 @@ var LAST_PUSH_PROP = 'SHIFT_PUSH_LAST_RUN';
 var CONFIRMED_SHEET_PROP = 'CONFIRMED_SHEET_NAME';
 var NAME_COLUMN_PROP = 'CONFIRMED_NAME_COLUMN';
 var START_ROW_PROP = 'CONFIRMED_START_ROW';
+var END_ROW_PROP = 'CONFIRMED_END_ROW';
 // 見出しにこの文字が入っている列を氏名の列とみなす
 var NAME_HEADER_WORDS = ['スタッフ名', '氏名', '名前', '社員名', '従業員名'];
 
@@ -504,8 +505,10 @@ function buildConfirmedPayload(sheet, month) {
 
   // 読み始める行の設定があれば、そこから。終わりは次の見出し行の手前まで
   var fixedStart = PropertiesService.getScriptProperties().getProperty(START_ROW_PROP);
+  var fixedEnd = PropertiesService.getScriptProperties().getProperty(END_ROW_PROP);
   if (fixedStart && Number(fixedStart) > 0) {
     startRow = Number(fixedStart) - 1;
+    // 終わりは、指定があればそれ。無ければ次の見出し行の手前まで
     endRow = values.length - 1;
     for (var sj = 0; sj < headerRows.length; sj++) {
       if (headerRows[sj] > startRow) { endRow = headerRows[sj] - 1; break; }
@@ -514,6 +517,9 @@ function buildConfirmedPayload(sheet, month) {
     for (var sk = headerRows.length - 1; sk >= 0; sk--) {
       if (headerRows[sk] < startRow) { headerRow = headerRows[sk]; dateCols = dateColsByRow[headerRow]; break; }
     }
+  }
+  if (fixedEnd && Number(fixedEnd) > 0) {
+    endRow = Math.min(Number(fixedEnd) - 1, values.length - 1);
   }
 
   var lastDay = new Date(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0).getDate();
@@ -714,26 +720,36 @@ function setConfirmedReadSettings() {
     props.deleteProperty(NAME_COLUMN_PROP);
   }
 
-  var nowStart = props.getProperty(START_ROW_PROP) || '（自動）';
+  var nowStart = props.getProperty(START_ROW_PROP);
+  var nowEnd = props.getProperty(END_ROW_PROP);
+  var nowRange = nowStart ? (nowStart + (nowEnd ? '-' + nowEnd : '')) : '（自動）';
   var res3 = ui.prompt(
-    '読み始める行',
-    'スタッフの個人シフトが始まる行を入力してください（例：457）。\n今の設定：' + nowStart +
-    '\n\n空のまま OK を押すと自動で決めます。' +
-    '\n（日付の見出し行が複数あるときは、いちばん下の見出し行の次から読みます）',
+    '読み取る行の範囲',
+    'スタッフの個人シフトが入っている行を入力してください。\n' +
+    '　例）457-554　　開始だけなら 457\n' +
+    '今の設定：' + nowRange +
+    '\n\n空のまま OK を押すと自動で決めます。',
     ui.ButtonSet.OK_CANCEL
   );
   if (res3.getSelectedButton() !== ui.Button.OK) return;
-  var startRow = res3.getResponseText().trim();
-  if (startRow) {
-    if (!/^\d+$/.test(startRow) || Number(startRow) < 1) { ui.alert('行番号は数字で入力してください。'); return; }
-    props.setProperty(START_ROW_PROP, startRow);
+  var range = res3.getResponseText().replace(/[〜～–—]/g, '-').replace(/\s/g, '').trim();
+  var rangeLabel = '（自動）';
+  if (range) {
+    var m = range.match(/^(\d+)(?:-(\d+))?$/);
+    if (!m) { ui.alert('範囲の形式が違います。「457-554」または「457」のように入力してください。'); return; }
+    if (m[2] && Number(m[2]) < Number(m[1])) { ui.alert('終わりの行が開始より前になっています。'); return; }
+    props.setProperty(START_ROW_PROP, m[1]);
+    if (m[2]) props.setProperty(END_ROW_PROP, m[2]);
+    else props.deleteProperty(END_ROW_PROP);
+    rangeLabel = m[1] + (m[2] ? '-' + m[2] : '以降');
   } else {
     props.deleteProperty(START_ROW_PROP);
+    props.deleteProperty(END_ROW_PROP);
   }
 
   ui.alert(
     '設定しました',
-    'シート：' + (name || '（自動）') + '\n氏名の列：' + (col || '（自動）') + '\n読み始める行：' + (startRow || '（自動）') +
+    'シート：' + (name || '（自動）') + '\n氏名の列：' + (col || '（自動）') + '\n読み取る行：' + rangeLabel +
     '\n\n「確定シフトを送る」で読み取り内容をご確認ください。',
     ui.ButtonSet.OK
   );
