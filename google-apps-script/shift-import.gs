@@ -5,10 +5,13 @@
  *   1. スプレッドシートを開く
  *   2. メニューの「拡張機能」→「Apps Script」
  *   3. 既定の Code.gs の中身をすべて消し、このファイルの内容を貼り付けて保存
- *   4. メニューの「プロジェクトの設定」→「スクリプト プロパティ」で次の2つを追加
- *        SUPABASE_URL   … https://xxxxxxxx.supabase.co
- *        SHIFT_API_KEY  … supabase secrets set SHIFT_EXPORT_KEY で決めた文字列
- *   5. スプレッドシートを再読み込みすると、上部に「Brown Work」メニューが出ます
+ *   4. スプレッドシートを再読み込みすると、上部に「Brown Work」メニューが出ます
+ *   5. 「Brown Work」→「接続の設定」で、接続先と合言葉を入力
+ *
+ * ■ 翌月のファイルを複製で作ったとき
+ *   「Brown Work」→「複製したファイルの初期設定」を一度押してください。
+ *   設定は隠しシート（_BrownWork設定）に入っていて複製と一緒についてきますが、
+ *   合言葉と自動実行の設定だけは引き継がれないため、ここでそろえます。
  *
  * ■ 使い方
  *   「Brown Work」→「シフト希望を取り込む」→ 対象月を入力
@@ -30,6 +33,10 @@ var LAST_RUN_PROP = 'SHIFT_IMPORT_LAST_RUN';
 var PUSH_FINGERPRINT_PROP = 'SHIFT_PUSH_FINGERPRINT_';
 var LAST_PUSH_PROP = 'SHIFT_PUSH_LAST_RUN';
 var CONFIRMED_SHEET_PROP = 'CONFIRMED_SHEET_NAME';
+// 設定を書いておく隠しシート。スプレッドシートを複製すると一緒についてくるため、
+// 翌月のファイルでも設定を引き継げる。合言葉だけはここに書かない。
+var CONFIG_SHEET_NAME = '_BrownWork設定';
+var SECRET_KEYS = ['SHIFT_API_KEY'];
 var NAME_COLUMN_PROP = 'CONFIRMED_NAME_COLUMN';
 var START_ROW_PROP = 'CONFIRMED_START_ROW';
 var END_ROW_PROP = 'CONFIRMED_END_ROW';
@@ -47,6 +54,9 @@ function onOpen() {
     .addItem('自動取り込みを解除', 'removeDailyTrigger')
     .addSeparator()
     .addItem('確定シフトの読み取り設定', 'setConfirmedReadSettings')
+    .addSeparator()
+    .addItem('接続の設定', 'setConnectionSettings')
+    .addItem('複製したファイルの初期設定', 'setupCopiedFile')
     .addToUi();
 }
 
@@ -84,11 +94,10 @@ function importNextMonthShiftRequests() {
 
 /** 本体：APIから取得してシートへ書き込む */
 function importShiftRequests(month, force) {
-  var props = PropertiesService.getScriptProperties();
-  var baseUrl = (props.getProperty('SUPABASE_URL') || '').replace(/\/+$/, '');
-  var apiKey = props.getProperty('SHIFT_API_KEY') || '';
+  var baseUrl = (readConfig('SUPABASE_URL') || '').replace(/\/+$/, '');
+  var apiKey = readConfig('SHIFT_API_KEY') || '';
   if (!baseUrl || !apiKey) {
-    throw new Error('スクリプト プロパティに SUPABASE_URL と SHIFT_API_KEY を設定してください。');
+    throw new Error('接続先が設定されていません。「Brown Work」→「接続の設定」から設定してください。');
   }
 
   var url = baseUrl + '/functions/v1/shift-requests-export?month=' + encodeURIComponent(month);
@@ -261,7 +270,7 @@ function setTriggerInterval(key) {
     builder.create();
   });
   if (['m5', 'm15', 'm30'].indexOf(key) < 0) key = 'daily';
-  PropertiesService.getScriptProperties().setProperty(INTERVAL_PROP, key);
+  writeConfig(INTERVAL_PROP, key);
 }
 
 /** 今の設定を表示する */
@@ -277,7 +286,7 @@ function showTriggerStatus() {
     ui.alert('自動取り込みの状態', '今は自動取り込みを設定していません。', ui.ButtonSet.OK);
     return;
   }
-  var key = PropertiesService.getScriptProperties().getProperty(INTERVAL_PROP) || 'daily';
+  var key = readConfig(INTERVAL_PROP) || 'daily';
   var label = key;
   for (var j = 0; j < INTERVALS.length; j++) {
     if (INTERVALS[j].key === key) label = INTERVALS[j].label;
@@ -312,7 +321,7 @@ function removeTriggersOnly() {
 /** 自動取り込みを止める */
 function removeDailyTrigger() {
   removeTriggersOnly();
-  PropertiesService.getScriptProperties().deleteProperty(INTERVAL_PROP);
+  writeConfig(INTERVAL_PROP, '');
   SpreadsheetApp.getUi().alert('自動取り込みを解除しました。');
 }
 
@@ -330,6 +339,77 @@ function removeDailyTrigger() {
 //   空欄        → 休み
 //   有給を含む  → 有給
 //   それ以外    → 出勤。その文字をそのまま活動場所として送る
+
+/** 設定を読む。スクリプト プロパティ → 設定シート の順に探す */
+function readConfig(key) {
+  var fromProps = PropertiesService.getScriptProperties().getProperty(key);
+  if (fromProps !== null && fromProps !== '') return fromProps;
+  if (SECRET_KEYS.indexOf(key) >= 0) return null;   // 合言葉はシートに書かない
+  var map = readConfigSheet();
+  return map[key] || null;
+}
+
+/** 設定を書く。スクリプト プロパティと設定シートの両方に残す */
+function writeConfig(key, value) {
+  var props = PropertiesService.getScriptProperties();
+  if (value === null || value === '') props.deleteProperty(key);
+  else props.setProperty(key, String(value));
+  if (SECRET_KEYS.indexOf(key) >= 0) return;
+  writeConfigSheet(key, value);
+}
+
+/** 設定シートを読む */
+function readConfigSheet() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG_SHEET_NAME);
+  var map = {};
+  if (!sheet) return map;
+  var values = sheet.getDataRange().getValues();
+  for (var i = 0; i < values.length; i++) {
+    var k = String(values[i][0] == null ? '' : values[i][0]).trim();
+    if (k && k.charAt(0) !== '#') map[k] = String(values[i][1] == null ? '' : values[i][1]).trim();
+  }
+  return map;
+}
+
+/** 設定シートに1行書く。無ければシートを作る */
+function writeConfigSheet(key, value) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(CONFIG_SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(CONFIG_SHEET_NAME);
+    sheet.getRange(1, 1, 1, 3).setValues([['# 設定名', '値', '説明']]);
+    sheet.getRange(1, 1, 1, 3).setFontWeight('bold').setBackground('#f1f3f4');
+    sheet.setColumnWidth(1, 220);
+    sheet.setColumnWidth(2, 280);
+    sheet.setColumnWidth(3, 420);
+    sheet.getRange(2, 1).setValue('# このシートは Brown Work 連携の設定です。削除しないでください。');
+    sheet.hideSheet();
+  }
+  var values = sheet.getDataRange().getValues();
+  var target = -1;
+  for (var i = 0; i < values.length; i++) {
+    if (String(values[i][0] == null ? '' : values[i][0]).trim() === key) { target = i + 1; break; }
+  }
+  if (value === null || value === '') {
+    if (target > 0) sheet.getRange(target, 2).setValue('');
+    return;
+  }
+  if (target < 0) {
+    target = sheet.getLastRow() + 1;
+    sheet.getRange(target, 1).setValue(key);
+    sheet.getRange(target, 3).setValue(CONFIG_DESCRIPTIONS[key] || '');
+  }
+  sheet.getRange(target, 2).setValue(String(value));
+}
+
+var CONFIG_DESCRIPTIONS = {
+  SUPABASE_URL: 'Brown Work の接続先。https://〇〇〇〇.supabase.co',
+  CONFIRMED_SHEET_NAME: '確定シフトを読み取るシート（タブ）の名前。空なら自動',
+  CONFIRMED_NAME_COLUMN: 'スタッフのフルネームが入っている列。例：E。空なら自動',
+  CONFIRMED_START_ROW: '読み取りを始める行。例：457。空なら自動',
+  CONFIRMED_END_ROW: '読み取りを終える行。例：554。空なら次の見出し行の手前まで',
+  SHIFT_IMPORT_INTERVAL: '自動実行の間隔（daily / m30 / m15 / m5）'
+};
 
 /** 「E」「5」などの指定を列番号（1始まり）にする。分からなければ 0 */
 function parseColumn(value) {
@@ -388,7 +468,7 @@ function guessTargetMonth(sheet) {
 /** 確定シフトのシートを選ぶ。設定があればそれ、無ければ「〇月」の名前を探す */
 function findConfirmedSheet() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var saved = PropertiesService.getScriptProperties().getProperty(CONFIRMED_SHEET_PROP);
+  var saved = readConfig(CONFIRMED_SHEET_PROP);
   if (saved) {
     var bySaved = ss.getSheetByName(saved);
     if (bySaved) return bySaved;
@@ -438,7 +518,7 @@ function buildConfirmedPayload(sheet, month) {
   var firstDateCol = dateColsByRow[headerRows[0]][0];
   var nameCol = -1;
 
-  var fixedCol = PropertiesService.getScriptProperties().getProperty(NAME_COLUMN_PROP);
+  var fixedCol = readConfig(NAME_COLUMN_PROP);
   if (fixedCol) {
     var parsed = parseColumn(fixedCol);
     if (parsed > 0) nameCol = parsed - 1;
@@ -504,8 +584,8 @@ function buildConfirmedPayload(sheet, month) {
   var endRow = picked.to;
 
   // 読み始める行の設定があれば、そこから。終わりは次の見出し行の手前まで
-  var fixedStart = PropertiesService.getScriptProperties().getProperty(START_ROW_PROP);
-  var fixedEnd = PropertiesService.getScriptProperties().getProperty(END_ROW_PROP);
+  var fixedStart = readConfig(START_ROW_PROP);
+  var fixedEnd = readConfig(END_ROW_PROP);
   if (fixedStart && Number(fixedStart) > 0) {
     startRow = Number(fixedStart) - 1;
     // 終わりは、指定があればそれ。無ければ次の見出し行の手前まで
@@ -573,11 +653,10 @@ function buildPushFingerprint(payload) {
 
 /** Brown Work へ送る */
 function sendConfirmedShifts(payload) {
-  var props = PropertiesService.getScriptProperties();
-  var baseUrl = (props.getProperty('SUPABASE_URL') || '').replace(/\/+$/, '');
-  var apiKey = props.getProperty('SHIFT_API_KEY') || '';
+  var baseUrl = (readConfig('SUPABASE_URL') || '').replace(/\/+$/, '');
+  var apiKey = readConfig('SHIFT_API_KEY') || '';
   if (!baseUrl || !apiKey) {
-    throw new Error('スクリプト プロパティに SUPABASE_URL と SHIFT_API_KEY を設定してください。');
+    throw new Error('接続先が設定されていません。「Brown Work」→「接続の設定」から設定してください。');
   }
   var response = UrlFetchApp.fetch(baseUrl + '/functions/v1/shift-confirmed-import', {
     method: 'post',
@@ -687,12 +766,114 @@ function pushConfirmedShiftsAuto() {
   props.setProperty(PUSH_FINGERPRINT_PROP + month, fingerprint);
 }
 
+/** 接続先と合言葉を設定する */
+function setConnectionSettings() {
+  var ui = SpreadsheetApp.getUi();
+
+  var nowUrl = readConfig('SUPABASE_URL') || '（未設定）';
+  var res1 = ui.prompt(
+    '接続先（SUPABASE_URL）',
+    'Brown Work の接続先を入力してください。\n　例）https://ommtelelmjnyazflfcoo.supabase.co\n\n今の設定：' + nowUrl +
+    '\n\n空のまま OK を押すと、今の設定のままにします。',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (res1.getSelectedButton() !== ui.Button.OK) return;
+  var url = res1.getResponseText().trim().replace(/\/+$/, '');
+  if (url) {
+    if (!/^https:\/\/[\w.-]+\.supabase\.co$/.test(url)) {
+      ui.alert('接続先の形式が違います。https://〇〇〇〇.supabase.co の形で入力してください。');
+      return;
+    }
+    writeConfig('SUPABASE_URL', url);
+  }
+
+  var hasKey = !!readConfig('SHIFT_API_KEY');
+  var res2 = ui.prompt(
+    '合言葉（SHIFT_API_KEY）',
+    'Brown Work 側で設定した合言葉を入力してください。\n\n今の設定：' + (hasKey ? '設定済み' : '未設定') +
+    '\n\n空のまま OK を押すと、今の設定のままにします。' +
+    '\n（合言葉はこのスクリプトにだけ保存され、シートには書きません）',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (res2.getSelectedButton() !== ui.Button.OK) return;
+  var key = res2.getResponseText().trim();
+  if (key) writeConfig('SHIFT_API_KEY', key);
+
+  ui.alert(
+    '設定しました',
+    '接続先：' + (readConfig('SUPABASE_URL') || '（未設定）') + '\n' +
+    '合言葉：' + (readConfig('SHIFT_API_KEY') ? '設定済み' : '未設定'),
+    ui.ButtonSet.OK
+  );
+}
+
+/** 複製して作った翌月分のファイルで、引き継げなかった設定をそろえる */
+function setupCopiedFile() {
+  var ui = SpreadsheetApp.getUi();
+  var fromSheet = readConfigSheet();
+  var missing = [];
+
+  // 1. 接続先。設定シートから引き継げていればそれを使う
+  if (!PropertiesService.getScriptProperties().getProperty('SUPABASE_URL') && fromSheet.SUPABASE_URL) {
+    PropertiesService.getScriptProperties().setProperty('SUPABASE_URL', fromSheet.SUPABASE_URL);
+  }
+  if (!readConfig('SUPABASE_URL')) missing.push('接続先');
+
+  // 2. 合言葉はシートに書いていないため、毎回ここで入力してもらう
+  if (!readConfig('SHIFT_API_KEY')) {
+    var res = ui.prompt(
+      '合言葉の入力',
+      'このファイルにはまだ合言葉が設定されていません。\n' +
+      'Brown Work 側で設定した合言葉を入力してください。\n\n' +
+      '（合言葉だけは、複製しても引き継がれません）',
+      ui.ButtonSet.OK_CANCEL
+    );
+    if (res.getSelectedButton() !== ui.Button.OK) return;
+    var key = res.getResponseText().trim();
+    if (!key) { ui.alert('合言葉が入力されませんでした。'); return; }
+    writeConfig('SHIFT_API_KEY', key);
+  }
+
+  // 3. 自動実行を、前月と同じ間隔で作り直す
+  var interval = readConfig(INTERVAL_PROP) || '';
+  var intervalLabel = '設定なし';
+  if (interval) {
+    setTriggerInterval(interval);
+    for (var i = 0; i < INTERVALS.length; i++) {
+      if (INTERVALS[i].key === interval) intervalLabel = INTERVALS[i].label;
+    }
+  }
+
+  // 4. 前月分の取り込み記録は引き継がない（新しい月として送り直せるようにする）
+  var props = PropertiesService.getScriptProperties();
+  var all = props.getProperties();
+  Object.keys(all).forEach(function (k) {
+    if (k.indexOf(FINGERPRINT_PROP) === 0 || k.indexOf(PUSH_FINGERPRINT_PROP) === 0) props.deleteProperty(k);
+  });
+
+  var sheet = findConfirmedSheet();
+  var month = guessTargetMonth(sheet);
+
+  ui.alert(
+    '初期設定が終わりました',
+    '接続先：' + (readConfig('SUPABASE_URL') || '（未設定）') + '\n' +
+    '合言葉：' + (readConfig('SHIFT_API_KEY') ? '設定済み' : '未設定') + '\n' +
+    '自動実行：' + intervalLabel + '\n' +
+    '読み取るシート：' + sheet.getName() + '\n' +
+    '読み取る行：' + (readConfig(START_ROW_PROP) ? readConfig(START_ROW_PROP) + (readConfig(END_ROW_PROP) ? '-' + readConfig(END_ROW_PROP) : '以降') : '（自動）') + '\n' +
+    '対象月：' + (month || '（ファイル名から読み取れません）') +
+    (missing.length > 0 ? '\n\n【未設定】' + missing.join('、') + '\n「接続の設定」から設定してください。' : '') +
+    '\n\n対象月やシート名が違う場合は、ファイル名とシート名の月をご確認ください。',
+    ui.ButtonSet.OK
+  );
+}
+
 /** 読み取るシートと氏名の列を手で決める */
 function setConfirmedReadSettings() {
   var ui = SpreadsheetApp.getUi();
   var props = PropertiesService.getScriptProperties();
 
-  var nowSheet = props.getProperty(CONFIRMED_SHEET_PROP) || '（自動）';
+  var nowSheet = readConfig(CONFIRMED_SHEET_PROP) || '（自動）';
   var res1 = ui.prompt(
     '確定シフトのシート名',
     '読み取るシート（タブ）の名前を入力してください。\n今の設定：' + nowSheet + '\n\n空のまま OK を押すと自動で探します。',
@@ -700,10 +881,9 @@ function setConfirmedReadSettings() {
   );
   if (res1.getSelectedButton() !== ui.Button.OK) return;
   var name = res1.getResponseText().trim();
-  if (name) props.setProperty(CONFIRMED_SHEET_PROP, name);
-  else props.deleteProperty(CONFIRMED_SHEET_PROP);
+  writeConfig(CONFIRMED_SHEET_PROP, name);
 
-  var nowCol = props.getProperty(NAME_COLUMN_PROP) || '（自動）';
+  var nowCol = readConfig(NAME_COLUMN_PROP) || '（自動）';
   var res2 = ui.prompt(
     '氏名の列',
     'スタッフのフルネームが入っている列を入力してください（例：E）。\n今の設定：' + nowCol +
@@ -715,13 +895,13 @@ function setConfirmedReadSettings() {
   var col = res2.getResponseText().trim();
   if (col) {
     if (parseColumn(col) <= 0) { ui.alert('列の指定が読み取れません。「E」または「5」のように入力してください。'); return; }
-    props.setProperty(NAME_COLUMN_PROP, col);
+    writeConfig(NAME_COLUMN_PROP, col);
   } else {
-    props.deleteProperty(NAME_COLUMN_PROP);
+    writeConfig(NAME_COLUMN_PROP, '');
   }
 
-  var nowStart = props.getProperty(START_ROW_PROP);
-  var nowEnd = props.getProperty(END_ROW_PROP);
+  var nowStart = readConfig(START_ROW_PROP);
+  var nowEnd = readConfig(END_ROW_PROP);
   var nowRange = nowStart ? (nowStart + (nowEnd ? '-' + nowEnd : '')) : '（自動）';
   var res3 = ui.prompt(
     '読み取る行の範囲',
@@ -738,13 +918,12 @@ function setConfirmedReadSettings() {
     var m = range.match(/^(\d+)(?:-(\d+))?$/);
     if (!m) { ui.alert('範囲の形式が違います。「457-554」または「457」のように入力してください。'); return; }
     if (m[2] && Number(m[2]) < Number(m[1])) { ui.alert('終わりの行が開始より前になっています。'); return; }
-    props.setProperty(START_ROW_PROP, m[1]);
-    if (m[2]) props.setProperty(END_ROW_PROP, m[2]);
-    else props.deleteProperty(END_ROW_PROP);
+    writeConfig(START_ROW_PROP, m[1]);
+    writeConfig(END_ROW_PROP, m[2] || '');
     rangeLabel = m[1] + (m[2] ? '-' + m[2] : '以降');
   } else {
-    props.deleteProperty(START_ROW_PROP);
-    props.deleteProperty(END_ROW_PROP);
+    writeConfig(START_ROW_PROP, '');
+    writeConfig(END_ROW_PROP, '');
   }
 
   ui.alert(
