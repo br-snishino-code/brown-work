@@ -121,7 +121,8 @@ function importShiftRequests(month) {
     var okCount = 0;
     for (var c = 0; c < row.cells.length; c++) {
       line.push(row.cells[c]);
-      if (row.cells[c] === '●') okCount++;
+      // ● のほか、活動場所が書かれている日も出勤可能として数える
+      if (row.cells[c] && row.cells[c] !== '×' && row.cells[c] !== '有給') okCount++;
     }
     line.push(row.submitted ? okCount : '未提出');
     line.push(row.note || '');

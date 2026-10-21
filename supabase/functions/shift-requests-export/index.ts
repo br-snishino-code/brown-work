@@ -31,8 +31,16 @@ const json = (body: unknown, status = 200) =>
     headers: { ...corsHeaders, 'Content-Type': 'application/json' },
   });
 
-// 'ok' | 'off' | 'paid' → スプレッドシートに書く記号
+// 答えの値 → スプレッドシートに書く文字
+// 'ok' | 'off' | 'paid' のほか、活動場所を入力する部署は 'place:<活動場所>' で入る。
+// その場合は記号ではなく活動場所をそのまま書く。
 const SYMBOL: Record<string, string> = { ok: '●', off: '×', paid: '有給' };
+const PLACE_PREFIX = 'place:';
+const cellText = (value: unknown): string => {
+  const v = String(value ?? '');
+  if (v.startsWith(PLACE_PREFIX)) return v.slice(PLACE_PREFIX.length).trim();
+  return SYMBOL[v] || '';
+};
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -100,7 +108,7 @@ Deno.serve(async (req) => {
           note: found?.note || '',
           submittedAt: found?.submittedAt || '',
           // 日付順の記号。未提出や未選択は空文字
-          cells: days.map((d) => (found ? SYMBOL[found.answers[d.date]] || '' : '')),
+          cells: days.map((d) => (found ? cellText(found.answers[d.date]) : '')),
         };
       });
 

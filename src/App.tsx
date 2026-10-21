@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef, useContext, createContext } from 'react';
 import { createPortal } from 'react-dom';
 import * as XLSX from 'xlsx';
-import { Clock, MapPin, CheckCircle2, XCircle, AlertTriangle, LogIn, LogOut, FileEdit, Users, Bell, Calendar, Mail, LogOut as LogoutIcon, UserPlus, Lock, User, Monitor, Smartphone, Palmtree, Plus, Pencil, CalendarDays, ListChecks, ClipboardList, MessageSquare, Coffee, BarChart3, Home, Download, ChevronRight, LayoutGrid, Wallet, Briefcase, UserCog, Construction, Megaphone, Paperclip, FileText, Pin, Trash2, Key, ShieldCheck, HelpCircle, ChevronDown, ChevronLeft } from 'lucide-react';
+import { Clock, MapPin, CheckCircle2, XCircle, AlertTriangle, LogIn, LogOut, FileEdit, Users, Bell, Calendar, Mail, LogOut as LogoutIcon, UserPlus, Lock, User, Monitor, Smartphone, Palmtree, Plus, Pencil, CalendarDays, ListChecks, ClipboardList, MessageSquare, Coffee, BarChart3, Home, Download, ChevronRight, LayoutGrid, Wallet, Briefcase, UserCog, Construction, Megaphone, Paperclip, FileText, Pin, Trash2, Key, ShieldCheck, HelpCircle, ChevronDown, ChevronLeft, Settings } from 'lucide-react';
 import { supabase, CLOUD_ENABLED, usernameToEmail } from './supabaseClient';
 
 // ---- constants ----
@@ -790,6 +790,72 @@ const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: 
 
 // 管理者宛の通知メールの送信先（app_settings の key）
 const SETTING_ADMIN_NOTIFY_EMAIL = 'admin_notify_email';
+
+// ---- 部署（メイングループ）ごとの入力フォーマット ----
+// app_settings に { "部署名": { shift: 'symbol'|'place'|'none', performance: 'eo'|'simple'|'none' } } を
+// JSON で1件だけ保存する。設定がない部署は下の既定値を使う。
+const SETTING_GROUP_FORMATS = 'group_formats';
+
+// シフト希望の入力の型
+const SHIFT_FORMATS = {
+  symbol: { label: '●×有給（3択）', desc: '1日ごとに 出勤可能／希望休／有給 から選びます' },
+  place: { label: '活動場所を入力', desc: '希望休／有給は同じ。出勤できる日は活動場所を書きます' },
+  none: { label: '使わない', desc: 'この部署には「シフト希望」を表示しません' },
+};
+
+// 保存されている設定を読む。壊れていても画面は動かす
+function parseGroupFormats(settings) {
+  try {
+    const raw = settings?.[SETTING_GROUP_FORMATS];
+    if (!raw) return {};
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (e) {
+    console.error('フォーマット設定の読み取りに失敗しました', e);
+    return {};
+  }
+}
+
+// 既定：eo業務は今までどおりの3択、それ以外の部署は活動場所の入力
+function shiftFormatKeyFor(group, settings) {
+  const key = parseGroupFormats(settings)[group]?.shift;
+  if (SHIFT_FORMATS[key]) return key;
+  return group === EO_GROUP_NAME ? 'symbol' : 'place';
+}
+
+// 既定：eo業務はeo用の実績入力、それ以外の部署は実績入力を出さない
+function performanceFormatKeyFor(group, settings) {
+  const key = parseGroupFormats(settings)[group]?.performance;
+  if (key === 'none' || PERFORMANCE_FORMATS[key]) return key;
+  return group === EO_GROUP_NAME ? 'eo' : 'none';
+}
+
+// ---- シフト希望の答えの読み書き ----
+// 値は 'ok' | 'off' | 'paid' | 'place:<活動場所>' のいずれか
+const SHIFT_PLACE_PREFIX = 'place:';
+const isPlaceAnswer = (v) => String(v || '').startsWith(SHIFT_PLACE_PREFIX);
+// 出勤・休み・有給のどれか（活動場所の入力も「出勤」として扱う）
+function shiftAnswerKind(v) {
+  if (!v) return '';
+  return isPlaceAnswer(v) ? 'ok' : v;
+}
+function shiftAnswerPlace(v) {
+  return isPlaceAnswer(v) ? String(v).slice(SHIFT_PLACE_PREFIX.length) : '';
+}
+// 一覧や書き出しに出す文字
+function shiftAnswerText(v) {
+  const place = shiftAnswerPlace(v).trim();
+  if (place) return place;
+  if (v === 'ok') return '●';
+  if (v === 'off') return '×';
+  if (v === 'paid') return '有給';
+  return '';
+}
+// 入力済みとみなせるか（活動場所が空のままは未入力）
+function shiftAnswerFilled(v) {
+  if (!v) return false;
+  return isPlaceAnswer(v) ? shiftAnswerPlace(v).trim().length > 0 : true;
+}
 
 // ---- row(snake_case) → app(camelCase) 変換 ----
 const rowToAccount = (row) => ({
@@ -2107,6 +2173,29 @@ function AttendanceApp() {
       show('ログインIDの変更に失敗しました', 'warn');
       return false;
     }
+  };
+
+  // 部署ごとの入力フォーマットを保存する（マスター管理者のみ）
+  const saveGroupFormats = async (map) => {
+    const value = JSON.stringify(map || {});
+    const { error } = await supabase.from('app_settings').upsert(
+      {
+        key: SETTING_GROUP_FORMATS,
+        value,
+        updated_by: session.id,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'key' }
+    );
+    if (error) {
+      console.error('フォーマット設定の保存に失敗しました', error);
+      show('フォーマット設定の保存に失敗しました', 'warn');
+      return false;
+    }
+    await logAudit(session, '部署ごとの入力フォーマットを変更', Object.keys(map || {}).join('、') || '（なし）');
+    await refreshData();
+    show('フォーマット設定を保存しました');
+    return true;
   };
 
   // 管理者宛の通知メールの送信先を保存する（マスター管理者のみ）
@@ -3468,9 +3557,11 @@ function AttendanceApp() {
   );
   const needsMonthlyConfirm = !myMonthlyConfirm || myMonthlyConfirm.status === 'draft' || myMonthlyConfirm.status === 'rejected';
   // シフト希望：受付中の月があるときだけ各種申請に出す
-  const openShiftPeriod = (data.shiftPeriods || []).find(
+  // シフト希望の入力の型は、所属部署（メイングループ）の設定で決まる
+  const myShiftFormatKey = shiftFormatKeyFor(session.mainGroup, data.settings);
+  const openShiftPeriod = myShiftFormatKey === 'none' ? null : ((data.shiftPeriods || []).find(
     (p) => p.isOpen && (!p.targetEmployeeIds || p.targetEmployeeIds.length === 0 || p.targetEmployeeIds.includes(employeeId))
-  ) || null;
+  ) || null);
   const myShiftRequest = openShiftPeriod
     ? (data.shiftRequests || []).find((r) => r.employeeId === employeeId && r.targetMonth === openShiftPeriod.targetMonth) || null
     : null;
@@ -3481,7 +3572,7 @@ function AttendanceApp() {
   };
   // 実績入力は、所属している業務（メイングループ）の入力フォーマットを自動で出す。
   // 定義がない業務の方には「実績入力」自体を出さない。
-  const perfFormat = performanceFormatFor(session.mainGroup);
+  const perfFormat = PERFORMANCE_FORMATS[performanceFormatKeyFor(session.mainGroup, data.settings)] || null;
   const PerformanceFormatSection = perfFormat?.Component || null;
   const staffRequestItems = STAFF_REQUEST_ITEMS
     .filter((it) => (!it.byGroup || !!perfFormat) && (!it.shiftOnly || !!openShiftPeriod))
@@ -3570,6 +3661,7 @@ function AttendanceApp() {
                 period={openShiftPeriod}
                 request={myShiftRequest}
                 onSubmit={submitShiftRequest}
+                formatKey={myShiftFormatKey}
               />
             )}
             {requestTab === 'leave' && (
@@ -3725,6 +3817,7 @@ function AttendanceApp() {
             onUpdateDates={updateEmployeeDates}
             onUpdateAdminAccess={updateAdminAccess}
             onSaveAdminNotifyEmail={saveAdminNotifyEmail}
+            onSaveGroupFormats={saveGroupFormats}
             onChangeLoginEmail={handleChangeLoginEmail}
             onDecideMonthlyConfirm={decideMonthlyAttendanceConfirmation}
             onCancelMonthlyConfirm={cancelMonthlyAttendanceConfirmation}
@@ -5029,6 +5122,12 @@ const SHIFT_ANSWERS = [
   { key: 'paid', label: '有給', full: '有給（SV報告済）', cls: 'bg-teal-700 text-white border-teal-700' },
 ];
 const SHIFT_ANSWER_LABEL = { ok: '●', off: '×', paid: '有給' };
+// 活動場所を入力する型の選択肢（●のかわりに「出勤」を選んで場所を書く）
+const SHIFT_PLACE_ANSWERS = [
+  { key: 'ok', label: '出勤', full: '出勤可能', cls: 'bg-amber-600 text-white border-amber-600' },
+  { key: 'off', label: '×', full: '希望休', cls: 'bg-slate-700 text-white border-slate-700' },
+  { key: 'paid', label: '有給', full: '有給（SV報告済）', cls: 'bg-teal-700 text-white border-teal-700' },
+];
 
 // 対象月の日付を並べる（祝日と曜日の情報つき）
 function shiftMonthDays(targetMonth) {
@@ -5058,7 +5157,7 @@ function defaultRequestDays(targetMonth) {
   return shiftMonthDays(targetMonth).filter((d) => d.isWeekendOrHoliday).map((d) => d.key);
 }
 
-function ShiftRequestSection({ session, period, request, onSubmit }) {
+function ShiftRequestSection({ session, period, request, onSubmit, formatKey = 'symbol' }) {
   const targetMonth = period?.targetMonth || '';
   const days = useMemo(() => shiftMonthDays(targetMonth), [targetMonth]);
   const [answers, setAnswers] = useState({});
@@ -5085,13 +5184,17 @@ function ShiftRequestSection({ session, period, request, onSubmit }) {
   }
 
   const requestDays = new Set(period.requestDays && period.requestDays.length > 0 ? period.requestDays : defaultRequestDays(targetMonth));
-  const filled = days.filter((d) => answers[d.key]).length;
+  const isPlaceFormat = formatKey === 'place';
+  const filled = days.filter((d) => shiftAnswerFilled(answers[d.key])).length;
   const complete = filled === days.length && days.length > 0;
   const closed = !period.isOpen;
 
+  // 残りをまとめて埋める。活動場所の型では場所を書いてもらう必要があるため「×」でまとめる
+  const bulkValue = isPlaceFormat ? 'off' : 'ok';
+  const bulkLabel = isPlaceFormat ? '残りを×にする' : '残りを●にする';
   const setAll = () => {
     const next = { ...answers };
-    days.forEach((d) => { if (!next[d.key]) next[d.key] = 'ok'; });
+    days.forEach((d) => { if (!shiftAnswerFilled(next[d.key])) next[d.key] = bulkValue; });
     setAnswers(next);
   };
 
@@ -5105,6 +5208,7 @@ function ShiftRequestSection({ session, period, request, onSubmit }) {
   // 1日分の行。再描画で作り直されないよう関数として組み立てる
   const renderDay = (d) => {
     const picked = answers[d.key];
+    const kind = shiftAnswerKind(picked);
     const isRequest = requestDays.has(d.key);
     return (
       <div
@@ -5123,20 +5227,33 @@ function ShiftRequestSection({ session, period, request, onSubmit }) {
           )}
         </div>
         <div className="flex gap-1.5">
-          {SHIFT_ANSWERS.map((a) => (
+          {(isPlaceFormat ? SHIFT_PLACE_ANSWERS : SHIFT_ANSWERS).map((a) => (
             <button
               key={a.key}
               type="button"
               disabled={closed}
-              onClick={() => setAnswers((prev) => ({ ...prev, [d.key]: a.key }))}
+              onClick={() => setAnswers((prev) => ({
+                ...prev,
+                // 活動場所の型で「出勤」を選んだときは、入力欄を出すために空の場所を入れる
+                [d.key]: a.key === 'ok' && isPlaceFormat ? `${SHIFT_PLACE_PREFIX}${shiftAnswerPlace(prev[d.key])}` : a.key,
+              }))}
               className={`flex-1 rounded-xl border py-2.5 text-[13px] font-bold transition-colors disabled:opacity-60 ${
-                picked === a.key ? a.cls : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50'
+                kind === a.key ? a.cls : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50'
               } ${a.key === 'paid' ? 'text-[11.5px]' : ''}`}
             >
               {a.label}
             </button>
           ))}
         </div>
+        {isPlaceFormat && kind === 'ok' && (
+          <input
+            value={shiftAnswerPlace(picked)}
+            onChange={(e) => setAnswers((prev) => ({ ...prev, [d.key]: `${SHIFT_PLACE_PREFIX}${e.target.value}` }))}
+            disabled={closed}
+            placeholder="活動場所（例：亀岡店）"
+            className="mt-1.5 block w-full min-w-0 max-w-full box-border rounded-xl border border-slate-200 bg-white px-3 py-2 text-[16px] disabled:opacity-60"
+          />
+        )}
       </div>
     );
   };
@@ -5159,9 +5276,19 @@ function ShiftRequestSection({ session, period, request, onSubmit }) {
         </div>
         <div className="px-5 py-4 space-y-3">
           <div className="rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-[11.5px] leading-relaxed text-slate-600">
-            ● ＝ 出勤可能　／　× ＝ 希望休<br />
-            有給 ＝ SVへ報告済みの有給<br />
-            <span className="font-bold text-amber-700">★</span> の日は出勤依頼日です（土日祝）
+            {isPlaceFormat ? (
+              <>
+                出勤 ＝ 出勤できる日。活動場所を入力してください<br />
+                × ＝ 希望休　／　有給 ＝ SVへ報告済みの有給<br />
+                <span className="font-bold text-amber-700">★</span> の日は出勤依頼日です（土日祝）
+              </>
+            ) : (
+              <>
+                ● ＝ 出勤可能　／　× ＝ 希望休<br />
+                有給 ＝ SVへ報告済みの有給<br />
+                <span className="font-bold text-amber-700">★</span> の日は出勤依頼日です（土日祝）
+              </>
+            )}
           </div>
           {period.note && (
             <div className="rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-[11.5px] text-amber-800">{period.note}</div>
@@ -5182,7 +5309,7 @@ function ShiftRequestSection({ session, period, request, onSubmit }) {
               disabled={closed}
               className="shrink-0 rounded-lg border border-slate-300 px-3 py-2 text-[11.5px] font-bold text-slate-600 disabled:opacity-60"
             >
-              残りを●にする
+              {bulkLabel}
             </button>
           </div>
         </div>
@@ -6950,21 +7077,287 @@ function EoPerformanceSection({ employeeId, session, onNotifyAdmin, isDesktop })
   );
 }
 
-// ---- 業務（メイングループ）ごとの実績入力フォーマット ----
-// スタッフのメイングループと同じ名前のものが、そのスタッフの実績入力画面になる。
-// 新しい業務の実績入力を追加するときは、ここに1行足す。
-// 定義がないグループのスタッフには「実績入力」は表示されない。
+// ---- 簡易版の実績入力 ----
+// 日ごとに「件数」と「内容・備考」だけを書く形。eo業務以外の部署向け。
+// 保存先はeo業務と同じ staff_new_performance の daily（形だけが違う）。
+function SimplePerformanceSection({ employeeId, onNotifyAdmin, isDesktop }) {
+  const now = new Date();
+  const [year, setYear] = useState(now.getFullYear());
+  const [month, setMonth] = useState(now.getMonth() + 1);
+  const [daily, setDaily] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const [savedAt, setSavedAt] = useState(null);
+  const [submittedAt, setSubmittedAt] = useState(null);
+
+  const monthKey = `${year}-${pad(month)}`;
+  const days = useMemo(() => shiftMonthDays(monthKey), [monthKey]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    fetchNewPerf(employeeId, year, month).then((row) => {
+      if (cancelled) return;
+      setDaily(row?.daily || {});
+      setSubmittedAt(row?.submitted_at || null);
+      setDirty(false);
+      setSavedAt(null);
+      setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [employeeId, year, month]);
+
+  // 保存していない入力があるまま対象月を変えると消えてしまうため、確認する
+  const changeMonthSafely = (apply) => {
+    if (dirty && !window.confirm('保存していない入力があります。保存せずに対象月を切り替えますか？')) return;
+    apply();
+  };
+
+  const updateDay = (key, field, value) => {
+    setDirty(true);
+    setDaily((prev) => ({ ...prev, [key]: { ...(prev[key] || {}), [field]: value } }));
+  };
+
+  const monthTotal = days.reduce((sum, d) => sum + (Number(daily[d.key]?.count) || 0), 0);
+  const filledDays = days.filter((d) => (daily[d.key]?.count || '') !== '' || (daily[d.key]?.note || '')).length;
+
+  const save = async () => {
+    setSaving(true);
+    await saveNewPerf(employeeId, year, month, { daily });
+    setSaving(false);
+    setDirty(false);
+    setSavedAt(new Date());
+  };
+
+  const submit = async () => {
+    if (!window.confirm(`${year}年${month}月分の実績を提出します。よろしいですか？`)) return;
+    setSubmitting(true);
+    const at = new Date().toISOString();
+    await saveNewPerf(employeeId, year, month, { daily, submitted_at: at });
+    if (onNotifyAdmin) await onNotifyAdmin(`${year}年${month}月分の実績が提出されました`);
+    setSubmitting(false);
+    setDirty(false);
+    setSavedAt(new Date());
+    setSubmittedAt(at);
+  };
+
+  const years = [now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1];
+  const months = Array.from({ length: 12 }, (_, i) => i + 1);
+
+  return (
+    <div className="space-y-3">
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2 flex-wrap">
+          <BarChart3 size={15} className="text-slate-400" />
+          <h2 className="font-bold text-[13.5px]">実績入力</h2>
+          {submittedAt && (
+            <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10.5px] font-bold text-emerald-700">
+              提出済み {dateLabel(String(submittedAt).slice(0, 10))}
+            </span>
+          )}
+        </div>
+        <div className="px-5 py-4 space-y-3">
+          <div className="flex items-center gap-2 flex-wrap">
+            <select
+              value={year}
+              onChange={(e) => changeMonthSafely(() => setYear(Number(e.target.value)))}
+              className="border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white"
+            >
+              {years.map((y) => <option key={y} value={y}>{y}年</option>)}
+            </select>
+            <select
+              value={month}
+              onChange={(e) => changeMonthSafely(() => setMonth(Number(e.target.value)))}
+              className="border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white"
+            >
+              {months.map((m) => <option key={m} value={m}>{m}月</option>)}
+            </select>
+            <span className="ml-auto text-[12px] text-slate-500">
+              入力 {filledDays}／{days.length}日　合計 <span className="font-mono text-[13.5px] font-bold text-slate-800">{monthTotal}</span>件
+            </span>
+          </div>
+          <div className="rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-[11.5px] leading-relaxed text-slate-600">
+            日ごとの件数と内容を入力してください。途中まででも「一時保存」で残せます。
+          </div>
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-5 py-10 text-center text-[12.5px] text-slate-300">読み込み中…</div>
+      ) : (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden divide-y divide-slate-100">
+          {days.map((d) => (
+            <div key={d.key} className="px-4 py-2.5 flex items-center gap-2 flex-wrap">
+              <span className={`w-[4.5rem] shrink-0 text-[13px] font-bold ${d.isSunday || d.holidayName ? 'text-rose-600' : d.isSaturday ? 'text-sky-600' : 'text-slate-700'}`}>
+                {d.day}日({d.weekday})
+              </span>
+              <input
+                type="number"
+                inputMode="numeric"
+                min="0"
+                value={daily[d.key]?.count ?? ''}
+                onChange={(e) => updateDay(d.key, 'count', e.target.value)}
+                placeholder="件数"
+                className="w-[5.5rem] shrink-0 box-border rounded-lg border border-slate-200 px-2.5 py-2 text-[16px] font-mono text-right"
+              />
+              <input
+                value={daily[d.key]?.note ?? ''}
+                onChange={(e) => updateDay(d.key, 'note', e.target.value)}
+                placeholder="内容・備考"
+                className="flex-1 min-w-[8rem] box-border rounded-lg border border-slate-200 px-2.5 py-2 text-[16px]"
+              />
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-5 py-4 space-y-2">
+        <div className="flex gap-2">
+          <button
+            onClick={save}
+            disabled={saving || loading}
+            className="flex-1 rounded-xl border border-slate-300 py-3 text-[13.5px] font-bold text-slate-600 disabled:opacity-60"
+          >
+            {saving ? '保存中…' : '一時保存'}
+          </button>
+          <button
+            onClick={submit}
+            disabled={submitting || loading}
+            className="flex-1 rounded-xl bg-amber-600 py-3 text-[13.5px] font-bold text-white disabled:bg-slate-200"
+          >
+            {submitting ? '送信中…' : submittedAt ? '出し直す' : '提出する'}
+          </button>
+        </div>
+        <div className="text-center text-[11px] text-slate-400">
+          {dirty ? '保存していない入力があります' : savedAt ? `${savedAt.toLocaleTimeString('ja-JP')} に保存しました` : '提出後も、出し直せます'}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---- 実績入力のフォーマット ----
+// どの部署にどの型を使うかは「部署ごとのフォーマット」設定で決める。
+// 新しい型を足すときは、ここに1行足す。
 const PERFORMANCE_FORMATS = {
-  [EO_GROUP_NAME]: {
+  eo: {
     label: '実績入力',
     desc: '担当業務の実績を入力して保存',
+    adminLabel: 'eo業務用（新規・既存の詳細入力）',
     Component: EoPerformanceSection,
+  },
+  simple: {
+    label: '実績入力',
+    desc: '日ごとの件数と内容を入力して保存',
+    adminLabel: '簡易版（日別の件数・内容）',
+    Component: SimplePerformanceSection,
   },
 };
 
-function performanceFormatFor(mainGroup) {
-  if (!mainGroup) return null;
-  return PERFORMANCE_FORMATS[mainGroup] || null;
+// ---- 部署ごとの入力フォーマット設定（マスター管理者）----
+function GroupFormatSettingsTab({ employeeAccounts, settings, onSave, isDesktop }) {
+  const groups = Array.from(new Set(employeeAccounts.filter((a) => !a.resignationDate).map((a) => a.mainGroup).filter(Boolean))).sort();
+  const saved = parseGroupFormats(settings);
+  const [draft, setDraft] = useState(saved);
+  const [saving, setSaving] = useState(false);
+  const [savedAt, setSavedAt] = useState(null);
+
+  // 他の画面で設定が変わったときに追従する
+  const savedText = JSON.stringify(saved);
+  useEffect(() => { setDraft(JSON.parse(savedText)); }, [savedText]);
+
+  const valueOf = (group, kind) => {
+    const picked = draft[group]?.[kind];
+    if (kind === 'shift') return SHIFT_FORMATS[picked] ? picked : shiftFormatKeyFor(group, settings);
+    return picked === 'none' || PERFORMANCE_FORMATS[picked] ? picked : performanceFormatKeyFor(group, settings);
+  };
+  const pick = (group, kind, value) => {
+    setDraft((prev) => ({ ...prev, [group]: { ...(prev[group] || {}), [kind]: value } }));
+  };
+
+  const save = async () => {
+    setSaving(true);
+    // 画面に出ている部署の分だけを、今の選択どおりに書き出す
+    const next = { ...draft };
+    groups.forEach((g) => { next[g] = { shift: valueOf(g, 'shift'), performance: valueOf(g, 'performance') }; });
+    const ok = await onSave(next);
+    setSaving(false);
+    if (ok) setSavedAt(new Date());
+  };
+
+  const perfOptions = [
+    ...Object.entries(PERFORMANCE_FORMATS).map(([key, f]) => [key, f.adminLabel || f.label]),
+    ['none', '使わない（実績入力を表示しない）'],
+  ];
+
+  const renderGroup = (g) => (
+    <div key={g} className="px-5 py-4 border-b border-slate-100 last:border-0">
+      <div className="text-[13.5px] font-bold text-slate-800 mb-2.5">{g}</div>
+      <div className={isDesktop ? 'grid grid-cols-2 gap-4' : 'space-y-3'}>
+        <div>
+          <div className="text-[11px] font-bold text-slate-400 mb-1">シフト希望</div>
+          <select
+            value={valueOf(g, 'shift')}
+            onChange={(e) => pick(g, 'shift', e.target.value)}
+            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px] bg-white"
+          >
+            {Object.entries(SHIFT_FORMATS).map(([key, f]) => (
+              <option key={key} value={key}>{f.label}</option>
+            ))}
+          </select>
+          <div className="mt-1 text-[11px] text-slate-400">{SHIFT_FORMATS[valueOf(g, 'shift')]?.desc}</div>
+        </div>
+        <div>
+          <div className="text-[11px] font-bold text-slate-400 mb-1">実績入力</div>
+          <select
+            value={valueOf(g, 'performance')}
+            onChange={(e) => pick(g, 'performance', e.target.value)}
+            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px] bg-white"
+          >
+            {perfOptions.map(([key, label]) => (
+              <option key={key} value={key}>{label}</option>
+            ))}
+          </select>
+          <div className="mt-1 text-[11px] text-slate-400">
+            {valueOf(g, 'performance') === 'none' ? 'この部署には「実績入力」を表示しません' : PERFORMANCE_FORMATS[valueOf(g, 'performance')]?.desc}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="space-y-5">
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+          <Settings size={15} className="text-slate-400" />
+          <h2 className="font-bold text-[13.5px]">部署ごとの入力フォーマット</h2>
+        </div>
+        <div className="px-5 py-2.5 bg-slate-50 border-b border-slate-100 text-[11.5px] leading-relaxed text-slate-500">
+          スタッフの「各種申請」に出る、シフト希望と実績入力の形を部署（メイングループ）ごとに決めます。<br />
+          変更すると、その部署のスタッフの画面がすぐに切り替わります。提出済みの内容は消えません。
+        </div>
+        {groups.length === 0 ? (
+          <div className="px-5 py-8 text-center text-[12.5px] text-slate-300">メイングループが設定されたスタッフがいません</div>
+        ) : (
+          <div>{groups.map(renderGroup)}</div>
+        )}
+      </div>
+
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-5 py-4 space-y-2">
+        <button
+          onClick={save}
+          disabled={saving || groups.length === 0}
+          className="w-full rounded-xl bg-amber-600 py-3 text-[14px] font-bold text-white disabled:bg-slate-200"
+        >
+          {saving ? '保存中…' : 'この内容で保存する'}
+        </button>
+        {savedAt && <div className="text-center text-[11px] text-slate-400">{savedAt.toLocaleTimeString('ja-JP')} に保存しました</div>}
+      </div>
+    </div>
+  );
 }
 
 // 管理者用：eo業務グループのインセンティブ集計
@@ -7920,7 +8313,7 @@ function ShiftAdminTab({ employeeAccounts, periods = [], requests = [], tablesRe
     const lines = [header.join(',')];
     activeStaff.forEach((acc) => {
       const r = byEmployee[acc.id];
-      const cells = days.map((d) => (r ? (SHIFT_ANSWER_LABEL[r.answers?.[d.key]] || '') : ''));
+      const cells = days.map((d) => (r ? shiftAnswerText(r.answers?.[d.key]) : ''));
       lines.push([acc.name, ...cells].join(','));
     });
     const blob = new Blob(['﻿' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
@@ -7944,7 +8337,9 @@ function ShiftAdminTab({ employeeAccounts, periods = [], requests = [], tablesRe
   })();
 
   // その日に出勤可能な人数
-  const okCount = (dayKey) => monthRequests.filter((r) => r.answers?.[dayKey] === 'ok').length;
+  const okCount = (dayKey) => monthRequests.filter((r) => shiftAnswerKind(r.answers?.[dayKey]) === 'ok').length;
+  // 活動場所を書く型のスタッフが混ざっているときは、マス目を広くして場所を見せる
+  const hasPlaceAnswer = monthRequests.some((r) => Object.values(r.answers || {}).some((v) => shiftAnswerPlace(v).trim()));
 
   const renderRow = (acc) => {
     const r = byEmployee[acc.id];
@@ -7959,7 +8354,7 @@ function ShiftAdminTab({ employeeAccounts, periods = [], requests = [], tablesRe
         </div>
       );
     }
-    const okDays = days.filter((d) => r.answers?.[d.key] === 'ok').length;
+    const okDays = days.filter((d) => shiftAnswerKind(r.answers?.[d.key]) === 'ok').length;
     return (
       <div key={acc.id} className="flex items-center gap-2 border-b border-slate-100 px-3 py-2 last:border-0">
         <span className="w-28 shrink-0 text-[12.5px] font-bold text-slate-800 truncate">
@@ -7968,14 +8363,17 @@ function ShiftAdminTab({ employeeAccounts, periods = [], requests = [], tablesRe
         <span className="flex flex-1 min-w-0 gap-[2px] overflow-x-auto">
           {days.map((d) => {
             const v = r.answers?.[d.key];
-            const cls = v === 'ok' ? 'text-amber-600' : v === 'off' ? 'text-slate-700' : v === 'paid' ? 'text-teal-700' : 'text-slate-200';
+            const kind = shiftAnswerKind(v);
+            const place = shiftAnswerPlace(v).trim();
+            const cls = kind === 'ok' ? 'text-amber-600' : kind === 'off' ? 'text-slate-700' : kind === 'paid' ? 'text-teal-700' : 'text-slate-200';
+            const text = place || (kind === 'paid' ? '有' : SHIFT_ANSWER_LABEL[kind] || '-');
             return (
               <span
                 key={d.key}
-                title={`${d.day}日(${d.weekday})`}
-                className={`w-[22px] shrink-0 text-center text-[11px] font-bold ${cls} ${requestDays.has(d.key) ? 'bg-amber-50 rounded' : ''}`}
+                title={`${d.day}日(${d.weekday})${place ? ` ${place}` : ''}`}
+                className={`${hasPlaceAnswer ? 'w-[56px]' : 'w-[22px]'} shrink-0 truncate text-center text-[11px] font-bold ${cls} ${requestDays.has(d.key) ? 'bg-amber-50 rounded' : ''}`}
               >
-                {v === 'paid' ? '有' : SHIFT_ANSWER_LABEL[v] || '-'}
+                {text}
               </span>
             );
           })}
@@ -9215,12 +9613,13 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
     {
       key: 'staff-group',
       label: 'スタッフ管理',
-      tabs: isMasterAdmin ? ['accounts', 'groupleave', 'eoincentive', 'auditlog', 'adminperms', 'resignreasons'] : ['accounts', 'groupleave', 'eoincentive', 'auditlog'],
+      tabs: isMasterAdmin ? ['accounts', 'groupleave', 'eoincentive', 'groupformats', 'auditlog', 'adminperms', 'resignreasons'] : ['accounts', 'groupleave', 'eoincentive', 'auditlog'],
       items: isMasterAdmin
         ? [
             { tab: 'accounts', label: 'スタッフ一覧・登録', sub: '入退職日・有休管理' },
             { tab: 'groupleave', label: '出勤規定日数設定', sub: 'グループ別・月別日数' },
             { tab: 'eoincentive', label: 'eo業務インセンティブ', sub: '新規実績・既存実績・支給額' },
+            { tab: 'groupformats', label: '部署ごとの入力フォーマット', sub: 'シフト希望・実績入力の形' },
             { tab: 'auditlog', label: '監査ログ', sub: '承認・操作の履歴' },
             { tab: 'adminperms', label: '管理者権限', sub: '管理者アカウント・権限設定' },
             { tab: 'resignreasons', label: '退職理由の設定', sub: '選択肢の追加・編集' },
@@ -9313,7 +9712,7 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
   );
 }
 
-function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAdminTab = null, onConsumeRequestedAdminTab, onDecide, onDecideLeave, onDecidePerformance, onDecideCommute, onNotifyEmployee, onSaveShiftPeriod, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onChangeLoginEmail, onDecideMonthlyConfirm, onCancelMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
+function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAdminTab = null, onConsumeRequestedAdminTab, onDecide, onDecideLeave, onDecidePerformance, onDecideCommute, onNotifyEmployee, onSaveShiftPeriod, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onSaveGroupFormats, onChangeLoginEmail, onDecideMonthlyConfirm, onCancelMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
   const [tab, setTab] = useState('dashboard'); // dashboard | attendance | requests | leave | performance | accounts
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
@@ -9701,6 +10100,15 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
 
       {tab === 'resignreasons' && isMasterAdmin && (
         <ResignationReasonSettings reasons={data.resignationReasons} onRefresh={onRefresh} isDesktop={isDesktop} />
+      )}
+
+      {tab === 'groupformats' && isMasterAdmin && (
+        <GroupFormatSettingsTab
+          employeeAccounts={employeeAccounts}
+          settings={data.settings}
+          onSave={onSaveGroupFormats}
+          isDesktop={isDesktop}
+        />
       )}
 
       {tab === 'auditlog' && (
