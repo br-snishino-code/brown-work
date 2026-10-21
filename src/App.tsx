@@ -9537,79 +9537,19 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
   return (
     <EmployeeLinkContext.Provider value={openEmployee}>
     <div className="space-y-5">
-      {isDesktop ? (
-        <AdminTopNav
-          tab={tab}
-          setTab={setTab}
-          attendanceCount={clockInApprovalCount}
-          correctionCount={pending.length + missing.length}
-          leaveCount={leavePending.length}
-          performanceCount={performancePending.length}
-          monthlyConfirmCount={monthlyConfirmCount}
-          approvalCount={approvalItems.length}
-          shiftPendingCount={shiftPendingCount}
-          isMasterAdmin={isMasterAdmin}
-        />
-      ) : (
-        <div className="flex items-center bg-white rounded-xl border border-slate-200 p-1 text-[11.5px] font-medium overflow-x-auto">
-          <button onClick={() => setTab('dashboard')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'dashboard' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
-            ホーム
-          </button>
-          <button onClick={() => setTab('approvals')} className={`relative flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'approvals' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
-            承認
-            {approvalItems.length > 0 && tab !== 'approvals' && (
-              <span className="absolute -top-1 -right-0.5 w-4 h-4 bg-amber-600 rounded-full text-[9px] flex items-center justify-center text-white font-bold">
-                {approvalItems.length}
-              </span>
-            )}
-          </button>
-          <button onClick={() => setTab('shift')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'shift' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
-            シフト
-          </button>
-          <button onClick={() => setTab('attendance')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'attendance' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
-            勤怠一覧
-          </button>
-          <button onClick={() => setTab('requests')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'requests' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
-            勤怠修正
-          </button>
-          <button onClick={() => setTab('leave')} className={`relative flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'leave' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
-            休暇申請
-            {leavePending.length > 0 && tab !== 'leave' && (
-              <span className="absolute -top-1 -right-0.5 w-4 h-4 bg-amber-600 rounded-full text-[9px] flex items-center justify-center text-white font-bold">
-                {leavePending.length}
-              </span>
-            )}
-          </button>
-          <button onClick={() => setTab('performance')} className={`relative flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'performance' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
-            実績
-            {performancePending.length > 0 && tab !== 'performance' && (
-              <span className="absolute -top-1 -right-0.5 w-4 h-4 bg-amber-600 rounded-full text-[9px] flex items-center justify-center text-white font-bold">
-                {performancePending.length}
-              </span>
-            )}
-          </button>
-          <button onClick={() => setTab('accounts')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'accounts' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
-            スタッフ管理
-          </button>
-          <button onClick={() => setTab('groupleave')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'groupleave' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
-            出勤規定日数設定
-          </button>
-          <button onClick={() => setTab('eoincentive')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'eoincentive' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
-            eo業務インセンティブ
-          </button>
-          <button onClick={() => setTab('auditlog')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'auditlog' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
-            監査ログ
-          </button>
-          <button onClick={() => setTab('monthlyconfirm')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'monthlyconfirm' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
-            月次勤怠の確定{monthlyConfirmCount > 0 ? `（${monthlyConfirmCount}）` : ''}
-          </button>
-          {isMasterAdmin && (
-            <button onClick={() => setTab('adminperms')} className={`flex-1 py-2 rounded-lg transition-colors whitespace-nowrap px-2 ${tab === 'adminperms' ? 'bg-slate-800 text-white' : 'text-slate-500'}`}>
-              管理者権限
-            </button>
-          )}
-        </div>
-      )}
+      {/* スマホでもPCと同じ並び・同じ件数表示にする */}
+      <AdminTopNav
+        tab={tab}
+        setTab={setTab}
+        attendanceCount={clockInApprovalCount}
+        correctionCount={pending.length + missing.length}
+        leaveCount={leavePending.length}
+        performanceCount={performancePending.length}
+        monthlyConfirmCount={monthlyConfirmCount}
+        approvalCount={approvalItems.length}
+        shiftPendingCount={shiftPendingCount}
+        isMasterAdmin={isMasterAdmin}
+      />
 
       {missing.length > 0 && tab === 'requests' && (
         <div className="bg-rose-50 border border-rose-200 rounded-xl px-4 py-3 flex items-start gap-2.5">
