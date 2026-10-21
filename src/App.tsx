@@ -443,6 +443,18 @@ function getPrescribedAttendanceDays(employee, month, groupAttendanceSchedules, 
   return v != null && v !== '' ? Number(v) : null;
 }
 
+// 生年月日から年齢を出す
+function ageFromBirthDate(birthDateStr, asOf = new Date()) {
+  if (!birthDateStr) return null;
+  const b = new Date(birthDateStr + 'T00:00:00');
+  if (Number.isNaN(b.getTime())) return null;
+  let age = asOf.getFullYear() - b.getFullYear();
+  const beforeBirthday =
+    asOf.getMonth() < b.getMonth() || (asOf.getMonth() === b.getMonth() && asOf.getDate() < b.getDate());
+  if (beforeBirthday) age -= 1;
+  return age >= 0 && age < 150 ? age : null;
+}
+
 function tenureLabel(hireDateStr, asOf = new Date()) {
   if (!hireDateStr) return '入職日未設定';
   const hire = new Date(hireDateStr + 'T00:00:00');
@@ -5606,6 +5618,79 @@ function AnnouncementComposerModal({ onClose, onSubmit }) {
   );
 }
 
+// 管理者からのお知らせの全件一覧。月で絞り込める
+function NotificationsAllModal({ notifications, onMarkRead, onClose }) {
+  const [monthFilter, setMonthFilter] = useState('all');
+  const [unreadOnly, setUnreadOnly] = useState(false);
+
+  const months = Array.from(new Set(notifications.map((n) => String(n.sentAt || '').slice(0, 7)).filter(Boolean))).sort().reverse();
+  const filtered = notifications
+    .filter((n) => monthFilter === 'all' || String(n.sentAt || '').startsWith(monthFilter))
+    .filter((n) => !unreadOnly || !n.isRead);
+  const unreadCount = notifications.filter((n) => !n.isRead).length;
+
+  const markAll = async () => {
+    for (const n of notifications.filter((x) => !x.isRead)) {
+      // eslint-disable-next-line no-await-in-loop
+      await onMarkRead(n.id);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-end sm:items-center justify-center" onClick={onClose}>
+      <div
+        className="bg-white w-full sm:max-w-2xl sm:rounded-2xl rounded-t-2xl max-h-[88vh] flex flex-col overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+          <Bell size={15} className="text-slate-400" />
+          <h3 className="font-bold text-[14px]">管理者からのお知らせ</h3>
+          <button onClick={onClose} className="ml-auto text-slate-400 text-[12.5px] font-bold">閉じる</button>
+        </div>
+        <div className="px-5 py-2.5 border-b border-slate-100 flex items-center gap-2 flex-wrap">
+          <select
+            value={monthFilter}
+            onChange={(e) => setMonthFilter(e.target.value)}
+            className="border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white"
+          >
+            <option value="all">すべての期間</option>
+            {months.map((m) => <option key={m} value={m}>{monthKeyLabel(m)}</option>)}
+          </select>
+          <button
+            onClick={() => setUnreadOnly((v) => !v)}
+            className={`rounded-lg border px-2.5 py-1.5 text-[12px] font-bold ${unreadOnly ? 'border-rose-500 bg-rose-50 text-rose-600' : 'border-slate-200 text-slate-500'}`}
+          >
+            未読のみ
+          </button>
+          {unreadCount > 0 && (
+            <button onClick={markAll} className="ml-auto text-[12px] font-bold text-slate-500">すべて既読にする</button>
+          )}
+        </div>
+        <div className="flex-1 overflow-y-auto divide-y divide-slate-100">
+          {filtered.length === 0 ? (
+            <div className="px-5 py-10 text-center text-[12.5px] text-slate-300">該当するお知らせはありません</div>
+          ) : (
+            filtered.map((n) => (
+              <button
+                key={n.id}
+                onClick={() => !n.isRead && onMarkRead(n.id)}
+                className="w-full text-left px-5 py-3 hover:bg-slate-50"
+              >
+                <div className="flex items-center gap-1.5">
+                  {!n.isRead && <span className="w-1.5 h-1.5 rounded-full bg-rose-500 shrink-0" />}
+                  <span className="text-[12.5px] font-bold text-slate-700">{n.subject}</span>
+                </div>
+                <div className="text-[11.5px] text-slate-500 mt-0.5 whitespace-pre-wrap">{n.body}</div>
+                <div className="text-[10px] text-slate-300 mt-1">{new Date(n.sentAt).toLocaleString('ja-JP')}</div>
+              </button>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, historyDates, records, corrections, onOpenCorrection, notifications, onMarkNotificationRead, schedulePatterns = [], activePatternNo, onSetActivePattern, onSavePatterns, needsCommuteClaimReminder, commuteClaimTargetMonth, onGoToCommuteClaim, isDesktop }) {
   const status = computeDayStatus(todayRecord);
   const canClockIn = !todayRecord?.clockIn;
@@ -5614,6 +5699,8 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
   // 勤怠履歴で表示する月（既定は今月。◀▶で過去の月も見られる）
   const thisMonthKey = `${now.getFullYear()}-${pad(now.getMonth() + 1)}`;
   const [viewMonth, setViewMonth] = useState(thisMonthKey);
+  // お知らせの全件表示
+  const [notifyAllOpen, setNotifyAllOpen] = useState(false);
   const viewMonthDate = new Date(Number(viewMonth.slice(0, 4)), Number(viewMonth.slice(5, 7)) - 1, 1);
   const isThisMonth = viewMonth === thisMonthKey;
   const shiftViewMonth = (diff) => {
@@ -5723,11 +5810,16 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
       </div>
 
       <div className="rounded-2xl bg-white border border-slate-200 shadow-sm overflow-hidden">
-        <div className="px-5 py-3 bg-slate-100 flex items-center justify-between">
+        <div className="px-5 py-3 bg-slate-100 flex items-center justify-between gap-2">
           <span className="text-[12.5px] font-bold text-slate-500">管理者からのお知らせ</span>
-          {notifications && notifications.some((n) => !n.isRead) && (
-            <span className="text-[10px] font-bold text-white bg-rose-500 rounded-full px-2 py-0.5">未読 {notifications.filter((n) => !n.isRead).length}</span>
-          )}
+          <span className="flex items-center gap-2">
+            {notifications && notifications.some((n) => !n.isRead) && (
+              <span className="text-[10px] font-bold text-white bg-rose-500 rounded-full px-2 py-0.5">未読 {notifications.filter((n) => !n.isRead).length}</span>
+            )}
+            {notifications && notifications.length > 0 && (
+              <button onClick={() => setNotifyAllOpen(true)} className="text-[11px] font-bold text-slate-400 hover:text-slate-700">すべて見る</button>
+            )}
+          </span>
         </div>
         {(!notifications || notifications.length === 0) ? (
           <div className="px-5 py-4 text-[12.5px] text-slate-400">管理者からのお知らせはありません</div>
@@ -5747,9 +5839,25 @@ function EmployeeView({ now, todayRecord, onClockIn, onClockOut, geoStatus, hist
                 <div className="text-[10px] text-slate-300 mt-1">{new Date(n.sentAt).toLocaleString('ja-JP')}</div>
               </button>
             ))}
+            {notifications.length > 5 && (
+              <button
+                onClick={() => setNotifyAllOpen(true)}
+                className="w-full px-5 py-2.5 text-[12px] font-bold text-slate-500 hover:bg-slate-50"
+              >
+                ほかに{notifications.length - 5}件のお知らせを見る
+              </button>
+            )}
           </div>
         )}
       </div>
+
+      {notifyAllOpen && (
+        <NotificationsAllModal
+          notifications={notifications || []}
+          onMarkRead={onMarkNotificationRead}
+          onClose={() => setNotifyAllOpen(false)}
+        />
+      )}
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <SummaryTile label={isThisMonth ? '今月の出勤' : `${Number(viewMonth.slice(5, 7))}月の出勤`} value={`${monthly.days}日`} icon={<CalendarDays size={16}/>} />
@@ -12354,8 +12462,10 @@ function AdminCommuteExpenseClaimsTab({ claims, isMasterAdmin = false, onDecide,
 // 変更申請ができない、閲覧のみの登録情報
 const PROFILE_READONLY_FIELDS = [
   { key: 'username', label: 'ログインID' },
-  { key: 'birthDate', label: '生年月日', type: 'date' },
-  { key: 'hireDate', label: '入職日', type: 'date' },
+  { key: 'staffNumber', label: 'スタッフコード' },
+  // 生年月日の横に年齢、入職日の横に勤続年数を添える
+  { key: 'birthDate', label: '生年月日', type: 'date', note: (v) => (ageFromBirthDate(v) != null ? `（${ageFromBirthDate(v)}歳）` : '') },
+  { key: 'hireDate', label: '入職日', type: 'date', note: (v) => (v ? `（${tenureLabel(v)}）` : '') },
   { key: 'staffType', label: '雇用形態' },
   { key: 'jobTitle', label: '役職' },
   { key: 'mainGroup', label: 'メイングループ' },
@@ -12365,12 +12475,42 @@ const PROFILE_READONLY_FIELDS = [
   { key: 'contractEnd', label: '契約終了日', type: 'date' },
 ];
 
+// 社会保険の加入状況（閲覧のみ）
+const PROFILE_INSURANCE_FIELDS = [
+  { key: 'healthInsuranceStatus', label: '健康保険' },
+  { key: 'healthInsuranceAcquiredDate', label: '　資格取得日', type: 'date' },
+  { key: 'pensionStatus', label: '厚生年金' },
+  { key: 'pensionAcquiredDate', label: '　資格取得日', type: 'date' },
+  { key: 'employmentInsuranceStatus', label: '雇用保険' },
+  { key: 'employmentInsuranceAcquiredDate', label: '　資格取得日', type: 'date' },
+];
+
 function ProfileRequestView({ session, requests, onSubmit }) {
   const [modalOpen, setModalOpen] = useState(false);
   const pending = requests.filter((r) => r.status === 'pending');
+  // 入力漏れのお知らせ。変更申請で直せる項目だけを見る
+  const missingFields = PROFILE_EDITABLE_FIELDS.filter((f) => !String(session[f.key] || '').trim());
 
   return (
     <div className="space-y-5">
+      {missingFields.length > 0 && (
+        <div className="rounded-2xl border border-amber-500 bg-amber-50 px-4 py-3.5">
+          <div className="flex items-center gap-2">
+            <AlertTriangle size={16} className="text-amber-600 shrink-0" />
+            <div className="text-[12.5px] font-bold text-amber-900">未入力の項目が{missingFields.length}件あります</div>
+          </div>
+          <div className="mt-1.5 text-[11.5px] leading-relaxed text-amber-800">
+            {missingFields.slice(0, 6).map((f) => f.label.replace(/（.*）/, '')).join('、')}
+            {missingFields.length > 6 ? ` ほか${missingFields.length - 6}件` : ''}
+          </div>
+          <button
+            onClick={() => setModalOpen(true)}
+            className="mt-2.5 w-full rounded-lg bg-amber-600 py-2.5 text-[12.5px] font-bold text-white active:brightness-95"
+          >
+            変更を申請して入力する
+          </button>
+        </div>
+      )}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
         <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
           <UserCog size={16} className="text-slate-400" />
@@ -12409,16 +12549,83 @@ function ProfileRequestView({ session, requests, onSubmit }) {
           {PROFILE_READONLY_FIELDS.map((f) => {
             const raw = session[f.key] || '';
             const value = raw && f.type === 'date' ? dateLabel(raw) : raw;
+            const note = raw && f.note ? f.note(raw) : '';
             return (
               <div key={f.key} className="px-5 py-2.5 flex items-center justify-between gap-3 text-[13px]">
                 <span className="text-slate-400 shrink-0">{f.label}</span>
-                <span className="font-medium text-slate-700 text-right break-all">{value || '未設定'}</span>
+                <span className="font-medium text-slate-700 text-right break-all">
+                  {value || '未設定'}
+                  {note && <span className="ml-1 text-[11.5px] text-slate-400">{note}</span>}
+                </span>
               </div>
             );
           })}
         </div>
         <div className="px-5 py-2.5 bg-slate-50 text-[10.5px] text-slate-400 border-t border-slate-100">
           自身の情報の変更については管理者へ相談ください。
+        </div>
+      </div>
+
+      {/* 家族・配偶者（閲覧のみ。年末調整の扶養の確認に使う） */}
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+          <Users size={15} className="text-slate-400" />
+          <h2 className="font-bold text-[13.5px] text-slate-800">家族・配偶者</h2>
+        </div>
+        <div className="px-5 pt-3 pb-1 text-[11px] font-bold text-slate-400">配偶者</div>
+        <div className="divide-y divide-slate-100">
+          {[
+            ['配偶者の有無', session.spouseStatus || '無'],
+            ['年収（前年）', session.spouseAnnualIncome != null ? formatYen(session.spouseAnnualIncome) : '未設定'],
+            ['月収（現在）', session.spouseMonthlyIncome != null ? formatYen(session.spouseMonthlyIncome) : '未設定'],
+          ].map(([label, value]) => (
+            <div key={label} className="px-5 py-2.5 flex items-center justify-between gap-3 text-[13px]">
+              <span className="text-slate-400 shrink-0">{label}</span>
+              <span className="font-medium text-slate-700 text-right break-all">{value}</span>
+            </div>
+          ))}
+        </div>
+        <div className="px-5 pt-3 pb-1 text-[11px] font-bold text-slate-400 border-t border-slate-100">家族</div>
+        {(session.familyMembers || []).length === 0 ? (
+          <div className="px-5 py-4 text-[12.5px] text-slate-300">家族の登録はありません</div>
+        ) : (
+          <div className="divide-y divide-slate-100">
+            {(session.familyMembers || []).map((m, i) => (
+              <div key={i} className="px-5 py-2.5 flex items-center justify-between gap-3 text-[13px]">
+                <span className="font-medium text-slate-700">{m.name || '（氏名未設定）'}</span>
+                <span className="text-right text-[12px] text-slate-400">
+                  {m.relation || '続柄未設定'}
+                  {m.birthDate ? ` ・ ${dateLabel(m.birthDate)}` : ''}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="px-5 py-2.5 bg-slate-50 text-[10.5px] text-slate-400 border-t border-slate-100">
+          家族・配偶者の情報の変更については管理者へ相談ください。
+        </div>
+      </div>
+
+      {/* 社会保険（閲覧のみ） */}
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+          <ShieldCheck size={15} className="text-slate-400" />
+          <h2 className="font-bold text-[13.5px] text-slate-800">社会保険の加入状況</h2>
+        </div>
+        <div className="divide-y divide-slate-100">
+          {PROFILE_INSURANCE_FIELDS.map((f) => {
+            const raw = session[f.key] || '';
+            const value = raw && f.type === 'date' ? dateLabel(raw) : raw;
+            return (
+              <div key={f.key} className="px-5 py-2.5 flex items-center justify-between gap-3 text-[13px]">
+                <span className="text-slate-400 shrink-0 whitespace-pre">{f.label}</span>
+                <span className={`font-medium text-right break-all ${value === '加入' ? 'text-emerald-700' : 'text-slate-700'}`}>{value || '未設定'}</span>
+              </div>
+            );
+          })}
+        </div>
+        <div className="px-5 py-2.5 bg-slate-50 text-[10.5px] text-slate-400 border-t border-slate-100">
+          加入・喪失の手続きは会社が行います。内容に相違があるときは管理者へご連絡ください。
         </div>
       </div>
 
