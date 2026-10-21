@@ -3625,11 +3625,10 @@ function AttendanceApp() {
                 onOpen={() => setTopTab('hr')}
               />
             )}
+            {/* 労務タブは閲覧のみ。お知らせの配信・削除は管理画面から行う */}
             <AnnouncementsView
               announcements={data.announcements}
-              isAdmin={session.role === 'admin' || session.role === 'master_admin'}
-              onSubmit={submitAnnouncement}
-              onDelete={deleteAnnouncement}
+              isAdmin={false}
               onGetFileUrl={getAnnouncementFileUrl}
               isDesktop={isDesktop}
             />
@@ -3722,6 +3721,7 @@ function AttendanceApp() {
                 onDecide={decideYearEndAdjustment}
                 employeeAccounts={employeeAccounts}
                 onNotifyEmployee={notifyEmployeeUser}
+                isMasterAdmin={session.role === 'master_admin'}
                 isDesktop={isDesktop}
               />
               <AdminProfileRequestsTab
@@ -3818,6 +3818,9 @@ function AttendanceApp() {
             onUpdateAdminAccess={updateAdminAccess}
             onSaveAdminNotifyEmail={saveAdminNotifyEmail}
             onSaveGroupFormats={saveGroupFormats}
+            onSubmitAnnouncement={submitAnnouncement}
+            onDeleteAnnouncement={deleteAnnouncement}
+            onGetAnnouncementFileUrl={getAnnouncementFileUrl}
             onChangeLoginEmail={handleChangeLoginEmail}
             onDecideMonthlyConfirm={decideMonthlyAttendanceConfirmation}
             onCancelMonthlyConfirm={cancelMonthlyAttendanceConfirmation}
@@ -8052,13 +8055,13 @@ const HELP_ADMIN = [
       { q: '支給・控除の項目を追加するには', a: 'スタッフの「詳細」→「給与・口座」タブで、スタッフごとの固定的な支給項目・控除項目を登録できます。毎月の計算に自動で反映されます。' },
       { q: '標準報酬月額の設定はどこですか', a: 'スタッフの「詳細」→「社会保険」タブで設定します。等級表から選択でき、健康保険・厚生年金の保険料が自動計算されます。保険料率は別途「保険料率設定」で管理します。' },
       { q: '交通費精算の承認とExcel出力', a: '「給与」タブの交通費精算一覧から承認・却下します。承認できるのはマスター管理者のみです。承認待ちの左側にあるチェックを入れると、まとめて承認できます。承認済みのものは月を指定してExcelファイルに出力でき、経理処理に使えます。承認した金額は、同じ対象月の給与を新規作成する際に支給項目「交通費精算」として自動で入ります。承認する前に「内容を修正して承認」を選ぶと、金額や区間を直してから承認できます。修正した箇所は本人への通知に一覧で記載されます。承認後に修正が必要になった場合は、マスター管理者が「承認を取り消す」で差し戻しに戻せます。いずれの場合も、作成済みの給与明細の「交通費精算」の金額は自動で更新されます。' },
-      { q: '年末調整の進め方', a: '「人材」タブの年末調整で、スタッフから提出された内容を確認し、承認します。見出しの横に提出済みの人数が出ます。未提出の方がいるときは「未提出の◯名に入力依頼を送る」が表示され、お知らせとメールをまとめて送れます。承認したことはアプリ内のお知らせでのみ伝わり、メールは送りません。差し戻した場合は再提出が必要なため、メールでもお知らせします。' },
+      { q: '年末調整の進め方', a: '「人材」タブの年末調整で、スタッフから提出された内容を確認し、承認します。見出しの横に提出済みの人数が出ます。未提出の方がいるときは「未提出の◯名に入力依頼を送る」が表示され、お知らせとメールをまとめて送れます（この送信はマスター管理者のみ行えます）。承認したことはアプリ内のお知らせでのみ伝わり、メールは送りません。差し戻した場合は再提出が必要なため、メールでもお知らせします。' },
     ],
   },
   {
     category: 'お知らせ・その他',
     items: [
-      { q: 'お知らせを投稿するには', a: '「労務」タブの上部にある投稿フォームから、カテゴリ・タイトル・本文を入力して投稿します。ファイルの添付もできます。重要なものは固定表示にすると一番上に表示されます。' },
+      { q: 'お知らせを投稿するには', a: '管理画面の「その他」→「お知らせ配信」から、カテゴリ・タイトル・本文を入力して投稿します。ファイルの添付もできます。重要なものは固定表示にすると一番上に表示されます。投稿したお知らせは、スタッフの「労務」タブに表示されます。' },
       { q: 'データのバックアップを取るには', a: '「勤怠」→「スタッフ一覧」の右上にある「データバックアップ」を押すと、全データがExcelファイルでダウンロードされます。マスター管理者のみ利用できます。月1回を目安に実行してください。マイナンバーを含むため、保管場所には十分ご注意ください。' },
       { q: '監査ログとは何ですか', a: '誰がいつどの操作をしたかの記録です。「勤怠」→「その他」→「監査ログ」で確認できます。承認・却下・アカウント操作などが記録されます。' },
       { q: '「同期エラー」と表示されました', a: '通信が一時的に不安定な場合に表示されます。画面を再読み込み（Ctrl + Shift + R）すると復帰することが多いです。繰り返し発生する場合は開発者にご相談ください。' },
@@ -9613,10 +9616,11 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
     {
       key: 'staff-group',
       label: 'スタッフ管理',
-      tabs: isMasterAdmin ? ['accounts', 'groupleave', 'eoincentive', 'groupformats', 'auditlog', 'adminperms', 'resignreasons'] : ['accounts', 'groupleave', 'eoincentive', 'auditlog'],
+      tabs: isMasterAdmin ? ['accounts', 'announce', 'groupleave', 'eoincentive', 'groupformats', 'auditlog', 'adminperms', 'resignreasons'] : ['accounts', 'announce', 'groupleave', 'eoincentive', 'auditlog'],
       items: isMasterAdmin
         ? [
             { tab: 'accounts', label: 'スタッフ一覧・登録', sub: '入退職日・有休管理' },
+            { tab: 'announce', label: 'お知らせ配信', sub: '労務タブへの掲示・ファイル添付' },
             { tab: 'groupleave', label: '出勤規定日数設定', sub: 'グループ別・月別日数' },
             { tab: 'eoincentive', label: 'eo業務インセンティブ', sub: '新規実績・既存実績・支給額' },
             { tab: 'groupformats', label: '部署ごとの入力フォーマット', sub: 'シフト希望・実績入力の形' },
@@ -9626,6 +9630,7 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
           ]
         : [
             { tab: 'accounts', label: 'スタッフ一覧・登録', sub: '入退職日・有休管理' },
+            { tab: 'announce', label: 'お知らせ配信', sub: '労務タブへの掲示・ファイル添付' },
             { tab: 'groupleave', label: '出勤規定日数設定', sub: 'グループ別・月別日数' },
             { tab: 'eoincentive', label: 'eo業務インセンティブ', sub: '新規実績・既存実績・支給額' },
             { tab: 'auditlog', label: '監査ログ', sub: '承認・操作の履歴' },
@@ -9712,7 +9717,7 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
   );
 }
 
-function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAdminTab = null, onConsumeRequestedAdminTab, onDecide, onDecideLeave, onDecidePerformance, onDecideCommute, onNotifyEmployee, onSaveShiftPeriod, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onSaveGroupFormats, onChangeLoginEmail, onDecideMonthlyConfirm, onCancelMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
+function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAdminTab = null, onConsumeRequestedAdminTab, onDecide, onDecideLeave, onDecidePerformance, onDecideCommute, onNotifyEmployee, onSaveShiftPeriod, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onSaveGroupFormats, onSubmitAnnouncement, onDeleteAnnouncement, onGetAnnouncementFileUrl, onChangeLoginEmail, onDecideMonthlyConfirm, onCancelMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
   const [tab, setTab] = useState('dashboard'); // dashboard | attendance | requests | leave | performance | accounts
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
@@ -10100,6 +10105,17 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
 
       {tab === 'resignreasons' && isMasterAdmin && (
         <ResignationReasonSettings reasons={data.resignationReasons} onRefresh={onRefresh} isDesktop={isDesktop} />
+      )}
+
+      {tab === 'announce' && (
+        <AnnouncementsView
+          announcements={data.announcements}
+          isAdmin
+          onSubmit={onSubmitAnnouncement}
+          onDelete={onDeleteAnnouncement}
+          onGetFileUrl={onGetAnnouncementFileUrl}
+          isDesktop={isDesktop}
+        />
       )}
 
       {tab === 'groupformats' && isMasterAdmin && (
@@ -11212,7 +11228,7 @@ function YearEndAdjustmentSection({ session, requests, onSubmit }) {
   );
 }
 
-function AdminYearEndAdjustmentTab({ requests, onDecide, employeeAccounts = [], onNotifyEmployee, isDesktop }) {
+function AdminYearEndAdjustmentTab({ requests, onDecide, employeeAccounts = [], onNotifyEmployee, isMasterAdmin = false, isDesktop }) {
   const now = new Date();
   const [yearFilter, setYearFilter] = useState(now.getFullYear());
   const [comment, setComment] = useState({});
@@ -11296,7 +11312,8 @@ function AdminYearEndAdjustmentTab({ requests, onDecide, employeeAccounts = [], 
         </select>
       </div>
 
-      {notSubmitted.length > 0 && onNotifyEmployee && (
+      {/* 入力依頼の送信はマスター管理者のみ */}
+      {notSubmitted.length > 0 && onNotifyEmployee && isMasterAdmin && (
         <div className="px-5 py-3 border-b border-slate-100 bg-amber-50 flex items-center gap-3 flex-wrap">
           <div className="flex-1 min-w-[14rem]">
             <div className="text-[12.5px] font-bold text-amber-900">{yearFilter}年分が未提出のスタッフが{notSubmitted.length}名います</div>
