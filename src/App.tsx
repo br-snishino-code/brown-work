@@ -8496,7 +8496,7 @@ function AdminDashboardTab({ missingCount, correctionCount, leaveCount, performa
     { label: '勤怠一覧', tab: 'attendance', icon: <Clock size={17} /> },
     { label: 'スタッフ管理', tab: 'accounts', icon: <Users size={17} /> },
     { label: '休暇申請', tab: 'leave', icon: <Palmtree size={17} /> },
-    { label: '実績報告', tab: 'performance', icon: <ClipboardList size={17} /> },
+    { label: '実績報告（過去分）', tab: 'performance', icon: <ClipboardList size={17} /> },
   ];
 
   const alertTotal = alertRows.reduce((s, r) => s + r.count, 0);
@@ -9209,7 +9209,7 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
       tabs: ['leave', 'performance'],
       items: [
         { tab: 'leave', label: '休暇申請', sub: '承認・却下', badge: leaveCount },
-        { tab: 'performance', label: '実績報告', sub: '承認・却下', badge: performanceCount },
+        { tab: 'performance', label: '実績報告（過去分）', sub: '記録の確認', badge: performanceCount },
       ],
     },
     {
@@ -9325,7 +9325,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
   const leavePending = data.leaveRequests.filter((l) => l.status === 'pending');
   const leaveDecided = data.leaveRequests.filter((l) => l.status !== 'pending').slice(0, 8);
   const performancePending = data.performanceReports.filter((r) => r.status === 'pending');
-  const performanceDecided = data.performanceReports.filter((r) => r.status !== 'pending').slice(0, 8);
+  const performanceDecided = data.performanceReports.filter((r) => r.status !== 'pending');
   const today = todayKey();
 
   const missing = [];
@@ -9908,6 +9908,17 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
 function PerformanceAdminTab({ pending, decided, onDecide, isDesktop }) {
   const [memos, setMemos] = useState({});
   const setMemo = (id, v) => setMemos((m) => ({ ...m, [id]: v }));
+  const [archiveYear, setArchiveYear] = useState('all');
+  const [archiveName, setArchiveName] = useState('');
+
+  // この画面は以前の運用で提出された実績報告の記録。新しい実績の提出はここには届かない
+  const noticeCard = (
+    <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-[11.5px] leading-relaxed text-slate-500">
+      この画面は、以前の運用でスタッフから提出された実績報告の記録です。<br />
+      現在の実績入力の提出状況は「その他 →
+      <span className="font-semibold text-slate-600">eo業務インセンティブ</span>」でご確認ください。
+    </div>
+  );
 
   const pendingCard = (
     <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
@@ -9956,39 +9967,91 @@ function PerformanceAdminTab({ pending, decided, onDecide, isDesktop }) {
     </div>
   );
 
-  const decidedCard = decided.length > 0 && (
+  // 過去に提出された実績報告の記録。対象年と氏名で絞り込める
+  const decidedYears = Array.from(new Set(decided.map((r) => r.year).filter(Boolean))).sort((a, b) => b - a);
+  const filteredDecided = decided
+    .filter((r) => archiveYear === 'all' || String(r.year) === String(archiveYear))
+    .filter((r) => !archiveName.trim() || (r.employeeName || '').includes(archiveName.trim()))
+    .sort((a, b) => String(b.submittedAt || '').localeCompare(String(a.submittedAt || '')));
+
+  const decidedCard = (
     <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden h-fit">
-      <div className="px-5 py-3.5 border-b border-slate-100">
-        <h2 className="font-bold text-[13.5px]">処理済みの実績</h2>
+      <div className="px-5 py-3.5 border-b border-slate-100 space-y-2.5">
+        <div className="flex items-center gap-2">
+          <h2 className="font-bold text-[13.5px]">提出された実績報告の記録</h2>
+          <span className="ml-auto text-[11px] text-slate-400">{filteredDecided.length}件</span>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <select
+            value={archiveYear}
+            onChange={(e) => setArchiveYear(e.target.value)}
+            className="border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white"
+          >
+            <option value="all">すべての年</option>
+            {decidedYears.map((y) => (
+              <option key={y} value={y}>{y}年</option>
+            ))}
+          </select>
+          <input
+            value={archiveName}
+            onChange={(e) => setArchiveName(e.target.value)}
+            placeholder="氏名で絞り込む"
+            className="flex-1 min-w-[8rem] border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px]"
+          />
+        </div>
       </div>
-      <div className="divide-y divide-slate-100">
-        {decided.map((r) => (
-          <div key={r.id} className="px-5 py-2.5 text-[12.5px]">
-            <div className="flex items-center justify-between">
-              <span><EmployeeLink id={r.employeeId} name={r.employeeName} /> — {r.periodLabel}</span>
-              <span className={`font-medium shrink-0 ml-2 ${r.status === 'approved' ? 'text-emerald-600' : 'text-slate-400'}`}>
-                {r.status === 'approved' ? '承認済み' : '却下'}
-              </span>
+      {filteredDecided.length === 0 ? (
+        <div className="px-5 py-8 text-center text-[12.5px] text-slate-300">
+          {decided.length === 0 ? '実績報告の記録はありません' : '条件に合う記録はありません'}
+        </div>
+      ) : (
+        <div className="divide-y divide-slate-100 max-h-[32rem] overflow-y-auto">
+          {filteredDecided.map((r) => (
+            <div key={r.id} className="px-5 py-3 text-[12.5px]">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-semibold text-slate-800">
+                  <EmployeeLink id={r.employeeId} name={r.employeeName} /> — {r.periodLabel}
+                </span>
+                <span className={`font-medium shrink-0 text-[11.5px] ${r.status === 'approved' ? 'text-emerald-600' : 'text-slate-400'}`}>
+                  {r.status === 'approved' ? '承認済み' : '却下'}
+                </span>
+              </div>
+              <div className="mt-0.5 text-[10.5px] text-slate-400">
+                提出：{r.submittedAt ? new Date(r.submittedAt).toLocaleString('ja-JP') : '—'}
+              </div>
+              {r.summary && (
+                <div className="mt-1.5 font-mono text-[12px] text-slate-600 bg-slate-50 rounded-lg px-3 py-2 whitespace-pre-wrap">{r.summary}</div>
+              )}
+              {r.numericValue !== null && r.numericValue !== '' && (
+                <div className="mt-1 text-[12px] text-slate-500">
+                  {r.numericLabel || '実績値'}：<span className="font-mono font-semibold text-slate-700">{r.numericValue}</span>
+                </div>
+              )}
+              {r.notes && <div className="mt-1 text-[11.5px] text-slate-400">備考：{r.notes}</div>}
+              {r.adminMemo && <div className="mt-1 text-[11.5px] text-slate-400">コメント：{r.adminMemo}</div>}
             </div>
-            {r.adminMemo && <div className="text-[11px] text-slate-400 mt-0.5">コメント：{r.adminMemo}</div>}
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 
   if (isDesktop) {
     return (
-      <div className="grid grid-cols-2 gap-5 items-start">
-        {pendingCard}
-        {decidedCard}
+      <div className="space-y-5">
+        {noticeCard}
+        <div className={pending.length > 0 ? 'grid grid-cols-2 gap-5 items-start' : ''}>
+          {pending.length > 0 && pendingCard}
+          {decidedCard}
+        </div>
       </div>
     );
   }
 
   return (
     <div className="space-y-5">
-      {pendingCard}
+      {noticeCard}
+      {pending.length > 0 && pendingCard}
       {decidedCard}
     </div>
   );
