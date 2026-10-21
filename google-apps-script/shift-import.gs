@@ -15,19 +15,25 @@
  *   「シフト希望_2026-11」というシートが作られ（あれば上書き）、
  *   スタッフ×日付の表が書き込まれます。
  *
- * ■ 毎日自動で取り込む場合
- *   「Brown Work」→「毎日の自動取り込みを設定」を一度押してください。
- *   毎朝6時台に、翌月分を自動で取り込みます。止めるときは「自動取り込みを解除」。
+ * ■ 自動で取り込む場合
+ *   「Brown Work」→「自動取り込みの間隔を選ぶ」から、毎朝1回・30分おき・15分おきを選べます。
+ *   止めるときは「自動取り込みを解除」。今の設定は「自動取り込みの状態を見る」で確認できます。
+ *   内容が前回と変わっていないときはシートを書き換えないため、
+ *   短い間隔にしても、見ている最中に表示が消えることはありません。
  */
 
 var SHEET_PREFIX = 'シフト希望_';
+// 前回取り込んだ内容の指紋と、最後に動いた時刻を覚えておくための名前
+var FINGERPRINT_PROP = 'SHIFT_IMPORT_FINGERPRINT_';
+var LAST_RUN_PROP = 'SHIFT_IMPORT_LAST_RUN';
 
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('Brown Work')
     .addItem('シフト希望を取り込む', 'importShiftRequestsPrompt')
     .addSeparator()
-    .addItem('毎日の自動取り込みを設定', 'createDailyTrigger')
+    .addItem('自動取り込みの間隔を選ぶ', 'chooseTriggerInterval')
+    .addItem('自動取り込みの状態を見る', 'showTriggerStatus')
     .addItem('自動取り込みを解除', 'removeDailyTrigger')
     .addToUi();
 }
@@ -43,7 +49,8 @@ function importShiftRequestsPrompt() {
     return;
   }
   try {
-    var result = importShiftRequests(month);
+    // 手動のときは、変化がなくても必ず書き直す
+    var result = importShiftRequests(month, true);
     ui.alert(
       '取り込みました',
       month + '分：' + result.submittedCount + '／' + result.totalCount + '名が提出済みです。\n' +
@@ -64,7 +71,7 @@ function importNextMonthShiftRequests() {
 }
 
 /** 本体：APIから取得してシートへ書き込む */
-function importShiftRequests(month) {
+function importShiftRequests(month, force) {
   var props = PropertiesService.getScriptProperties();
   var baseUrl = (props.getProperty('SUPABASE_URL') || '').replace(/\/+$/, '');
   var apiKey = props.getProperty('SHIFT_API_KEY') || '';
@@ -90,6 +97,19 @@ function importShiftRequests(month) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheetName = SHEET_PREFIX + month;
   var sheet = ss.getSheetByName(sheetName);
+  var props = PropertiesService.getScriptProperties();
+  props.setProperty(LAST_RUN_PROP, Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy/MM/dd HH:mm'));
+
+  // 前回と中身が同じなら、シートを書き換えずに終わる。
+  // 短い間隔で動かしても、見ている最中に表示が消えないようにするため。
+  // 取り込み日時は毎回変わるので、指紋には含めない。
+  var fingerprint = buildFingerprint(data);
+  var previous = props.getProperty(FINGERPRINT_PROP + month);
+  if (sheet && previous === fingerprint && !force) {
+    data.skipped = true;
+    return data;
+  }
+
   if (!sheet) {
     sheet = ss.insertSheet(sheetName);
   } else {
@@ -152,26 +172,127 @@ function importShiftRequests(month) {
       .setHorizontalAlignment('center');
   }
 
+  props.setProperty(FINGERPRINT_PROP + month, fingerprint);
+  data.skipped = false;
   return data;
 }
 
-/** 毎朝6時台に翌月分を取り込む */
+/** 取り込んだ内容から指紋を作る。中身が1文字でも違えば別の文字列になる */
+function buildFingerprint(data) {
+  var parts = [String(data.deadline || ''), String(data.isOpen)];
+  for (var i = 0; i < data.rows.length; i++) {
+    var row = data.rows[i];
+    parts.push(row.name + '\u0001' + row.group + '\u0001' + (row.submitted ? '1' : '0') +
+      '\u0001' + row.cells.join('\u0002') + '\u0001' + (row.note || ''));
+  }
+  var text = parts.join('\u0003');
+  var bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, text, Utilities.Charset.UTF_8);
+  var hex = '';
+  for (var b = 0; b < bytes.length; b++) {
+    hex += ('0' + (bytes[b] & 0xff).toString(16)).slice(-2);
+  }
+  return hex;
+}
+
+/** 自動取り込みの間隔。メニューに出る順番で並べる */
+var INTERVALS = [
+  { key: 'daily',  label: '毎朝1回（6時台）' },
+  { key: 'm30',    label: '30分おき' },
+  { key: 'm15',    label: '15分おき' },
+  { key: 'm5',     label: '5分おき' },
+];
+
+var INTERVAL_PROP = 'SHIFT_IMPORT_INTERVAL';
+
+/** 間隔を選んで自動取り込みを設定する */
+function chooseTriggerInterval() {
+  var ui = SpreadsheetApp.getUi();
+  var lines = [];
+  for (var i = 0; i < INTERVALS.length; i++) {
+    lines.push((i + 1) + '：' + INTERVALS[i].label);
+  }
+  var res = ui.prompt(
+    '自動取り込みの間隔',
+    '番号で選んでください。\n\n' + lines.join('\n') +
+    '\n\n受付期間中だけ短くして、締め切ったら「毎朝1回」に戻す使い方がおすすめです。',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (res.getSelectedButton() !== ui.Button.OK) return;
+
+  var n = parseInt(res.getResponseText().trim(), 10);
+  if (!(n >= 1 && n <= INTERVALS.length)) {
+    ui.alert('1〜' + INTERVALS.length + ' の番号で入力してください。');
+    return;
+  }
+  var chosen = INTERVALS[n - 1];
+  setTriggerInterval(chosen.key);
+  ui.alert(
+    '設定しました',
+    '「' + chosen.label + '」で、翌月分のシフト希望を自動で取り込みます。\n' +
+    '内容が前回と変わっていないときは、シートを書き換えません。',
+    ui.ButtonSet.OK
+  );
+}
+
+/** 指定された間隔でトリガーを作り直す */
+function setTriggerInterval(key) {
+  removeTriggersOnly();
+  var builder = ScriptApp.newTrigger('importNextMonthShiftRequests').timeBased();
+  switch (key) {
+    case 'm5':  builder.everyMinutes(5); break;
+    case 'm15': builder.everyMinutes(15); break;
+    case 'm30': builder.everyMinutes(30); break;
+    default:    builder.atHour(6).everyDays(1); key = 'daily'; break;
+  }
+  builder.create();
+  PropertiesService.getScriptProperties().setProperty(INTERVAL_PROP, key);
+}
+
+/** 今の設定を表示する */
+function showTriggerStatus() {
+  var ui = SpreadsheetApp.getUi();
+  var triggers = ScriptApp.getProjectTriggers();
+  var running = false;
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === 'importNextMonthShiftRequests') running = true;
+  }
+  if (!running) {
+    ui.alert('自動取り込みの状態', '今は自動取り込みを設定していません。', ui.ButtonSet.OK);
+    return;
+  }
+  var key = PropertiesService.getScriptProperties().getProperty(INTERVAL_PROP) || 'daily';
+  var label = key;
+  for (var j = 0; j < INTERVALS.length; j++) {
+    if (INTERVALS[j].key === key) label = INTERVALS[j].label;
+  }
+  var last = PropertiesService.getScriptProperties().getProperty(LAST_RUN_PROP);
+  ui.alert(
+    '自動取り込みの状態',
+    '間隔：' + label + '\n' +
+    '最後に動いた時刻：' + (last || '記録なし'),
+    ui.ButtonSet.OK
+  );
+}
+
+/** 旧バージョンとの互換。毎朝1回で設定する */
 function createDailyTrigger() {
-  removeDailyTrigger();
-  ScriptApp.newTrigger('importNextMonthShiftRequests')
-    .timeBased()
-    .atHour(6)
-    .everyDays(1)
-    .create();
+  setTriggerInterval('daily');
   SpreadsheetApp.getUi().alert('毎朝6時台に、翌月分のシフト希望を自動で取り込みます。');
 }
 
-/** 自動取り込みを止める */
-function removeDailyTrigger() {
+/** トリガーだけを消す（メッセージを出さない） */
+function removeTriggersOnly() {
   var triggers = ScriptApp.getProjectTriggers();
   for (var i = 0; i < triggers.length; i++) {
     if (triggers[i].getHandlerFunction() === 'importNextMonthShiftRequests') {
       ScriptApp.deleteTrigger(triggers[i]);
     }
   }
+}
+
+/** 自動取り込みを止める */
+function removeDailyTrigger() {
+  removeTriggersOnly();
+  PropertiesService.getScriptProperties().deleteProperty(INTERVAL_PROP);
+  SpreadsheetApp.getUi().alert('自動取り込みを解除しました。');
 }
