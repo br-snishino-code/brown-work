@@ -8020,7 +8020,7 @@ function ShiftAdminTab({ employeeAccounts, periods = [], requests = [], tablesRe
           </div>
           {targetMode === 'some' && (
             <div className="mt-2.5">
-              <div className="mb-1.5 text-[11px] text-slate-400">チェックを入れた方の「各種申請」にだけ表示されます。試験運用のあいだはご自身だけを選んでおくと安全です。</div>
+              <div className="mb-1.5 text-[11px] text-slate-400">チェックを入れた方の「各種申請」にだけ表示されます。</div>
               <div className="max-h-44 overflow-y-auto rounded-xl border border-slate-200 p-2">
                 <div className="grid grid-cols-2 gap-x-3 gap-y-1 sm:grid-cols-3">
                   {allStaff.map((a) => (
