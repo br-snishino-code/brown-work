@@ -15443,6 +15443,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
     try {
       const wb = XLSX.utils.book_new();
       let failed = [];
+      const backedUpCounts = {};
       for (const table of BACKUP_TABLES) {
         // Supabaseは1回のリクエストで返す行数に上限があるため、1000件ずつ繰り返し取得して全件つなげる
         const rows = [];
@@ -15470,13 +15471,32 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
           }
           return out;
         });
+        backedUpCounts[table] = rows.length;
         const ws = XLSX.utils.json_to_sheet(flat.length ? flat : [{ 情報: 'データなし' }]);
         XLSX.utils.book_append_sheet(wb, ws, table.slice(0, 31));
       }
       XLSX.writeFile(wb, `brown-work_バックアップ_${todayKey()}.xlsx`);
+
+      // マイナンバー・口座情報・給与を含むファイルの持ち出しなので、
+      // 誰がいつ実行したかを必ず監査ログに残す。
+      const myNumberCount = backedUpCounts.employee_my_numbers || 0;
+      await logAudit(
+        session,
+        '全データバックアップを作成',
+        `${BACKUP_TABLES.length - failed.length}個のテーブルを書き出し`
+          + `（マイナンバー${myNumberCount}件・口座情報・給与を含む）`
+          + (failed.length ? ` ／ 取得できず：${failed.join('、')}` : ''),
+      );
+
       if (failed.length) {
         alert(`一部のデータを取得できませんでした：\n${failed.join('\n')}`);
       }
+      alert(
+        'バックアップを保存しました。\n\n'
+        + 'このファイルにはマイナンバー・口座情報・給与が含まれます。\n'
+        + '保管場所にご注意のうえ、不要になったら削除してください。\n'
+        + 'この操作は監査ログに記録されました。'
+      );
     } catch (e) {
       alert('バックアップの作成に失敗しました。時間をおいて再度お試しください。');
     }
