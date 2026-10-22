@@ -1757,13 +1757,47 @@ async function fetchNewPerf(employeeId, year, month) {
   return data;
 }
 
+// 管理者が編集したことを記録する列（55_performance_admin_edit.sql で追加）。
+// SQL をまだ実行していない環境でも保存だけは通るように、
+// 「その列が無い」というエラーのときは、この3列を外して入れ直す。
+const ADMIN_EDIT_COLUMNS = ['admin_edited_at', 'admin_edited_by_id', 'admin_edited_by_name'];
+
+function isMissingColumnError(error) {
+  if (!error) return false;
+  // PostgREST はスキーマキャッシュに無い列を PGRST204 で返す
+  if (error.code === 'PGRST204') return true;
+  const msg = String(error.message || '');
+  return /column .* does not exist/i.test(msg) || /Could not find the '.*' column/i.test(msg);
+}
+
+function withoutAdminEditColumns(row) {
+  const next = { ...row };
+  ADMIN_EDIT_COLUMNS.forEach((k) => { delete next[k]; });
+  return next;
+}
+
+async function upsertPerfRow(table, row) {
+  const { error } = await supabase.from(table).upsert(row, { onConflict: 'employee_id,year,month' });
+  if (!error) return true;
+  if (isMissingColumnError(error) && ADMIN_EDIT_COLUMNS.some((k) => k in row)) {
+    const { error: retryError } = await supabase
+      .from(table)
+      .upsert(withoutAdminEditColumns(row), { onConflict: 'employee_id,year,month' });
+    if (!retryError) {
+      console.warn(`${table}: 管理者編集の記録用の列がありません（55_performance_admin_edit.sql が未実行）。内容だけ保存しました。`);
+      return true;
+    }
+    console.error('実績の保存に失敗しました', retryError);
+    return false;
+  }
+  console.error('実績の保存に失敗しました', error);
+  return false;
+}
+
 async function saveNewPerf(employeeId, year, month, patch) {
-  const { error } = await supabase.from('staff_new_performance').upsert(
-    { employee_id: employeeId, year, month, ...patch, updated_at: new Date().toISOString() },
-    { onConflict: 'employee_id,year,month' }
-  );
-  if (error) { console.error('新規実績の保存に失敗しました', error); return false; }
-  return true;
+  return upsertPerfRow('staff_new_performance', {
+    employee_id: employeeId, year, month, ...patch, updated_at: new Date().toISOString(),
+  });
 }
 
 async function fetchExistingPerf(employeeId, year, month) {
@@ -1778,13 +1812,10 @@ async function fetchExistingPerf(employeeId, year, month) {
   return data;
 }
 
-async function saveExistingPerf(employeeId, year, month, daily) {
-  const { error } = await supabase.from('staff_existing_performance').upsert(
-    { employee_id: employeeId, year, month, daily, updated_at: new Date().toISOString() },
-    { onConflict: 'employee_id,year,month' }
-  );
-  if (error) { console.error('既存実績の保存に失敗しました', error); return false; }
-  return true;
+async function saveExistingPerf(employeeId, year, month, daily, patch) {
+  return upsertPerfRow('staff_existing_performance', {
+    employee_id: employeeId, year, month, daily, ...(patch || {}), updated_at: new Date().toISOString(),
+  });
 }
 
 // 管理者用：グループ全員分のその月の実績をまとめて取得（RLSにより管理者のみ取得可能）
@@ -7743,6 +7774,78 @@ const NEW_PERF_COLUMN_GROUPS = [
   { label: '後日成約内訳', fields: NEW_PERF_CONTRACT_FIELDS, path: 'later' },
 ];
 
+// ---- 実績の変更点を洗い出す ----
+// 管理者がスタッフの実績を編集したとき、「どこをどう変えたか」を本人に知らせるために使う。
+// 画面の見出しと同じ言い方になるよう、表の定義（NEW_PERF_COLUMN_GROUPS など）から項目名を作る。
+
+// 新規実績シートの全項目を「日→この項目」の形で1列に並べたもの
+const NEW_PERF_DIFF_FIELDS = NEW_PERF_COLUMN_GROUPS.flatMap((g) =>
+  g.fields.map((f) => ({
+    path: g.path,
+    key: f.key,
+    // 「基本」と「後日成約」の項目名はそれだけで意味が通るため、グループ名を付けない
+    label: g.label === '基本' || g.label === '後日成約' ? f.label : `${g.label}・${f.label}`,
+  }))
+);
+
+const perfValueText = (v) => {
+  const s = v === null || v === undefined ? '' : String(v).trim();
+  return s === '' ? '未入力' : s;
+};
+
+// 空欄と0は同じ扱いにする（どちらもポイントに影響しないため、通知が無駄に増えないように）
+function samePerfValue(a, b) {
+  const x = a === null || a === undefined ? '' : String(a).trim();
+  const y = b === null || b === undefined ? '' : String(b).trim();
+  if (x === y) return true;
+  const blankOrZero = (s) => s === '' || s === '0';
+  if (blankOrZero(x) && blankOrZero(y)) return true;
+  const nx = Number(x);
+  const ny = Number(y);
+  if (x !== '' && y !== '' && Number.isFinite(nx) && Number.isFinite(ny)) return nx === ny;
+  return false;
+}
+
+// 日ごとの表（1〜末日をキーにした入れ物）どうしを比べる
+// toRows: 1日分の前後を受け取り、[{ fieldLabel, from, to }] を返す
+function diffDailyByDay(before, after, year, month, toRows) {
+  const changes = [];
+  const lastDay = lastDayOfMonth(year, month);
+  for (let d = 1; d <= lastDay; d++) {
+    const rows = toRows(before?.[d], after?.[d]);
+    rows.forEach((r) => changes.push({ dayLabel: `${d}日`, ...r }));
+  }
+  return changes;
+}
+
+function diffNewPerfDaily(before, after, year, month) {
+  return diffDailyByDay(before, after, year, month, (b, a) => {
+    const rows = [];
+    NEW_PERF_DIFF_FIELDS.forEach((f) => {
+      const bv = f.path ? b?.[f.path]?.[f.key] : b?.[f.key];
+      const av = f.path ? a?.[f.path]?.[f.key] : a?.[f.key];
+      if (!samePerfValue(bv, av)) rows.push({ fieldLabel: f.label, from: perfValueText(bv), to: perfValueText(av) });
+    });
+    return rows;
+  });
+}
+
+function diffExistingPerfDaily(before, after, year, month) {
+  return diffDailyByDay(before, after, year, month, (b, a) => {
+    const rows = [];
+    EXISTING_PERF_FIELDS.forEach((f) => {
+      if (!samePerfValue(b?.[f.key], a?.[f.key])) {
+        rows.push({ fieldLabel: f.label, from: perfValueText(b?.[f.key]), to: perfValueText(a?.[f.key]) });
+      }
+    });
+    return rows;
+  });
+}
+
+// 通知やログに入れる1行の文字列にする
+const perfChangeLine = (c, sheetLabel) =>
+  `${sheetLabel ? `${sheetLabel} ` : ''}${c.dayLabel ? `${c.dayLabel} ` : ''}${c.fieldLabel}：${c.from} → ${c.to}`;
+
 function EoNewPerfCell({ value, onChange, type = 'number' }) {
   if (type === 'text') {
     return <input value={value} onChange={(e) => onChange(e.target.value)} className="w-16 border border-slate-200 rounded px-1 py-1 text-[11px]" />;
@@ -7886,6 +7989,8 @@ function EoPerformanceSection({ employeeId, session, onNotifyAdmin, isDesktop })
   const [savedAt, setSavedAt] = useState(null);
   const [submittedAt, setSubmittedAt] = useState(null);
   const [submitting, setSubmitting] = useState(false);
+  // 管理者がこの月の実績を直した記録（あれば画面の上に出す）
+  const [adminEdit, setAdminEdit] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -7897,6 +8002,11 @@ function EoPerformanceSection({ employeeId, session, onNotifyAdmin, isDesktop })
       setCancellations(String(np?.cancellations ?? 0));
       setExistingDaily(ep?.daily || {});
       setSubmittedAt(np?.submitted_at || null);
+      // 新規・既存のうち、あとから直されたほうの記録を出す
+      const edits = [np, ep]
+        .filter((r) => r?.admin_edited_at)
+        .sort((a, b) => String(b.admin_edited_at).localeCompare(String(a.admin_edited_at)));
+      setAdminEdit(edits[0] ? { at: edits[0].admin_edited_at, by: edits[0].admin_edited_by_name || '' } : null);
       setDirty(false);
       setSavedAt(null);
       setLoading(false);
@@ -8005,6 +8115,14 @@ function EoPerformanceSection({ employeeId, session, onNotifyAdmin, isDesktop })
       <div className="px-5 pt-3 text-[11.5px] text-slate-500">
         入力の途中は「一時保存」で残せます。新規・既存の両方がまとめて保存されます。内容がそろったら「提出する」を押してください。提出後も修正して出し直せます。
       </div>
+
+      {adminEdit && (
+        <div className="mx-5 mt-3 rounded-xl border border-sky-200 bg-sky-50 px-3.5 py-2.5 text-[11.5px] leading-relaxed text-sky-800">
+          この月の実績は、{dateLabel(String(adminEdit.at).slice(0, 10))}に
+          {adminEdit.by ? `${adminEdit.by}さん（管理者）` : '管理者'}が修正しています。
+          変更箇所はお知らせでご確認ください。内容に相違があれば管理者へご連絡ください。
+        </div>
+      )}
 
       <div className="px-5 pt-3 flex gap-2">
         <button onClick={() => setSheet('new')} className={`px-3 py-1.5 rounded-lg text-[12.5px] font-bold ${sheet === 'new' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-500'}`}>新規実績</button>
@@ -8444,8 +8562,289 @@ function GroupFormatSettingsTab({ employeeAccounts, groupLeaveSchedules = {}, se
   );
 }
 
+// 管理者用：スタッフが提出した実績を直す画面
+// スタッフ本人の「実績入力」と同じ表をそのまま使う。保存するときに、
+// 変更した箇所を一覧にして本人へお知らせを送る。
+function EoAdminPerfEditModal({ employee, year, month, session, onNotifyEmployee, onClose, onSaved }) {
+  const [loading, setLoading] = useState(true);
+  const [sheet, setSheet] = useState('new');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  // 読み込んだときの内容。保存するときにこれと比べて変更点を出す
+  const [original, setOriginal] = useState(null);
+  const [newDaily, setNewDaily] = useState({});
+  const [existingDaily, setExistingDaily] = useState({});
+  const [tabletIssues, setTabletIssues] = useState('0');
+  const [cancellations, setCancellations] = useState('0');
+  const [g10Half, setG10Half] = useState('');
+  const [submittedAt, setSubmittedAt] = useState(null);
+  const [notifyStaff, setNotifyStaff] = useState(true);
+  const [note, setNote] = useState('');
+
+  const g10ToText = (v) => (v === true ? 'half' : v === false ? 'full' : '');
+  const g10FromText = (s) => (s === 'half' ? true : s === 'full' ? false : null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError('');
+    Promise.all([fetchNewPerf(employee.id, year, month), fetchExistingPerf(employee.id, year, month)]).then(([np, ep]) => {
+      if (cancelled) return;
+      const nd = np?.daily || {};
+      const ed = ep?.daily || {};
+      const ti = String(np?.tablet_issues ?? 0);
+      const ca = String(np?.cancellations ?? 0);
+      const gh = g10ToText(np?.g10_half_override ?? null);
+      setNewDaily(nd);
+      setExistingDaily(ed);
+      setTabletIssues(ti);
+      setCancellations(ca);
+      setG10Half(gh);
+      setSubmittedAt(np?.submitted_at || null);
+      setOriginal({ newDaily: nd, existingDaily: ed, tabletIssues: ti, cancellations: ca, g10Half: gh });
+      setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [employee.id, year, month]);
+
+  const updateNewDay = (d, updater) => setNewDaily((prev) => ({ ...prev, [d]: updater(prev[d] || emptyNewPerfDay()) }));
+  const updateExistingDay = (d, key, value) =>
+    setExistingDaily((prev) => ({ ...prev, [d]: { ...(prev[d] || emptyExistingPerfDay()), [key]: value } }));
+
+  // 変更点（保存前でも見えるように、入力のたびに計算し直す）
+  const newDiff = original ? diffNewPerfDaily(original.newDaily, newDaily, year, month) : [];
+  const existingDiff = original ? diffExistingPerfDaily(original.existingDaily, existingDaily, year, month) : [];
+  const scalarDiff = [];
+  if (original) {
+    if (!samePerfValue(original.tabletIssues, tabletIssues)) {
+      scalarDiff.push({ fieldLabel: 'タブレット不備件数', from: perfValueText(original.tabletIssues), to: perfValueText(tabletIssues) });
+    }
+    if (!samePerfValue(original.cancellations, cancellations)) {
+      scalarDiff.push({ fieldLabel: 'キャンセル件数', from: perfValueText(original.cancellations), to: perfValueText(cancellations) });
+    }
+    if (original.g10Half !== g10Half) {
+      const label = (s) => (s === 'half' ? '半額にする' : s === 'full' ? '半額にしない' : '自動判定（10G付帯率で判定）');
+      scalarDiff.push({ fieldLabel: '10G付帯率による半額の扱い', from: label(original.g10Half), to: label(g10Half) });
+    }
+  }
+  const changeLines = [
+    ...newDiff.map((c) => perfChangeLine(c, '新規実績')),
+    ...scalarDiff.map((c) => perfChangeLine(c, '新規実績')),
+    ...existingDiff.map((c) => perfChangeLine(c, '既存実績')),
+  ];
+  const newChanged = newDiff.length > 0 || scalarDiff.length > 0;
+  const existingChanged = existingDiff.length > 0;
+  const hasChanges = changeLines.length > 0;
+
+  // 直した結果のポイント（スタッフ画面と同じ計算）
+  const existingSheetNewPoints = computeExistingPerfMonthNewPoints(existingDaily);
+  const monthNewPoints = computeNewPerfMonthPoints(newDaily) + existingSheetNewPoints;
+  const monthExistingPoints = computeExistingPerfMonthPoints(existingDaily);
+  const empakeTotal = computeMonthEmpakeCount(newDaily);
+  const adjustedNewPoints = monthNewPoints - (Number(tabletIssues) || 0) * 2 - (Number(cancellations) || 0) * 3;
+
+  const save = async () => {
+    if (!hasChanges) return;
+    const confirmText = notifyStaff
+      ? `${employee.name}さんの${year}年${month}月分の実績を${changeLines.length}か所変更し、本人にお知らせを送ります。よろしいですか？`
+      : `${employee.name}さんの${year}年${month}月分の実績を${changeLines.length}か所変更します。本人へのお知らせは送りません。よろしいですか？`;
+    if (!window.confirm(confirmText)) return;
+    setSaving(true);
+    setError('');
+    const at = new Date().toISOString();
+    const adminMeta = { admin_edited_at: at, admin_edited_by_id: session?.id || null, admin_edited_by_name: session?.name || '' };
+    let ok = true;
+    if (newChanged) {
+      ok = await saveNewPerf(employee.id, year, month, {
+        daily: newDaily,
+        tablet_issues: Number(tabletIssues) || 0,
+        cancellations: Number(cancellations) || 0,
+        g10_half_override: g10FromText(g10Half),
+        ...adminMeta,
+      }) && ok;
+    }
+    if (existingChanged) {
+      ok = await saveExistingPerf(employee.id, year, month, existingDaily, adminMeta) && ok;
+    }
+    if (!ok) {
+      setSaving(false);
+      setError('保存できませんでした。通信の状態を確かめて、もう一度お試しください。権限の設定が原因の場合は開発者にご連絡ください。');
+      return;
+    }
+
+    // 本人へのお知らせ（変更箇所を並べる。多いときは先頭30件まで）
+    if (notifyStaff && onNotifyEmployee) {
+      const shown = changeLines.slice(0, 30);
+      const rest = changeLines.length - shown.length;
+      const lines = [
+        `${year}年${month}月分の実績について、管理者が次の箇所を修正しました。`,
+        '',
+        ...shown.map((l) => `・${l}`),
+        ...(rest > 0 ? [`・ほか${rest}か所`] : []),
+        '',
+        `修正後の合計：新規獲得${monthNewPoints}P（調整後${adjustedNewPoints}P）／既存${monthExistingPoints}P／エンパケ${empakeTotal}枚`,
+        ...(note.trim() ? ['', `管理者からの連絡：${note.trim()}`] : []),
+        '',
+        '内容をご確認ください。相違がある場合は管理者までご連絡ください。',
+      ];
+      await onNotifyEmployee(
+        employee.id,
+        `【実績の修正】${year}年${month}月分`,
+        `${year}年${month}月分の実績について、管理者が${changeLines.length}か所を修正しました。内容をご確認ください。`,
+        null,
+        lines
+      );
+    }
+
+    await logAudit(
+      session,
+      'スタッフの実績を修正',
+      [`${year}年${month}月分（${changeLines.length}か所）`, notifyStaff ? '本人へ通知済み' : '本人への通知なし', ...changeLines.slice(0, 50)].join(' / '),
+      employee.id,
+      employee.name
+    );
+
+    setSaving(false);
+    if (onSaved) onSaved();
+    onClose();
+  };
+
+  const closeSafely = () => {
+    if (hasChanges && !window.confirm('保存していない変更があります。閉じてよろしいですか？')) return;
+    onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-50 p-0 sm:p-4">
+      <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-5xl max-h-[92vh] overflow-y-auto">
+        <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center gap-2 flex-wrap">
+          <div className="w-9 h-9 rounded-xl bg-amber-50 flex items-center justify-center shrink-0">
+            <Pencil size={16} className="text-amber-600" />
+          </div>
+          <div>
+            <h3 className="font-bold text-[15px]">{employee.name}さんの実績を修正</h3>
+            <div className="text-[11.5px] text-slate-400">
+              {year}年{month}月分
+              {submittedAt ? `・提出済み ${dateLabel(String(submittedAt).slice(0, 10))}` : '・未提出'}
+            </div>
+          </div>
+          <button onClick={closeSafely} className="ml-auto text-[12.5px] font-bold text-slate-400 px-2 py-1">閉じる</button>
+        </div>
+
+        {loading ? (
+          <div className="px-5 py-14 text-center text-[12.5px] text-slate-300">読み込み中…</div>
+        ) : (
+          <>
+            <div className="px-5 pt-4">
+              <div className="rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-[11.5px] leading-relaxed text-amber-800">
+                本人が入力した内容を直接書き換えます。保存すると、変更した箇所の一覧が本人へのお知らせとして送られます（送らない設定にもできます）。
+              </div>
+            </div>
+
+            <div className="px-5 pt-3 flex gap-2">
+              <button onClick={() => setSheet('new')} className={`px-3 py-1.5 rounded-lg text-[12.5px] font-bold ${sheet === 'new' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-500'}`}>
+                新規実績{newDiff.length + scalarDiff.length > 0 ? `（${newDiff.length + scalarDiff.length}）` : ''}
+              </button>
+              <button onClick={() => setSheet('existing')} className={`px-3 py-1.5 rounded-lg text-[12.5px] font-bold ${sheet === 'existing' ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-500'}`}>
+                既存実績（アップセルLTV）{existingDiff.length > 0 ? `（${existingDiff.length}）` : ''}
+              </button>
+            </div>
+
+            <div className="p-5 grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <PayrollMetric label="新規獲得Pt(月合計)" value={`${monthNewPoints}P`} />
+              <PayrollMetric label="調整後Pt" value={`${adjustedNewPoints}P`} />
+              <PayrollMetric label="既存(アップセルLTV)Pt" value={`${monthExistingPoints}P`} />
+              <PayrollMetric label="エンパケ配布(月合計)" value={`${empakeTotal}枚`} />
+            </div>
+
+            {sheet === 'new' && (
+              <div className="px-5 pb-3 grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <Field label="タブレット不備件数（-2P/件）">
+                  <input type="number" value={tabletIssues} onChange={(e) => setTabletIssues(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" />
+                </Field>
+                <Field label="キャンセル件数（-3P/件）">
+                  <input type="number" value={cancellations} onChange={(e) => setCancellations(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" />
+                </Field>
+                <Field label="10G付帯率による半額の扱い">
+                  <select value={g10Half} onChange={(e) => setG10Half(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px] bg-white">
+                    <option value="">自動判定（参考値が40%未満なら半額）</option>
+                    <option value="half">半額にする</option>
+                    <option value="full">半額にしない</option>
+                  </select>
+                </Field>
+              </div>
+            )}
+
+            <div className="px-5 pb-5">
+              {sheet === 'new' ? (
+                <EoNewPerfTable year={year} month={month} daily={newDaily} onUpdateDay={updateNewDay} />
+              ) : (
+                <EoExistingPerfTable year={year} month={month} daily={existingDaily} onUpdateDay={updateExistingDay} />
+              )}
+            </div>
+
+            <div className="px-5 pb-5 space-y-3">
+              <div className={`rounded-xl border px-3.5 py-3 ${hasChanges ? 'border-sky-200 bg-sky-50' : 'border-slate-200 bg-slate-50'}`}>
+                <div className={`text-[12px] font-bold ${hasChanges ? 'text-sky-900' : 'text-slate-500'}`}>
+                  {hasChanges ? `変更する箇所：${changeLines.length}か所` : '変更はありません'}
+                </div>
+                {hasChanges && (
+                  <ul className="mt-2 space-y-0.5 max-h-48 overflow-y-auto">
+                    {changeLines.slice(0, 50).map((l, i) => (
+                      <li key={i} className="text-[11.5px] text-sky-800 font-mono">・{l}</li>
+                    ))}
+                    {changeLines.length > 50 && (
+                      <li className="text-[11.5px] text-sky-700">・ほか{changeLines.length - 50}か所</li>
+                    )}
+                  </ul>
+                )}
+              </div>
+
+              <label className="flex items-start gap-2 text-[12.5px] text-slate-600">
+                <input type="checkbox" checked={notifyStaff} onChange={(e) => setNotifyStaff(e.target.checked)} className="mt-0.5" />
+                <span>
+                  本人に変更箇所をお知らせする
+                  <span className="block text-[11px] text-slate-400">アプリ内のお知らせと、連絡用メールアドレスが登録されていればメールも送ります。</span>
+                </span>
+              </label>
+
+              {notifyStaff && (
+                <Field label="ひとこと添える（任意）">
+                  <input
+                    value={note}
+                    onChange={(e) => setNote(e.target.value)}
+                    placeholder="例：集計表と件数が合わなかったため修正しました"
+                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px]"
+                  />
+                </Field>
+              )}
+
+              {error && (
+                <div className="rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-[11.5px] text-rose-700">{error}</div>
+              )}
+
+              <div className="flex gap-2">
+                <button onClick={closeSafely} disabled={saving} className="flex-1 py-2.5 rounded-lg border border-slate-300 text-[13px] font-bold text-slate-600">
+                  やめる
+                </button>
+                <button
+                  onClick={save}
+                  disabled={saving || !hasChanges}
+                  className="flex-1 py-2.5 rounded-lg bg-amber-600 disabled:bg-slate-300 text-white text-[13px] font-bold"
+                >
+                  {saving ? '保存中…' : notifyStaff ? '保存して本人に知らせる' : '保存する（通知なし）'}
+                </button>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // 管理者用：eo業務グループのインセンティブ集計
-function EoAdminIncentiveTab({ employeeAccounts, onNotifyEmployee, isDesktop }) {
+function EoAdminIncentiveTab({ employeeAccounts, session, onNotifyEmployee, isDesktop }) {
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
   const [month, setMonth] = useState(now.getMonth() + 1);
@@ -8455,6 +8854,10 @@ function EoAdminIncentiveTab({ employeeAccounts, onNotifyEmployee, isDesktop }) 
   const [flags, setFlags] = useState({ cancel_target_met: false, empake_target_met: false, upsell_target_met: false });
   const [savingFlags, setSavingFlags] = useState(false);
   const [reminding, setReminding] = useState(false);
+  // 実績を直す画面を開いている対象者
+  const [editing, setEditing] = useState(null);
+  // 保存のあと一覧を読み直すための番号
+  const [reloadKey, setReloadKey] = useState(0);
 
   const eoStaff = employeeAccounts.filter((a) => a.mainGroup === EO_GROUP_NAME);
   const eoIds = eoStaff.map((a) => a.id);
@@ -8475,7 +8878,7 @@ function EoAdminIncentiveTab({ employeeAccounts, onNotifyEmployee, isDesktop }) 
     });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [year, month, eoIds.join(',')]);
+  }, [year, month, eoIds.join(','), reloadKey]);
 
   const saveFlags = async () => {
     setSavingFlags(true);
@@ -8517,7 +8920,15 @@ function EoAdminIncentiveTab({ employeeAccounts, onNotifyEmployee, isDesktop }) 
       { cancelTargetMet: flags.cancel_target_met, empakeTargetMet: flags.empake_target_met, upsellTargetMet: flags.upsell_target_met },
       rankOf(a.id)
     );
-    return { account: a, newPoints, existingPoints, empakeCount, rank: rankOf(a.id), incentive, submittedAt: newRow?.submitted_at || null };
+    // 管理者が直した記録（新規・既存のうち新しいほう）
+    const adminEditedAt = [newRow?.admin_edited_at, existingRow?.admin_edited_at]
+      .filter(Boolean)
+      .sort((x, y) => String(y).localeCompare(String(x)))[0] || null;
+    const adminEditedBy = (newRow?.admin_edited_at === adminEditedAt ? newRow?.admin_edited_by_name : existingRow?.admin_edited_by_name) || '';
+    return {
+      account: a, newPoints, existingPoints, empakeCount, rank: rankOf(a.id), incentive,
+      submittedAt: newRow?.submitted_at || null, adminEditedAt, adminEditedBy,
+    };
   });
 
   // まだ実績を提出していないスタッフ
@@ -8605,7 +9016,7 @@ function EoAdminIncentiveTab({ employeeAccounts, onNotifyEmployee, isDesktop }) 
         )}
 
         <div className="text-[11px] text-slate-400 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
-          10G付帯率（40%未満で半額）は自動では正確に判定できないため、参考値をもとにスタッフ側の画面で表示のみ行っています。個別に上書きが必要な場合は開発者にご相談ください。
+          10G付帯率（40%未満で半額）は自動では正確に判定できないため、参考値をもとに判定しています。実際と違う場合は、各スタッフの「実績を直す」から半額の扱いを個別に指定できます。
         </div>
       </div>
 
@@ -8628,6 +9039,7 @@ function EoAdminIncentiveTab({ employeeAccounts, onNotifyEmployee, isDesktop }) 
                   <th className="px-4 py-2 font-medium">新規獲得</th>
                   <th className="px-4 py-2 font-medium">アップセル</th>
                   <th className="px-4 py-2 font-medium">合計</th>
+                  <th className="px-4 py-2 font-medium">実績の修正</th>
                 </tr>
               </thead>
               <tbody>
@@ -8642,6 +9054,14 @@ function EoAdminIncentiveTab({ employeeAccounts, onNotifyEmployee, isDesktop }) 
                       ) : (
                         <span className="rounded-full bg-rose-50 px-2 py-0.5 text-[10.5px] font-bold text-rose-600">未提出</span>
                       )}
+                      {r.adminEditedAt && (
+                        <span
+                          className="ml-1 rounded-full bg-sky-50 px-2 py-0.5 text-[10.5px] font-bold text-sky-700 whitespace-nowrap"
+                          title={`${r.adminEditedBy ? `${r.adminEditedBy}が` : ''}${dateLabel(String(r.adminEditedAt).slice(0, 10))}に修正`}
+                        >
+                          修正済み
+                        </span>
+                      )}
                     </td>
                     <td className="px-4 py-2.5 font-mono">{r.incentive.newPointsForJudge}P</td>
                     <td className="px-4 py-2.5 font-mono">{r.existingPoints}P</td>
@@ -8650,12 +9070,32 @@ function EoAdminIncentiveTab({ employeeAccounts, onNotifyEmployee, isDesktop }) 
                     <td className="px-4 py-2.5 font-mono">{formatYen(r.incentive.newAcquisitionAmount)}</td>
                     <td className="px-4 py-2.5 font-mono">{formatYen(r.incentive.upsellAmount)}</td>
                     <td className="px-4 py-2.5 font-mono font-bold text-slate-800">{formatYen(r.incentive.totalAmount)}</td>
+                    <td className="px-4 py-2.5 whitespace-nowrap">
+                      <button
+                        onClick={() => setEditing(r.account)}
+                        className="inline-flex items-center gap-1 rounded-lg border border-slate-300 px-2.5 py-1.5 text-[11.5px] font-bold text-slate-600"
+                      >
+                        <Pencil size={12} className="text-slate-400" />実績を直す
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
         </div>
+      )}
+
+      {editing && (
+        <EoAdminPerfEditModal
+          employee={editing}
+          year={year}
+          month={month}
+          session={session}
+          onNotifyEmployee={onNotifyEmployee}
+          onClose={() => setEditing(null)}
+          onSaved={() => setReloadKey((k) => k + 1)}
+        />
       )}
     </div>
   );
@@ -12114,7 +12554,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
       )}
 
       {tab === 'eoincentive' && (
-        <EoAdminIncentiveTab employeeAccounts={employeeAccounts} onNotifyEmployee={onNotifyEmployee} isDesktop={isDesktop} />
+        <EoAdminIncentiveTab employeeAccounts={employeeAccounts} session={session} onNotifyEmployee={onNotifyEmployee} isDesktop={isDesktop} />
       )}
 
       {tab === 'performance' && (

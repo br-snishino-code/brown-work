@@ -203,4 +203,16 @@ select '承認ガード：勤怠の打刻（attendance_records）',
               where tgrelid = to_regclass('public.attendance_records')
                 and tgname = 'guard_attendance_self_update')
             then '✅ あり' else '❌ ありません' end
+union all
+select '55番：実績の管理者編集（列・ポリシー・ガード）',
+       case when (select count(*) from information_schema.columns
+                   where table_schema = 'public'
+                     and table_name in ('staff_new_performance', 'staff_existing_performance')
+                     and column_name in ('admin_edited_at', 'admin_edited_by_id', 'admin_edited_by_name')) = 6
+             and (select count(*) from pg_policies
+                   where schemaname = 'public'
+                     and tablename in ('staff_new_performance', 'staff_existing_performance')) = 8
+             and (select count(*) from pg_trigger
+                   where tgname = 'guard_performance_self_update' and not tgisinternal) = 2
+            then '✅ あり' else '❌ ありません（55_performance_admin_edit.sql が未実行）' end
 order by 1;
