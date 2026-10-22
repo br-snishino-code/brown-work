@@ -164,14 +164,37 @@ Deno.serve(async (req) => {
         return json({ number: '', purposes: row?.purposes || [] });
       }
 
+      // 暗号化前の古いデータ（12桁の数字がそのまま入っている）かどうかを先に見る
+      if (/^[0-9]{12}$/.test(row.my_number_encrypted)) {
+        return json({
+          error: 'この番号は暗号化される前に登録されたものです。'
+            + 'お手数ですが、ご本人に再登録をご依頼ください。',
+          reason: 'legacy_plaintext',
+        }, 409);
+      }
+
+      // 鍵そのものが読めない場合（長さ違い・余計な空白など）を切り分ける
+      try {
+        await getKey();
+      } catch (e) {
+        return json({
+          error: 'MY_NUMBER_KEY の形式が正しくありません（32バイトをbase64にした44文字）。'
+            + '前後の空白や改行が入っていないかご確認ください。',
+          reason: 'bad_key',
+          detail: String((e as Error)?.message || e),
+        }, 500);
+      }
+
       let number = '';
       try {
         number = await decryptNumber(row.my_number_encrypted);
       } catch (_) {
-        // 鍵が違う、または暗号化前の古いデータ
+        // 鍵は読めるが復号できない＝保存時と違う鍵が設定されている
         return json({
           error: '保存されている番号を復号できませんでした。'
-            + 'ご本人に再登録をご依頼いただくか、MY_NUMBER_KEY の設定をご確認ください。',
+            + '登録したときと違う鍵が設定されている可能性があります。'
+            + '元の鍵に戻すか、ご本人に再登録をご依頼ください。',
+          reason: 'wrong_key',
         }, 409);
       }
 
