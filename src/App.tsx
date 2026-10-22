@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef, useContext, createContext } from 'react';
 import { createPortal } from 'react-dom';
 import * as XLSX from 'xlsx';
-import { Clock, MapPin, CheckCircle2, XCircle, AlertTriangle, LogIn, LogOut, FileEdit, Users, Bell, Calendar, Mail, LogOut as LogoutIcon, UserPlus, Lock, User, Monitor, Smartphone, Palmtree, Plus, Pencil, CalendarDays, ListChecks, ClipboardList, MessageSquare, Coffee, BarChart3, Home, Download, ChevronRight, LayoutGrid, Wallet, Briefcase, UserCog, Construction, Megaphone, Paperclip, FileText, Pin, Trash2, Key, ShieldCheck, HelpCircle, ChevronDown, ChevronLeft, Settings } from 'lucide-react';
+import { Clock, MapPin, CheckCircle2, XCircle, AlertTriangle, LogIn, LogOut, FileEdit, Users, Bell, Calendar, Mail, LogOut as LogoutIcon, UserPlus, Lock, User, Monitor, Smartphone, Palmtree, Plus, Pencil, CalendarDays, ListChecks, ClipboardList, MessageSquare, Coffee, BarChart3, Home, Download, ChevronRight, LayoutGrid, Wallet, Briefcase, UserCog, Construction, Megaphone, Paperclip, FileText, Pin, Trash2, Key, ShieldCheck, ShieldAlert, HelpCircle, ChevronDown, ChevronLeft, Settings } from 'lucide-react';
 import { supabase, CLOUD_ENABLED, usernameToEmail } from './supabaseClient';
 
 // ---- constants ----
@@ -798,7 +798,7 @@ function ToastView({ toast }) {
 // 以降のコンポーネント（LoginScreenなど）は一切変更していません。
 // ============================================================
 
-const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, performanceReports: [], payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, employeeAttendanceSchedules: {}, announcements: [], yearEndAdjustments: [], commuteExpenseClaims: [], resignationReasons: [], monthlyConfirmations: [], shiftPeriods: [], shiftRequests: [], shiftTablesReady: true, bonusRecords: [], bonusTableReady: true, shiftAssignments: [], shiftAssignmentReady: true, shiftImportLogs: [], shiftNameAliases: [], shiftChanges: [], settings: {} };
+const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, performanceReports: [], payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, employeeAttendanceSchedules: {}, announcements: [], yearEndAdjustments: [], commuteExpenseClaims: [], resignationReasons: [], monthlyConfirmations: [], shiftPeriods: [], shiftRequests: [], shiftTablesReady: true, bonusRecords: [], bonusTableReady: true, shiftAssignments: [], shiftAssignmentReady: true, shiftImportLogs: [], shiftNameAliases: [], shiftChanges: [], loginAttempts: [], settings: {} };
 
 // 管理者宛の通知メールの送信先（app_settings の key）
 const SETTING_ADMIN_NOTIFY_EMAIL = 'admin_notify_email';
@@ -1365,6 +1365,15 @@ const rowToShiftChange = (row) => ({
   changedAt: row.changed_at,
 });
 
+const rowToLoginAttempt = (row) => ({
+  id: row.id,
+  username: row.username || '',
+  clientIp: row.client_ip || '',
+  userAgent: row.user_agent || '',
+  reason: row.reason || '',
+  occurredAt: row.occurred_at,
+});
+
 const rowToImportLog = (row) => ({
   id: row.id,
   targetMonth: row.target_month,
@@ -1445,6 +1454,7 @@ async function fetchAllData() {
     importLogRes,
     aliasRes,
     shiftChangeRes,
+    loginAttemptRes,
   ] = await Promise.all([
     supabase.from('employees').select('*'),
     supabase.from('attendance_records').select('*'),
@@ -1470,6 +1480,7 @@ async function fetchAllData() {
     supabase.from('shift_import_logs').select('*').order('imported_at', { ascending: false }).limit(20),
     supabase.from('shift_name_aliases').select('*'),
     supabase.from('shift_assignment_changes').select('*').order('changed_at', { ascending: false }).limit(500),
+    supabase.from('login_attempts').select('*').order('occurred_at', { ascending: false }).limit(100),
   ]);
 
   for (const res of [employeesRes, recordsRes, correctionsRes, leaveRes, perfRes, notifRes, payrollRes, auditRes, profileReqRes, groupLeaveRes, employeeAttendanceRes, announcementsRes, yearEndRes, commuteClaimsRes]) {
@@ -1497,6 +1508,9 @@ async function fetchAllData() {
   const shiftImportLogs = importLogRes?.error ? [] : (importLogRes?.data || []).map(rowToImportLog);
   const shiftNameAliases = aliasRes?.error ? [] : (aliasRes?.data || []).map(rowToShiftAlias);
   const shiftChanges = shiftChangeRes?.error ? [] : (shiftChangeRes?.data || []).map(rowToShiftChange);
+
+  // ログイン失敗の記録（管理者以外はRLSで0件、SQL未実行ならエラー→空扱い）
+  const loginAttempts = loginAttemptRes?.error ? [] : (loginAttemptRes?.data || []).map(rowToLoginAttempt);
 
   // アプリ全体の設定（SQL未実行でも画面が落ちないよう、エラー時は空扱いにする）
   const settings = {};
@@ -1552,6 +1566,7 @@ async function fetchAllData() {
     shiftImportLogs,
     shiftNameAliases,
     shiftChanges,
+    loginAttempts,
     settings,
   };
 }
@@ -1602,6 +1617,59 @@ async function sendEmailBestEffort(toEmail, subject, text) {
     });
   } catch (e) {
     console.error('メール送信に失敗しました（アプリの動作には影響ありません）', e);
+  }
+}
+
+// 2段階認証を設定している人かどうか（＝いまコードの入力が必要か）を調べる。
+// currentLevel が aal1 のまま nextLevel が aal2 のときは、まだコードを入れていない。
+async function needsMfaChallenge() {
+  try {
+    const { data, error } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
+    if (error || !data) return false;
+    return data.nextLevel === 'aal2' && data.currentLevel !== 'aal2';
+  } catch (e) {
+    console.error('2段階認証の確認に失敗しました', e);
+    return false;
+  }
+}
+
+// 入力された6桁のコードで本人確認を済ませる
+async function verifyMfaCode(code) {
+  const { data: listed, error: listError } = await supabase.auth.mfa.listFactors();
+  if (listError) throw listError;
+  const factor = (listed?.totp || []).find((f) => f.status === 'verified');
+  if (!factor) throw new Error('2段階認証の設定が見つかりません');
+  const { data: ch, error: chError } = await supabase.auth.mfa.challenge({ factorId: factor.id });
+  if (chError) throw chError;
+  const { error: vError } = await supabase.auth.mfa.verify({
+    factorId: factor.id,
+    challengeId: ch.id,
+    code: String(code).replace(/\s/g, ''),
+  });
+  if (vError) throw vError;
+}
+
+// 退職日を過ぎたスタッフのログインを Supabase Auth 側で止める。
+// 画面の中で signOut するだけでは、すでに持っているトークンで
+// APIを直接叩けてしまうため、アカウントそのものを停止する。
+// 管理者のログイン時と、退職日を保存したときに呼ぶ。
+// 失敗してもアプリの動作は止めない（次に管理者がログインしたときに再び試みる）。
+async function syncResignedAuth() {
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    const accessToken = sessionData?.session?.access_token;
+    if (!accessToken) return null;
+    const { data, error } = await supabase.functions.invoke('sync-resigned-auth', {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (error) {
+      console.error('退職者のログイン停止に失敗しました', error);
+      return null;
+    }
+    return data;
+  } catch (e) {
+    console.error('退職者のログイン停止に失敗しました', e);
+    return null;
   }
 }
 
@@ -1951,6 +2019,8 @@ function AttendanceApp() {
   const [loaded, setLoaded] = useState(false);
   const [cloudStatus, setCloudStatus] = useState(CLOUD_ENABLED ? 'connecting' : 'local');
   const [session, setSession] = useState(null); // { id, username, name, role, hireDate, resignationDate }
+  // 2段階認証のコード待ち（パスワードは通ったが、まだコードを入れていない状態）
+  const [mfaPending, setMfaPending] = useState(false);
   const [correctionModal, setCorrectionModal] = useState(null);
   const [leaveModalOpen, setLeaveModalOpen] = useState(false);
   const [performanceModal, setPerformanceModal] = useState(null);
@@ -2045,6 +2115,17 @@ function AttendanceApp() {
         setCloudStatus('cloud');
         return;
       }
+      // 2段階認証を設定している人は、コードを入れるまでデータを読み込まない
+      if (await needsMfaChallenge()) {
+        setMfaPending(true);
+        setSession(null);
+        setData(EMPTY_DATA);
+        setLoaded(true);
+        setCloudStatus('cloud');
+        return;
+      }
+      setMfaPending(false);
+
       const { data: empRow, error: empErr } = await supabase
         .from('employees')
         .select('*')
@@ -2070,6 +2151,11 @@ function AttendanceApp() {
         return;
       }
       setSession(rowToAccount(empRow));
+      // 管理者がログインしたら、退職日を過ぎたスタッフのログインを止める。
+      // 将来の日付で登録した分を、その日が来たら確実に止めるため。
+      if (empRow.role === 'admin' || empRow.role === 'master_admin') {
+        syncResignedAuth();
+      }
       const fresh = await fetchAllData();
       setData(fresh);
       setLoaded(true);
@@ -2160,8 +2246,21 @@ function AttendanceApp() {
         password,
       });
       if (error) {
+        // 失敗を記録する（管理画面の監査ログで確認できる）。
+        // パスワードは送らない。記録に失敗してもログイン画面の動きは変えない。
+        supabase.functions
+          .invoke('record-login-attempt', {
+            body: { username, reason: 'ユーザー名またはパスワードが違います' },
+          })
+          .catch(() => undefined);
         show('ユーザー名またはパスワードが違います', 'warn');
         return false;
+      }
+      // 2段階認証を設定している場合、ここではまだ aal1。
+      // コードを入れて aal2 になるまでデータを読み込まない。
+      if (await needsMfaChallenge()) {
+        setMfaPending(true);
+        return 'mfa';
       }
       await loadSessionAndData();
       show('おかえりなさい', 'success');
@@ -3030,6 +3129,16 @@ function AttendanceApp() {
       return false;
     }
     await refreshData();
+    // 退職日を変更したら、その場でログインの可否をそろえる
+    // （退職日が今日以前なら停止、取り消したなら解除）
+    if (Object.prototype.hasOwnProperty.call(patch, 'resignationDate')) {
+      const result = await syncResignedAuth();
+      if (result?.banned?.length) {
+        show(`${result.banned.join('、')}さんのログインを停止しました`, 'success');
+      } else if (result?.unbanned?.length) {
+        show(`${result.unbanned.join('、')}さんのログインを再開しました`, 'success');
+      }
+    }
     if (session && session.id === targetEmployeeId) {
       setSession((prev) => ({ ...prev, ...patch }));
     }
@@ -3885,6 +3994,25 @@ function AttendanceApp() {
     );
   }
 
+  // パスワードは通ったが、まだ2段階認証のコードを入れていない状態
+  if (!session && mfaPending) {
+    return (
+      <MfaChallengeScreen
+        onVerify={async (code) => {
+          await verifyMfaCode(code);
+          setMfaPending(false);
+          await loadSessionAndData();
+          show('おかえりなさい', 'success');
+        }}
+        onCancel={async () => {
+          setMfaPending(false);
+          await supabase.auth.signOut();
+        }}
+        toast={toast}
+      />
+    );
+  }
+
   if (!session) {
     return <LoginScreen onLogin={handleLogin} toast={toast} />;
   }
@@ -4036,6 +4164,9 @@ function AttendanceApp() {
               requests={data.profileUpdateRequests.filter((r) => r.employeeId === employeeId)}
               onSubmit={submitProfileUpdateRequest}
             />
+            {(session.role === 'admin' || session.role === 'master_admin') && (
+              <TwoFactorCard session={session} />
+            )}
           </div>
         )}
         {effectiveTopTab === 'requests' && showStaffScreens && (
@@ -4256,6 +4387,75 @@ function AttendanceApp() {
         />
       )}
       <ToastView toast={toast} />
+    </div>
+  );
+}
+
+// 2段階認証のコード入力画面。パスワードが通ったあとに出る。
+function MfaChallengeScreen({ onVerify, onCancel, toast }) {
+  const [code, setCode] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const submit = async (e) => {
+    e.preventDefault();
+    const clean = code.replace(/\s/g, '');
+    if (clean.length < 6) return;
+    setBusy(true); setError('');
+    try {
+      await onVerify(clean);
+    } catch (err) {
+      setError('コードが正しくありません。アプリの表示をもう一度ご確認ください');
+      setCode('');
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="min-h-[100dvh] bg-white flex items-center justify-center px-4 py-[max(1rem,env(safe-area-inset-top))] font-sans">
+      <div className="w-full max-w-[360px]">
+        <div className="text-center mb-8">
+          <div className="w-14 h-14 rounded-2xl bg-slate-950 flex items-center justify-center mx-auto mb-4">
+            <ShieldCheck size={26} className="text-white" strokeWidth={2.4} />
+          </div>
+          <h1 className="text-slate-800 font-bold text-[19px] tracking-tight">2段階認証</h1>
+          <p className="text-slate-500 text-[13px] mt-1.5 leading-relaxed">
+            スマートフォンのアプリに表示されている<br />6桁のコードを入力してください
+          </p>
+        </div>
+
+        <form onSubmit={submit} className="space-y-3">
+          <input
+            value={code}
+            onChange={(e) => setCode(e.target.value)}
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            autoFocus
+            placeholder="000000"
+            className="w-full border border-slate-200 rounded-xl px-3 py-3.5 font-mono text-center text-[22px] tracking-[0.3em]"
+          />
+          {error && <div className="rounded-lg bg-rose-50 px-3 py-2 text-[12px] text-rose-700">{error}</div>}
+          <button
+            type="submit"
+            disabled={busy || code.replace(/\s/g, '').length < 6}
+            className="w-full py-3 rounded-xl bg-slate-900 disabled:bg-slate-200 text-white text-[13.5px] font-bold"
+          >
+            {busy ? '確認中…' : 'ログイン'}
+          </button>
+          <button
+            type="button"
+            onClick={onCancel}
+            className="w-full py-2.5 text-[12.5px] font-medium text-slate-400"
+          >
+            ログイン画面に戻る
+          </button>
+        </form>
+
+        <p className="mt-6 text-[11.5px] leading-relaxed text-slate-400 text-center">
+          スマートフォンを機種変更・紛失された場合は、マスター管理者にご連絡ください。
+        </p>
+      </div>
+      {toast}
     </div>
   );
 }
@@ -11845,7 +12045,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
       )}
 
       {tab === 'auditlog' && (
-        <AdminAuditLogTab logs={data.auditLogs} isDesktop={isDesktop} />
+        <AdminAuditLogTab logs={data.auditLogs} loginAttempts={data.loginAttempts} isDesktop={isDesktop} />
       )}
 
       {tab === 'adminperms' && isMasterAdmin && (
@@ -14128,6 +14328,191 @@ const PROFILE_READONLY_FIELDS = [
 ];
 
 
+// 2段階認証（TOTP）の設定カード。管理者・マスター管理者にだけ出す。
+// 任意設定：有効にするとログイン時にスマホアプリの6桁コードを求められる。
+function TwoFactorCard({ session }) {
+  const [factors, setFactors] = useState(null); // null = 読み込み中
+  const [enrolling, setEnrolling] = useState(null); // { factorId, qr, secret }
+  const [code, setCode] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [done, setDone] = useState('');
+
+  const reload = async () => {
+    try {
+      const { data, error: listError } = await supabase.auth.mfa.listFactors();
+      if (listError) throw listError;
+      setFactors((data?.totp || []).filter((f) => f.status === 'verified'));
+    } catch (e) {
+      console.error('2段階認証の状態を取得できませんでした', e);
+      setFactors([]);
+    }
+  };
+
+  useEffect(() => { reload(); }, []);
+
+  const start = async () => {
+    setError(''); setDone(''); setBusy(true);
+    try {
+      // 中断した登録が残っていると「同じ名前は使えません」で失敗するため、先に片付ける
+      const { data: listed } = await supabase.auth.mfa.listFactors();
+      for (const f of (listed?.totp || [])) {
+        if (f.status !== 'verified') await supabase.auth.mfa.unenroll({ factorId: f.id });
+      }
+      const { data, error: enrollError } = await supabase.auth.mfa.enroll({
+        factorType: 'totp',
+        friendlyName: `BrownWork-${Date.now()}`,
+      });
+      if (enrollError) throw enrollError;
+      setEnrolling({
+        factorId: data.id,
+        qr: data.totp?.qr_code || '',
+        secret: data.totp?.secret || '',
+      });
+      setCode('');
+    } catch (e) {
+      setError(e?.message || '登録を開始できませんでした');
+    }
+    setBusy(false);
+  };
+
+  const verify = async () => {
+    if (!enrolling) return;
+    setError(''); setBusy(true);
+    try {
+      const { data: ch, error: chError } = await supabase.auth.mfa.challenge({ factorId: enrolling.factorId });
+      if (chError) throw chError;
+      const { error: vError } = await supabase.auth.mfa.verify({
+        factorId: enrolling.factorId,
+        challengeId: ch.id,
+        code: code.replace(/\s/g, ''),
+      });
+      if (vError) throw vError;
+      setEnrolling(null);
+      setCode('');
+      setDone('2段階認証を有効にしました。次回のログインから6桁のコードが必要になります。');
+      await reload();
+    } catch (e) {
+      setError(e?.message || 'コードが正しくありません。アプリの表示をもう一度ご確認ください');
+    }
+    setBusy(false);
+  };
+
+  const cancel = async () => {
+    if (enrolling) {
+      try { await supabase.auth.mfa.unenroll({ factorId: enrolling.factorId }); } catch (_) { /* noop */ }
+    }
+    setEnrolling(null); setCode(''); setError('');
+  };
+
+  const disable = async (factorId) => {
+    if (!window.confirm('2段階認証を解除します。次回からコードの入力は不要になります。よろしいですか？')) return;
+    setBusy(true); setError(''); setDone('');
+    try {
+      const { error: unError } = await supabase.auth.mfa.unenroll({ factorId });
+      if (unError) throw unError;
+      setDone('2段階認証を解除しました。');
+      await reload();
+    } catch (e) {
+      setError(e?.message || '解除できませんでした');
+    }
+    setBusy(false);
+  };
+
+  const enabled = (factors || []).length > 0;
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+      <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
+        <ShieldCheck size={15} className={enabled ? 'text-emerald-600' : 'text-slate-400'} />
+        <h2 className="font-bold text-[13.5px]">2段階認証</h2>
+        <span className={`ml-auto text-[11px] font-bold ${enabled ? 'text-emerald-700' : 'text-slate-400'}`}>
+          {factors === null ? '確認中…' : enabled ? '有効' : '未設定'}
+        </span>
+      </div>
+
+      <div className="px-5 py-4 space-y-3">
+        <p className="text-[12px] leading-relaxed text-slate-500">
+          有効にすると、ログインのときにパスワードに加えて、スマートフォンのアプリに表示される6桁のコードが必要になります。
+          管理者はスタッフ全員の情報を見られるため、設定をおすすめします。
+        </p>
+
+        {error && <div className="rounded-lg bg-rose-50 px-3 py-2 text-[12px] text-rose-700">{error}</div>}
+        {done && <div className="rounded-lg bg-emerald-50 px-3 py-2 text-[12px] text-emerald-700">{done}</div>}
+
+        {enrolling ? (
+          <div className="space-y-3">
+            <div className="text-[12px] font-bold text-slate-700">1. アプリで読み取る</div>
+            <p className="text-[11.5px] text-slate-500 leading-relaxed">
+              Google Authenticator や Microsoft Authenticator などのアプリを開き、
+              下のコードを読み取ってください。
+            </p>
+            {enrolling.qr && (
+              <div className="flex justify-center bg-white rounded-xl border border-slate-200 p-3">
+                <img src={enrolling.qr} alt="2段階認証のQRコード" className="w-44 h-44" />
+              </div>
+            )}
+            {enrolling.secret && (
+              <div className="text-[11px] text-slate-400">
+                読み取れない場合は、このキーを手入力してください：
+                <div className="mt-1 font-mono text-[11.5px] text-slate-600 break-all bg-slate-50 rounded px-2 py-1.5">
+                  {enrolling.secret}
+                </div>
+              </div>
+            )}
+            <div className="text-[12px] font-bold text-slate-700 pt-1">2. 表示された6桁を入力</div>
+            <input
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              placeholder="000000"
+              className="w-full border border-slate-200 rounded-lg px-3 py-2.5 font-mono text-center text-[18px] tracking-[0.3em]"
+            />
+            <div className="flex gap-2">
+              <button onClick={cancel} disabled={busy} className="flex-1 py-2.5 rounded-lg border border-slate-200 text-[12.5px] font-medium text-slate-500">
+                やめる
+              </button>
+              <button
+                onClick={verify}
+                disabled={busy || code.replace(/\s/g, '').length < 6}
+                className="flex-1 py-2.5 rounded-lg bg-slate-800 disabled:bg-slate-200 text-white text-[12.5px] font-bold"
+              >
+                {busy ? '確認中…' : '有効にする'}
+              </button>
+            </div>
+          </div>
+        ) : enabled ? (
+          <div className="space-y-2">
+            <div className="rounded-lg bg-amber-50 px-3 py-2.5 text-[11.5px] leading-relaxed text-amber-800">
+              スマートフォンを機種変更・紛失すると、ご自身ではログインできなくなります。
+              その場合はマスター管理者にご連絡ください（Supabaseの管理画面から解除できます）。
+            </div>
+            {(factors || []).map((f) => (
+              <button
+                key={f.id}
+                onClick={() => disable(f.id)}
+                disabled={busy}
+                className="w-full py-2.5 rounded-lg border border-rose-200 text-[12.5px] font-bold text-rose-600"
+              >
+                2段階認証を解除する
+              </button>
+            ))}
+          </div>
+        ) : (
+          <button
+            onClick={start}
+            disabled={busy || factors === null}
+            className="w-full py-2.5 rounded-lg bg-slate-800 disabled:bg-slate-200 text-white text-[12.5px] font-bold"
+          >
+            {busy ? '準備中…' : '2段階認証を設定する'}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ProfileRequestView({ session, requests, onSubmit }) {
   const [modalOpen, setModalOpen] = useState(false);
   const pending = requests.filter((r) => r.status === 'pending');
@@ -14793,8 +15178,94 @@ function AdminPermissionsTab({ adminAccounts, staffAccounts = [], currentUserId,
   );
 }
 
-function AdminAuditLogTab({ logs, isDesktop }) {
+// ログインの失敗（総当たりに気づくための記録）
+function LoginFailureCard({ attempts, isDesktop }) {
+  const [days, setDays] = useState(7);
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).getTime();
+  const list = (attempts || []).filter((a) => new Date(a.occurredAt).getTime() >= since);
+
+  // 同じIDに繰り返し失敗しているものを目立たせる
+  const countByName = {};
+  list.forEach((a) => { countByName[a.username] = (countByName[a.username] || 0) + 1; });
+  const repeated = Object.entries(countByName).filter(([, n]) => n >= 5).sort((a, b) => b[1] - a[1]);
+
   return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden mt-4">
+      <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2 flex-wrap">
+        <ShieldAlert size={15} className="text-slate-400" />
+        <h2 className="font-bold text-[13.5px]">ログインの失敗</h2>
+        <span className="text-[11px] text-slate-400">直近{days}日で{list.length}件</span>
+        <div className="ml-auto flex gap-1">
+          {[1, 7, 30].map((d) => (
+            <button
+              key={d}
+              onClick={() => setDays(d)}
+              className={`px-2.5 py-1 rounded-lg text-[11px] font-bold ${days === d ? 'bg-slate-800 text-white' : 'bg-slate-100 text-slate-500'}`}
+            >
+              {d}日
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {repeated.length > 0 && (
+        <div className="px-5 py-3 bg-amber-50 border-b border-amber-100 text-[12px] text-amber-800">
+          <b>同じログインIDで繰り返し失敗しています。</b>
+          <div className="mt-1 space-y-0.5">
+            {repeated.map(([name, n]) => (
+              <div key={name}>{name || '（IDなし）'}：{n}回</div>
+            ))}
+          </div>
+          <div className="mt-1.5 text-[11px] text-amber-700">
+            ご本人がパスワードをお忘れの場合はパスワード再発行をご案内ください。
+            心当たりがない場合は、そのアカウントのパスワード変更をおすすめします。
+          </div>
+        </div>
+      )}
+
+      {list.length === 0 ? (
+        <div className="px-5 py-10 text-center text-[12.5px] text-slate-300">記録がありません</div>
+      ) : isDesktop ? (
+        <table className="w-full text-[12.5px]">
+          <thead>
+            <tr className="text-left text-[10.5px] text-slate-400 border-b border-slate-100">
+              <th className="px-5 py-2 font-medium">日時</th>
+              <th className="px-5 py-2 font-medium">ログインID</th>
+              <th className="px-5 py-2 font-medium">接続元</th>
+              <th className="px-5 py-2 font-medium">内容</th>
+            </tr>
+          </thead>
+          <tbody>
+            {list.map((a) => (
+              <tr key={a.id} className="border-b border-slate-100 last:border-0">
+                <td className="px-5 py-2.5 font-mono text-slate-500 whitespace-nowrap">{new Date(a.occurredAt).toLocaleString('ja-JP')}</td>
+                <td className="px-5 py-2.5 font-semibold text-slate-700">{a.username || '—'}</td>
+                <td className="px-5 py-2.5 font-mono text-[11px] text-slate-400">{a.clientIp || '—'}</td>
+                <td className="px-5 py-2.5 text-slate-500">{a.reason || ''}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        <div className="divide-y divide-slate-100">
+          {list.map((a) => (
+            <div key={a.id} className="px-5 py-3">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[12.5px] font-bold text-slate-800 break-all">{a.username || '—'}</span>
+                <span className="text-[10px] text-slate-300 font-mono whitespace-nowrap">{new Date(a.occurredAt).toLocaleString('ja-JP')}</span>
+              </div>
+              <div className="text-[11px] text-slate-400 mt-0.5 font-mono">{a.clientIp || '—'}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AdminAuditLogTab({ logs, loginAttempts, isDesktop }) {
+  return (
+    <>
     <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
       <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
         <ListChecks size={15} className="text-slate-400" />
@@ -14843,6 +15314,8 @@ function AdminAuditLogTab({ logs, isDesktop }) {
         </div>
       )}
     </div>
+    <LoginFailureCard attempts={loginAttempts} isDesktop={isDesktop} />
+    </>
   );
 }
 
