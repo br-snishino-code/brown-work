@@ -122,4 +122,85 @@ select '45 【セキュリティ】employees の列ガード',
               where tgrelid = to_regclass('public.employees')
                 and tgname = 'guard_employee_self_update')
             then '✅ 実行済み' else '❌ 未実行' end
+union all
+select '46 【セキュリティ】旧 app_state の削除',
+       case when to_regclass('public.app_state') is null
+            then '✅ 実行済み' else '❌ 未実行' end
+union all
+select '47 【セキュリティ】お知らせの偽装を防ぐ',
+       case when exists (
+              select 1 from pg_policies
+              where schemaname = 'public' and tablename = 'notifications'
+                and cmd = 'INSERT' and with_check like '%to_role%')
+            then '✅ 実行済み' else '❌ 未実行' end
+union all
+select '48 シフト連携の合言葉の失敗記録',
+       case when to_regclass('public.api_access_failures') is not null
+            then '✅ 実行済み' else '❌ 未実行' end
+union all
+select '49 ログイン失敗の記録',
+       case when to_regclass('public.login_attempts') is not null
+            then '✅ 実行済み' else '❌ 未実行' end
+union all
+select '50 【任意】2段階認証をDB側でも要求',
+       case when exists (
+              select 1 from pg_policies
+              where schemaname = 'public' and policyname = 'mfa required')
+            then '✅ 実行済み' else '－ 未実行（任意）' end
+
+-- ============================================================
+-- 承認フローのトリガー
+--   承認・却下のある表には、本人が自分で status を書き換えられない
+--   ようにするトリガーが必要。表を追加したら、ここにも1行足すこと。
+--   詳しくは 01_schema.sql の「承認フローのある表を追加するときの
+--   決まりごと」を参照。
+-- ============================================================
+union all
+select '承認ガード：勤怠修正申請（corrections）',
+       case when exists (select 1 from pg_trigger
+              where tgrelid = to_regclass('public.corrections')
+                and tgname = 'guard_corrections')
+            then '✅ あり' else '❌ ありません' end
+union all
+select '承認ガード：休暇申請（leave_requests）',
+       case when exists (select 1 from pg_trigger
+              where tgrelid = to_regclass('public.leave_requests')
+                and tgname = 'guard_leave_requests')
+            then '✅ あり' else '❌ ありません' end
+union all
+select '承認ガード：シフト希望（shift_requests）',
+       case when exists (select 1 from pg_trigger
+              where tgrelid = to_regclass('public.shift_requests')
+                and tgname = 'guard_shift_requests')
+            then '✅ あり' else '❌ ありません' end
+union all
+select '承認ガード：実績報告（performance_reports）',
+       case when exists (select 1 from pg_trigger
+              where tgrelid = to_regclass('public.performance_reports')
+                and tgname = 'guard_performance_reports')
+            then '✅ あり' else '❌ ありません' end
+union all
+select '承認ガード：交通費精算（commute_expense_claims）',
+       case when exists (select 1 from pg_trigger
+              where tgrelid = to_regclass('public.commute_expense_claims')
+                and tgname = 'guard_commute_claim_decision')
+            then '✅ あり' else '❌ ありません' end
+union all
+select '承認ガード：月次勤怠の確定（monthly_attendance_confirmations）',
+       case when exists (select 1 from pg_trigger
+              where tgrelid = to_regclass('public.monthly_attendance_confirmations')
+                and tgname = 'guard_monthly_confirm_decision')
+            then '✅ あり' else '❌ ありません' end
+union all
+select '承認ガード：年末調整（year_end_adjustments）',
+       case when exists (select 1 from pg_trigger
+              where tgrelid = to_regclass('public.year_end_adjustments')
+                and tgname = 'guard_year_end_decision')
+            then '✅ あり' else '❌ ありません' end
+union all
+select '承認ガード：勤怠の打刻（attendance_records）',
+       case when exists (select 1 from pg_trigger
+              where tgrelid = to_regclass('public.attendance_records')
+                and tgname = 'guard_attendance_self_update')
+            then '✅ あり' else '❌ ありません' end
 order by 1;

@@ -166,6 +166,33 @@ begin
 end;
 $$;
 
+-- ============================================================
+-- 【承認フローのある表を追加するときの決まりごと】
+--
+--   RLS は「どの行を触れるか」しか見ていない。
+--   「本人が自分の行を更新できる」ポリシーを書いた時点で、
+--   その行の status を 'approved' に書き換えることもできてしまう。
+--   画面からはできなくても、開発者ツールから API を直接呼べば通る。
+--
+--   そのため、承認・却下のある表を追加するときは、
+--   RLS とセットで必ず下のトリガーを付けること。
+--
+--     drop trigger if exists guard_<表の名前> on public.<表の名前>;
+--     create trigger guard_<表の名前> before update on public.<表の名前>
+--       for each row execute function public.guard_decision_fields();
+--
+--   列の名前が status / decided_at と違う表は、専用のトリガーを書く。
+--   実例：51_self_approval_guard.sql（交通費・月次勤怠・勤怠打刻）、
+--         52_year_end_and_shift_guard.sql（年末調整）
+--
+--   付け忘れは 99_check_status.sql の「承認フローのトリガー」で
+--   まとめて確認できる。表を追加したら、その確認にも1行足すこと。
+--
+--   ※ 実際に、あとから追加した5つの表（交通費精算・月次勤怠の確定・
+--      勤怠打刻・年末調整・シフト希望）でこの付け忘れが起き、
+--      2026年10月の監査で見つかっている。
+-- ============================================================
+
 drop trigger if exists guard_corrections on public.corrections;
 create trigger guard_corrections before update on public.corrections
   for each row execute function public.guard_decision_fields();
