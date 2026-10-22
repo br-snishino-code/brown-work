@@ -81,6 +81,25 @@ Deno.serve(async (req) => {
       return json({ error: `スタッフの取得に失敗しました：${empError.message}` }, 500);
     }
 
+    // Auth のアカウントは一覧でまとめて取る。
+    // 1人ずつ問い合わせると、スタッフが増えたときに
+    // 管理者のログインのたびに何百回も通信することになるため。
+    const bannedUntilById = new Map<string, string | null>();
+    for (let page = 1; page <= 20; page++) {
+      const { data: listed, error: listError } = await adminClient.auth.admin.listUsers({
+        page,
+        perPage: 1000,
+      });
+      if (listError) {
+        return json({ error: `アカウント一覧の取得に失敗しました：${listError.message}` }, 500);
+      }
+      const users = listed?.users || [];
+      for (const u of users) {
+        bannedUntilById.set(u.id, (u as { banned_until?: string | null }).banned_until ?? null);
+      }
+      if (users.length < 1000) break;
+    }
+
     const today = todayKey();
     const banned: string[] = [];
     const unbanned: string[] = [];
@@ -92,15 +111,15 @@ Deno.serve(async (req) => {
 
       const shouldBan = !!emp.resignation_date && emp.resignation_date <= today;
 
-      // いまの状態を見てから、変える必要があるときだけ変える
-      const { data: authUser } = await adminClient.auth.admin.getUserById(emp.id);
-      if (!authUser?.user) continue; // Auth 側にアカウントが無い（作成前・削除済み）
+      // Auth 側にアカウントが無い（作成前・削除済み）場合は何もしない
+      if (!bannedUntilById.has(emp.id)) continue;
 
       // banned_until は停止中のときだけ入る。'none' の文字が入る実装もある。
-      const bannedUntil = (authUser.user as { banned_until?: string | null }).banned_until;
+      const bannedUntil = bannedUntilById.get(emp.id);
       const isBanned = !!bannedUntil && bannedUntil !== 'none'
         && new Date(bannedUntil).getTime() > Date.now();
 
+      // 変える必要があるときだけ書き換える
       if (shouldBan && !isBanned) {
         const { error } = await adminClient.auth.admin.updateUserById(emp.id, {
           ban_duration: BAN_FOREVER,
