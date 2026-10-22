@@ -238,7 +238,20 @@ Deno.serve(async (req) => {
       return json({ ok: true });
     }
 
-    // ---- 4. 削除（保存期間を過ぎたものの廃棄） ----
+    // ---- 4. 一覧（誰の番号が保存されているか。番号そのものは返さない） ----
+    if (action === 'list') {
+      if (!isMaster) {
+        return json({ error: '一覧を確認できるのはマスター管理者のみです' }, 403);
+      }
+      const { data: rows, error } = await admin
+        .from('employee_my_numbers')
+        .select('employee_id, updated_at');
+      if (error) return json({ error: `取得に失敗しました：${error.message}` }, 500);
+      // 番号は含めないので、この操作は監査ログに記録しない
+      return json({ items: rows || [] });
+    }
+
+    // ---- 5. 削除（保存期間を過ぎたものの廃棄） ----
     if (action === 'delete') {
       if (!isMaster) {
         return json({ error: 'マイナンバーを削除できるのはマスター管理者のみです' }, 403);
@@ -253,7 +266,7 @@ Deno.serve(async (req) => {
       return json({ ok: true });
     }
 
-    return json({ error: 'action は read / save / delete のいずれかです' }, 400);
+    return json({ error: 'action は read / save / list / delete のいずれかです' }, 400);
   } catch (e) {
     console.error('マイナンバーの処理に失敗しました', e);
     return json({ error: String((e as Error)?.message || e) }, 500);

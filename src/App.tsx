@@ -2443,6 +2443,26 @@ function AttendanceApp() {
     return { number: res.number || '', purposes: res.purposes || [] };
   };
 
+  // 誰の番号が保存されているかの一覧（番号そのものは返らない）
+  const listMyNumbers = async () => {
+    const res = await callMyNumberFunction({ action: 'list' });
+    if (res.error) {
+      show(res.error, 'warn');
+      return null;
+    }
+    return res.items || [];
+  };
+
+  // 保存期間を過ぎたマイナンバーを廃棄する（番号法の廃棄義務への対応）
+  const deleteMyNumber = async (targetEmployeeId) => {
+    const res = await callMyNumberFunction({ action: 'delete', employeeId: targetEmployeeId });
+    if (res.error) {
+      show(res.error, 'warn');
+      return false;
+    }
+    return true;
+  };
+
   const saveMyNumber = async (targetEmployeeId, { number, purposes }) => {
     const res = await callMyNumberFunction({
       action: 'save', employeeId: targetEmployeeId, number, purposes,
@@ -4352,6 +4372,8 @@ function AttendanceApp() {
             onDeleteAccount={handleDeleteAccount}
             onResetPassword={handleResetPassword}
             onFetchMyNumber={fetchMyNumber}
+            onListMyNumbers={listMyNumbers}
+            onDeleteMyNumber={deleteMyNumber}
             onSaveMyNumber={saveMyNumber}
             onUpdateDates={updateEmployeeDates}
             onUpdateAdminAccess={updateAdminAccess}
@@ -11604,7 +11626,7 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
   );
 }
 
-function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAdminTab = null, onConsumeRequestedAdminTab, onDecide, onDecideLeave, onDecidePerformance, onDecideCommute, onNotifyEmployee, onSaveShiftPeriod, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onSaveGroupFormats, onSaveShiftAlias, onDeleteShiftAlias, onAnnounceShift, onChangeLoginEmail, onDecideMonthlyConfirm, onCancelMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
+function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAdminTab = null, onConsumeRequestedAdminTab, onDecide, onDecideLeave, onDecidePerformance, onDecideCommute, onNotifyEmployee, onSaveShiftPeriod, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onListMyNumbers, onDeleteMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onSaveGroupFormats, onSaveShiftAlias, onDeleteShiftAlias, onAnnounceShift, onChangeLoginEmail, onDecideMonthlyConfirm, onCancelMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
   const [tab, setTab] = useState('dashboard'); // dashboard | attendance | requests | leave | performance | accounts
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
@@ -12053,7 +12075,15 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
       )}
 
       {tab === 'auditlog' && (
-        <AdminAuditLogTab logs={data.auditLogs} loginAttempts={data.loginAttempts} isDesktop={isDesktop} />
+        <AdminAuditLogTab
+          logs={data.auditLogs}
+          loginAttempts={data.loginAttempts}
+          accounts={employeeAccounts}
+          isMasterAdmin={isMasterAdmin}
+          onListMyNumbers={onListMyNumbers}
+          onDeleteMyNumber={onDeleteMyNumber}
+          isDesktop={isDesktop}
+        />
       )}
 
       {tab === 'adminperms' && isMasterAdmin && (
@@ -15271,7 +15301,7 @@ function LoginFailureCard({ attempts, isDesktop }) {
   );
 }
 
-function AdminAuditLogTab({ logs, loginAttempts, isDesktop }) {
+function AdminAuditLogTab({ logs, loginAttempts, accounts, isMasterAdmin, onListMyNumbers, onDeleteMyNumber, isDesktop }) {
   return (
     <>
     <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
@@ -15323,6 +15353,16 @@ function AdminAuditLogTab({ logs, loginAttempts, isDesktop }) {
       )}
     </div>
     <LoginFailureCard attempts={loginAttempts} isDesktop={isDesktop} />
+    {isMasterAdmin && (
+      <div className="mt-4">
+        <MyNumberRetentionCard
+          accounts={accounts}
+          onListMyNumbers={onListMyNumbers}
+          onDeleteMyNumber={onDeleteMyNumber}
+          isDesktop={isDesktop}
+        />
+      </div>
+    )}
     </>
   );
 }
@@ -15406,7 +15446,193 @@ function StaffRowMenu({ account, info, onOpenProfile, onOpenAttendance, onOpenAp
   );
 }
 
-function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail, onUpdateDates, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, groupLeaveSchedules, employeeAttendanceSchedules, onSaveEmployeeAttendance, resignationReasons = [], initialProfileId = null, onConsumeInitialProfile, rowInfo = {}, rowActions = {}, session, isDesktop }) {
+// ------------------------------------------------------------
+// マイナンバーの保存期間と廃棄
+//
+// 番号法では、利用目的が終了して保存期間を過ぎたマイナンバーは
+// 廃棄しなければならない。残し続けること自体が違反になりえる。
+// 扶養控除等申告書は7年保存のため、ここでは退職日からの経過年数で
+// 廃棄できるものを一覧にする（年数は変更できる）。
+//
+// 最終的な保存期間の判断は、社労士・税理士にご確認ください。
+// ------------------------------------------------------------
+function MyNumberRetentionCard({ accounts, onListMyNumbers, onDeleteMyNumber, isDesktop }) {
+  const [items, setItems] = useState(null); // null = 未読み込み
+  const [years, setYears] = useState(7);
+  const [busyId, setBusyId] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  const load = async () => {
+    setLoading(true);
+    const res = await onListMyNumbers();
+    setItems(res || []);
+    setLoading(false);
+  };
+
+  const byId = {};
+  accounts.forEach((a) => { byId[a.id] = a; });
+
+  const today = new Date();
+  const rows = (items || []).map((it) => {
+    const acc = byId[it.employee_id];
+    const resignation = acc?.resignationDate || '';
+    let elapsed = null;
+    if (resignation) {
+      const d = new Date(`${resignation}T00:00:00`);
+      elapsed = (today.getTime() - d.getTime()) / (365.25 * 24 * 60 * 60 * 1000);
+    }
+    return {
+      id: it.employee_id,
+      name: acc?.name || '（削除されたスタッフ）',
+      resignation,
+      elapsed,
+      updatedAt: it.updated_at,
+    };
+  });
+
+  const expired = rows.filter((r) => r.elapsed !== null && r.elapsed >= years);
+  const retired = rows.filter((r) => r.elapsed !== null && r.elapsed < years);
+  const active = rows.filter((r) => r.elapsed === null);
+
+  const discard = async (row) => {
+    if (!window.confirm(
+      `${row.name}さんのマイナンバーを廃棄します。\n\n`
+      + '元に戻すことはできません。よろしいですか？'
+    )) return;
+    setBusyId(row.id);
+    const ok = await onDeleteMyNumber(row.id);
+    setBusyId(null);
+    if (ok) await load();
+  };
+
+  const discardAllExpired = async () => {
+    if (expired.length === 0) return;
+    if (!window.confirm(
+      `保存期間（${years}年）を過ぎた${expired.length}件のマイナンバーを廃棄します。\n\n`
+      + `対象：${expired.map((r) => r.name).join('、')}\n\n`
+      + '元に戻すことはできません。よろしいですか？'
+    )) return;
+    setBusyId('all');
+    for (const row of expired) {
+      await onDeleteMyNumber(row.id);
+    }
+    setBusyId(null);
+    await load();
+  };
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+      <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2 flex-wrap">
+        <ShieldCheck size={15} className="text-slate-400" />
+        <h2 className="font-bold text-[13.5px]">マイナンバーの保存期間</h2>
+        {items !== null && (
+          <span className="text-[11px] text-slate-400">保存中 {rows.length}件</span>
+        )}
+        <button
+          onClick={load}
+          disabled={loading}
+          className="ml-auto text-[12px] font-bold text-slate-600 border border-slate-200 rounded-lg px-2.5 py-1.5 disabled:text-slate-300"
+        >
+          {loading ? '確認中…' : items === null ? '保存状況を確認する' : '再読み込み'}
+        </button>
+      </div>
+
+      <div className="px-5 py-3 border-b border-slate-100 text-[11.5px] leading-relaxed text-slate-500">
+        保存期間を過ぎたマイナンバーは、番号法により廃棄が必要です。
+        ここでは退職日からの経過年数で判定しています。
+        在籍中の方は対象外です。
+        <span className="text-slate-400">（保存期間の最終的な判断は社労士・税理士にご確認ください）</span>
+      </div>
+
+      {items === null ? (
+        <div className="px-5 py-10 text-center text-[12.5px] text-slate-300">
+          「保存状況を確認する」を押すと、誰の番号が保存されているかを確認できます<br />
+          <span className="text-[11px]">（番号そのものは表示されません）</span>
+        </div>
+      ) : rows.length === 0 ? (
+        <div className="px-5 py-10 text-center text-[12.5px] text-slate-300">
+          保存されているマイナンバーはありません
+        </div>
+      ) : (
+        <>
+          <div className="px-5 py-3 border-b border-slate-100 flex items-center gap-2 flex-wrap">
+            <span className="text-[12px] text-slate-600">保存期間</span>
+            <select
+              value={years}
+              onChange={(e) => setYears(Number(e.target.value))}
+              className="border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white"
+            >
+              {[5, 7, 10].map((y) => <option key={y} value={y}>退職から{y}年</option>)}
+            </select>
+            {expired.length > 0 && (
+              <button
+                onClick={discardAllExpired}
+                disabled={busyId !== null}
+                className="ml-auto text-[12px] font-bold text-white bg-rose-600 disabled:bg-slate-200 rounded-lg px-3 py-1.5"
+              >
+                {busyId === 'all' ? '廃棄中…' : `期間を過ぎた${expired.length}件を廃棄`}
+              </button>
+            )}
+          </div>
+
+          {expired.length > 0 && (
+            <div className="px-5 py-3 bg-amber-50 border-b border-amber-100">
+              <div className="text-[12px] font-bold text-amber-900">
+                保存期間を過ぎています（{expired.length}件）
+              </div>
+              <div className="mt-2 space-y-1.5">
+                {expired.map((r) => (
+                  <div key={r.id} className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <span className="text-[12.5px] font-semibold text-slate-800">{r.name}</span>
+                      <span className="ml-2 text-[11px] text-slate-500">
+                        退職 {dateLabel(r.resignation)}（{Math.floor(r.elapsed)}年経過）
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => discard(r)}
+                      disabled={busyId !== null}
+                      className="shrink-0 text-[11.5px] font-bold text-rose-600 border border-rose-200 rounded-lg px-2.5 py-1 disabled:text-slate-300"
+                    >
+                      {busyId === r.id ? '廃棄中…' : '廃棄'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="divide-y divide-slate-100">
+            {retired.map((r) => (
+              <div key={r.id} className="px-5 py-2.5 flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <span className="text-[12.5px] text-slate-700">{r.name}</span>
+                  <span className="ml-2 text-[11px] text-slate-400">
+                    退職 {dateLabel(r.resignation)}（{Math.floor(r.elapsed)}年経過・保存期間内）
+                  </span>
+                </div>
+                <button
+                  onClick={() => discard(r)}
+                  disabled={busyId !== null}
+                  className="shrink-0 text-[11.5px] font-medium text-slate-400 border border-slate-200 rounded-lg px-2.5 py-1"
+                >
+                  廃棄
+                </button>
+              </div>
+            ))}
+            {active.length > 0 && (
+              <div className="px-5 py-2.5 text-[11.5px] text-slate-400">
+                在籍中のスタッフ {active.length}名 ぶんは保存中です（廃棄の対象外）
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail, onUpdateDates, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onListMyNumbers, onDeleteMyNumber, groupLeaveSchedules, employeeAttendanceSchedules, onSaveEmployeeAttendance, resignationReasons = [], initialProfileId = null, onConsumeInitialProfile, rowInfo = {}, rowActions = {}, session, isDesktop }) {
   const knownGroups = Array.from(new Set([...employeeAccounts.map((a) => a.mainGroup).filter(Boolean), ...Object.keys(groupLeaveSchedules || {})]));
   const [listGroupFilter, setListGroupFilter] = useState('all');
   const [listStaffTypeFilter, setListStaffTypeFilter] = useState('all');
