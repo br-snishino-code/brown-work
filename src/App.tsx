@@ -1288,7 +1288,12 @@ const rowToMonthlyConfirm = (row) => ({
 
 const ANNOUNCEMENT_CATEGORIES = ['お知らせ', '制度・インセンティブ', '資料・料金表', 'キャンペーン', 'その他'];
 
-// 全データバックアップの対象テーブル（employee_my_numbers を含む＝マイナンバーも書き出される）
+// 全データバックアップの対象テーブル。
+// マイナンバー（employee_my_numbers）は意図的に含めていない。
+// ・暗号化して保存しており、鍵が無ければ書き出しても読めない
+// ・ダウンロードしたExcelから番号が漏れる経路を作らない
+// 番号が必要な場合は、スタッフ詳細の画面から1件ずつ確認する
+// （その操作は監査ログに記録される）。
 const BACKUP_TABLES = [
   'employees',
   'attendance_records',
@@ -1312,7 +1317,6 @@ const BACKUP_TABLES = [
   'staff_new_performance',
   'staff_existing_performance',
   'group_incentive_flags',
-  'employee_my_numbers',
   'resignation_reasons',
 ];
 
@@ -1647,6 +1651,37 @@ async function verifyMfaCode(code) {
     code: String(code).replace(/\s/g, ''),
   });
   if (vError) throw vError;
+}
+
+// マイナンバーの読み書きは、すべて my-number 関数を通す。
+// 番号は暗号化して保存され、復号の鍵はこの関数のシークレットにしか無い。
+// ブラウザ側は鍵を持たないため、アプリのキーが漏れても番号は読めない。
+// 閲覧・保存・廃棄は関数側で必ず監査ログに記録される。
+async function callMyNumberFunction(payload) {
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    const accessToken = sessionData?.session?.access_token;
+    if (!accessToken) return { error: 'ログインの情報が取得できませんでした' };
+    const { data, error } = await supabase.functions.invoke('my-number', {
+      body: payload,
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (data?.error) return { error: data.error };
+    if (error) {
+      // 関数が 4xx を返した場合、本文にこちらのメッセージが入っている
+      if (error.context) {
+        try {
+          const body = await error.context.json();
+          if (body?.error) return { error: body.error };
+        } catch (_) { /* noop */ }
+      }
+      return { error: 'マイナンバーの処理に失敗しました' };
+    }
+    return data || {};
+  } catch (e) {
+    console.error('マイナンバーの処理に失敗しました', e);
+    return { error: 'マイナンバーの処理に失敗しました' };
+  }
 }
 
 // 退職日を過ぎたスタッフのログインを Supabase Auth 側で止める。
@@ -2400,41 +2435,24 @@ function AttendanceApp() {
   // マイナンバーは別テーブル・マスター管理者のみアクセス可。
   // 一覧に含めず、開いたときだけ都度取得する（不要な露出を減らすため）。
   const fetchMyNumber = async (targetEmployeeId) => {
-    try {
-      const { data: row, error } = await supabase
-        .from('employee_my_numbers')
-        .select('*')
-        .eq('employee_id', targetEmployeeId)
-        .maybeSingle();
-      if (error) throw error;
-      await logAudit(session, 'マイナンバーを閲覧', '', targetEmployeeId);
-      return row ? { number: row.my_number_encrypted, purposes: row.purposes || [] } : { number: '', purposes: [] };
-    } catch (e) {
-      show('マイナンバーの取得に失敗しました', 'warn');
+    const res = await callMyNumberFunction({ action: 'read', employeeId: targetEmployeeId });
+    if (res.error) {
+      show(res.error, 'warn');
       return null;
     }
+    return { number: res.number || '', purposes: res.purposes || [] };
   };
 
   const saveMyNumber = async (targetEmployeeId, { number, purposes }) => {
-    try {
-      const { error } = await supabase.from('employee_my_numbers').upsert(
-        {
-          employee_id: targetEmployeeId,
-          my_number_encrypted: number,
-          purposes,
-          updated_by: session.id,
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: 'employee_id' }
-      );
-      if (error) throw error;
-      await logAudit(session, 'マイナンバーを更新', `利用目的: ${purposes.join('、')}`, targetEmployeeId);
-      show('マイナンバーを保存しました', 'success');
-      return true;
-    } catch (e) {
-      show('マイナンバーの保存に失敗しました', 'warn');
+    const res = await callMyNumberFunction({
+      action: 'save', employeeId: targetEmployeeId, number, purposes,
+    });
+    if (res.error) {
+      show(res.error, 'warn');
       return false;
     }
+    show('マイナンバーを保存しました', 'success');
+    return true;
   };
 
   // ログインID（メールアドレス）を変更する（マスター管理者のみ）
@@ -2668,24 +2686,14 @@ function AttendanceApp() {
   // 本人による登録のみ許可（他人の番号は登録できない）。
   // 登録後の閲覧はマスター管理者のみ。
   const saveOwnMyNumber = async (number) => {
-    try {
-      const { error } = await supabase.from('employee_my_numbers').upsert(
-        {
-          employee_id: session.id,
-          my_number_encrypted: number,
-          purposes: MY_NUMBER_PURPOSES,
-          updated_by: session.id,
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: 'employee_id' }
-      );
-      if (error) throw error;
-      try { await logAudit(session, 'マイナンバーを本人登録', '初回登録', session.id); } catch { /* 記録に失敗しても登録は続行 */ }
-      return true;
-    } catch (e) {
-      console.error('マイナンバーの保存に失敗しました', e);
+    const res = await callMyNumberFunction({
+      action: 'save', employeeId: session.id, number, purposes: MY_NUMBER_PURPOSES,
+    });
+    if (res.error) {
+      console.error('マイナンバーの保存に失敗しました', res.error);
       return false;
     }
+    return true;
   };
 
   const today = todayKey();
@@ -15477,14 +15485,15 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
       }
       XLSX.writeFile(wb, `brown-work_バックアップ_${todayKey()}.xlsx`);
 
-      // マイナンバー・口座情報・給与を含むファイルの持ち出しなので、
+      // 口座情報・給与を含むファイルの持ち出しなので、
       // 誰がいつ実行したかを必ず監査ログに残す。
-      const myNumberCount = backedUpCounts.employee_my_numbers || 0;
+      // （マイナンバーは対象外。BACKUP_TABLES のコメントを参照）
+      const staffCount = backedUpCounts.employees || 0;
       await logAudit(
         session,
         '全データバックアップを作成',
         `${BACKUP_TABLES.length - failed.length}個のテーブルを書き出し`
-          + `（マイナンバー${myNumberCount}件・口座情報・給与を含む）`
+          + `（スタッフ${staffCount}名分の口座情報・給与を含む／マイナンバーは対象外）`
           + (failed.length ? ` ／ 取得できず：${failed.join('、')}` : ''),
       );
 
@@ -15493,7 +15502,8 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
       }
       alert(
         'バックアップを保存しました。\n\n'
-        + 'このファイルにはマイナンバー・口座情報・給与が含まれます。\n'
+        + 'このファイルには口座情報と給与が含まれます。\n'
+        + '（マイナンバーは含まれません）\n'
         + '保管場所にご注意のうえ、不要になったら削除してください。\n'
         + 'この操作は監査ログに記録されました。'
       );
