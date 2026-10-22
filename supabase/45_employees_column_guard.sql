@@ -28,7 +28,7 @@ returns trigger
 language plpgsql
 security definer
 set search_path = public, pg_temp
-as $$
+as $func$
 declare
   -- 本人では変更できない列（権限・給与・雇用条件・社会保険）
   protected_cols text[] := array[
@@ -93,7 +93,7 @@ begin
 
   return new;
 end;
-$$;
+$func$;
 
 drop trigger if exists guard_employee_self_update on public.employees;
 create trigger guard_employee_self_update

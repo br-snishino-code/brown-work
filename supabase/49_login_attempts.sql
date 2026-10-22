@@ -45,14 +45,14 @@ returns integer
 language sql
 security definer
 set search_path = public, pg_temp
-as $$
+as $func$
   with deleted as (
     delete from public.login_attempts
      where occurred_at < now() - interval '90 days'
     returning 1
   )
   select count(*)::int from deleted;
-$$;
+$func$;
 
 notify pgrst, 'reload schema';
 

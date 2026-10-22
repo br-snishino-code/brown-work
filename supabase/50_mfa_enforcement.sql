@@ -35,7 +35,7 @@ language sql
 stable
 security definer
 set search_path = public, auth, pg_temp
-as $$
+as $func$
   select case
     when exists (
       select 1 from auth.mfa_factors f
@@ -44,7 +44,7 @@ as $$
     then coalesce(auth.jwt() ->> 'aal', '') = 'aal2'
     else true
   end;
-$$;
+$func$;
 
 -- ------------------------------------------------------------
 -- 対象の表に「制限ポリシー」を足す
@@ -52,7 +52,7 @@ $$;
 --   つまり、これまで読めていた範囲がさらに狭まるだけで、
 --   新しく何かが読めるようになることはない。
 -- ------------------------------------------------------------
-do $$
+do $do$
 declare
   t text;
   targets text[] := array[
@@ -80,7 +80,7 @@ begin
       || 'using (public.mfa_ok()) with check (public.mfa_ok())', t);
     raise notice '適用しました: %', t;
   end loop;
-end $$;
+end $do$;
 
 notify pgrst, 'reload schema';
 
@@ -99,7 +99,7 @@ order by tablename;
 -- ============================================================
 -- 解除したいとき（この下だけを選んで実行）
 -- ============================================================
--- do $$
+-- do $do$
 -- declare r record;
 -- begin
 --   for r in select tablename from pg_policies
@@ -107,5 +107,5 @@ order by tablename;
 --   loop
 --     execute format('drop policy if exists "mfa required" on public.%I', r.tablename);
 --   end loop;
--- end $$;
+-- end $do$;
 -- notify pgrst, 'reload schema';
