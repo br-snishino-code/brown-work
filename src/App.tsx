@@ -2367,52 +2367,6 @@ function AttendanceApp() {
     }
   };
 
-  // 複数のアカウントをまとめて削除する（テストデータの整理用）。
-  // 1件ずつ delete-employee を呼ぶので、権限の確認と
-  // 「自分自身は削除できない」「マスター管理者はマスター管理者のみ削除できる」
-  // といった制限はこれまでどおり効く。
-  const handleDeleteAccountsBulk = async (accounts, onProgress) => {
-    const { data: sessionData } = await supabase.auth.getSession();
-    const accessToken = sessionData?.session?.access_token;
-    const deleted = [];
-    const failed = [];
-
-    for (let i = 0; i < accounts.length; i++) {
-      const account = accounts[i];
-      if (onProgress) onProgress(i + 1, accounts.length, account.name);
-      try {
-        const { data: fnData, error } = await supabase.functions.invoke('delete-employee', {
-          body: { employeeId: account.id },
-          headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
-        });
-        if (error || fnData?.error) {
-          let detail = fnData?.error;
-          if (!detail && error?.context) {
-            try {
-              const body = await error.context.json();
-              detail = body?.error || body?.message;
-            } catch (_) { /* noop */ }
-          }
-          failed.push({ name: account.name, reason: detail || '削除に失敗しました' });
-        } else {
-          deleted.push(account);
-        }
-      } catch (e) {
-        failed.push({ name: account.name, reason: String(e?.message || e) });
-      }
-    }
-
-    await refreshData();
-    if (deleted.length > 0) {
-      await logAudit(
-        session,
-        'スタッフアカウントをまとめて削除',
-        `${deleted.length}件：${deleted.map((a) => a.name).join('、')}`,
-      );
-    }
-    return { deleted, failed };
-  };
-
   const handleResetPassword = async (account, newPassword) => {
     try {
       const { data: sessionData } = await supabase.auth.getSession();
@@ -4388,7 +4342,6 @@ function AttendanceApp() {
             onSaveShiftPeriod={saveShiftPeriod}
             onAddAccount={handleAddAccount}
             onDeleteAccount={handleDeleteAccount}
-            onBulkDeleteAccounts={handleDeleteAccountsBulk}
             onResetPassword={handleResetPassword}
             onFetchMyNumber={fetchMyNumber}
             onSaveMyNumber={saveMyNumber}
@@ -11643,7 +11596,7 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
   );
 }
 
-function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAdminTab = null, onConsumeRequestedAdminTab, onDecide, onDecideLeave, onDecidePerformance, onDecideCommute, onNotifyEmployee, onSaveShiftPeriod, onAddAccount, onDeleteAccount, onBulkDeleteAccounts, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onSaveGroupFormats, onSaveShiftAlias, onDeleteShiftAlias, onAnnounceShift, onChangeLoginEmail, onDecideMonthlyConfirm, onCancelMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
+function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAdminTab = null, onConsumeRequestedAdminTab, onDecide, onDecideLeave, onDecidePerformance, onDecideCommute, onNotifyEmployee, onSaveShiftPeriod, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onSaveGroupFormats, onSaveShiftAlias, onDeleteShiftAlias, onAnnounceShift, onChangeLoginEmail, onDecideMonthlyConfirm, onCancelMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
   const [tab, setTab] = useState('dashboard'); // dashboard | attendance | requests | leave | performance | accounts
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
@@ -12061,7 +12014,6 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
           onChangeLoginEmail={onChangeLoginEmail}
           onUpdateDates={onUpdateDates}
           onDeleteAccount={onDeleteAccount}
-          onBulkDeleteAccounts={onBulkDeleteAccounts}
           onResetPassword={onResetPassword}
           onFetchMyNumber={onFetchMyNumber}
           onSaveMyNumber={onSaveMyNumber}
@@ -15446,185 +15398,7 @@ function StaffRowMenu({ account, info, onOpenProfile, onOpenAttendance, onOpenAp
   );
 }
 
-// ------------------------------------------------------------
-// スタッフをまとめて削除する画面（テストデータの整理用・一時的な機能）
-//
-// 不要になったら、このコンポーネントと
-// AccountManagement 内の「まとめて削除」ボタン、
-// App の handleDeleteAccountsBulk を消せば元に戻ります。
-//
-// 削除は1件ずつ delete-employee を呼ぶので、
-// 「自分自身は削除できない」「マスター管理者はマスター管理者のみ削除できる」
-// といった制限はこれまでどおり効きます。
-// ------------------------------------------------------------
-function BulkDeleteModal({ accounts, session, onBulkDelete, onClose }) {
-  const [selected, setSelected] = useState(() => new Set());
-  const [q, setQ] = useState('');
-  const [confirmText, setConfirmText] = useState('');
-  const [running, setRunning] = useState(false);
-  const [progress, setProgress] = useState(null);
-  const [result, setResult] = useState(null);
-
-  // 自分自身は一覧に出さない（削除できないため）
-  const candidates = accounts.filter((a) => a.id !== session?.id);
-  const shown = q
-    ? candidates.filter((a) =>
-        `${a.name}${a.furigana || ''}${a.username || ''}`.toLowerCase().includes(q.toLowerCase()))
-    : candidates;
-
-  const toggle = (id) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-  };
-  const selectAllShown = () => setSelected(new Set(shown.map((a) => a.id)));
-  const clearAll = () => setSelected(new Set());
-
-  const targets = candidates.filter((a) => selected.has(a.id));
-  const canRun = targets.length > 0 && confirmText === '削除' && !running;
-
-  const run = async () => {
-    setRunning(true);
-    setProgress({ done: 0, total: targets.length, name: '' });
-    const res = await onBulkDelete(targets, (done, total, name) =>
-      setProgress({ done, total, name }));
-    setProgress(null);
-    setResult(res);
-    setSelected(new Set());
-    setConfirmText('');
-    setRunning(false);
-  };
-
-  return createPortal(
-    <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl w-full max-w-[560px] max-h-[88vh] flex flex-col overflow-hidden">
-        <div className="px-5 py-4 border-b border-slate-100">
-          <h2 className="font-bold text-[15px] text-slate-800">スタッフをまとめて削除</h2>
-          <p className="mt-1 text-[11.5px] leading-relaxed text-rose-700">
-            削除したアカウントと、そのスタッフの勤怠・申請・給与・マイナンバーは
-            すべて消えます。元に戻すことはできません。
-          </p>
-        </div>
-
-        {result ? (
-          <div className="px-5 py-5 overflow-y-auto">
-            <div className="text-[13px] font-bold text-slate-800">
-              {result.deleted.length}件を削除しました
-            </div>
-            {result.deleted.length > 0 && (
-              <div className="mt-1.5 text-[12px] text-slate-500 leading-relaxed">
-                {result.deleted.map((a) => a.name).join('、')}
-              </div>
-            )}
-            {result.failed.length > 0 && (
-              <div className="mt-4">
-                <div className="text-[13px] font-bold text-rose-700">
-                  {result.failed.length}件は削除できませんでした
-                </div>
-                <div className="mt-1.5 space-y-1">
-                  {result.failed.map((f, i) => (
-                    <div key={i} className="text-[12px] text-slate-600">
-                      {f.name}：{f.reason}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-            <button
-              onClick={onClose}
-              className="mt-5 w-full py-2.5 rounded-lg bg-slate-800 text-white text-[13px] font-bold"
-            >
-              閉じる
-            </button>
-          </div>
-        ) : (
-          <>
-            <div className="px-5 py-3 border-b border-slate-100 flex items-center gap-2 flex-wrap">
-              <input
-                value={q}
-                onChange={(e) => setQ(e.target.value)}
-                placeholder="氏名・IDで絞り込み"
-                className="flex-1 min-w-[160px] border border-slate-200 rounded-lg px-3 py-2 text-[12.5px]"
-              />
-              <button onClick={selectAllShown} className="text-[12px] font-bold text-slate-600 border border-slate-200 rounded-lg px-2.5 py-2">
-                表示中をすべて選択
-              </button>
-              <button onClick={clearAll} className="text-[12px] font-bold text-slate-500 border border-slate-200 rounded-lg px-2.5 py-2">
-                選択を解除
-              </button>
-            </div>
-
-            <div className="flex-1 overflow-y-auto divide-y divide-slate-100">
-              {shown.map((a) => (
-                <label key={a.id} className="flex items-center gap-3 px-5 py-2.5 cursor-pointer hover:bg-slate-50">
-                  <input
-                    type="checkbox"
-                    checked={selected.has(a.id)}
-                    onChange={() => toggle(a.id)}
-                    className="shrink-0"
-                  />
-                  <div className="min-w-0 flex-1">
-                    <div className="text-[13px] font-semibold text-slate-800 truncate">
-                      {a.name}
-                      {a.role === 'master_admin' && <span className="ml-1.5 text-[10px] text-amber-700">マスター管理者</span>}
-                      {a.role === 'admin' && <span className="ml-1.5 text-[10px] text-slate-500">管理者</span>}
-                      {a.resignationDate && <span className="ml-1.5 text-[10px] text-slate-400">退職済み</span>}
-                    </div>
-                    <div className="text-[11px] text-slate-400 font-mono truncate">{a.username}</div>
-                  </div>
-                </label>
-              ))}
-              {shown.length === 0 && (
-                <div className="px-5 py-10 text-center text-[12.5px] text-slate-300">該当するスタッフがいません</div>
-              )}
-            </div>
-
-            <div className="px-5 py-4 border-t border-slate-100 space-y-2.5">
-              {progress ? (
-                <div className="text-[12.5px] text-slate-600">
-                  削除中… {progress.done} / {progress.total}（{progress.name}）
-                </div>
-              ) : (
-                <>
-                  <div className="text-[12.5px] text-slate-600">
-                    <b className="text-slate-900">{targets.length}名</b>を削除します
-                  </div>
-                  <input
-                    value={confirmText}
-                    onChange={(e) => setConfirmText(e.target.value)}
-                    placeholder="確認のため「削除」と入力"
-                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[12.5px]"
-                  />
-                </>
-              )}
-              <div className="flex gap-2">
-                <button
-                  onClick={onClose}
-                  disabled={running}
-                  className="flex-1 py-2.5 rounded-lg border border-slate-200 text-[13px] font-medium text-slate-500"
-                >
-                  キャンセル
-                </button>
-                <button
-                  onClick={run}
-                  disabled={!canRun}
-                  className="flex-1 py-2.5 rounded-lg bg-rose-600 disabled:bg-slate-200 text-white text-[13px] font-bold"
-                >
-                  {running ? '削除中…' : '完全に削除する'}
-                </button>
-              </div>
-            </div>
-          </>
-        )}
-      </div>
-    </div>,
-    document.body
-  );
-}
-
-function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail, onUpdateDates, onDeleteAccount, onBulkDeleteAccounts, onResetPassword, onFetchMyNumber, onSaveMyNumber, groupLeaveSchedules, employeeAttendanceSchedules, onSaveEmployeeAttendance, resignationReasons = [], initialProfileId = null, onConsumeInitialProfile, rowInfo = {}, rowActions = {}, session, isDesktop }) {
+function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail, onUpdateDates, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, groupLeaveSchedules, employeeAttendanceSchedules, onSaveEmployeeAttendance, resignationReasons = [], initialProfileId = null, onConsumeInitialProfile, rowInfo = {}, rowActions = {}, session, isDesktop }) {
   const knownGroups = Array.from(new Set([...employeeAccounts.map((a) => a.mainGroup).filter(Boolean), ...Object.keys(groupLeaveSchedules || {})]));
   const [listGroupFilter, setListGroupFilter] = useState('all');
   const [listStaffTypeFilter, setListStaffTypeFilter] = useState('all');
@@ -15647,8 +15421,6 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
   const [resetPasswordTarget, setResetPasswordTarget] = useState(null);
   const [loginEmailTarget, setLoginEmailTarget] = useState(null);
   const [backingUp, setBackingUp] = useState(false);
-  // テストデータの整理用（一時的な機能）
-  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
   const isMasterAdmin = session?.role === 'master_admin';
 
   // 詳細を開いたとき・一覧に戻ったときは、前の画面のスクロール位置を引き継がない
@@ -15822,25 +15594,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
             <Download size={13} /> {backingUp ? '作成中…' : 'データバックアップ'}
           </button>
         )}
-        {/* テストデータの整理用（一時的な機能）。不要になったらこのボタンごと消してください */}
-        {isMasterAdmin && (
-          <button
-            onClick={() => setBulkDeleteOpen(true)}
-            className="flex items-center gap-1 text-[12px] font-bold text-rose-600 border border-rose-200 rounded-lg px-2.5 py-1.5"
-          >
-            <Trash2 size={13} /> まとめて削除
-          </button>
-        )}
       </div>
-
-      {bulkDeleteOpen && (
-        <BulkDeleteModal
-          accounts={employeeAccounts}
-          session={session}
-          onBulkDelete={onBulkDeleteAccounts}
-          onClose={() => setBulkDeleteOpen(false)}
-        />
-      )}
 
       <div className="px-5 py-3.5 border-b border-slate-100 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2.5">
         <Field label="氏名で検索">
