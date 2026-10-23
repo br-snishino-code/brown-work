@@ -8064,7 +8064,7 @@ function EoNewPerfCell({ value, onChange, type = 'number' }) {
       </div>
     );
   }
-  return <input type="number" value={value} onChange={(e) => onChange(e.target.value)} className="w-12 border border-slate-200 rounded px-1 py-1 font-mono text-[11px] text-right" />;
+  return <input type="number" value={value} onChange={(e) => onChange(e.target.value)} className="w-12 border border-slate-200 rounded px-1 py-1 font-mono text-[11px] text-center" />;
 }
 
 // 表の見出しを上に貼り付けておくための指定。
@@ -8109,7 +8109,7 @@ function EoNewPerfTable({ year, month, daily, onUpdateDay, readOnly = false }) {
                   });
                   if (readOnly) {
                     return (
-                      <td key={g.label + f.key} className="border-r border-slate-100 px-1.5 py-1 font-mono text-slate-600 text-right whitespace-nowrap">
+                      <td key={g.label + f.key} className="border-r border-slate-100 px-1.5 py-1 font-mono text-slate-600 text-center whitespace-nowrap">
                         {value === '' ? <span className="text-slate-300">-</span> : value}
                       </td>
                     );
@@ -8157,7 +8157,7 @@ function EoExistingPerfTable({ year, month, daily, onUpdateDay, readOnly = false
               <tr key={d} className="border-b border-slate-100 last:border-0">
                 <td className="sticky left-0 z-10 bg-white border-r border-slate-200 px-2 py-1 font-bold text-slate-500 whitespace-nowrap shadow-[1px_0_0_0_#e2e8f0]">{d}日</td>
                 {EXISTING_PERF_FIELDS.map((f) => (
-                  <td key={f.key} className={`border-r border-slate-100 ${readOnly ? 'px-1.5' : 'px-1'} py-1 ${f.countsAsNew ? 'bg-amber-50/40' : ''} ${readOnly ? 'font-mono text-slate-600 text-right whitespace-nowrap' : ''}`}>
+                  <td key={f.key} className={`border-r border-slate-100 ${readOnly ? 'px-1.5' : 'px-1'} py-1 ${f.countsAsNew ? 'bg-amber-50/40' : ''} ${readOnly ? 'font-mono text-slate-600 text-center whitespace-nowrap' : ''}`}>
                     {readOnly ? (
                       (day[f.key] ?? '') === '' ? <span className="text-slate-300">-</span> : day[f.key]
                     ) : (
@@ -8165,7 +8165,7 @@ function EoExistingPerfTable({ year, month, daily, onUpdateDay, readOnly = false
                         type="number"
                         value={day[f.key] ?? ''}
                         onChange={(e) => onUpdateDay(d, f.key, e.target.value)}
-                        className="w-11 border border-slate-200 rounded px-1 py-1 font-mono text-[11px] text-right"
+                        className="w-11 border border-slate-200 rounded px-1 py-1 font-mono text-[11px] text-center"
                       />
                     )}
                   </td>
@@ -8377,16 +8377,16 @@ function EoPerformanceSection({ employeeId, session, settings, onNotifyAdmin, is
         <div className="px-5 pb-3 grid grid-cols-2 gap-3">
           <Field label="タブレット不備件数（-2P/件）">
             {locked ? (
-              <div className="w-full border border-slate-200 bg-slate-50 rounded-lg px-3 py-2 font-mono text-[13px] text-slate-600">{tabletIssues || '0'}</div>
+              <div className="w-full border border-slate-200 bg-slate-50 rounded-lg px-3 py-2 font-mono text-[13px] text-center text-slate-600">{tabletIssues || '0'}</div>
             ) : (
-              <input type="number" value={tabletIssues} onChange={(e) => { setDirty(true); setTabletIssues(e.target.value); }} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" />
+              <input type="number" value={tabletIssues} onChange={(e) => { setDirty(true); setTabletIssues(e.target.value); }} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px] text-center" />
             )}
           </Field>
           <Field label="キャンセル件数（-3P/件）">
             {locked ? (
-              <div className="w-full border border-slate-200 bg-slate-50 rounded-lg px-3 py-2 font-mono text-[13px] text-slate-600">{cancellations || '0'}</div>
+              <div className="w-full border border-slate-200 bg-slate-50 rounded-lg px-3 py-2 font-mono text-[13px] text-center text-slate-600">{cancellations || '0'}</div>
             ) : (
-              <input type="number" value={cancellations} onChange={(e) => { setDirty(true); setCancellations(e.target.value); }} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" />
+              <input type="number" value={cancellations} onChange={(e) => { setDirty(true); setCancellations(e.target.value); }} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px] text-center" />
             )}
           </Field>
         </div>
@@ -8576,7 +8576,7 @@ function SimplePerformanceSection({ employeeId, settings, onNotifyAdmin, isDeskt
               </span>
               {locked ? (
                 <>
-                  <div className="w-[5.5rem] shrink-0 box-border rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 text-[15px] font-mono text-right text-slate-600">
+                  <div className="w-[5.5rem] shrink-0 box-border rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 text-[15px] font-mono text-center text-slate-600">
                     {(daily[d.key]?.count ?? '') === '' ? <span className="text-slate-300">-</span> : daily[d.key].count}
                   </div>
                   <div className="flex-1 min-w-[8rem] box-border rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 text-[15px] text-slate-600">
@@ -8592,7 +8592,7 @@ function SimplePerformanceSection({ employeeId, settings, onNotifyAdmin, isDeskt
                     value={daily[d.key]?.count ?? ''}
                     onChange={(e) => updateDay(d.key, 'count', e.target.value)}
                     placeholder="件数"
-                    className="w-[5.5rem] shrink-0 box-border rounded-lg border border-slate-200 px-2.5 py-2 text-[16px] font-mono text-right"
+                    className="w-[5.5rem] shrink-0 box-border rounded-lg border border-slate-200 px-2.5 py-2 text-[16px] font-mono text-center"
                   />
                   <input
                     value={daily[d.key]?.note ?? ''}
@@ -9038,10 +9038,10 @@ function EoAdminPerfEditModal({ employee, year, month, session, onNotifyEmployee
             {sheet === 'new' && (
               <div className="px-5 pb-3 grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <Field label="タブレット不備件数（-2P/件）">
-                  <input type="number" value={tabletIssues} onChange={(e) => setTabletIssues(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" />
+                  <input type="number" value={tabletIssues} onChange={(e) => setTabletIssues(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px] text-center" />
                 </Field>
                 <Field label="キャンセル件数（-3P/件）">
-                  <input type="number" value={cancellations} onChange={(e) => setCancellations(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" />
+                  <input type="number" value={cancellations} onChange={(e) => setCancellations(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px] text-center" />
                 </Field>
                 <Field label="10G付帯率による半額の扱い">
                   <select value={g10Half} onChange={(e) => setG10Half(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px] bg-white">
