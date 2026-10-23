@@ -16,22 +16,6 @@ body { margin: 0; min-width: 320px; min-height: 100dvh; background: #f8fafc; }
 button, input, select, textarea { font: inherit; }
 button { -webkit-tap-highlight-color: transparent; }
 
-/* スマートフォンで入力欄を押したときに画面が勝手に拡大されないようにする。
-   iPhone（iOS Safari）は、文字が16px未満の入力欄にピントが合うと
-   読みやすくするために自動で拡大する。拡大されると表の位置がずれて
-   入力しづらいため、指で操作する端末では入力欄の文字を16pxにそろえる。
-   マウスの端末（PC）には影響しないので、画面の見た目は変わらない。
-   チェックボックスとラジオボタンは文字を持たないため対象外。 */
-@media (pointer: coarse) {
-  input:not([type='checkbox']):not([type='radio']),
-  select,
-  textarea {
-    font-size: 16px;
-  }
-  /* 日付の入力欄は16pxだと「yyyy/mm/dd」が収まらないことがあるため少し広げる */
-  input[type='date'] { min-width: 9.5rem; }
-}
-
 @supports (padding: max(0px)) {
   body { padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right); }
 }
