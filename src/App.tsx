@@ -8042,7 +8042,7 @@ function EoNewPerfCell({ value, onChange, type = 'number' }) {
   if (type === 'date') {
     // スマートフォンでは日付を空に戻せないため、消すためのボタンを添える
     return (
-      <div className="flex items-center gap-1">
+      <div className="inline-flex items-center gap-1 align-middle">
         <input
           type="date"
           value={value}
@@ -8115,7 +8115,8 @@ function EoNewPerfTable({ year, month, daily, onUpdateDay, readOnly = false }) {
                     );
                   }
                   return (
-                    <td key={g.label + f.key} className="border-r border-slate-100 px-1 py-1">
+                    // 見出しが長い列では枠が左に寄ってしまうため、枠ごと列の中央に置く
+                    <td key={g.label + f.key} className="border-r border-slate-100 px-1 py-1 text-center">
                       <EoNewPerfCell value={value} onChange={onChange} type={f.type} />
                     </td>
                   );
@@ -8157,7 +8158,7 @@ function EoExistingPerfTable({ year, month, daily, onUpdateDay, readOnly = false
               <tr key={d} className="border-b border-slate-100 last:border-0">
                 <td className="sticky left-0 z-10 bg-white border-r border-slate-200 px-2 py-1 font-bold text-slate-500 whitespace-nowrap shadow-[1px_0_0_0_#e2e8f0]">{d}日</td>
                 {EXISTING_PERF_FIELDS.map((f) => (
-                  <td key={f.key} className={`border-r border-slate-100 ${readOnly ? 'px-1.5' : 'px-1'} py-1 ${f.countsAsNew ? 'bg-amber-50/40' : ''} ${readOnly ? 'font-mono text-slate-600 text-center whitespace-nowrap' : ''}`}>
+                  <td key={f.key} className={`border-r border-slate-100 text-center ${readOnly ? 'px-1.5' : 'px-1'} py-1 ${f.countsAsNew ? 'bg-amber-50/40' : ''} ${readOnly ? 'font-mono text-slate-600 whitespace-nowrap' : ''}`}>
                     {readOnly ? (
                       (day[f.key] ?? '') === '' ? <span className="text-slate-300">-</span> : day[f.key]
                     ) : (
