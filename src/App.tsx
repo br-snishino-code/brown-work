@@ -823,15 +823,86 @@ function MyShiftCalendar({ employeeId, assignments = [], shiftRequests = [], isD
     setMonth(`${d.getFullYear()}-${pad(d.getMonth() + 1)}`);
   };
 
+  // 1日ごとの色分け（出勤・有給・休み・未定）
+  const toneOf = (kind) =>
+    kind === 'ok' ? 'border-amber-500 bg-amber-50'
+    : kind === 'paid' ? 'border-teal-300 bg-teal-50'
+    : kind === 'off' ? 'border-slate-200 bg-slate-50'
+    : 'border-dashed border-slate-200 bg-white';
+
+  // PC表示はカレンダーの形にする。曜日が縦にそろうため、
+  // 土日の出勤や連勤が一目で分かる。
+  const WEEKDAY_HEADERS = ['日', '月', '火', '水', '木', '金', '土'];
+  const renderMonthGrid = () => {
+    const firstWeekday = new Date(`${month}-01T00:00:00`).getDay();
+    const cells = [];
+    for (let i = 0; i < firstWeekday; i++) cells.push(null);
+    days.forEach((d) => cells.push(d));
+    while (cells.length % 7 !== 0) cells.push(null);
+
+    return (
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="grid grid-cols-7 border-b border-slate-100 bg-slate-50">
+          {WEEKDAY_HEADERS.map((w, i) => (
+            <div
+              key={w}
+              className={`py-2 text-center text-[11.5px] font-bold ${i === 0 ? 'text-rose-500' : i === 6 ? 'text-sky-500' : 'text-slate-400'}`}
+            >
+              {w}
+            </div>
+          ))}
+        </div>
+        <div className="grid grid-cols-7">
+          {cells.map((d, i) => {
+            if (!d) return <div key={`blank-${i}`} className="min-h-[5.5rem] border-b border-r border-slate-100 bg-slate-50/40 last:border-r-0" />;
+            const shift = shiftOf(d.key);
+            const isToday = d.key === todayStr;
+            const kind = shift?.kind || '';
+            const bg =
+              kind === 'ok' ? 'bg-amber-50'
+              : kind === 'paid' ? 'bg-teal-50'
+              : kind === 'off' ? 'bg-white'
+              : 'bg-white';
+            return (
+              <div
+                key={d.key}
+                className={`min-h-[5.5rem] border-b border-r border-slate-100 px-2 py-1.5 ${bg} ${isToday ? 'ring-2 ring-inset ring-slate-800' : ''}`}
+              >
+                <div className="flex items-baseline gap-1">
+                  <span className={`text-[12.5px] font-bold ${d.isSunday || d.holidayName ? 'text-rose-600' : d.isSaturday ? 'text-sky-600' : 'text-slate-700'}`}>
+                    {d.day}
+                  </span>
+                  {isToday && <span className="rounded-full bg-slate-800 px-1.5 py-[1px] text-[9px] font-bold text-white">今日</span>}
+                </div>
+                {d.holidayName && (
+                  <div className="truncate text-[9.5px] font-bold text-rose-500" title={d.holidayName}>{d.holidayName}</div>
+                )}
+                <div className="mt-1">
+                  {!shift ? (
+                    <span className="text-[11px] text-slate-300">未定</span>
+                  ) : kind === 'paid' ? (
+                    <span className="text-[12px] font-bold text-teal-700">有給</span>
+                  ) : kind === 'off' ? (
+                    <span className="text-[11.5px] text-slate-400">休み</span>
+                  ) : (
+                    <span className="block break-words text-[12.5px] font-bold leading-tight text-slate-800" title={shift.place || '出勤'}>
+                      {shift.place || '出勤'}
+                    </span>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
   const renderDay = (d) => {
     const shift = shiftOf(d.key);
     const isToday = d.key === todayStr;
     const kind = shift?.kind || '';
-    const tone =
-      kind === 'ok' ? 'border-amber-500 bg-amber-50'
-      : kind === 'paid' ? 'border-teal-300 bg-teal-50'
-      : kind === 'off' ? 'border-slate-200 bg-slate-50'
-      : 'border-dashed border-slate-200 bg-white';
+    const tone = toneOf(kind);
     return (
       <div key={d.key} className={`rounded-xl border px-3 py-2.5 ${tone} ${isToday ? 'ring-2 ring-slate-800' : ''}`}>
         <div className="flex items-center gap-1.5 flex-wrap">
@@ -898,11 +969,11 @@ function MyShiftCalendar({ employeeId, assignments = [], shiftRequests = [], isD
         )}
       </div>
 
-      {filled > 0 && (
-        <div className={isDesktop ? 'grid grid-cols-2 gap-2' : 'space-y-2'}>
+      {filled > 0 && (isDesktop ? renderMonthGrid() : (
+        <div className="space-y-2">
           {days.map(renderDay)}
         </div>
-      )}
+      ))}
     </div>
   );
 }
