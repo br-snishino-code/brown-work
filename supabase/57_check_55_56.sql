@@ -1,12 +1,12 @@
 -- 57_check_55_56.sql
 --
--- 55番・56番が実行できているかを確かめるだけのSQL。
+-- 55番・56番・58番が実行できているかを確かめるだけのSQL。
 -- 読み取るだけで、何も変更しません。何度実行しても大丈夫です。
 --
 -- 実行方法：Supabase → SQL Editor にこの中身を貼り付けて Run
 --
 -- 見方：
---   「結果」の列が すべて ✅ なら、55番・56番は実行済みです。
+--   「結果」の列が すべて ✅ なら、55番・56番・58番は実行済みです。
 --   ❌ があれば、その行の案内にあるSQLを実行してください。
 
 select '① 55番：修正記録の列' as 確認項目,
@@ -59,7 +59,16 @@ select '⑤ 56番：入力期限の判定',
             else '✅ あり' end
 
 union all
-select '⑥ 56番：いまの入力期限の設定',
+select '⑥ 58番：管理者だけが入力する列の制限',
+       case when exists (
+         select 1 from pg_proc
+          where proname = 'guard_performance_self_update'
+            and prosrc like '%tablet_issues%'
+       ) then '✅ あり'
+       else '❌ ありません → 58_performance_admin_only_columns.sql を実行' end
+
+union all
+select '⑦ 56番：いまの入力期限の設定',
        case when to_regprocedure('public.perf_deadline_date(int,int)') is null
             then '－（56番が未実行）'
             when coalesce(nullif((select value from public.app_settings

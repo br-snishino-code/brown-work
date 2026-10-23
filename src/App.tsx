@@ -8253,11 +8253,11 @@ function EoPerformanceSection({ employeeId, session, settings, onNotifyAdmin, is
   const adjustedNewPoints = monthNewPoints - (Number(tabletIssues) || 0) * 2 - (Number(cancellations) || 0) * 3;
 
   // 新規・既存の両方をまとめて書き込む（シートを切り替えても入力が消えないようにするため）
+  // tablet_issues と cancellations は管理者の入力項目なので、本人の保存では触らない
+  // （本人の画面に古い値が残っていても、管理者が入れた値を上書きしないようにするため）
   const writeAll = async (extra) => {
     await saveNewPerf(employeeId, year, month, {
       daily: newDaily,
-      tablet_issues: Number(tabletIssues) || 0,
-      cancellations: Number(cancellations) || 0,
       ...(extra || {}),
     });
     await saveExistingPerf(employeeId, year, month, existingDaily);
@@ -8374,22 +8374,19 @@ function EoPerformanceSection({ employeeId, session, settings, onNotifyAdmin, is
         </div>
       )}
 
+      {/* タブレット不備件数とキャンセル件数は管理者が入力する項目。
+          本人は確認のみで、入力はできない（管理画面の「eo業務インセンティブ」で入力する） */}
       {sheet === 'new' && (
         <div className="px-5 pb-3 grid grid-cols-2 gap-3">
           <Field label="タブレット不備件数（-2P/件）">
-            {locked ? (
-              <div className="w-full border border-slate-200 bg-slate-50 rounded-lg px-3 py-2 font-mono text-[13px] text-center text-slate-600">{tabletIssues || '0'}</div>
-            ) : (
-              <input type="number" value={tabletIssues} onChange={(e) => { setDirty(true); setTabletIssues(e.target.value); }} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px] text-center" />
-            )}
+            <div className="w-full border border-slate-200 bg-slate-50 rounded-lg px-3 py-2 font-mono text-[13px] text-center text-slate-600">{tabletIssues || '0'}</div>
           </Field>
           <Field label="キャンセル件数（-3P/件）">
-            {locked ? (
-              <div className="w-full border border-slate-200 bg-slate-50 rounded-lg px-3 py-2 font-mono text-[13px] text-center text-slate-600">{cancellations || '0'}</div>
-            ) : (
-              <input type="number" value={cancellations} onChange={(e) => { setDirty(true); setCancellations(e.target.value); }} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px] text-center" />
-            )}
+            <div className="w-full border border-slate-200 bg-slate-50 rounded-lg px-3 py-2 font-mono text-[13px] text-center text-slate-600">{cancellations || '0'}</div>
           </Field>
+          <div className="col-span-2 -mt-1 text-[11px] text-slate-400">
+            この2つは管理者が入力します。内容に相違がある場合は管理者へご連絡ください。
+          </div>
         </div>
       )}
       {sheet === 'new' && approxG10Rate != null && (
@@ -9562,6 +9559,11 @@ function EoAdminIncentiveTab({ employeeAccounts, session, onNotifyEmployee, isDe
   const [editing, setEditing] = useState(null);
   // 保存のあと一覧を読み直すための番号
   const [reloadKey, setReloadKey] = useState(0);
+  // タブレット不備件数・キャンセル件数の入力。{ スタッフID: { tablet, cancel } }
+  // この2つはスタッフ側では入力できず、管理者がこの一覧でまとめて入力する
+  const [counts, setCounts] = useState({});
+  const [savingCounts, setSavingCounts] = useState(false);
+  const [countsSavedAt, setCountsSavedAt] = useState(null);
 
   const eoStaff = employeeAccounts.filter((a) => a.mainGroup === EO_GROUP_NAME);
   const eoIds = eoStaff.map((a) => a.id);
@@ -9573,6 +9575,12 @@ function EoAdminIncentiveTab({ employeeAccounts, session, onNotifyEmployee, isDe
       if (cancelled) return;
       setNewRows(perf.newRows);
       setExistingRows(perf.existingRows);
+      const next = {};
+      perf.newRows.forEach((r) => {
+        next[r.employee_id] = { tablet: String(r.tablet_issues ?? 0), cancel: String(r.cancellations ?? 0) };
+      });
+      setCounts(next);
+      setCountsSavedAt(null);
       setFlags({
         cancel_target_met: !!flagRow?.cancel_target_met,
         empake_target_met: !!flagRow?.empake_target_met,
@@ -9588,6 +9596,39 @@ function EoAdminIncentiveTab({ employeeAccounts, session, onNotifyEmployee, isDe
     setSavingFlags(true);
     await saveGroupIncentiveFlags(EO_GROUP_NAME, year, month, flags);
     setSavingFlags(false);
+  };
+
+  const countOf = (id, key) => counts[id]?.[key] ?? '0';
+  const setCount = (id, key, value) =>
+    setCounts((prev) => ({ ...prev, [id]: { tablet: '0', cancel: '0', ...(prev[id] || {}), [key]: value } }));
+
+  // 読み込んだときから変わったスタッフだけを保存する
+  const changedCountIds = eoStaff
+    .filter((a) => {
+      const row = newRows.find((r) => r.employee_id === a.id);
+      const beforeT = String(row?.tablet_issues ?? 0);
+      const beforeC = String(row?.cancellations ?? 0);
+      return !samePerfValue(beforeT, countOf(a.id, 'tablet')) || !samePerfValue(beforeC, countOf(a.id, 'cancel'));
+    })
+    .map((a) => a.id);
+
+  const saveCounts = async () => {
+    if (changedCountIds.length === 0) return;
+    setSavingCounts(true);
+    const names = [];
+    for (const id of changedCountIds) {
+      const a = eoStaff.find((x) => x.id === id);
+      // eslint-disable-next-line no-await-in-loop
+      await saveNewPerf(id, year, month, {
+        tablet_issues: Number(countOf(id, 'tablet')) || 0,
+        cancellations: Number(countOf(id, 'cancel')) || 0,
+      });
+      names.push(`${a?.name || id}（不備${countOf(id, 'tablet')}・キャンセル${countOf(id, 'cancel')}）`);
+    }
+    await logAudit(session, 'タブレット不備・キャンセル件数を入力', `${year}年${month}月分 / ${names.join('、')}`);
+    setSavingCounts(false);
+    setCountsSavedAt(new Date());
+    setReloadKey((k) => k + 1);
   };
 
   // 個人別アップセルLTV順位を算出
@@ -9615,8 +9656,9 @@ function EoAdminIncentiveTab({ employeeAccounts, session, onNotifyEmployee, isDe
       {
         newPoints,
         empakeCount,
-        tabletIssues: newRow?.tablet_issues || 0,
-        cancellations: newRow?.cancellations || 0,
+        // 入力中の値で計算する（保存前でも支給額の変化が見えるように）
+        tabletIssues: Number(countOf(a.id, 'tablet')) || 0,
+        cancellations: Number(countOf(a.id, 'cancel')) || 0,
         existingPoints,
         g10HalfOverride: newRow?.g10_half_override,
         approxG10Rate,
@@ -9730,6 +9772,27 @@ function EoAdminIncentiveTab({ employeeAccounts, session, onNotifyEmployee, isDe
         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-6 py-14 text-center text-[12.5px] text-slate-300">eo業務グループのスタッフが登録されていません</div>
       ) : (
         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="px-5 py-3 border-b border-slate-100 flex items-center gap-3 flex-wrap">
+            <div className="text-[11.5px] text-slate-500">
+              タブレット不備件数とキャンセル件数は、この一覧で入力します（スタッフ側では入力できません）。
+              入力すると支給額がその場で計算し直されます。
+            </div>
+            <div className="ml-auto flex items-center gap-2">
+              {countsSavedAt && changedCountIds.length === 0 && (
+                <span className="text-[11px] text-emerald-700">保存しました（{hhmm(countsSavedAt)}）</span>
+              )}
+              {changedCountIds.length > 0 && (
+                <span className="text-[11px] font-bold text-amber-700">未保存 {changedCountIds.length}名</span>
+              )}
+              <button
+                onClick={saveCounts}
+                disabled={savingCounts || changedCountIds.length === 0}
+                className="rounded-lg bg-amber-600 disabled:bg-slate-200 px-3.5 py-2 text-[12px] font-bold text-white"
+              >
+                {savingCounts ? '保存中…' : '件数を保存する'}
+              </button>
+            </div>
+          </div>
           <div className="overflow-x-auto">
             <table className="w-full text-[12.5px]">
               <thead>
@@ -9739,6 +9802,8 @@ function EoAdminIncentiveTab({ employeeAccounts, session, onNotifyEmployee, isDe
                   <th className="px-4 py-2 font-medium">新規Pt(調整後)</th>
                   <th className="px-4 py-2 font-medium">既存(LTV)Pt</th>
                   <th className="px-4 py-2 font-medium">エンパケ</th>
+                  <th className="px-3 py-2 font-medium text-center">タブレット<br />不備(-2P)</th>
+                  <th className="px-3 py-2 font-medium text-center">キャンセル<br />(-3P)</th>
                   <th className="px-4 py-2 font-medium">順位</th>
                   <th className="px-4 py-2 font-medium">新規獲得</th>
                   <th className="px-4 py-2 font-medium">アップセル</th>
@@ -9770,6 +9835,24 @@ function EoAdminIncentiveTab({ employeeAccounts, session, onNotifyEmployee, isDe
                     <td className="px-4 py-2.5 font-mono">{r.incentive.newPointsForJudge}P</td>
                     <td className="px-4 py-2.5 font-mono">{r.existingPoints}P</td>
                     <td className="px-4 py-2.5 font-mono">{r.empakeCount}枚</td>
+                    <td className="px-3 py-2.5 text-center">
+                      <input
+                        type="number"
+                        min="0"
+                        value={countOf(r.account.id, 'tablet')}
+                        onChange={(e) => setCount(r.account.id, 'tablet', e.target.value)}
+                        className="w-14 border border-slate-200 rounded px-1 py-1 font-mono text-[12px] text-center"
+                      />
+                    </td>
+                    <td className="px-3 py-2.5 text-center">
+                      <input
+                        type="number"
+                        min="0"
+                        value={countOf(r.account.id, 'cancel')}
+                        onChange={(e) => setCount(r.account.id, 'cancel', e.target.value)}
+                        className="w-14 border border-slate-200 rounded px-1 py-1 font-mono text-[12px] text-center"
+                      />
+                    </td>
                     <td className="px-4 py-2.5 font-mono">{r.rank ? `${r.rank}位` : '-'}</td>
                     <td className="px-4 py-2.5 font-mono">{formatYen(r.incentive.newAcquisitionAmount)}</td>
                     <td className="px-4 py-2.5 font-mono">{formatYen(r.incentive.upsellAmount)}</td>
