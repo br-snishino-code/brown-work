@@ -9555,8 +9555,6 @@ function EoAdminIncentiveTab({ employeeAccounts, session, onNotifyEmployee, isDe
   const [flags, setFlags] = useState({ cancel_target_met: false, empake_target_met: false, upsell_target_met: false });
   const [savingFlags, setSavingFlags] = useState(false);
   const [reminding, setReminding] = useState(false);
-  // 実績を直す画面を開いている対象者
-  const [editing, setEditing] = useState(null);
   // 保存のあと一覧を読み直すための番号
   const [reloadKey, setReloadKey] = useState(0);
   // タブレット不備件数・キャンセル件数の入力。{ スタッフID: { tablet, cancel } }
@@ -9762,7 +9760,7 @@ function EoAdminIncentiveTab({ employeeAccounts, session, onNotifyEmployee, isDe
         )}
 
         <div className="text-[11px] text-slate-400 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
-          10G付帯率（40%未満で半額）は自動では正確に判定できないため、参考値をもとに判定しています。実際と違う場合は、各スタッフの「実績を直す」から半額の扱いを個別に指定できます。
+          10G付帯率（40%未満で半額）は自動では正確に判定できないため、参考値をもとに判定しています。実際と違う場合は、「実績の確認」タブの「実績を直す」から半額の扱いを個別に指定できます。
         </div>
       </div>
 
@@ -9808,7 +9806,6 @@ function EoAdminIncentiveTab({ employeeAccounts, session, onNotifyEmployee, isDe
                   <th className="px-4 py-2 font-medium">新規獲得</th>
                   <th className="px-4 py-2 font-medium">アップセル</th>
                   <th className="px-4 py-2 font-medium">合計</th>
-                  <th className="px-4 py-2 font-medium">実績の修正</th>
                 </tr>
               </thead>
               <tbody>
@@ -9857,32 +9854,12 @@ function EoAdminIncentiveTab({ employeeAccounts, session, onNotifyEmployee, isDe
                     <td className="px-4 py-2.5 font-mono">{formatYen(r.incentive.newAcquisitionAmount)}</td>
                     <td className="px-4 py-2.5 font-mono">{formatYen(r.incentive.upsellAmount)}</td>
                     <td className="px-4 py-2.5 font-mono font-bold text-slate-800">{formatYen(r.incentive.totalAmount)}</td>
-                    <td className="px-4 py-2.5 whitespace-nowrap">
-                      <button
-                        onClick={() => setEditing(r.account)}
-                        className="inline-flex items-center gap-1 rounded-lg border border-slate-300 px-2.5 py-1.5 text-[11.5px] font-bold text-slate-600"
-                      >
-                        <Pencil size={12} className="text-slate-400" />実績を直す
-                      </button>
-                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
         </div>
-      )}
-
-      {editing && (
-        <EoAdminPerfEditModal
-          employee={editing}
-          year={year}
-          month={month}
-          session={session}
-          onNotifyEmployee={onNotifyEmployee}
-          onClose={() => setEditing(null)}
-          onSaved={() => setReloadKey((k) => k + 1)}
-        />
       )}
     </div>
   );
