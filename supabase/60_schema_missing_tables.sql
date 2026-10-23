@@ -11,12 +11,22 @@
 -- 出どころ：
 --   列の定義・既定値      … 59a_export_columns.sql の結果（2026年10月23日時点の本番）
 --   主キー・一意制約      … 索引の一覧から読み取り
---   外部キー・チェック制約 … 59b の結果が届き次第この下に追記します（未反映）
---   アクセス制限（RLS）    … 59c の結果が届き次第、別ファイルにまとめます（未反映）
+--   外部キー・チェック制約 … 59b / 59d の結果（条件式と削除時の動作も反映済み）
+--   アクセス制限（RLS）    … 61_rls_policies_missing_tables.sql に分けてあります
 --
--- ⚠ この時点ではまだ完全ではありません。
---   このファイルだけで作り直すと、外部キーとアクセス制限が入りません。
---   復旧に使う前に、59b・59c の反映を済ませてください。
+-- ⚠ このファイルは表の形（列・制約）だけを作ります。
+--   アクセス制限（RLSポリシー）は入っていないため、このファイルだけで
+--   作り直すと「RLSは有効だがポリシーが1つも無い」状態になります。
+--   その状態では誰もデータに触れないので情報は漏れませんが、アプリは動きません。
+--   復旧の際は、このファイルのあとに 61番も必ず流してください。
+--
+-- ⚠ 外部キーの削除時の動作について（本番の設定をそのまま反映しています）
+--   employees の行を消すと、下の11表の行も一緒に消えます（on delete cascade）。
+--     給与明細 / 交通費精算 / 年末調整 / 固定支給・控除 / 標準報酬 /
+--     通勤経路 / 出勤規定日数 / 勤怠パターン / 変更申請 / eo実績2表
+--   賃金台帳などは法定の保存期間があるため、退職者は削除せず
+--   退職日を入れて残す運用にしてください。
+--   （お知らせの作成者と監査ログの2本だけは on delete set null です）
 --
 -- すでにテーブルがある本番で実行しても、create table if not exists のため
 -- 何も起きません（既存の表はそのままです）。
@@ -36,7 +46,8 @@ create table if not exists public.announcements (
   created_by_name text,
   is_pinned boolean default false not null,
   created_at timestamptz default now() not null,
-  primary key (id)
+  primary key (id),
+  constraint announcements_created_by_fkey foreign key (created_by) references public.employees(id) on delete set null
 );
 alter table public.announcements enable row level security;
 
@@ -52,7 +63,9 @@ create table if not exists public.audit_logs (
   target_employee_name text,
   detail text,
   created_at timestamptz default now() not null,
-  primary key (id)
+  primary key (id),
+  constraint audit_logs_actor_id_fkey foreign key (actor_id) references public.employees(id) on delete set null,
+  constraint audit_logs_target_employee_id_fkey foreign key (target_employee_id) references public.employees(id) on delete set null
 );
 alter table public.audit_logs enable row level security;
 
@@ -71,7 +84,8 @@ create table if not exists public.commute_expense_claims (
   created_at timestamptz default now() not null,
   decided_at timestamptz,
   target_month text,
-  primary key (id)
+  primary key (id),
+  constraint commute_expense_claims_employee_id_fkey foreign key (employee_id) references public.employees(id) on delete cascade
 );
 alter table public.commute_expense_claims enable row level security;
 
@@ -86,7 +100,9 @@ create table if not exists public.employee_attendance_schedules (
   created_at timestamptz default now() not null,
   updated_at timestamptz default now() not null,
   primary key (id),
-  unique (employee_id, month)
+  unique (employee_id, month),
+  constraint employee_attendance_schedules_month_check check (month >= 1 and month <= 12),
+  constraint employee_attendance_schedules_employee_id_fkey foreign key (employee_id) references public.employees(id) on delete cascade
 );
 alter table public.employee_attendance_schedules enable row level security;
 
@@ -105,7 +121,8 @@ create table if not exists public.employee_commute_routes (
   pass_fare numeric default 0,
   sort_order integer default 0 not null,
   updated_at timestamptz default now() not null,
-  primary key (id)
+  primary key (id),
+  constraint employee_commute_routes_employee_id_fkey foreign key (employee_id) references public.employees(id) on delete cascade
 );
 alter table public.employee_commute_routes enable row level security;
 
@@ -120,7 +137,9 @@ create table if not exists public.employee_salary_items (
   amount numeric default 0 not null,
   sort_order integer default 0 not null,
   updated_at timestamptz default now() not null,
-  primary key (id)
+  primary key (id),
+  constraint employee_salary_items_kind_check check (kind in ('payment', 'deduction')),
+  constraint employee_salary_items_employee_id_fkey foreign key (employee_id) references public.employees(id) on delete cascade
 );
 alter table public.employee_salary_items enable row level security;
 
@@ -138,7 +157,10 @@ create table if not exists public.employee_schedule_patterns (
   end_time text not null,
   updated_at timestamptz default now() not null,
   primary key (id),
-  unique (employee_id, year, month, pattern_no)
+  unique (employee_id, year, month, pattern_no),
+  constraint employee_schedule_patterns_month_check check (month >= 1 and month <= 12),
+  constraint employee_schedule_patterns_pattern_no_check check (pattern_no >= 1 and pattern_no <= 3),
+  constraint employee_schedule_patterns_employee_id_fkey foreign key (employee_id) references public.employees(id) on delete cascade
 );
 alter table public.employee_schedule_patterns enable row level security;
 
@@ -157,7 +179,9 @@ create table if not exists public.employee_standard_remuneration (
   pension_premium numeric,
   updated_at timestamptz default now() not null,
   primary key (id),
-  unique (employee_id, year, month)
+  unique (employee_id, year, month),
+  constraint employee_standard_remuneration_month_check check (month >= 1 and month <= 12),
+  constraint employee_standard_remuneration_employee_id_fkey foreign key (employee_id) references public.employees(id) on delete cascade
 );
 alter table public.employee_standard_remuneration enable row level security;
 
@@ -170,7 +194,8 @@ create table if not exists public.group_attendance_schedules (
   month integer not null,
   days numeric default 0 not null,
   primary key (id),
-  unique (group_name, month)
+  unique (group_name, month),
+  constraint group_leave_schedules_month_check check (month >= 1 and month <= 12)
 );
 alter table public.group_attendance_schedules enable row level security;
 
@@ -187,7 +212,8 @@ create table if not exists public.group_incentive_flags (
   upsell_target_met boolean default false not null,
   updated_at timestamptz default now() not null,
   primary key (id),
-  unique (group_name, year, month)
+  unique (group_name, year, month),
+  constraint group_incentive_flags_month_check check (month >= 1 and month <= 12)
 );
 alter table public.group_incentive_flags enable row level security;
 
@@ -227,7 +253,10 @@ create table if not exists public.payroll_records (
   deduction_items jsonb,
   attendance_extra jsonb,
   primary key (id),
-  unique (employee_id, year, month)
+  unique (employee_id, year, month),
+  constraint payroll_records_status_check check (status in ('draft', 'published')),
+  constraint payroll_records_wage_type_check check (wage_type in ('hourly', 'monthly')),
+  constraint payroll_records_employee_id_fkey foreign key (employee_id) references public.employees(id) on delete cascade
 );
 alter table public.payroll_records enable row level security;
 
@@ -244,7 +273,9 @@ create table if not exists public.profile_update_requests (
   admin_memo text,
   submitted_at timestamptz default now() not null,
   decided_at timestamptz,
-  primary key (id)
+  primary key (id),
+  constraint profile_update_requests_status_check check (status in ('pending', 'approved', 'rejected')),
+  constraint profile_update_requests_employee_id_fkey foreign key (employee_id) references public.employees(id) on delete cascade
 );
 alter table public.profile_update_requests enable row level security;
 
@@ -277,7 +308,9 @@ create table if not exists public.staff_existing_performance (
   admin_edited_by_id uuid,
   admin_edited_by_name text,
   primary key (id),
-  unique (employee_id, year, month)
+  unique (employee_id, year, month),
+  constraint staff_existing_performance_month_check check (month >= 1 and month <= 12),
+  constraint staff_existing_performance_employee_id_fkey foreign key (employee_id) references public.employees(id) on delete cascade
 );
 alter table public.staff_existing_performance enable row level security;
 
@@ -299,7 +332,9 @@ create table if not exists public.staff_new_performance (
   admin_edited_by_id uuid,
   admin_edited_by_name text,
   primary key (id),
-  unique (employee_id, year, month)
+  unique (employee_id, year, month),
+  constraint staff_new_performance_month_check check (month >= 1 and month <= 12),
+  constraint staff_new_performance_employee_id_fkey foreign key (employee_id) references public.employees(id) on delete cascade
 );
 alter table public.staff_new_performance enable row level security;
 
@@ -324,7 +359,8 @@ create table if not exists public.year_end_adjustments (
   submitted_at timestamptz default now() not null,
   decided_at timestamptz,
   primary key (id),
-  unique (employee_id, year)
+  unique (employee_id, year),
+  constraint year_end_adjustments_employee_id_fkey foreign key (employee_id) references public.employees(id) on delete cascade
 );
 alter table public.year_end_adjustments enable row level security;
 
