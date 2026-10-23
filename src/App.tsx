@@ -8067,22 +8067,30 @@ function EoNewPerfCell({ value, onChange, type = 'number' }) {
   return <input type="number" value={value} onChange={(e) => onChange(e.target.value)} className="w-12 border border-slate-200 rounded px-1 py-1 font-mono text-[11px] text-right" />;
 }
 
+// 表の見出しを上に貼り付けておくための指定。
+// 枠線は border-collapse の表だと見出しと一緒に動かないため、
+// 影で下線のかわりを描いている。
+// 2段の見出しがぴったり重なるよう、どちらの段も高さを固定する。
+// （高さが決まっていないと、段の間に本文が透けて見える）
+const STICKY_HEAD = 'sticky z-20 bg-slate-50 shadow-[0_1px_0_0_#e2e8f0]';
+const HEAD_ROW_H = 'h-[28px] py-0 leading-[28px]';
+
 function EoNewPerfTable({ year, month, daily, onUpdateDay, readOnly = false }) {
   const days = Array.from({ length: lastDayOfMonth(year, month) }, (_, i) => i + 1);
   return (
-    <div className="overflow-x-auto border border-slate-200 rounded-xl">
+    <div className="overflow-auto max-h-[70vh] border border-slate-200 rounded-xl">
       <table className="text-[11px] border-collapse">
         <thead>
           <tr className="bg-slate-50">
-            <th rowSpan={2} className="sticky left-0 bg-slate-50 border-b border-r border-slate-200 px-2 py-1 z-10">日</th>
+            <th rowSpan={2} className={`${STICKY_HEAD} left-0 top-0 z-30 h-[56px] py-0 border-b border-r border-slate-200 px-2`}>日</th>
             {NEW_PERF_COLUMN_GROUPS.map((g) => (
-              <th key={g.label} colSpan={g.fields.length} className="border-b border-r border-slate-200 px-2 py-1 text-slate-500 font-bold whitespace-nowrap">{g.label}</th>
+              <th key={g.label} colSpan={g.fields.length} className={`${STICKY_HEAD} ${HEAD_ROW_H} top-0 border-b border-r border-slate-200 px-2 text-slate-500 font-bold whitespace-nowrap`}>{g.label}</th>
             ))}
-            <th rowSpan={2} className="border-b border-slate-200 px-2 py-1 whitespace-nowrap">Pt</th>
+            <th rowSpan={2} className={`${STICKY_HEAD} top-0 h-[56px] py-0 border-b border-slate-200 px-2 whitespace-nowrap`}>Pt</th>
           </tr>
           <tr className="bg-slate-50">
             {NEW_PERF_COLUMN_GROUPS.flatMap((g) => g.fields.map((f) => (
-              <th key={g.label + f.key} className="border-b border-r border-slate-200 px-1 py-1 font-normal text-slate-400 whitespace-nowrap">{f.label}</th>
+              <th key={g.label + f.key} className={`${STICKY_HEAD} ${HEAD_ROW_H} top-[28px] border-b border-r border-slate-200 px-1 font-normal text-slate-400 whitespace-nowrap`}>{f.label}</th>
             )))}
           </tr>
         </thead>
@@ -8092,7 +8100,7 @@ function EoNewPerfTable({ year, month, daily, onUpdateDay, readOnly = false }) {
             const pt = computeNewPerfDayPoints(day);
             return (
               <tr key={d} className="border-b border-slate-100 last:border-0">
-                <td className="sticky left-0 bg-white border-r border-slate-200 px-2 py-1 font-bold text-slate-500 whitespace-nowrap">{d}日</td>
+                <td className="sticky left-0 z-10 bg-white border-r border-slate-200 px-2 py-1 font-bold text-slate-500 whitespace-nowrap shadow-[1px_0_0_0_#e2e8f0]">{d}日</td>
                 {NEW_PERF_COLUMN_GROUPS.flatMap((g) => g.fields.map((f) => {
                   const value = g.path ? (day[g.path]?.[f.key] ?? '') : (day[f.key] ?? '');
                   const onChange = (v) => onUpdateDay(d, (cur) => {
@@ -8125,19 +8133,19 @@ function EoNewPerfTable({ year, month, daily, onUpdateDay, readOnly = false }) {
 function EoExistingPerfTable({ year, month, daily, onUpdateDay, readOnly = false }) {
   const days = Array.from({ length: lastDayOfMonth(year, month) }, (_, i) => i + 1);
   return (
-    <div className="overflow-x-auto border border-slate-200 rounded-xl">
+    <div className="overflow-auto max-h-[70vh] border border-slate-200 rounded-xl">
       <table className="text-[11px] border-collapse">
         <thead>
           <tr className="bg-slate-50">
-            <th className="sticky left-0 bg-slate-50 border-b border-r border-slate-200 px-2 py-1 z-10">日</th>
+            <th className={`${STICKY_HEAD} left-0 top-0 z-30 border-b border-r border-slate-200 px-2 py-1`}>日</th>
             {EXISTING_PERF_FIELDS.map((f) => (
-              <th key={f.key} className={`border-b border-r border-slate-200 px-1.5 py-1 font-normal whitespace-nowrap ${f.countsAsNew ? 'bg-amber-50 text-amber-700' : 'text-slate-500'}`}>
+              <th key={f.key} className={`sticky top-0 z-20 shadow-[0_1px_0_0_#e2e8f0] border-b border-r border-slate-200 px-1.5 py-1 font-normal whitespace-nowrap ${f.countsAsNew ? 'bg-amber-50 text-amber-700' : 'bg-slate-50 text-slate-500'}`}>
                 {f.label}
                 <div className={`text-[9.5px] ${f.countsAsNew ? 'text-amber-500' : 'text-slate-300'}`}>{f.points}P{f.countsAsNew ? '・新規' : ''}</div>
               </th>
             ))}
-            <th className="border-b border-r border-slate-200 px-2 py-1 whitespace-nowrap bg-amber-50 text-amber-700">新規Pt</th>
-            <th className="border-b border-slate-200 px-2 py-1 whitespace-nowrap">既存Pt</th>
+            <th className="sticky top-0 z-20 shadow-[0_1px_0_0_#e2e8f0] border-b border-r border-slate-200 px-2 py-1 whitespace-nowrap bg-amber-50 text-amber-700">新規Pt</th>
+            <th className={`${STICKY_HEAD} top-0 border-b border-slate-200 px-2 py-1 whitespace-nowrap`}>既存Pt</th>
           </tr>
         </thead>
         <tbody>
@@ -8147,7 +8155,7 @@ function EoExistingPerfTable({ year, month, daily, onUpdateDay, readOnly = false
             const newPt = computeExistingPerfDayNewPoints(day);
             return (
               <tr key={d} className="border-b border-slate-100 last:border-0">
-                <td className="sticky left-0 bg-white border-r border-slate-200 px-2 py-1 font-bold text-slate-500 whitespace-nowrap">{d}日</td>
+                <td className="sticky left-0 z-10 bg-white border-r border-slate-200 px-2 py-1 font-bold text-slate-500 whitespace-nowrap shadow-[1px_0_0_0_#e2e8f0]">{d}日</td>
                 {EXISTING_PERF_FIELDS.map((f) => (
                   <td key={f.key} className={`border-r border-slate-100 ${readOnly ? 'px-1.5' : 'px-1'} py-1 ${f.countsAsNew ? 'bg-amber-50/40' : ''} ${readOnly ? 'font-mono text-slate-600 text-right whitespace-nowrap' : ''}`}>
                     {readOnly ? (
