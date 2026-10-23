@@ -8375,7 +8375,7 @@ function EoPerformanceSection({ employeeId, session, settings, onNotifyAdmin, is
       )}
 
       {/* タブレット不備件数とキャンセル件数は管理者が入力する項目。
-          本人は確認のみで、入力はできない（管理画面の「eo業務インセンティブ」で入力する） */}
+          本人は確認のみで、入力はできない（管理画面の「インセンティブ集計」で入力する） */}
       {sheet === 'new' && (
         <div className="px-5 pb-3 grid grid-cols-2 gap-3">
           <Field label="タブレット不備件数（-2P/件）">
@@ -9365,6 +9365,9 @@ function PerfReviewTab({ employeeAccounts, settings, session, isMasterAdmin, onN
       setNewRows(perf.newRows);
       setExistingRows(perf.existingRows);
       setLoading(false);
+    }).catch((e) => {
+      console.error('実績の読み込みに失敗しました', e);
+      if (!cancelled) setLoading(false);
     });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -9544,11 +9547,14 @@ function PerfReviewTab({ employeeAccounts, settings, session, isMasterAdmin, onN
   );
 }
 
-// 管理者用：eo業務グループのインセンティブ集計
-function EoAdminIncentiveTab({ employeeAccounts, session, onNotifyEmployee, isDesktop }) {
+// 管理者用：インセンティブ集計
+// 支給額の計算式は eo業務 のものを使う。業務を切り替えて表示でき、
+// 目標達成フラグとアップセル順位は業務ごとに持つ。
+function EoAdminIncentiveTab({ employeeAccounts, settings, session, onNotifyEmployee, isDesktop }) {
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
   const [month, setMonth] = useState(now.getMonth() + 1);
+  const [group, setGroup] = useState(EO_GROUP_NAME);
   const [loading, setLoading] = useState(true);
   const [newRows, setNewRows] = useState([]);
   const [existingRows, setExistingRows] = useState([]);
@@ -9563,13 +9569,25 @@ function EoAdminIncentiveTab({ employeeAccounts, session, onNotifyEmployee, isDe
   const [savingCounts, setSavingCounts] = useState(false);
   const [countsSavedAt, setCountsSavedAt] = useState(null);
 
-  const eoStaff = employeeAccounts.filter((a) => a.mainGroup === EO_GROUP_NAME);
+  // 実績入力を使っている業務だけを対象にする（実績が無いと計算できないため）
+  const perfStaff = employeeAccounts
+    .filter((a) => !a.resignationDate && a.mainGroup)
+    .filter((a) => performanceFormatKeyFor(a.mainGroup, settings) !== 'none');
+  const groups = Array.from(new Set(perfStaff.map((a) => a.mainGroup))).sort();
+  // 選んだ業務が無くなった場合（設定変更など）は、先頭の業務に寄せる
+  const activeGroup = group === '' || groups.includes(group) ? group : (groups[0] || '');
+  const eoStaff = activeGroup ? perfStaff.filter((a) => a.mainGroup === activeGroup) : perfStaff;
   const eoIds = eoStaff.map((a) => a.id);
+  // 業務を1つ選んでいるときだけ、その業務の目標達成フラグを出す
+  const showFlags = !!activeGroup;
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    Promise.all([fetchGroupPerfAll(eoIds, year, month), fetchGroupIncentiveFlags(EO_GROUP_NAME, year, month)]).then(([perf, flagRow]) => {
+    Promise.all([
+      fetchGroupPerfAll(eoIds, year, month),
+      activeGroup ? fetchGroupIncentiveFlags(activeGroup, year, month) : Promise.resolve(null),
+    ]).then(([perf, flagRow]) => {
       if (cancelled) return;
       setNewRows(perf.newRows);
       setExistingRows(perf.existingRows);
@@ -9585,14 +9603,19 @@ function EoAdminIncentiveTab({ employeeAccounts, session, onNotifyEmployee, isDe
         upsell_target_met: !!flagRow?.upsell_target_met,
       });
       setLoading(false);
+    }).catch((e) => {
+      // 通信に失敗しても「読み込み中」のまま止めない
+      console.error('インセンティブ集計の読み込みに失敗しました', e);
+      if (!cancelled) setLoading(false);
     });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [year, month, eoIds.join(','), reloadKey]);
+  }, [year, month, activeGroup, eoIds.join(','), reloadKey]);
 
   const saveFlags = async () => {
+    if (!activeGroup) return;
     setSavingFlags(true);
-    await saveGroupIncentiveFlags(EO_GROUP_NAME, year, month, flags);
+    await saveGroupIncentiveFlags(activeGroup, year, month, flags);
     setSavingFlags(false);
   };
 
@@ -9629,14 +9652,19 @@ function EoAdminIncentiveTab({ employeeAccounts, session, onNotifyEmployee, isDe
     setReloadKey((k) => k + 1);
   };
 
-  // 個人別アップセルLTV順位を算出
-  const existingTotals = eoStaff.map((a) => {
+  // 個人別アップセルLTV順位を算出。
+  // 順位は業務ごとに付ける（「すべての業務」を選んでいても、他の業務と混ぜない）
+  const totalsByGroup = {};
+  eoStaff.forEach((a) => {
     const row = existingRows.find((r) => r.employee_id === a.id);
-    return { id: a.id, points: computeExistingPerfMonthPoints(row?.daily || {}) };
-  }).sort((a, b) => b.points - a.points);
-  const rankOf = (id) => {
-    const idx = existingTotals.findIndex((x) => x.id === id);
-    if (idx < 0 || existingTotals[idx].points <= 0) return null;
+    const g = a.mainGroup || '';
+    (totalsByGroup[g] = totalsByGroup[g] || []).push({ id: a.id, points: computeExistingPerfMonthPoints(row?.daily || {}) });
+  });
+  Object.values(totalsByGroup).forEach((list) => list.sort((x, y) => y.points - x.points));
+  const rankOf = (id, groupName) => {
+    const list = totalsByGroup[groupName || ''] || [];
+    const idx = list.findIndex((x) => x.id === id);
+    if (idx < 0 || list[idx].points <= 0) return null;
     return idx + 1;
   };
 
@@ -9661,8 +9689,11 @@ function EoAdminIncentiveTab({ employeeAccounts, session, onNotifyEmployee, isDe
         g10HalfOverride: newRow?.g10_half_override,
         approxG10Rate,
       },
-      { cancelTargetMet: flags.cancel_target_met, empakeTargetMet: flags.empake_target_met, upsellTargetMet: flags.upsell_target_met },
-      rankOf(a.id)
+      // 目標達成フラグは業務を1つ選んでいるときだけ効かせる
+      showFlags
+        ? { cancelTargetMet: flags.cancel_target_met, empakeTargetMet: flags.empake_target_met, upsellTargetMet: flags.upsell_target_met }
+        : {},
+      rankOf(a.id, a.mainGroup)
     );
     // 管理者が直した記録（新規・既存のうち新しいほう）
     const adminEditedAt = [newRow?.admin_edited_at, existingRow?.admin_edited_at]
@@ -9670,7 +9701,7 @@ function EoAdminIncentiveTab({ employeeAccounts, session, onNotifyEmployee, isDe
       .sort((x, y) => String(y).localeCompare(String(x)))[0] || null;
     const adminEditedBy = (newRow?.admin_edited_at === adminEditedAt ? newRow?.admin_edited_by_name : existingRow?.admin_edited_by_name) || '';
     return {
-      account: a, newPoints, existingPoints, empakeCount, rank: rankOf(a.id), incentive,
+      account: a, newPoints, existingPoints, empakeCount, rank: rankOf(a.id, a.mainGroup), incentive,
       submittedAt: newRow?.submitted_at || null, adminEditedAt, adminEditedBy,
     };
   });
@@ -9699,13 +9730,21 @@ function EoAdminIncentiveTab({ employeeAccounts, session, onNotifyEmployee, isDe
 
   const years = [now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1];
   const months = Array.from({ length: 12 }, (_, i) => i + 1);
+  // 簡易版の実績入力を使っている業務は、この計算式ではポイントが出ない
+  const simpleGroups = Array.from(new Set(
+    eoStaff.filter((a) => performanceFormatKeyFor(a.mainGroup, settings) === 'simple').map((a) => a.mainGroup)
+  )).sort();
 
   return (
     <div className="space-y-5">
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
         <div className="flex items-center gap-2 flex-wrap">
-          <h2 className="font-bold text-[14px] text-slate-800 flex items-center gap-2"><Wallet size={16} className="text-slate-400" />eo業務 インセンティブ集計</h2>
-          <div className="ml-auto flex items-center gap-2">
+          <h2 className="font-bold text-[14px] text-slate-800 flex items-center gap-2"><Wallet size={16} className="text-slate-400" />インセンティブ集計</h2>
+          <div className="ml-auto flex items-center gap-2 flex-wrap">
+            <select value={activeGroup} onChange={(e) => setGroup(e.target.value)} className="border border-slate-200 rounded-lg px-2 py-1.5 text-[12.5px] bg-white">
+              <option value="">すべての業務</option>
+              {groups.map((g) => <option key={g} value={g}>{g}</option>)}
+            </select>
             <select value={year} onChange={(e) => setYear(Number(e.target.value))} className="border border-slate-200 rounded-lg px-2 py-1.5 text-[12.5px] bg-white">
               {years.map((y) => <option key={y} value={y}>{y}年</option>)}
             </select>
@@ -9715,8 +9754,16 @@ function EoAdminIncentiveTab({ employeeAccounts, session, onNotifyEmployee, isDe
           </div>
         </div>
 
+        {!showFlags && (
+          <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-[11.5px] leading-relaxed text-slate-600">
+            目標達成フラグは業務ごとに設定します。設定するときは、上の選択から業務を1つ選んでください。
+            「すべての業務」ではフラグを適用しない状態の金額を表示しています。アップセルの順位は業務ごとに付けています。
+          </div>
+        )}
+
+        {showFlags && (
         <div className="bg-slate-50 rounded-xl p-4 space-y-2">
-          <div className="text-[12px] font-bold text-slate-600">グループ全体の目標達成フラグ（この月・全員に一律で適用）</div>
+          <div className="text-[12px] font-bold text-slate-600">{activeGroup}の目標達成フラグ（この月・全員に一律で適用）</div>
           <label className="flex items-center gap-2 text-[12.5px] text-slate-600">
             <input type="checkbox" checked={flags.cancel_target_met} onChange={(e) => setFlags((f) => ({ ...f, cancel_target_met: e.target.checked }))} />
             全体キャンセル率目標（10.1%未満）達成 → 新規獲得ポイントに+6P
@@ -9733,6 +9780,7 @@ function EoAdminIncentiveTab({ employeeAccounts, session, onNotifyEmployee, isDe
             {savingFlags ? '保存中…' : 'フラグを保存する'}
           </button>
         </div>
+        )}
 
         {rows.length > 0 && (
           <div className={`rounded-xl border px-4 py-3 flex items-center gap-3 flex-wrap ${notSubmittedRows.length > 0 ? 'border-amber-500 bg-amber-50' : 'border-emerald-200 bg-emerald-50'}`}>
@@ -9762,12 +9810,22 @@ function EoAdminIncentiveTab({ employeeAccounts, session, onNotifyEmployee, isDe
         <div className="text-[11px] text-slate-400 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
           10G付帯率（40%未満で半額）は自動では正確に判定できないため、参考値をもとに判定しています。実際と違う場合は、「実績の確認」タブの「実績を直す」から半額の扱いを個別に指定できます。
         </div>
+
+        {simpleGroups.length > 0 && (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] leading-relaxed text-amber-800">
+            {simpleGroups.join('、')}は簡易版の実績入力（日ごとの件数・内容）を使っています。
+            支給額の計算式はeo業務の実績の形に合わせて作られているため、これらの業務のポイントと金額は0のまま変わりません。
+            別の計算式が必要な場合はご相談ください。
+          </div>
+        )}
       </div>
 
       {loading ? (
         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-6 py-14 text-center text-[12.5px] text-slate-300">読み込み中…</div>
       ) : rows.length === 0 ? (
-        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-6 py-14 text-center text-[12.5px] text-slate-300">eo業務グループのスタッフが登録されていません</div>
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-6 py-14 text-center text-[12.5px] text-slate-300">
+          {activeGroup ? `${activeGroup}のスタッフが登録されていません` : '実績入力を使っているスタッフが登録されていません'}
+        </div>
       ) : (
         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
           <div className="px-5 py-3 border-b border-slate-100 flex items-center gap-3 flex-wrap">
@@ -9796,6 +9854,7 @@ function EoAdminIncentiveTab({ employeeAccounts, session, onNotifyEmployee, isDe
               <thead>
                 <tr className="text-left text-[11px] text-slate-400 border-b border-slate-100">
                   <th className="px-4 py-2 font-medium">氏名</th>
+                  {!activeGroup && <th className="px-4 py-2 font-medium">業務</th>}
                   <th className="px-4 py-2 font-medium">提出</th>
                   <th className="px-4 py-2 font-medium">新規Pt(調整後)</th>
                   <th className="px-4 py-2 font-medium">既存(LTV)Pt</th>
@@ -9812,6 +9871,7 @@ function EoAdminIncentiveTab({ employeeAccounts, session, onNotifyEmployee, isDe
                 {rows.map((r) => (
                   <tr key={r.account.id} className="border-b border-slate-100 last:border-0">
                     <td className="px-4 py-2.5 font-semibold text-slate-800"><EmployeeLink id={r.account.id} name={r.account.name} /></td>
+                    {!activeGroup && <td className="px-4 py-2.5 text-slate-500 whitespace-nowrap">{r.account.mainGroup || '-'}</td>}
                     <td className="px-4 py-2.5 whitespace-nowrap">
                       {r.submittedAt ? (
                         <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10.5px] font-bold text-emerald-700">
@@ -12738,7 +12798,7 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
             { tab: 'accounts', label: 'スタッフ一覧・登録', sub: '入退職日・有休管理' },
             { tab: 'groupleave', label: '出勤規定日数設定', sub: 'グループ別・月別日数' },
             { tab: 'perfreview', label: '実績の確認', sub: '全業務の閲覧・修正・入力期限' },
-            { tab: 'eoincentive', label: 'eo業務インセンティブ', sub: '新規実績・既存実績・支給額' },
+            { tab: 'eoincentive', label: 'インセンティブ集計', sub: '業務別・支給額の算出' },
             { tab: 'groupformats', label: 'グループごとの入力フォーマット', sub: 'シフト希望・実績入力の形' },
             { tab: 'auditlog', label: '監査ログ', sub: '承認・操作の履歴' },
             { tab: 'adminperms', label: '管理者権限', sub: '管理者アカウント・権限設定' },
@@ -12748,7 +12808,7 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
             { tab: 'accounts', label: 'スタッフ一覧・登録', sub: '入退職日・有休管理' },
             { tab: 'groupleave', label: '出勤規定日数設定', sub: 'グループ別・月別日数' },
             { tab: 'perfreview', label: '実績の確認', sub: '全業務の閲覧・修正' },
-            { tab: 'eoincentive', label: 'eo業務インセンティブ', sub: '新規実績・既存実績・支給額' },
+            { tab: 'eoincentive', label: 'インセンティブ集計', sub: '業務別・支給額の算出' },
             { tab: 'auditlog', label: '監査ログ', sub: '承認・操作の履歴' },
           ],
     },
@@ -13333,7 +13393,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
       )}
 
       {tab === 'eoincentive' && (
-        <EoAdminIncentiveTab employeeAccounts={employeeAccounts} session={session} onNotifyEmployee={onNotifyEmployee} isDesktop={isDesktop} />
+        <EoAdminIncentiveTab employeeAccounts={employeeAccounts} settings={data.settings} session={session} onNotifyEmployee={onNotifyEmployee} isDesktop={isDesktop} />
       )}
 
       {tab === 'performance' && (
@@ -13514,7 +13574,7 @@ function PerformanceAdminTab({ pending, decided, onDecide, isDesktop }) {
     <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-[11.5px] leading-relaxed text-slate-500">
       この画面は、以前の運用でスタッフから提出された実績報告の記録です。<br />
       現在の実績入力の提出状況は「その他 →
-      <span className="font-semibold text-slate-600">eo業務インセンティブ</span>」でご確認ください。
+      <span className="font-semibold text-slate-600">インセンティブ集計</span>」でご確認ください。
     </div>
   );
 
