@@ -3774,19 +3774,24 @@ function AttendanceApp() {
   };
 
   // 交通費の承認内容が変わったとき、作成済みの給与明細の「交通費精算」も合わせる
+  // 戻り値：'changed'（更新した）／'none'（更新の必要がなかった）
+  //         'blocked'（公開済みのため更新しなかった）／'failed'（更新に失敗）
   const syncCommuteAmountInPayroll = async (targetEmployeeId, targetMonth, newAmount) => {
-    if (!targetMonth) return false;
+    if (!targetMonth) return 'none';
     const [y, m] = targetMonth.split('-').map(Number);
     const record = (data.payrollRecords || []).find(
       (r) => r.employeeId === targetEmployeeId && r.year === y && r.month === m
     );
-    if (!record || !Array.isArray(record.paymentItems)) return false;
+    if (!record || !Array.isArray(record.paymentItems)) return 'none';
     const label = `交通費精算（${m}月分）`;
     const without = record.paymentItems.filter((it) => !String(it.label || '').startsWith('交通費精算'));
     const nextItems = newAmount > 0 ? [...without, { label, amount: newAmount }] : without;
     const before = record.paymentItems.reduce((sum, it) => sum + (Number(it.amount) || 0), 0);
     const after = nextItems.reduce((sum, it) => sum + (Number(it.amount) || 0), 0);
-    if (before === after && nextItems.length === record.paymentItems.length) return false;
+    if (before === after && nextItems.length === record.paymentItems.length) return 'none';
+    // 公開済みの明細は書き換えない。スタッフが受け取った明細があとから変わると
+    // 手元の控えと食い違うため、管理者に知らせて判断してもらう
+    if (record.status === 'published') return 'blocked';
     const deductionTotal = (record.deductionItems || []).reduce((sum, it) => sum + (Number(it.amount) || 0), 0);
     const { error } = await supabase
       .from('payroll_records')
@@ -3794,7 +3799,7 @@ function AttendanceApp() {
       .eq('id', record.id);
     if (error) {
       console.error('給与明細の交通費の更新に失敗しました', error);
-      return false;
+      return 'failed';
     }
     const previous = Number(record.paymentItems.find((it) => String(it.label || '').startsWith('交通費精算'))?.amount) || 0;
     await logAudit(
@@ -3803,7 +3808,17 @@ function AttendanceApp() {
       `${y}年${m}月：${formatYen(previous)} → ${formatYen(newAmount)}`,
       targetEmployeeId
     );
-    return true;
+    return 'changed';
+  };
+
+  // 公開済みで反映できなかったときに、管理者へ出す案内
+  const warnCommuteSyncBlocked = (targetMonth) => {
+    const [y, m] = String(targetMonth || '').split('-').map(Number);
+    const when = y && m ? `${y}年${m}月分` : '対象月';
+    show(
+      `${when}の給与明細は公開済みのため、交通費を反映しませんでした。翌月で調整するか、公開を取り消してから反映してください`,
+      'warn'
+    );
   };
 
   // 承認済みの交通費精算の取り消し（マスター管理者のみ）。差し戻し扱いに戻す
@@ -3827,16 +3842,20 @@ function AttendanceApp() {
       show(`承認の取り消しに失敗しました：${error.message || ''}`, 'warn');
       return false;
     }
-    const payrollChanged = await syncCommuteAmountInPayroll(claim.employeeId, claim.targetMonth, 0);
+    const payrollSync = await syncCommuteAmountInPayroll(claim.employeeId, claim.targetMonth, 0);
     await notifyEmployeeInApp(
       claim.employeeId,
       '【交通費精算・承認の取り消し】',
-      `交通費精算書（合計 ${formatYen(claim.totalAmount)}）の承認が取り消されました。${reason ? `理由：${reason}` : ''}${payrollChanged ? '給与明細の交通費も取り下げました。' : ''}内容をご確認のうえ、修正して再度ご提出ください。`,
+      `交通費精算書（合計 ${formatYen(claim.totalAmount)}）の承認が取り消されました。${reason ? `理由：${reason}` : ''}${payrollSync === 'changed' ? '給与明細の交通費も取り下げました。' : ''}内容をご確認のうえ、修正して再度ご提出ください。`,
       id
     );
     await refreshData();
     await logAudit(session, '交通費精算の承認を取り消し', `${formatYen(claim.totalAmount)}${reason ? `／理由：${reason}` : ''}`, claim.employeeId, claim.employeeName);
-    show('承認を取り消しました。スタッフへ通知しています', 'warn');
+    if (payrollSync === 'blocked') {
+      warnCommuteSyncBlocked(claim.targetMonth);
+    } else {
+      show('承認を取り消しました。スタッフへ通知しています', 'warn');
+    }
     return true;
   };
 
@@ -3864,7 +3883,8 @@ function AttendanceApp() {
     }
 
     // 承認・差し戻しに合わせて、作成済みの給与明細の交通費も更新する
-    const payrollChanged = await syncCommuteAmountInPayroll(
+    // （公開済みの明細は書き換えない。そのときは下で管理者に案内を出す）
+    const payrollSync = await syncCommuteAmountInPayroll(
       claim.employeeId,
       claim.targetMonth,
       decision === 'approved' ? nextTotal : 0
@@ -3877,7 +3897,7 @@ function AttendanceApp() {
       lines.push('', '【管理者による修正箇所】', ...changes.map((t) => `・${t}`));
     }
     if (comment) lines.push('', `管理者コメント：${comment}`);
-    if (payrollChanged) lines.push('', '給与明細の交通費も更新しました。');
+    if (payrollSync === 'changed') lines.push('', '給与明細の交通費も更新しました。');
 
     await notifyEmployeeInApp(
       claim.employeeId,
@@ -3893,7 +3913,11 @@ function AttendanceApp() {
       claim.employeeId,
       claim.employeeName
     );
-    show(decision === 'approved' ? (changes.length > 0 ? '修正して承認しました' : '承認しました') : '差し戻しました', decision === 'approved' ? 'success' : 'warn');
+    if (payrollSync === 'blocked') {
+      warnCommuteSyncBlocked(claim.targetMonth);
+    } else {
+      show(decision === 'approved' ? (changes.length > 0 ? '修正して承認しました' : '承認しました') : '差し戻しました', decision === 'approved' ? 'success' : 'warn');
+    }
   };
 
   const saveGroupLeaveSchedule = async (groupName, monthlyDays) => {
@@ -3990,6 +4014,16 @@ function AttendanceApp() {
   };
 
   const savePayrollDraft = async (payload) => {
+    // 公開済みの明細は上書きしない。
+    // 以前は status: 'draft' を固定で書いていたため、保存するだけで公開が
+    // 取り消され、スタッフの画面から明細が消えていた
+    const already = (data.payrollRecords || []).find(
+      (r) => r.employeeId === payload.employeeId && r.year === payload.year && r.month === payload.month
+    );
+    if (already && already.status === 'published') {
+      show('この月の給与明細は公開済みです。直すには先に公開を取り消してください', 'warn');
+      return;
+    }
     const { error } = await supabase.from('payroll_records').upsert(
       {
         employee_id: payload.employeeId,
@@ -4040,6 +4074,44 @@ function AttendanceApp() {
     await refreshData();
     await logAudit(session, '給与明細を公開', record ? `${record.year}年${record.month}月分` : '', record?.employeeId, record?.employeeName);
     show('給与明細を公開しました', 'success');
+  };
+
+  // 公開済みの給与明細を下書きに戻す（マスター管理者のみ）。
+  // 公開済みは直接直せないため、直したいときはこれで下書きに戻してから修正する
+  const unpublishPayroll = async (id) => {
+    if (session.role !== 'master_admin') {
+      show('公開を取り消せるのはマスター管理者のみです', 'warn');
+      return false;
+    }
+    const record = data.payrollRecords.find((p) => p.id === id);
+    const { error } = await supabase
+      .from('payroll_records')
+      .update({ status: 'draft', published_at: null })
+      .eq('id', id);
+    if (error) {
+      console.error('公開の取り消しに失敗しました', error);
+      show(`公開の取り消しに失敗しました：${error.message || ''}`, 'warn');
+      return false;
+    }
+    if (record) {
+      await notifyEmployeeInApp(
+        record.employeeId,
+        `【給与明細・一時非公開】${record.year}年${record.month}月分`,
+        `${record.year}年${record.month}月分の給与明細を、内容の確認のため一時的に非公開にしました。`
+          + '\n確認が終わりしだい、あらためて公開しお知らせします。',
+        id
+      );
+    }
+    await refreshData();
+    await logAudit(
+      session,
+      '給与明細の公開を取り消し',
+      record ? `${record.year}年${record.month}月分` : '',
+      record?.employeeId,
+      record?.employeeName
+    );
+    show('公開を取り消しました。内容を直したうえで再度公開してください', 'warn');
+    return true;
   };
 
 
@@ -4369,6 +4441,8 @@ function AttendanceApp() {
                 employeeAttendanceSchedules={data.employeeAttendanceSchedules}
                 onSaveDraft={savePayrollDraft}
                 onPublish={publishPayroll}
+                onUnpublish={unpublishPayroll}
+                isMasterAdmin={session.role === 'master_admin'}
                 onUpdateWage={updateEmployeeProfile}
                 isDesktop={isDesktop}
               />
@@ -12238,7 +12312,7 @@ function PayrollItemsEditor({ title, items, onChange, addLabel = '項目を追�
   );
 }
 
-function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExpenseClaims = [], monthlyConfirmations = [], groupAttendanceSchedules = {}, employeeAttendanceSchedules = {}, onSaveDraft, onPublish, onUpdateWage, isDesktop }) {
+function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExpenseClaims = [], monthlyConfirmations = [], groupAttendanceSchedules = {}, employeeAttendanceSchedules = {}, onSaveDraft, onPublish, onUnpublish, isMasterAdmin = false, onUpdateWage, isDesktop }) {
   const now = new Date();
   const [employeeId, setEmployeeId] = useState(employeeAccounts[0]?.id || '');
   const [year, setYear] = useState(now.getFullYear());
@@ -12256,6 +12330,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
 
   const employee = employeeAccounts.find((a) => a.id === employeeId);
   const existing = payrollRecords.find((p) => p.employeeId === employeeId && p.year === year && p.month === month);
+  const isPublished = !!existing && existing.status === 'published';
 
   useEffect(() => {
     if (!employee) return;
@@ -12485,24 +12560,42 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
           <span className="font-mono text-[20px] font-bold">{formatYen(netAmount)}</span>
         </div>
 
-        <div className="flex gap-2">
-          <button onClick={generate} className="flex-1 py-2.5 rounded-lg bg-slate-800 text-white text-[13px] font-bold">
-            {existing ? 'この内容で再計算・保存' : 'この内容で給与明細を作成'}
-          </button>
-          {existing && existing.status === 'draft' && (
-            <button
-              onClick={() => onPublish(existing.id)}
-              disabled={!attendanceConfirmed}
-              title={attendanceConfirmed ? '' : 'この月の勤怠が最終承認されると公開できます'}
-              className="flex-1 py-2.5 rounded-lg bg-emerald-600 disabled:bg-slate-200 text-white text-[13px] font-bold"
-            >
-              {attendanceConfirmed ? '確定して公開する' : '勤怠の確定待ち'}
+        {isPublished ? (
+          // 公開済みは直接直せない。マスター管理者が公開を取り消してから修正する
+          <div className="space-y-2">
+            <div className="rounded-lg bg-emerald-50 border border-emerald-200 px-4 py-3 text-[12.5px] text-emerald-800">
+              <div className="font-bold">この月の給与明細は公開済みです</div>
+              <div className="mt-1 text-emerald-700 leading-relaxed">
+                スタッフが閲覧できる状態のため、内容は変更できません。直す場合は、
+                {isMasterAdmin ? '下の「公開を取り消す」で下書きに戻してから修正し、あらためて公開してください。' : 'マスター管理者に公開の取り消しを依頼してください。'}
+              </div>
+            </div>
+            {isMasterAdmin && (
+              <button
+                onClick={() => onUnpublish && onUnpublish(existing.id)}
+                className="w-full py-2.5 rounded-lg border border-rose-300 bg-white text-rose-600 text-[13px] font-bold"
+              >
+                公開を取り消す（下書きに戻す）
+              </button>
+            )}
+          </div>
+        ) : (
+          <div className="flex gap-2">
+            <button onClick={generate} className="flex-1 py-2.5 rounded-lg bg-slate-800 text-white text-[13px] font-bold">
+              {existing ? 'この内容で再計算・保存' : 'この内容で給与明細を作成'}
             </button>
-          )}
-          {existing && existing.status === 'published' && (
-            <span className="flex-1 flex items-center justify-center rounded-lg bg-emerald-50 text-emerald-600 text-[12.5px] font-bold">公開済みです</span>
-          )}
-        </div>
+            {existing && existing.status === 'draft' && (
+              <button
+                onClick={() => onPublish(existing.id)}
+                disabled={!attendanceConfirmed}
+                title={attendanceConfirmed ? '' : 'この月の勤怠が最終承認されると公開できます'}
+                className="flex-1 py-2.5 rounded-lg bg-emerald-600 disabled:bg-slate-200 text-white text-[13px] font-bold"
+              >
+                {attendanceConfirmed ? '確定して公開する' : '勤怠の確定待ち'}
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
