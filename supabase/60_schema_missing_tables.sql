@@ -13,12 +13,19 @@
 --   主キー・一意制約      … 索引の一覧から読み取り
 --   外部キー・チェック制約 … 59b / 59d の結果（条件式と削除時の動作も反映済み）
 --   アクセス制限（RLS）    … 61_rls_policies_missing_tables.sql に分けてあります
+--   索引・トリガー         … 62_indexes_and_triggers.sql に分けてあります
 --
 -- ⚠ このファイルは表の形（列・制約）だけを作ります。
---   アクセス制限（RLSポリシー）は入っていないため、このファイルだけで
---   作り直すと「RLSは有効だがポリシーが1つも無い」状態になります。
---   その状態では誰もデータに触れないので情報は漏れませんが、アプリは動きません。
---   復旧の際は、このファイルのあとに 61番も必ず流してください。
+--   アクセス制限（RLSポリシー）も索引・トリガーも入っていないため、
+--   このファイルだけで作り直すと「RLSは有効だがポリシーが1つも無い」状態になり、
+--   誰もデータに触れないためアプリが動きません（情報は漏れません）。
+--   復旧の際は、必ずこの順に流してください。
+--     60_schema_missing_tables.sql → 61_rls_policies_missing_tables.sql
+--       → 62_indexes_and_triggers.sql
+--
+--   退職理由（resignation_reasons）の名前の重複を防ぐ一意索引は、
+--   本番では制約ではなく索引として作られているため 62番にあります。
+--   60番だけでは重複が入り得ます。
 --
 -- ⚠ 外部キーの削除時の動作について（本番の設定をそのまま反映しています）
 --   employees の行を消すと、下の11表の行も一緒に消えます（on delete cascade）。
@@ -289,8 +296,7 @@ create table if not exists public.resignation_reasons (
   sort_order integer default 100 not null,
   is_active boolean default true not null,
   created_at timestamptz default now() not null,
-  primary key (id),
-  unique (label)
+  primary key (id)
 );
 alter table public.resignation_reasons enable row level security;
 
