@@ -216,10 +216,16 @@ select '55番：実績の管理者編集（列・ポリシー・ガード）',
                    where tgname = 'guard_performance_self_update' and not tgisinternal) = 2
             then '✅ あり' else '❌ ありません（55_performance_admin_edit.sql が未実行）' end
 union all
+-- ここで public.perf_deadline_day() を直接呼ぶと、56番が未実行の環境では
+-- 文の解析の段階でエラーになる（関数が無いため）。
+-- そのため、関数の有無は to_regprocedure で見て、設定値は app_settings から直接読む。
 select '56番：実績の入力期限',
-       case when to_regprocedure('public.perf_deadline_date(int, int)') is null
+       case when to_regprocedure('public.perf_deadline_date(int,int)') is null
             then '❌ ありません（56_performance_deadline.sql が未実行）'
-            when public.perf_deadline_day() = 0
-            then '✅ あり（締切なしの設定です）'
-            else '✅ あり（翌月' || public.perf_deadline_day()::text || '日まで）' end
+            when coalesce(nullif((select value from public.app_settings
+                                   where key = 'performance_deadline_day'), ''), '0') = '0'
+            then '✅ あり（いまは「締切なし」の設定です）'
+            else '✅ あり（いまは翌月'
+                 || (select value from public.app_settings where key = 'performance_deadline_day')
+                 || '日まで）' end
 order by 1;
