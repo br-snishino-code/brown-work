@@ -729,6 +729,28 @@ function computeMonthlySummary(records, target = new Date()) {
   }, { days: 0, workedMin: 0, overtimeMin: 0, lateMin: 0, earlyLeaveMin: 0 });
 }
 
+// ---- 法定帳簿（賃金台帳・出勤簿）用の計算 ----
+// 賃金台帳には深夜労働時間数の記載が必要（労働基準法施行規則第54条）。
+// 深夜は22時〜翌5時。日をまたぐ勤務の運用は無いため、1日の中での重なりだけを見る。
+// 休憩（固定60分）がどの時刻に取られたかは記録していないため、
+// 休憩が深夜帯にかかる場合は差し引けない。日中に取る運用のため影響しない想定。
+const NIGHT_FROM_MIN = 22 * 60;   // 22:00
+const NIGHT_UNTIL_MIN = 5 * 60;   // 05:00
+
+function overlapMinutes(startMin, endMin, fromMin, untilMin) {
+  return Math.max(0, Math.min(endMin, untilMin) - Math.max(startMin, fromMin));
+}
+
+function computeNightMinutes(record) {
+  if (!record || !record.clockIn || !record.clockOut) return 0;
+  const inMin = toMinutes(hhmm(new Date(record.clockIn)));
+  const outMin = toMinutes(hhmm(new Date(record.clockOut)));
+  if (outMin <= inMin) return 0;
+  // 早朝（0:00〜5:00）と夜（22:00〜24:00）の2つの帯
+  return overlapMinutes(inMin, outMin, 0, NIGHT_UNTIL_MIN)
+    + overlapMinutes(inMin, outMin, NIGHT_FROM_MIN, 24 * 60);
+}
+
 // ---- Geolocation ----
 function useGeolocation() {
   const [status, setStatus] = useState('idle');
