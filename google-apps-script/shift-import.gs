@@ -48,6 +48,7 @@ function onOpen() {
     .createMenu('Brown Work')
     .addItem('シフト希望を取り込む', 'importShiftRequestsPrompt')
     .addItem('確定シフトを送る', 'pushConfirmedShiftsPrompt')
+    .addItem('確定シフトを送る（対象月とシートを指定）', 'pushConfirmedShiftsForMonth')
     .addSeparator()
     .addItem('自動取り込みの間隔を選ぶ', 'chooseTriggerInterval')
     .addItem('自動取り込みの状態を見る', 'showTriggerStatus')
@@ -722,7 +723,7 @@ function sendConfirmedShifts(payload) {
   return JSON.parse(body);
 }
 
-/** メニューから：確認してから送る */
+/** メニューから：確認してから送る（対象月はファイル名から読み取る） */
 function pushConfirmedShiftsPrompt() {
   var ui = SpreadsheetApp.getUi();
   try {
@@ -734,7 +735,72 @@ function pushConfirmedShiftsPrompt() {
       month = ask.getResponseText().trim();
       if (!/^\d{4}-\d{2}$/.test(month)) { ui.alert('対象月の形式が違います。'); return; }
     }
+    pushConfirmedShiftsCore(sheet, month);
+  } catch (e) {
+    ui.alert('送信に失敗しました', String(e.message || e), ui.ButtonSet.OK);
+  }
+}
 
+/**
+ * メニューから：対象月と読み取るシートを自分で決めて送る。
+ * 過去の月を送りたいとき、ファイル名と対象月が合わないときに使う。
+ * 例：11月のファイルに「10月」のタブが残っている場合、
+ *     ファイル名からは 2026-11 と読めてしまうため、ここで 2026-10 を指定する。
+ */
+function pushConfirmedShiftsForMonth() {
+  var ui = SpreadsheetApp.getUi();
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var guessed = guessTargetMonth(findConfirmedSheet());
+
+    var askMonth = ui.prompt(
+      '対象月を指定して送る',
+      '送りたい月を YYYY-MM の形式で入力してください（例：2026-10）。\n\n' +
+      'ファイル名から読み取れる月：' + (guessed || '（読み取れません）'),
+      ui.ButtonSet.OK_CANCEL
+    );
+    if (askMonth.getSelectedButton() !== ui.Button.OK) return;
+    var month = askMonth.getResponseText().trim();
+    if (!/^\d{4}-\d{2}$/.test(month)) {
+      ui.alert('対象月の形式が違います。2026-10 のように入力してください。');
+      return;
+    }
+
+    // 読み取るシート。既定は「〇月」（対象月と同じ数字）のタブ
+    var sheets = ss.getSheets();
+    var names = [];
+    for (var i = 0; i < sheets.length; i++) names.push(sheets[i].getName());
+    var monthNum = String(Number(month.slice(5, 7)));
+    var defaultSheet = ss.getSheetByName(monthNum + '月') || ss.getSheetByName(monthNum + ' 月') || findConfirmedSheet();
+
+    var askSheet = ui.prompt(
+      '読み取るシート',
+      '読み取るシートの名前を入力してください。\n' +
+      '空のまま OK を押すと「' + defaultSheet.getName() + '」を読みます。\n\n' +
+      'このファイルのシート：\n' + names.join('、'),
+      ui.ButtonSet.OK_CANCEL
+    );
+    if (askSheet.getSelectedButton() !== ui.Button.OK) return;
+    var typed = askSheet.getResponseText().trim();
+    var sheet = defaultSheet;
+    if (typed) {
+      sheet = ss.getSheetByName(typed);
+      if (!sheet) {
+        ui.alert('「' + typed + '」というシートが見つかりません。シート名をご確認ください。');
+        return;
+      }
+    }
+
+    pushConfirmedShiftsCore(sheet, month);
+  } catch (e) {
+    ui.alert('送信に失敗しました', String(e.message || e), ui.ButtonSet.OK);
+  }
+}
+
+/** 読み取って、確認画面を出してから送る本体 */
+function pushConfirmedShiftsCore(sheet, month) {
+  var ui = SpreadsheetApp.getUi();
+  try {
     var payload = buildConfirmedPayload(sheet, month);
     if (payload.rows.length === 0) {
       ui.alert(
@@ -760,8 +826,21 @@ function pushConfirmedShiftsPrompt() {
       }
       sample.push('　' + r.name + ' … ' + preview.join('、') + ' …');
     }
+    // ファイル名から読める月と違う月を送ろうとしているときは、はっきり知らせる。
+    // 別の月の表を取り違えて送ると、その月の確定シフトが置き換わってしまうため。
+    var guessedForSheet = guessTargetMonth(sheet);
+    var monthWarning = '';
+    if (guessedForSheet && guessedForSheet !== month) {
+      monthWarning =
+        '【ご確認ください】\n' +
+        'このファイル・シートからは ' + guessedForSheet + ' と読めますが、\n' +
+        '送る対象月は ' + month + ' です。\n' +
+        '読み取るシートが ' + month + ' の表で合っているか、ご確認ください。\n\n';
+    }
+
     var res = ui.alert(
       '確定シフトを送ります',
+      monthWarning +
       'シート：' + sheet.getName() + '\n' +
       '対象月：' + month + '\n' +
       '人数：' + payload.rows.length + '名\n' +

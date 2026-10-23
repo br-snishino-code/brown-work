@@ -193,13 +193,21 @@ Deno.serve(async (req) => {
       return json({ error: `スタッフの取得に失敗しました：${await empRes.text()}` }, 500);
     }
     const employees: { id: string; name: string; resignation_date: string | null }[] = await empRes.json();
-    const activeIds = new Set(employees.filter((e) => !e.resignation_date).map((e) => e.id));
+
+    // 「その月に在籍していたか」で判断する。
+    // 過去の月を取り込むとき、いま退職済みでもその月には在籍していた方がいるため、
+    // 退職日が対象月の初日より前の方だけを対象外にする。
+    const monthStart = `${month}-01`;
+    const wasActiveInMonth = (e: { resignation_date: string | null }) =>
+      !e.resignation_date || e.resignation_date >= monthStart;
+
+    const activeIds = new Set(employees.filter(wasActiveInMonth).map((e) => e.id));
     const resignedNames = new Set(
-      employees.filter((e) => e.resignation_date).map((e) => normalizeName(e.name))
+      employees.filter((e) => !wasActiveInMonth(e)).map((e) => normalizeName(e.name))
     );
     const byName = new Map<string, string>();
     employees
-      .filter((e) => !e.resignation_date)
+      .filter(wasActiveInMonth)
       .forEach((e) => {
         const key = normalizeName(e.name);
         // 同姓同名がいる場合は、どちらとも突き合わせない（取り違えを防ぐため）
@@ -230,7 +238,7 @@ Deno.serve(async (req) => {
       // 対応表 → 完全一致 の順に探す
       const employeeId = aliasMap.get(name) ?? byName.get(name);
       if (employeeId === undefined) {
-        // 退職した方がシートに残っている場合は、黙って飛ばす
+        // 対象月より前に退職した方がシートに残っている場合は、黙って飛ばす
         if (resignedNames.has(name)) {
           if (!resigned.includes(name)) resigned.push(name);
           continue;
