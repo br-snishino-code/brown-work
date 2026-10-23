@@ -215,4 +215,11 @@ select '55番：実績の管理者編集（列・ポリシー・ガード）',
              and (select count(*) from pg_trigger
                    where tgname = 'guard_performance_self_update' and not tgisinternal) = 2
             then '✅ あり' else '❌ ありません（55_performance_admin_edit.sql が未実行）' end
+union all
+select '56番：実績の入力期限',
+       case when to_regprocedure('public.perf_deadline_date(int, int)') is null
+            then '❌ ありません（56_performance_deadline.sql が未実行）'
+            when public.perf_deadline_day() = 0
+            then '✅ あり（締切なしの設定です）'
+            else '✅ あり（翌月' || public.perf_deadline_day()::text || '日まで）' end
 order by 1;

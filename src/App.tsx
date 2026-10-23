@@ -946,6 +946,43 @@ function performanceFormatKeyFor(group, settings) {
   return group === EO_GROUP_NAME ? 'eo' : 'none';
 }
 
+// ---- 実績入力の締切 ----
+// app_settings に「翌月の何日まで本人が編集できるか」を数字1つで保存する。
+// 0（または未設定）は「締切を設けない」＝これまでどおり、いつでも本人が直せる。
+// 締切を過ぎても、管理者は「実績の確認」からいつでも直せる。
+const SETTING_PERF_DEADLINE_DAY = 'performance_deadline_day';
+
+function perfDeadlineDay(settings) {
+  const n = Number(settings?.[SETTING_PERF_DEADLINE_DAY]);
+  if (!Number.isFinite(n)) return 0;
+  const d = Math.floor(n);
+  // 月末が28日の月（2月）でも必ず来る日に限る
+  if (d < 1 || d > 28) return 0;
+  return d;
+}
+
+// 対象月（year年month月分）の実績を、本人が編集できる最後の瞬間
+// 「翌月○日のおわり」まで。日本時間で判定する（端末の時計を使う）
+function perfDeadlineAt(year, month, settings) {
+  const day = perfDeadlineDay(settings);
+  if (!day) return null;
+  // new Date の月は0始まりのため、month をそのまま渡すと「翌月」になる
+  return new Date(year, month, day, 23, 59, 59, 999);
+}
+
+function perfDeadlineLabel(year, month, settings) {
+  const at = perfDeadlineAt(year, month, settings);
+  if (!at) return '';
+  return `${at.getFullYear()}年${at.getMonth() + 1}月${at.getDate()}日`;
+}
+
+// 本人の編集が締め切られているか
+function isPerfLockedForStaff(year, month, settings, now = new Date()) {
+  const at = perfDeadlineAt(year, month, settings);
+  if (!at) return false;
+  return now.getTime() > at.getTime();
+}
+
 // ---- シフト希望の答えの読み書き ----
 // 値は 'ok' | 'off' | 'paid' | 'place:<活動場所>' のいずれか
 const SHIFT_PLACE_PREFIX = 'place:';
@@ -2583,6 +2620,31 @@ function AttendanceApp() {
     await logAudit(session, 'グループごとの入力フォーマットを変更', Object.keys(map || {}).join('、') || '（なし）');
     await refreshData();
     show('フォーマット設定を保存しました');
+    return true;
+  };
+
+  // スタッフが実績を入力できる期限（翌月の何日まで）を保存する（マスター管理者のみ）
+  // 0 は「締切を設けない」
+  const savePerfDeadlineDay = async (value) => {
+    const n = Number(value);
+    const day = Number.isFinite(n) && n >= 1 && n <= 28 ? String(Math.floor(n)) : '0';
+    const { error } = await supabase.from('app_settings').upsert(
+      {
+        key: SETTING_PERF_DEADLINE_DAY,
+        value: day,
+        updated_by: session.id,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'key' }
+    );
+    if (error) {
+      console.error('実績の入力期限の保存に失敗しました', error);
+      show('入力期限の保存に失敗しました', 'warn');
+      return false;
+    }
+    await logAudit(session, '実績の入力期限を変更', day === '0' ? '締切なし' : `翌月${day}日まで`);
+    await refreshData();
+    show(day === '0' ? '締切を設けない設定にしました' : `入力期限を翌月${day}日に設定しました`);
     return true;
   };
 
@@ -4281,7 +4343,7 @@ function AttendanceApp() {
               />
             )}
             {requestTab === 'performance' && PerformanceFormatSection && (
-              <PerformanceFormatSection employeeId={session.id} session={session} onNotifyAdmin={notifyAdmin} isDesktop={isDesktop} />
+              <PerformanceFormatSection employeeId={session.id} session={session} settings={data.settings} onNotifyAdmin={notifyAdmin} isDesktop={isDesktop} />
             )}
             {requestTab === 'yearend' && (
               <YearEndAdjustmentSection
@@ -4410,6 +4472,7 @@ function AttendanceApp() {
             onUpdateAdminAccess={updateAdminAccess}
             onSaveAdminNotifyEmail={saveAdminNotifyEmail}
             onSaveGroupFormats={saveGroupFormats}
+            onSavePerfDeadline={savePerfDeadlineDay}
             onSaveShiftAlias={saveShiftNameAlias}
             onDeleteShiftAlias={deleteShiftNameAlias}
             onAnnounceShift={announceShift}
@@ -7842,6 +7905,27 @@ function diffExistingPerfDaily(before, after, year, month) {
   });
 }
 
+// 簡易版（日ごとの件数と内容）の差分
+// こちらは日付の文字列（2026-10-01）をキーにしているため、日ごとの表とは別に見る
+const SIMPLE_PERF_DIFF_FIELDS = [
+  { key: 'count', label: '件数' },
+  { key: 'note', label: '内容・備考' },
+];
+
+function diffSimplePerfDaily(before, after, year, month) {
+  const changes = [];
+  shiftMonthDays(`${year}-${pad(month)}`).forEach((d) => {
+    SIMPLE_PERF_DIFF_FIELDS.forEach((f) => {
+      const bv = before?.[d.key]?.[f.key];
+      const av = after?.[d.key]?.[f.key];
+      if (!samePerfValue(bv, av)) {
+        changes.push({ dayLabel: `${d.day}日(${d.weekday})`, fieldLabel: f.label, from: perfValueText(bv), to: perfValueText(av) });
+      }
+    });
+  });
+  return changes;
+}
+
 // 通知やログに入れる1行の文字列にする
 const perfChangeLine = (c, sheetLabel) =>
   `${sheetLabel ? `${sheetLabel} ` : ''}${c.dayLabel ? `${c.dayLabel} ` : ''}${c.fieldLabel}：${c.from} → ${c.to}`;
@@ -7878,7 +7962,7 @@ function EoNewPerfCell({ value, onChange, type = 'number' }) {
   return <input type="number" value={value} onChange={(e) => onChange(e.target.value)} className="w-12 border border-slate-200 rounded px-1 py-1 font-mono text-[11px] text-right" />;
 }
 
-function EoNewPerfTable({ year, month, daily, onUpdateDay }) {
+function EoNewPerfTable({ year, month, daily, onUpdateDay, readOnly = false }) {
   const days = Array.from({ length: lastDayOfMonth(year, month) }, (_, i) => i + 1);
   return (
     <div className="overflow-x-auto border border-slate-200 rounded-xl">
@@ -7910,6 +7994,13 @@ function EoNewPerfTable({ year, month, daily, onUpdateDay }) {
                     if (g.path) return { ...cur, [g.path]: { ...cur[g.path], [f.key]: v } };
                     return { ...cur, [f.key]: v };
                   });
+                  if (readOnly) {
+                    return (
+                      <td key={g.label + f.key} className="border-r border-slate-100 px-1.5 py-1 font-mono text-slate-600 text-right whitespace-nowrap">
+                        {value === '' ? <span className="text-slate-300">-</span> : value}
+                      </td>
+                    );
+                  }
                   return (
                     <td key={g.label + f.key} className="border-r border-slate-100 px-1 py-1">
                       <EoNewPerfCell value={value} onChange={onChange} type={f.type} />
@@ -7926,7 +8017,7 @@ function EoNewPerfTable({ year, month, daily, onUpdateDay }) {
   );
 }
 
-function EoExistingPerfTable({ year, month, daily, onUpdateDay }) {
+function EoExistingPerfTable({ year, month, daily, onUpdateDay, readOnly = false }) {
   const days = Array.from({ length: lastDayOfMonth(year, month) }, (_, i) => i + 1);
   return (
     <div className="overflow-x-auto border border-slate-200 rounded-xl">
@@ -7953,13 +8044,17 @@ function EoExistingPerfTable({ year, month, daily, onUpdateDay }) {
               <tr key={d} className="border-b border-slate-100 last:border-0">
                 <td className="sticky left-0 bg-white border-r border-slate-200 px-2 py-1 font-bold text-slate-500 whitespace-nowrap">{d}日</td>
                 {EXISTING_PERF_FIELDS.map((f) => (
-                  <td key={f.key} className={`border-r border-slate-100 px-1 py-1 ${f.countsAsNew ? 'bg-amber-50/40' : ''}`}>
-                    <input
-                      type="number"
-                      value={day[f.key] ?? ''}
-                      onChange={(e) => onUpdateDay(d, f.key, e.target.value)}
-                      className="w-11 border border-slate-200 rounded px-1 py-1 font-mono text-[11px] text-right"
-                    />
+                  <td key={f.key} className={`border-r border-slate-100 ${readOnly ? 'px-1.5' : 'px-1'} py-1 ${f.countsAsNew ? 'bg-amber-50/40' : ''} ${readOnly ? 'font-mono text-slate-600 text-right whitespace-nowrap' : ''}`}>
+                    {readOnly ? (
+                      (day[f.key] ?? '') === '' ? <span className="text-slate-300">-</span> : day[f.key]
+                    ) : (
+                      <input
+                        type="number"
+                        value={day[f.key] ?? ''}
+                        onChange={(e) => onUpdateDay(d, f.key, e.target.value)}
+                        className="w-11 border border-slate-200 rounded px-1 py-1 font-mono text-[11px] text-right"
+                      />
+                    )}
                   </td>
                 ))}
                 <td className="border-r border-slate-100 px-2 py-1 font-mono font-bold text-amber-700 text-right whitespace-nowrap bg-amber-50/40">{newPt}</td>
@@ -7973,7 +8068,7 @@ function EoExistingPerfTable({ year, month, daily, onUpdateDay }) {
   );
 }
 
-function EoPerformanceSection({ employeeId, session, onNotifyAdmin, isDesktop }) {
+function EoPerformanceSection({ employeeId, session, settings, onNotifyAdmin, isDesktop }) {
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
   const [month, setMonth] = useState(now.getMonth() + 1);
@@ -8014,6 +8109,10 @@ function EoPerformanceSection({ employeeId, session, onNotifyAdmin, isDesktop })
     return () => { cancelled = true; };
   }, [employeeId, year, month]);
 
+  // 締切（翌月○日）を過ぎた月は、本人は見るだけ。直したいときは管理者に頼む
+  const locked = isPerfLockedForStaff(year, month, settings);
+  const deadlineLabel = perfDeadlineLabel(year, month, settings);
+
   // 保存していない入力があるまま対象月を変えると消えてしまうため、確認する
   const changeMonthSafely = (apply) => {
     if (dirty && !window.confirm('保存していない入力があります。保存せずに対象月を切り替えますか？')) return;
@@ -8021,10 +8120,12 @@ function EoPerformanceSection({ employeeId, session, onNotifyAdmin, isDesktop })
   };
 
   const updateNewDay = (d, updater) => {
+    if (locked) return;
     setDirty(true);
     setNewDaily((prev) => ({ ...prev, [d]: updater(prev[d] || emptyNewPerfDay()) }));
   };
   const updateExistingDay = (d, key, value) => {
+    if (locked) return;
     setDirty(true);
     setExistingDaily((prev) => ({ ...prev, [d]: { ...(prev[d] || emptyExistingPerfDay()), [key]: value } }));
   };
@@ -8087,6 +8188,9 @@ function EoPerformanceSection({ employeeId, session, onNotifyAdmin, isDesktop })
         {dirty && (
           <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10.5px] font-bold text-amber-700">未保存</span>
         )}
+        {locked && (
+          <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[10.5px] font-bold text-slate-600">受付終了</span>
+        )}
         {submittedAt ? (
           <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10.5px] font-bold text-emerald-700">
             提出済み {dateLabel(String(submittedAt).slice(0, 10))}
@@ -8113,8 +8217,23 @@ function EoPerformanceSection({ employeeId, session, onNotifyAdmin, isDesktop })
       </div>
 
       <div className="px-5 pt-3 text-[11.5px] text-slate-500">
-        入力の途中は「一時保存」で残せます。新規・既存の両方がまとめて保存されます。内容がそろったら「提出する」を押してください。提出後も修正して出し直せます。
+        {locked
+          ? `${year}年${month}月分は受付を終了しています。内容の確認はできますが、入力はできません。`
+          : `入力の途中は「一時保存」で残せます。新規・既存の両方がまとめて保存されます。内容がそろったら「提出する」を押してください。提出後も修正して出し直せます。${deadlineLabel ? `入力できるのは${deadlineLabel}までです。` : ''}`}
       </div>
+
+      {locked && (
+        <div className="mx-5 mt-3 rounded-xl border border-slate-300 bg-slate-50 px-3.5 py-2.5 text-[11.5px] leading-relaxed text-slate-600">
+          {deadlineLabel ? `${deadlineLabel}で締め切りました。` : '受付を終了しました。'}
+          直したい箇所がある場合は、管理者にご連絡ください。管理者が修正すると、変更箇所がお知らせで届きます。
+        </div>
+      )}
+
+      {!locked && deadlineLabel && (
+        <div className="mx-5 mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-[11.5px] leading-relaxed text-amber-800">
+          {year}年{month}月分の入力は <b>{deadlineLabel}</b> までです。それ以降は入力できなくなります。
+        </div>
+      )}
 
       {adminEdit && (
         <div className="mx-5 mt-3 rounded-xl border border-sky-200 bg-sky-50 px-3.5 py-2.5 text-[11.5px] leading-relaxed text-sky-800">
@@ -8144,10 +8263,18 @@ function EoPerformanceSection({ employeeId, session, onNotifyAdmin, isDesktop })
       {sheet === 'new' && (
         <div className="px-5 pb-3 grid grid-cols-2 gap-3">
           <Field label="タブレット不備件数（-2P/件）">
-            <input type="number" value={tabletIssues} onChange={(e) => { setDirty(true); setTabletIssues(e.target.value); }} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" />
+            {locked ? (
+              <div className="w-full border border-slate-200 bg-slate-50 rounded-lg px-3 py-2 font-mono text-[13px] text-slate-600">{tabletIssues || '0'}</div>
+            ) : (
+              <input type="number" value={tabletIssues} onChange={(e) => { setDirty(true); setTabletIssues(e.target.value); }} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" />
+            )}
           </Field>
           <Field label="キャンセル件数（-3P/件）">
-            <input type="number" value={cancellations} onChange={(e) => { setDirty(true); setCancellations(e.target.value); }} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" />
+            {locked ? (
+              <div className="w-full border border-slate-200 bg-slate-50 rounded-lg px-3 py-2 font-mono text-[13px] text-slate-600">{cancellations || '0'}</div>
+            ) : (
+              <input type="number" value={cancellations} onChange={(e) => { setDirty(true); setCancellations(e.target.value); }} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" />
+            )}
           </Field>
         </div>
       )}
@@ -8160,35 +8287,39 @@ function EoPerformanceSection({ employeeId, session, onNotifyAdmin, isDesktop })
       ) : (
         <div className="px-5 pb-5">
           {sheet === 'new' ? (
-            <EoNewPerfTable year={year} month={month} daily={newDaily} onUpdateDay={updateNewDay} />
+            <EoNewPerfTable year={year} month={month} daily={newDaily} onUpdateDay={updateNewDay} readOnly={locked} />
           ) : (
-            <EoExistingPerfTable year={year} month={month} daily={existingDaily} onUpdateDay={updateExistingDay} />
+            <EoExistingPerfTable year={year} month={month} daily={existingDaily} onUpdateDay={updateExistingDay} readOnly={locked} />
           )}
-          <div className="mt-4 flex gap-2">
-            <button
-              onClick={save}
-              disabled={saving || submitting}
-              className="flex-1 py-2.5 rounded-lg border border-slate-300 disabled:border-slate-200 text-[13px] font-bold text-slate-600"
-            >
-              {saving ? '保存中…' : '一時保存'}
-            </button>
-            <button
-              onClick={submit}
-              disabled={saving || submitting}
-              className="flex-1 py-2.5 rounded-lg bg-amber-600 disabled:bg-slate-300 text-white text-[13px] font-bold"
-            >
-              {submitting ? '送信中…' : submittedAt ? 'この内容で出し直す' : '提出する'}
-            </button>
-          </div>
-          <div className="mt-1.5 text-center text-[11px] text-slate-400">
-            {dirty
-              ? '保存していない入力があります'
-              : savedAt
-                ? `保存しました（${hhmm(savedAt)}）`
-                : submittedAt
-                  ? '提出済みです。修正したら、もう一度提出してください'
-                  : '入力の途中でも「一時保存」で残せます'}
-          </div>
+          {!locked && (
+            <>
+              <div className="mt-4 flex gap-2">
+                <button
+                  onClick={save}
+                  disabled={saving || submitting}
+                  className="flex-1 py-2.5 rounded-lg border border-slate-300 disabled:border-slate-200 text-[13px] font-bold text-slate-600"
+                >
+                  {saving ? '保存中…' : '一時保存'}
+                </button>
+                <button
+                  onClick={submit}
+                  disabled={saving || submitting}
+                  className="flex-1 py-2.5 rounded-lg bg-amber-600 disabled:bg-slate-300 text-white text-[13px] font-bold"
+                >
+                  {submitting ? '送信中…' : submittedAt ? 'この内容で出し直す' : '提出する'}
+                </button>
+              </div>
+              <div className="mt-1.5 text-center text-[11px] text-slate-400">
+                {dirty
+                  ? '保存していない入力があります'
+                  : savedAt
+                    ? `保存しました（${hhmm(savedAt)}）`
+                    : submittedAt
+                      ? '提出済みです。修正したら、もう一度提出してください'
+                      : '入力の途中でも「一時保存」で残せます'}
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>
@@ -8198,7 +8329,7 @@ function EoPerformanceSection({ employeeId, session, onNotifyAdmin, isDesktop })
 // ---- 簡易版の実績入力 ----
 // 日ごとに「件数」と「内容・備考」だけを書く形。eo業務以外のグループ向け。
 // 保存先はeo業務と同じ staff_new_performance の daily（形だけが違う）。
-function SimplePerformanceSection({ employeeId, onNotifyAdmin, isDesktop }) {
+function SimplePerformanceSection({ employeeId, settings, onNotifyAdmin, isDesktop }) {
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
   const [month, setMonth] = useState(now.getMonth() + 1);
@@ -8209,9 +8340,14 @@ function SimplePerformanceSection({ employeeId, onNotifyAdmin, isDesktop }) {
   const [dirty, setDirty] = useState(false);
   const [savedAt, setSavedAt] = useState(null);
   const [submittedAt, setSubmittedAt] = useState(null);
+  const [adminEdit, setAdminEdit] = useState(null);
 
   const monthKey = `${year}-${pad(month)}`;
   const days = useMemo(() => shiftMonthDays(monthKey), [monthKey]);
+
+  // 締切（翌月○日）を過ぎた月は、本人は見るだけ
+  const locked = isPerfLockedForStaff(year, month, settings);
+  const deadlineLabel = perfDeadlineLabel(year, month, settings);
 
   useEffect(() => {
     let cancelled = false;
@@ -8220,6 +8356,7 @@ function SimplePerformanceSection({ employeeId, onNotifyAdmin, isDesktop }) {
       if (cancelled) return;
       setDaily(row?.daily || {});
       setSubmittedAt(row?.submitted_at || null);
+      setAdminEdit(row?.admin_edited_at ? { at: row.admin_edited_at, by: row.admin_edited_by_name || '' } : null);
       setDirty(false);
       setSavedAt(null);
       setLoading(false);
@@ -8234,6 +8371,7 @@ function SimplePerformanceSection({ employeeId, onNotifyAdmin, isDesktop }) {
   };
 
   const updateDay = (key, field, value) => {
+    if (locked) return;
     setDirty(true);
     setDaily((prev) => ({ ...prev, [key]: { ...(prev[key] || {}), [field]: value } }));
   };
@@ -8275,6 +8413,9 @@ function SimplePerformanceSection({ employeeId, onNotifyAdmin, isDesktop }) {
               提出済み {dateLabel(String(submittedAt).slice(0, 10))}
             </span>
           )}
+          {locked && (
+            <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[10.5px] font-bold text-slate-600">受付終了</span>
+          )}
         </div>
         <div className="px-5 py-4 space-y-3">
           <div className="flex items-center gap-2 flex-wrap">
@@ -8297,8 +8438,17 @@ function SimplePerformanceSection({ employeeId, onNotifyAdmin, isDesktop }) {
             </span>
           </div>
           <div className="rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-[11.5px] leading-relaxed text-slate-600">
-            日ごとの件数と内容を入力してください。途中まででも「一時保存」で残せます。
+            {locked
+              ? `${deadlineLabel ? `${deadlineLabel}で締め切りました。` : '受付を終了しました。'}内容の確認はできますが、入力はできません。直したい箇所がある場合は管理者にご連絡ください。`
+              : `日ごとの件数と内容を入力してください。途中まででも「一時保存」で残せます。${deadlineLabel ? `入力できるのは${deadlineLabel}までです。` : ''}`}
           </div>
+          {adminEdit && (
+            <div className="rounded-xl border border-sky-200 bg-sky-50 px-3.5 py-2.5 text-[11.5px] leading-relaxed text-sky-800">
+              この月の実績は、{dateLabel(String(adminEdit.at).slice(0, 10))}に
+              {adminEdit.by ? `${adminEdit.by}さん（管理者）` : '管理者'}が修正しています。
+              変更箇所はお知らせでご確認ください。
+            </div>
+          )}
         </div>
       </div>
 
@@ -8311,47 +8461,62 @@ function SimplePerformanceSection({ employeeId, onNotifyAdmin, isDesktop }) {
               <span className={`w-[4.5rem] shrink-0 text-[13px] font-bold ${d.isSunday || d.holidayName ? 'text-rose-600' : d.isSaturday ? 'text-sky-600' : 'text-slate-700'}`}>
                 {d.day}日({d.weekday})
               </span>
-              <input
-                type="number"
-                inputMode="numeric"
-                min="0"
-                value={daily[d.key]?.count ?? ''}
-                onChange={(e) => updateDay(d.key, 'count', e.target.value)}
-                placeholder="件数"
-                className="w-[5.5rem] shrink-0 box-border rounded-lg border border-slate-200 px-2.5 py-2 text-[16px] font-mono text-right"
-              />
-              <input
-                value={daily[d.key]?.note ?? ''}
-                onChange={(e) => updateDay(d.key, 'note', e.target.value)}
-                placeholder="内容・備考"
-                className="flex-1 min-w-[8rem] box-border rounded-lg border border-slate-200 px-2.5 py-2 text-[16px]"
-              />
+              {locked ? (
+                <>
+                  <div className="w-[5.5rem] shrink-0 box-border rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 text-[15px] font-mono text-right text-slate-600">
+                    {(daily[d.key]?.count ?? '') === '' ? <span className="text-slate-300">-</span> : daily[d.key].count}
+                  </div>
+                  <div className="flex-1 min-w-[8rem] box-border rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 text-[15px] text-slate-600">
+                    {(daily[d.key]?.note ?? '') === '' ? <span className="text-slate-300">-</span> : daily[d.key].note}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <input
+                    type="number"
+                    inputMode="numeric"
+                    min="0"
+                    value={daily[d.key]?.count ?? ''}
+                    onChange={(e) => updateDay(d.key, 'count', e.target.value)}
+                    placeholder="件数"
+                    className="w-[5.5rem] shrink-0 box-border rounded-lg border border-slate-200 px-2.5 py-2 text-[16px] font-mono text-right"
+                  />
+                  <input
+                    value={daily[d.key]?.note ?? ''}
+                    onChange={(e) => updateDay(d.key, 'note', e.target.value)}
+                    placeholder="内容・備考"
+                    className="flex-1 min-w-[8rem] box-border rounded-lg border border-slate-200 px-2.5 py-2 text-[16px]"
+                  />
+                </>
+              )}
             </div>
           ))}
         </div>
       )}
 
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-5 py-4 space-y-2">
-        <div className="flex gap-2">
-          <button
-            onClick={save}
-            disabled={saving || loading}
-            className="flex-1 rounded-xl border border-slate-300 py-3 text-[13.5px] font-bold text-slate-600 disabled:opacity-60"
-          >
-            {saving ? '保存中…' : '一時保存'}
-          </button>
-          <button
-            onClick={submit}
-            disabled={submitting || loading}
-            className="flex-1 rounded-xl bg-amber-600 py-3 text-[13.5px] font-bold text-white disabled:bg-slate-200"
-          >
-            {submitting ? '送信中…' : submittedAt ? '出し直す' : '提出する'}
-          </button>
+      {!locked && (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-5 py-4 space-y-2">
+          <div className="flex gap-2">
+            <button
+              onClick={save}
+              disabled={saving || loading}
+              className="flex-1 rounded-xl border border-slate-300 py-3 text-[13.5px] font-bold text-slate-600 disabled:opacity-60"
+            >
+              {saving ? '保存中…' : '一時保存'}
+            </button>
+            <button
+              onClick={submit}
+              disabled={submitting || loading}
+              className="flex-1 rounded-xl bg-amber-600 py-3 text-[13.5px] font-bold text-white disabled:bg-slate-200"
+            >
+              {submitting ? '送信中…' : submittedAt ? '出し直す' : '提出する'}
+            </button>
+          </div>
+          <div className="text-center text-[11px] text-slate-400">
+            {dirty ? '保存していない入力があります' : savedAt ? `${savedAt.toLocaleTimeString('ja-JP')} に保存しました` : '提出後も、出し直せます'}
+          </div>
         </div>
-        <div className="text-center text-[11px] text-slate-400">
-          {dirty ? '保存していない入力があります' : savedAt ? `${savedAt.toLocaleTimeString('ja-JP')} に保存しました` : '提出後も、出し直せます'}
-        </div>
-      </div>
+      )}
     </div>
   );
 }
@@ -8839,6 +9004,431 @@ function EoAdminPerfEditModal({ employee, year, month, session, onNotifyEmployee
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+// 管理者用：簡易版フォーマット（日ごとの件数・内容）の実績を直す画面
+function SimpleAdminPerfEditModal({ employee, year, month, session, onNotifyEmployee, onClose, onSaved }) {
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [original, setOriginal] = useState(null);
+  const [daily, setDaily] = useState({});
+  const [submittedAt, setSubmittedAt] = useState(null);
+  const [notifyStaff, setNotifyStaff] = useState(true);
+  const [note, setNote] = useState('');
+
+  const monthKey = `${year}-${pad(month)}`;
+  const days = useMemo(() => shiftMonthDays(monthKey), [monthKey]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError('');
+    fetchNewPerf(employee.id, year, month).then((row) => {
+      if (cancelled) return;
+      const d = row?.daily || {};
+      setDaily(d);
+      setOriginal(d);
+      setSubmittedAt(row?.submitted_at || null);
+      setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [employee.id, year, month]);
+
+  const updateDay = (key, field, value) =>
+    setDaily((prev) => ({ ...prev, [key]: { ...(prev[key] || {}), [field]: value } }));
+
+  const changes = original ? diffSimplePerfDaily(original, daily, year, month) : [];
+  const changeLines = changes.map((c) => perfChangeLine(c, ''));
+  const hasChanges = changeLines.length > 0;
+  const monthTotal = days.reduce((sum, d) => sum + (Number(daily[d.key]?.count) || 0), 0);
+
+  const save = async () => {
+    if (!hasChanges) return;
+    const confirmText = notifyStaff
+      ? `${employee.name}さんの${year}年${month}月分の実績を${changeLines.length}か所変更し、本人にお知らせを送ります。よろしいですか？`
+      : `${employee.name}さんの${year}年${month}月分の実績を${changeLines.length}か所変更します。本人へのお知らせは送りません。よろしいですか？`;
+    if (!window.confirm(confirmText)) return;
+    setSaving(true);
+    setError('');
+    const at = new Date().toISOString();
+    const ok = await saveNewPerf(employee.id, year, month, {
+      daily,
+      admin_edited_at: at,
+      admin_edited_by_id: session?.id || null,
+      admin_edited_by_name: session?.name || '',
+    });
+    if (!ok) {
+      setSaving(false);
+      setError('保存できませんでした。通信の状態を確かめて、もう一度お試しください。権限の設定が原因の場合は開発者にご連絡ください。');
+      return;
+    }
+
+    if (notifyStaff && onNotifyEmployee) {
+      const shown = changeLines.slice(0, 30);
+      const rest = changeLines.length - shown.length;
+      const lines = [
+        `${year}年${month}月分の実績について、管理者が次の箇所を修正しました。`,
+        '',
+        ...shown.map((l) => `・${l}`),
+        ...(rest > 0 ? [`・ほか${rest}か所`] : []),
+        '',
+        `修正後の合計：${monthTotal}件`,
+        ...(note.trim() ? ['', `管理者からの連絡：${note.trim()}`] : []),
+        '',
+        '内容をご確認ください。相違がある場合は管理者までご連絡ください。',
+      ];
+      await onNotifyEmployee(
+        employee.id,
+        `【実績の修正】${year}年${month}月分`,
+        `${year}年${month}月分の実績について、管理者が${changeLines.length}か所を修正しました。内容をご確認ください。`,
+        null,
+        lines
+      );
+    }
+
+    await logAudit(
+      session,
+      'スタッフの実績を修正',
+      [`${year}年${month}月分（${changeLines.length}か所）`, notifyStaff ? '本人へ通知済み' : '本人への通知なし', ...changeLines.slice(0, 50)].join(' / '),
+      employee.id,
+      employee.name
+    );
+
+    setSaving(false);
+    if (onSaved) onSaved();
+    onClose();
+  };
+
+  const closeSafely = () => {
+    if (hasChanges && !window.confirm('保存していない変更があります。閉じてよろしいですか？')) return;
+    onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-50 p-0 sm:p-4">
+      <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-2xl max-h-[92vh] overflow-y-auto">
+        <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center gap-2 flex-wrap">
+          <div className="w-9 h-9 rounded-xl bg-amber-50 flex items-center justify-center shrink-0">
+            <Pencil size={16} className="text-amber-600" />
+          </div>
+          <div>
+            <h3 className="font-bold text-[15px]">{employee.name}さんの実績を修正</h3>
+            <div className="text-[11.5px] text-slate-400">
+              {year}年{month}月分
+              {submittedAt ? `・提出済み ${dateLabel(String(submittedAt).slice(0, 10))}` : '・未提出'}
+              ・合計 {monthTotal}件
+            </div>
+          </div>
+          <button onClick={closeSafely} className="ml-auto text-[12.5px] font-bold text-slate-400 px-2 py-1">閉じる</button>
+        </div>
+
+        {loading ? (
+          <div className="px-5 py-14 text-center text-[12.5px] text-slate-300">読み込み中…</div>
+        ) : (
+          <>
+            <div className="px-5 pt-4">
+              <div className="rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-[11.5px] leading-relaxed text-amber-800">
+                本人が入力した内容を直接書き換えます。保存すると、変更した箇所の一覧が本人へのお知らせとして送られます。
+              </div>
+            </div>
+
+            <div className="px-5 py-4">
+              <div className="rounded-xl border border-slate-200 overflow-hidden divide-y divide-slate-100">
+                {days.map((d) => (
+                  <div key={d.key} className="px-3 py-2 flex items-center gap-2 flex-wrap">
+                    <span className={`w-[4.5rem] shrink-0 text-[12.5px] font-bold ${d.isSunday || d.holidayName ? 'text-rose-600' : d.isSaturday ? 'text-sky-600' : 'text-slate-700'}`}>
+                      {d.day}日({d.weekday})
+                    </span>
+                    <input
+                      type="number"
+                      min="0"
+                      value={daily[d.key]?.count ?? ''}
+                      onChange={(e) => updateDay(d.key, 'count', e.target.value)}
+                      placeholder="件数"
+                      className="w-[5rem] shrink-0 box-border rounded-lg border border-slate-200 px-2 py-1.5 text-[13px] font-mono text-right"
+                    />
+                    <input
+                      value={daily[d.key]?.note ?? ''}
+                      onChange={(e) => updateDay(d.key, 'note', e.target.value)}
+                      placeholder="内容・備考"
+                      className="flex-1 min-w-[8rem] box-border rounded-lg border border-slate-200 px-2 py-1.5 text-[13px]"
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="px-5 pb-5 space-y-3">
+              <div className={`rounded-xl border px-3.5 py-3 ${hasChanges ? 'border-sky-200 bg-sky-50' : 'border-slate-200 bg-slate-50'}`}>
+                <div className={`text-[12px] font-bold ${hasChanges ? 'text-sky-900' : 'text-slate-500'}`}>
+                  {hasChanges ? `変更する箇所：${changeLines.length}か所` : '変更はありません'}
+                </div>
+                {hasChanges && (
+                  <ul className="mt-2 space-y-0.5 max-h-48 overflow-y-auto">
+                    {changeLines.slice(0, 50).map((l, i) => (
+                      <li key={i} className="text-[11.5px] text-sky-800">・{l}</li>
+                    ))}
+                    {changeLines.length > 50 && (
+                      <li className="text-[11.5px] text-sky-700">・ほか{changeLines.length - 50}か所</li>
+                    )}
+                  </ul>
+                )}
+              </div>
+
+              <label className="flex items-start gap-2 text-[12.5px] text-slate-600">
+                <input type="checkbox" checked={notifyStaff} onChange={(e) => setNotifyStaff(e.target.checked)} className="mt-0.5" />
+                <span>
+                  本人に変更箇所をお知らせする
+                  <span className="block text-[11px] text-slate-400">アプリ内のお知らせと、連絡用メールアドレスが登録されていればメールも送ります。</span>
+                </span>
+              </label>
+
+              {notifyStaff && (
+                <Field label="ひとこと添える（任意）">
+                  <input
+                    value={note}
+                    onChange={(e) => setNote(e.target.value)}
+                    placeholder="例：日報と件数が合わなかったため修正しました"
+                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px]"
+                  />
+                </Field>
+              )}
+
+              {error && (
+                <div className="rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-[11.5px] text-rose-700">{error}</div>
+              )}
+
+              <div className="flex gap-2">
+                <button onClick={closeSafely} disabled={saving} className="flex-1 py-2.5 rounded-lg border border-slate-300 text-[13px] font-bold text-slate-600">
+                  やめる
+                </button>
+                <button
+                  onClick={save}
+                  disabled={saving || !hasChanges}
+                  className="flex-1 py-2.5 rounded-lg bg-amber-600 disabled:bg-slate-300 text-white text-[13px] font-bold"
+                >
+                  {saving ? '保存中…' : notifyStaff ? '保存して本人に知らせる' : '保存する（通知なし）'}
+                </button>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// 管理者用：全グループの実績を確認し、必要なら直す画面
+function PerfReviewTab({ employeeAccounts, settings, session, isMasterAdmin, onNotifyEmployee, onSavePerfDeadline, isDesktop }) {
+  const now = new Date();
+  const [year, setYear] = useState(now.getFullYear());
+  const [month, setMonth] = useState(now.getMonth() + 1);
+  const [group, setGroup] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [newRows, setNewRows] = useState([]);
+  const [existingRows, setExistingRows] = useState([]);
+  const [editing, setEditing] = useState(null);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [deadlineDraft, setDeadlineDraft] = useState(String(perfDeadlineDay(settings) || 0));
+  const [savingDeadline, setSavingDeadline] = useState(false);
+
+  useEffect(() => { setDeadlineDraft(String(perfDeadlineDay(settings) || 0)); }, [settings]);
+
+  // 実績入力を使っているグループのスタッフだけを対象にする
+  const targets = employeeAccounts
+    .filter((a) => !a.resignationDate)
+    .map((a) => ({ account: a, format: performanceFormatKeyFor(a.mainGroup, settings) }))
+    .filter((t) => t.format !== 'none' && PERFORMANCE_FORMATS[t.format]);
+  const groups = Array.from(new Set(targets.map((t) => t.account.mainGroup).filter(Boolean))).sort();
+  const shown = group ? targets.filter((t) => t.account.mainGroup === group) : targets;
+  const ids = shown.map((t) => t.account.id);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    fetchGroupPerfAll(ids, year, month).then((perf) => {
+      if (cancelled) return;
+      setNewRows(perf.newRows);
+      setExistingRows(perf.existingRows);
+      setLoading(false);
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [year, month, ids.join(','), reloadKey]);
+
+  const rows = shown.map((t) => {
+    const newRow = newRows.find((r) => r.employee_id === t.account.id);
+    const existingRow = existingRows.find((r) => r.employee_id === t.account.id);
+    const newDaily = newRow?.daily || {};
+    const existingDaily = existingRow?.daily || {};
+    let summary;
+    if (t.format === 'eo') {
+      const newPoints = computeNewPerfMonthPoints(newDaily) + computeExistingPerfMonthNewPoints(existingDaily);
+      summary = `新規${newPoints}P／既存${computeExistingPerfMonthPoints(existingDaily)}P／エンパケ${computeMonthEmpakeCount(newDaily)}枚`;
+    } else {
+      const total = Object.values(newDaily).reduce((s, d) => s + (Number(d?.count) || 0), 0);
+      const filled = Object.values(newDaily).filter((d) => (d?.count ?? '') !== '' || (d?.note ?? '')).length;
+      summary = `合計${total}件（入力${filled}日）`;
+    }
+    const adminEditedAt = [newRow?.admin_edited_at, existingRow?.admin_edited_at]
+      .filter(Boolean)
+      .sort((x, y) => String(y).localeCompare(String(x)))[0] || null;
+    return { ...t, summary, submittedAt: newRow?.submitted_at || null, adminEditedAt };
+  });
+
+  const notSubmitted = rows.filter((r) => !r.submittedAt);
+  const years = [now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1];
+  const months = Array.from({ length: 12 }, (_, i) => i + 1);
+  const deadlineDay = perfDeadlineDay(settings);
+  const deadlineLabel = perfDeadlineLabel(year, month, settings);
+  const lockedNow = isPerfLockedForStaff(year, month, settings);
+
+  const saveDeadline = async () => {
+    if (!onSavePerfDeadline) return;
+    setSavingDeadline(true);
+    await onSavePerfDeadline(deadlineDraft);
+    setSavingDeadline(false);
+  };
+
+  return (
+    <div className="space-y-5">
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
+        <div className="flex items-center gap-2 flex-wrap">
+          <h2 className="font-bold text-[14px] text-slate-800 flex items-center gap-2"><BarChart3 size={16} className="text-slate-400" />実績の確認</h2>
+          <div className="ml-auto flex items-center gap-2 flex-wrap">
+            <select value={group} onChange={(e) => setGroup(e.target.value)} className="border border-slate-200 rounded-lg px-2 py-1.5 text-[12.5px] bg-white">
+              <option value="">すべての業務</option>
+              {groups.map((g) => <option key={g} value={g}>{g}</option>)}
+            </select>
+            <select value={year} onChange={(e) => setYear(Number(e.target.value))} className="border border-slate-200 rounded-lg px-2 py-1.5 text-[12.5px] bg-white">
+              {years.map((y) => <option key={y} value={y}>{y}年</option>)}
+            </select>
+            <select value={month} onChange={(e) => setMonth(Number(e.target.value))} className="border border-slate-200 rounded-lg px-2 py-1.5 text-[12.5px] bg-white">
+              {months.map((m) => <option key={m} value={m}>{m}月</option>)}
+            </select>
+          </div>
+        </div>
+
+        <div className={`rounded-xl border px-4 py-3 text-[11.5px] leading-relaxed ${lockedNow ? 'border-slate-300 bg-slate-50 text-slate-600' : 'border-emerald-200 bg-emerald-50 text-emerald-800'}`}>
+          {deadlineDay === 0 ? (
+            <>スタッフ本人の入力の締切は設けていません。本人はいつでも過去分を直せます。</>
+          ) : lockedNow ? (
+            <>{year}年{month}月分は <b>{deadlineLabel}</b> で締め切りました。本人は見るだけで、修正はこの画面から行います。</>
+          ) : (
+            <>{year}年{month}月分は <b>{deadlineLabel}</b> まで本人が入力できます。それ以降は見るだけになります。</>
+          )}
+        </div>
+
+        <div className="bg-slate-50 rounded-xl p-4 space-y-2">
+          <div className="text-[12px] font-bold text-slate-600">スタッフ本人が実績を入力できる期限（全業務に共通）</div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <select
+              value={deadlineDraft}
+              onChange={(e) => setDeadlineDraft(e.target.value)}
+              disabled={!isMasterAdmin}
+              className="border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white disabled:bg-slate-100 disabled:text-slate-400"
+            >
+              <option value="0">締切を設けない（いつでも直せる）</option>
+              {Array.from({ length: 28 }, (_, i) => i + 1).map((d) => (
+                <option key={d} value={String(d)}>翌月{d}日まで</option>
+              ))}
+            </select>
+            {isMasterAdmin ? (
+              <button onClick={saveDeadline} disabled={savingDeadline || deadlineDraft === String(deadlineDay)} className="text-[11.5px] font-bold text-amber-600 disabled:text-slate-300">
+                {savingDeadline ? '保存中…' : '期限を保存する'}
+              </button>
+            ) : (
+              <span className="text-[11px] text-slate-400">変更できるのはマスター管理者のみです</span>
+            )}
+          </div>
+          <div className="text-[11px] text-slate-400">
+            「翌月5日まで」にすると、10月分は11月5日のおわりまで本人が入力できます。期限を過ぎても、この画面からは管理者がいつでも直せます。
+          </div>
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-6 py-14 text-center text-[12.5px] text-slate-300">読み込み中…</div>
+      ) : rows.length === 0 ? (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-6 py-14 text-center text-[12.5px] text-slate-300">
+          実績入力を使っているスタッフがいません（「グループごとの入力フォーマット」で設定します）
+        </div>
+      ) : (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="px-5 py-3 border-b border-slate-100 text-[12px] text-slate-500">
+            {rows.length}名中 {rows.length - notSubmitted.length}名が提出済み
+            {notSubmitted.length > 0 && <span className="text-amber-700">・未提出 {notSubmitted.map((r) => r.account.name).slice(0, 8).join('、')}{notSubmitted.length > 8 ? ` ほか${notSubmitted.length - 8}名` : ''}</span>}
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-[12.5px]">
+              <thead>
+                <tr className="text-left text-[11px] text-slate-400 border-b border-slate-100">
+                  <th className="px-4 py-2 font-medium">氏名</th>
+                  <th className="px-4 py-2 font-medium">業務</th>
+                  <th className="px-4 py-2 font-medium">提出</th>
+                  <th className="px-4 py-2 font-medium">内容</th>
+                  <th className="px-4 py-2 font-medium">実績の修正</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.account.id} className="border-b border-slate-100 last:border-0">
+                    <td className="px-4 py-2.5 font-semibold text-slate-800"><EmployeeLink id={r.account.id} name={r.account.name} /></td>
+                    <td className="px-4 py-2.5 text-slate-500 whitespace-nowrap">{r.account.mainGroup || '-'}</td>
+                    <td className="px-4 py-2.5 whitespace-nowrap">
+                      {r.submittedAt ? (
+                        <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10.5px] font-bold text-emerald-700">
+                          提出済み {dateLabel(String(r.submittedAt).slice(0, 10))}
+                        </span>
+                      ) : (
+                        <span className="rounded-full bg-rose-50 px-2 py-0.5 text-[10.5px] font-bold text-rose-600">未提出</span>
+                      )}
+                      {r.adminEditedAt && (
+                        <span className="ml-1 rounded-full bg-sky-50 px-2 py-0.5 text-[10.5px] font-bold text-sky-700 whitespace-nowrap">修正済み</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-2.5 text-slate-600 font-mono whitespace-nowrap">{r.summary}</td>
+                    <td className="px-4 py-2.5 whitespace-nowrap">
+                      <button
+                        onClick={() => setEditing(r)}
+                        className="inline-flex items-center gap-1 rounded-lg border border-slate-300 px-2.5 py-1.5 text-[11.5px] font-bold text-slate-600"
+                      >
+                        <Pencil size={12} className="text-slate-400" />実績を直す
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {editing && editing.format === 'eo' && (
+        <EoAdminPerfEditModal
+          employee={editing.account}
+          year={year}
+          month={month}
+          session={session}
+          onNotifyEmployee={onNotifyEmployee}
+          onClose={() => setEditing(null)}
+          onSaved={() => setReloadKey((k) => k + 1)}
+        />
+      )}
+      {editing && editing.format !== 'eo' && (
+        <SimpleAdminPerfEditModal
+          employee={editing.account}
+          year={year}
+          month={month}
+          session={session}
+          onNotifyEmployee={onNotifyEmployee}
+          onClose={() => setEditing(null)}
+          onSaved={() => setReloadKey((k) => k + 1)}
+        />
+      )}
     </div>
   );
 }
@@ -11967,11 +12557,12 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
     {
       key: 'staff-group',
       label: 'スタッフ管理',
-      tabs: isMasterAdmin ? ['accounts', 'groupleave', 'eoincentive', 'groupformats', 'auditlog', 'adminperms', 'resignreasons'] : ['accounts', 'groupleave', 'eoincentive', 'auditlog'],
+      tabs: isMasterAdmin ? ['accounts', 'groupleave', 'perfreview', 'eoincentive', 'groupformats', 'auditlog', 'adminperms', 'resignreasons'] : ['accounts', 'groupleave', 'perfreview', 'eoincentive', 'auditlog'],
       items: isMasterAdmin
         ? [
             { tab: 'accounts', label: 'スタッフ一覧・登録', sub: '入退職日・有休管理' },
             { tab: 'groupleave', label: '出勤規定日数設定', sub: 'グループ別・月別日数' },
+            { tab: 'perfreview', label: '実績の確認', sub: '全業務の閲覧・修正・入力期限' },
             { tab: 'eoincentive', label: 'eo業務インセンティブ', sub: '新規実績・既存実績・支給額' },
             { tab: 'groupformats', label: 'グループごとの入力フォーマット', sub: 'シフト希望・実績入力の形' },
             { tab: 'auditlog', label: '監査ログ', sub: '承認・操作の履歴' },
@@ -11981,6 +12572,7 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
         : [
             { tab: 'accounts', label: 'スタッフ一覧・登録', sub: '入退職日・有休管理' },
             { tab: 'groupleave', label: '出勤規定日数設定', sub: 'グループ別・月別日数' },
+            { tab: 'perfreview', label: '実績の確認', sub: '全業務の閲覧・修正' },
             { tab: 'eoincentive', label: 'eo業務インセンティブ', sub: '新規実績・既存実績・支給額' },
             { tab: 'auditlog', label: '監査ログ', sub: '承認・操作の履歴' },
           ],
@@ -12066,7 +12658,7 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
   );
 }
 
-function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAdminTab = null, onConsumeRequestedAdminTab, onDecide, onDecideLeave, onDecidePerformance, onDecideCommute, onNotifyEmployee, onSaveShiftPeriod, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onListMyNumbers, onDeleteMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onSaveGroupFormats, onSaveShiftAlias, onDeleteShiftAlias, onAnnounceShift, onChangeLoginEmail, onDecideMonthlyConfirm, onCancelMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
+function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAdminTab = null, onConsumeRequestedAdminTab, onDecide, onDecideLeave, onDecidePerformance, onDecideCommute, onNotifyEmployee, onSaveShiftPeriod, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onListMyNumbers, onDeleteMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onSaveGroupFormats, onSavePerfDeadline, onSaveShiftAlias, onDeleteShiftAlias, onAnnounceShift, onChangeLoginEmail, onDecideMonthlyConfirm, onCancelMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
   const [tab, setTab] = useState('dashboard'); // dashboard | attendance | requests | leave | performance | accounts
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
@@ -12549,6 +13141,18 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
           employeeAccounts={employeeAccounts}
           groupLeaveSchedules={data.groupLeaveSchedules}
           onSave={onSaveGroupLeave}
+          isDesktop={isDesktop}
+        />
+      )}
+
+      {tab === 'perfreview' && (
+        <PerfReviewTab
+          employeeAccounts={employeeAccounts}
+          settings={data.settings}
+          session={session}
+          isMasterAdmin={session.role === 'master_admin'}
+          onNotifyEmployee={onNotifyEmployee}
+          onSavePerfDeadline={onSavePerfDeadline}
           isDesktop={isDesktop}
         />
       )}
