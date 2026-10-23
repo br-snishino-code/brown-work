@@ -177,7 +177,6 @@ function resolveNotificationTarget(subject = '') {
   if (has('出勤確認', '退勤確認')) return { topTab: 'attendance', adminTab: 'attendance', label: '勤怠一覧' };
   if (has('勤怠修正')) return { topTab: 'attendance', adminTab: 'requests', label: '勤怠修正申請' };
   if (has('休暇申請')) return { topTab: 'attendance', adminTab: 'leave', label: '休暇申請' };
-  if (has('個人実績')) return { topTab: 'attendance', adminTab: 'performance', label: '実績報告' };
   if (has('個人情報変更', '年末調整')) return { topTab: 'hr', adminTab: null, label: '人材' };
   if (has('交通費精算', '給与明細')) return { topTab: 'payroll', adminTab: null, label: '給与' };
   return null;
@@ -464,15 +463,7 @@ function tenureLabel(hireDateStr, asOf = new Date()) {
   return `勤続${y}年${m}ヶ月`;
 }
 
-// ---- Performance reports (個人実績) ----
 const lastDayOfMonth = (year, month) => new Date(year, month, 0).getDate();
-const halfPeriodLabel = (year, month, half) =>
-  half === 1 ? `${year}年${month}月 前半（1日〜15日）` : `${year}年${month}月 後半（16日〜${lastDayOfMonth(year, month)}日）`;
-const monthPeriodLabel = (year, month) => `${year}年${month}月度 月次まとめ`;
-const defaultHalfForToday = () => {
-  const d = new Date();
-  return d.getDate() <= 15 ? 1 : 2;
-};
 
 // ---- eo業務 実績管理（新規実績・既存実績・インセンティブ） ----
 const EO_GROUP_NAME = 'eo業務';
@@ -798,7 +789,7 @@ function ToastView({ toast }) {
 // 以降のコンポーネント（LoginScreenなど）は一切変更していません。
 // ============================================================
 
-const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, performanceReports: [], payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, employeeAttendanceSchedules: {}, announcements: [], yearEndAdjustments: [], commuteExpenseClaims: [], resignationReasons: [], monthlyConfirmations: [], shiftPeriods: [], shiftRequests: [], shiftTablesReady: true, bonusRecords: [], bonusTableReady: true, shiftAssignments: [], shiftAssignmentReady: true, shiftImportLogs: [], shiftNameAliases: [], shiftChanges: [], loginAttempts: [], settings: {} };
+const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, employeeAttendanceSchedules: {}, announcements: [], yearEndAdjustments: [], commuteExpenseClaims: [], resignationReasons: [], monthlyConfirmations: [], shiftPeriods: [], shiftRequests: [], shiftTablesReady: true, bonusRecords: [], bonusTableReady: true, shiftAssignments: [], shiftAssignmentReady: true, shiftImportLogs: [], shiftNameAliases: [], shiftChanges: [], loginAttempts: [], settings: {} };
 
 // 管理者宛の通知メールの送信先（app_settings の key）
 const SETTING_ADMIN_NOTIFY_EMAIL = 'admin_notify_email';
@@ -1241,25 +1232,6 @@ const rowToLeave = (row) => ({
   decidedAt: row.decided_at,
 });
 
-const rowToPerf = (row) => ({
-  id: row.id,
-  employeeId: row.employee_id,
-  employeeName: row.employees?.name || '',
-  type: row.type,
-  year: row.year,
-  month: row.month,
-  half: row.half,
-  periodLabel: row.period_label,
-  summary: row.summary,
-  numericLabel: row.numeric_label,
-  numericValue: row.numeric_value,
-  notes: row.notes,
-  status: row.status,
-  adminMemo: row.admin_memo,
-  submittedAt: row.submitted_at,
-  decidedAt: row.decided_at,
-});
-
 const rowToNotif = (row) => ({
   id: row.id,
   to: row.to_role || row.to_employee_id,
@@ -1546,7 +1518,6 @@ async function fetchAllData() {
     recordsRes,
     correctionsRes,
     leaveRes,
-    perfRes,
     notifRes,
     payrollRes,
     auditRes,
@@ -1572,7 +1543,6 @@ async function fetchAllData() {
     supabase.from('attendance_records').select('*'),
     supabase.from('corrections').select('*, employees(name)'),
     supabase.from('leave_requests').select('*, employees(name)'),
-    supabase.from('performance_reports').select('*, employees(name)'),
     supabase.from('notifications').select('*').order('sent_at', { ascending: false }).limit(50),
     supabase.from('payroll_records').select('*, employees(name)'),
     supabase.from('audit_logs').select('*').order('created_at', { ascending: false }).limit(100),
@@ -1595,7 +1565,7 @@ async function fetchAllData() {
     supabase.from('login_attempts').select('*').order('occurred_at', { ascending: false }).limit(100),
   ]);
 
-  for (const res of [employeesRes, recordsRes, correctionsRes, leaveRes, perfRes, notifRes, payrollRes, auditRes, profileReqRes, groupLeaveRes, employeeAttendanceRes, announcementsRes, yearEndRes, commuteClaimsRes]) {
+  for (const res of [employeesRes, recordsRes, correctionsRes, leaveRes, notifRes, payrollRes, auditRes, profileReqRes, groupLeaveRes, employeeAttendanceRes, announcementsRes, yearEndRes, commuteClaimsRes]) {
     if (res.error) throw res.error;
   }
   // 退職理由マスタはSQL未実行でも画面が落ちないよう、エラー時は空扱いにする
@@ -1657,7 +1627,6 @@ async function fetchAllData() {
     leaveRequests: (leaveRes.data || []).map(rowToLeave),
     leaveBalances: {},
     payrollRecords: (payrollRes.data || []).map(rowToPayroll),
-    performanceReports: (perfRes.data || []).map(rowToPerf),
     notifications: (notifRes.data || []).map(rowToNotif),
     auditLogs: (auditRes.data || []).map(rowToAudit),
     profileUpdateRequests: (profileReqRes.data || []).map(rowToProfileRequest),
@@ -2197,7 +2166,6 @@ function AttendanceApp() {
   const [mfaPending, setMfaPending] = useState(false);
   const [correctionModal, setCorrectionModal] = useState(null);
   const [leaveModalOpen, setLeaveModalOpen] = useState(false);
-  const [performanceModal, setPerformanceModal] = useState(null);
   // スタッフ画面の「勤怠」タブの中のサブタブ（勤怠＝打刻／実績＝実績入力／シフト＝月間シフト）
   const [employeeTab, setEmployeeTab] = useState('attendance');
   const [topTab, setTopTab] = useState('attendance'); // attendance | labor | requests(スタッフ) | hr(管理) | payroll | help
@@ -4074,63 +4042,6 @@ function AttendanceApp() {
     show('給与明細を公開しました', 'success');
   };
 
-  const submitPerformanceReport = async (payload) => {
-    const periodLabel = payload.type === 'half'
-      ? halfPeriodLabel(payload.year, payload.month, payload.half)
-      : monthPeriodLabel(payload.year, payload.month);
-    const { data: inserted, error } = await supabase
-      .from('performance_reports')
-      .insert({
-        employee_id: employeeId,
-        type: payload.type,
-        year: payload.year,
-        month: payload.month,
-        half: payload.half || null,
-        period_label: periodLabel,
-        summary: payload.summary,
-        numeric_label: payload.numericLabel || '',
-        numeric_value: payload.numericValue === '' ? null : payload.numericValue,
-        notes: payload.notes || '',
-        status: 'pending',
-      })
-      .select()
-      .single();
-    if (error) {
-      show('実績の送信に失敗しました', 'warn');
-      return;
-    }
-    await notifyAdmin(
-      `【個人実績】${session.name} - ${periodLabel}`,
-      `${session.name}さんより ${periodLabel} の実績報告が届きました。内容をご確認のうえ承認してください。`,
-      inserted?.id
-    );
-    await refreshData();
-    setPerformanceModal(null);
-    show('実績を提出しました。管理者に通知しました', 'success');
-  };
-
-  const decidePerformanceReport = async (id, decision, memo) => {
-    const report = data.performanceReports.find((r) => r.id === id);
-    const { error } = await supabase
-      .from('performance_reports')
-      .update({ status: decision, admin_memo: memo || '', decided_at: new Date().toISOString() })
-      .eq('id', id);
-    if (error) {
-      show('処理に失敗しました', 'warn');
-      return;
-    }
-    if (report) {
-      await notifyEmployeeUser(
-        report.employeeId,
-        `【実績${decision === 'approved' ? '承認' : '却下'}】${report.periodLabel}`,
-        `${report.periodLabel} の実績報告が${decision === 'approved' ? '承認されました' : '却下されました'}。${memo ? `管理者コメント：${memo}` : ''}`,
-        id
-      );
-    }
-    await refreshData();
-    if (report) await logAudit(session, decision === 'approved' ? '実績報告を承認' : '実績報告を却下', report.periodLabel, report.employeeId, report.employeeName);
-    show(decision === 'approved' ? '実績を承認しました' : '実績を却下しました', decision === 'approved' ? 'success' : 'warn');
-  };
 
   const cloudStatusLabel = cloudStatus === 'cloud' ? 'クラウド同期' : cloudStatus === 'connecting' ? '接続中' : cloudStatus === 'error' ? '同期エラー' : '端末保存';
   const cloudStatusClass = cloudStatus === 'cloud' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : cloudStatus === 'error' ? 'bg-rose-50 text-rose-700 border-rose-200' : 'bg-slate-50 text-slate-600 border-slate-200';
@@ -4220,7 +4131,6 @@ function AttendanceApp() {
   const myLeaveUsed = myLeaveRequests
     .filter((l) => l.type === '有休' && l.status === 'approved')
     .reduce((sum, l) => sum + l.days, 0);
-  const myPerformanceReports = data.performanceReports.filter((r) => r.employeeId === employeeId);
 
   // 管理者・マスター管理者も「働く人」として勤怠・給与の対象に含める
   const employeeAccounts = data.accounts;
@@ -4564,7 +4474,6 @@ function AttendanceApp() {
             onConsumeRequestedAdminTab={() => setPendingAdminTab(null)}
             onDecide={decideCorrection}
             onDecideLeave={decideLeaveRequest}
-            onDecidePerformance={decidePerformanceReport}
             onDecideCommute={decideCommuteExpenseClaim}
             onNotifyEmployee={notifyEmployeeUser}
             onSaveShiftPeriod={saveShiftPeriod}
@@ -4608,13 +4517,6 @@ function AttendanceApp() {
           leaveRemaining={myLeaveTotal - myLeaveUsed}
           onClose={() => setLeaveModalOpen(false)}
           onSubmit={submitLeaveRequest}
-        />
-      )}
-      {performanceModal && (
-        <PerformanceModal
-          type={performanceModal}
-          onClose={() => setPerformanceModal(null)}
-          onSubmit={submitPerformanceReport}
         />
       )}
       <ToastView toast={toast} />
@@ -7798,127 +7700,7 @@ function LeaveRequestModal({ leaveRemaining, onClose, onSubmit }) {
   );
 }
 
-function PerformanceModal({ type, onClose, onSubmit }) {
-  const now = new Date();
-  const [year, setYear] = useState(now.getFullYear());
-  const [month, setMonth] = useState(now.getMonth() + 1);
-  const [half, setHalf] = useState(defaultHalfForToday());
-  const [summary, setSummary] = useState('');
-  const [numericLabel, setNumericLabel] = useState('');
-  const [numericValue, setNumericValue] = useState('');
-  const [notes, setNotes] = useState('');
-  const canSubmit = summary.trim().length > 0;
-  const periodLabel = type === 'half' ? halfPeriodLabel(year, month, half) : monthPeriodLabel(year, month);
 
-  const years = [now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1];
-  const months = Array.from({ length: 12 }, (_, i) => i + 1);
-
-  return createPortal(
-    <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-40 p-0 sm:p-4">
-      <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-sm max-h-[90vh] overflow-y-auto">
-        <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white">
-          <h3 className="font-bold text-[15px]">{type === 'half' ? '半月実績の提出' : '月末まとめの提出'}</h3>
-          <button onClick={onClose} className="text-slate-400 text-xl leading-none px-1">×</button>
-        </div>
-        <div className="px-5 py-4 space-y-4">
-          <div className={`grid gap-3 ${type === 'half' ? 'grid-cols-3' : 'grid-cols-2'}`}>
-            <Field label="年">
-              <select value={year} onChange={(e) => setYear(Number(e.target.value))} className="w-full border border-slate-200 rounded-lg px-2 py-2 text-[13px] bg-white">
-                {years.map((y) => <option key={y} value={y}>{y}年</option>)}
-              </select>
-            </Field>
-            <Field label="月">
-              <select value={month} onChange={(e) => setMonth(Number(e.target.value))} className="w-full border border-slate-200 rounded-lg px-2 py-2 text-[13px] bg-white">
-                {months.map((m) => <option key={m} value={m}>{m}月</option>)}
-              </select>
-            </Field>
-            {type === 'half' && (
-              <Field label="期間">
-                <select value={half} onChange={(e) => setHalf(Number(e.target.value))} className="w-full border border-slate-200 rounded-lg px-2 py-2 text-[13px] bg-white">
-                  <option value={1}>前半</option>
-                  <option value={2}>後半</option>
-                </select>
-              </Field>
-            )}
-          </div>
-          <div className="bg-slate-50 rounded-lg px-3 py-2 text-[12px] text-slate-500">{periodLabel}</div>
-          <Field label={type === 'half' ? '実績内容' : '月次まとめ'}>
-            <textarea value={summary} onChange={(e) => setSummary(e.target.value)} rows={4} placeholder="対応した業務・成果などを記入してください" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] resize-none" />
-          </Field>
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="数値項目名（任意）">
-              <input value={numericLabel} onChange={(e) => setNumericLabel(e.target.value)} placeholder="例）受注件数" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px]" />
-            </Field>
-            <Field label="数値（任意）">
-              <input type="number" value={numericValue} onChange={(e) => setNumericValue(e.target.value)} placeholder="例）12" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" />
-            </Field>
-          </div>
-          <Field label="所感・備考（任意）">
-            <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} placeholder="課題や来期に向けてなど" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] resize-none" />
-          </Field>
-          <div className="flex items-start gap-2 bg-slate-50 rounded-lg p-3 text-[11.5px] text-slate-500">
-            <Mail size={13} className="mt-0.5 shrink-0" />
-            <span>提出すると管理者にメール通知が送信されます。承認・却下の結果とコメントはこの画面に表示されます</span>
-          </div>
-        </div>
-        <div className="px-5 pb-5 pt-1 flex gap-2 sticky bottom-0 bg-white">
-          <button onClick={onClose} className="flex-1 py-2.5 rounded-lg border border-slate-200 text-[13.5px] font-medium text-slate-500">キャンセル</button>
-          <button
-            onClick={() => canSubmit && onSubmit({ type, year, month, half: type === 'half' ? half : null, summary, numericLabel, numericValue, notes })}
-            disabled={!canSubmit}
-            className="flex-1 py-2.5 rounded-lg bg-amber-600 disabled:bg-slate-200 text-white text-[13.5px] font-bold"
-          >
-            提出する
-          </button>
-        </div>
-      </div>
-    </div>,
-    document.body
-  );
-}
-
-function PerformanceView({ reports, onOpenModal, isDesktop }) {
-  const sorted = [...reports].sort((a, b) => (a.submittedAt < b.submittedAt ? 1 : -1));
-  const statusLabel = { pending: '承認待ち', approved: '承認済み', rejected: '却下' };
-  const statusClass = { pending: 'bg-amber-50 text-amber-600', approved: 'bg-emerald-50 text-emerald-600', rejected: 'bg-rose-50 text-rose-600' };
-
-  return (
-    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-      <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2 flex-wrap">
-        <ClipboardList size={15} className="text-slate-400" />
-        <h2 className="font-bold text-[13.5px]">実績報告</h2>
-        <div className="ml-auto flex gap-2">
-          <button onClick={() => onOpenModal('half')} className="text-[11.5px] font-bold text-amber-600 border border-amber-200 rounded-lg px-2.5 py-1.5 flex items-center gap-1">
-            <Plus size={12} />半月実績
-          </button>
-          <button onClick={() => onOpenModal('month')} className="text-[11.5px] font-bold text-amber-600 border border-amber-200 rounded-lg px-2.5 py-1.5 flex items-center gap-1">
-            <Plus size={12} />月末まとめ
-          </button>
-        </div>
-      </div>
-      {sorted.length === 0 ? (
-        <div className="px-5 py-10 text-center text-[12.5px] text-slate-300">まだ実績報告はありません</div>
-      ) : (
-        <div className="divide-y divide-slate-100">
-          {sorted.map((r) => (
-            <div key={r.id} className="px-5 py-3.5">
-              <div className="flex items-center justify-between mb-1">
-                <span className="text-[13px] font-bold text-slate-800">{r.periodLabel}</span>
-                <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full ${statusClass[r.status]}`}>{statusLabel[r.status]}</span>
-              </div>
-              <div className="text-[12.5px] text-slate-600 whitespace-pre-wrap">{r.summary}</div>
-              {r.numericLabel && (
-                <div className="text-[12px] text-slate-500 mt-1">{r.numericLabel}：<span className="font-mono font-bold text-slate-700">{r.numericValue}</span></div>
-              )}
-              {r.notes && <div className="text-[11.5px] text-slate-400 mt-1">備考：{r.notes}</div>}
-              {r.adminMemo && <div className="text-[11.5px] text-slate-400 mt-1">管理者コメント：{r.adminMemo}</div>}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
 
 // ==== eo業務 実績管理（新規実績・既存実績・インセンティブ） ====
 
@@ -10368,7 +10150,7 @@ const HELP_ADMIN = [
       { q: 'ログインID（メールアドレス）を変えるには', a: 'スタッフ一覧の各行にあるメールのアイコンから変更できます（マスター管理者のみ）。新しいメールアドレスを入力すると、ログイン用のアドレスが切り替わります。パスワードは変わりません。連絡用メールアドレスも同時に変更するか、本人へお知らせメールを送るかを選べます。変更内容は監査ログに記録されます。' },
       { q: 'パスワードを再発行するには', a: 'スタッフ一覧の各行にある鍵のアイコンを押すと、仮パスワードを設定できます。設定した仮パスワードは本人に直接お伝えください。本人が次にログインした際、新しいパスワードの設定画面が表示されます。' },
       { q: 'スタッフにメールが届くのはどんなときですか', a: 'アカウントの作成（案内メール）、ログインIDの変更（送信を選んだ場合）、年末調整の入力依頼、年末調整の差し戻し、給与明細の公開、賞与明細の公開、ダッシュボードの「未提出の◯名にお知らせを送る」の6つです。月次勤怠の確定・差し戻し・確定の取り消し、交通費の承認・差し戻し・承認の取り消し、個人情報の変更申請の承認・却下、年末調整の承認は、スタッフ画面の「管理者からのお知らせ」にのみ表示され、メールは送られません。' },
-      { q: '通知メールの送信先を変えるには', a: '「勤怠」→「その他」→「管理者権限」の一番上にある「通知メールの送信先」で指定します。カンマ区切りで複数指定でき、未設定の場合はマスター管理者の連絡用メールアドレスに届きます。マスター管理者のみが設定できます。なお管理者宛のメールは個人情報の変更申請と年末調整のときだけ送られます。勤怠修正・休暇申請・実績報告などは、画面右上のベルのお知らせでご確認ください。' },
+      { q: '通知メールの送信先を変えるには', a: '「勤怠」→「その他」→「管理者権限」の一番上にある「通知メールの送信先」で指定します。カンマ区切りで複数指定でき、未設定の場合はマスター管理者の連絡用メールアドレスに届きます。マスター管理者のみが設定できます。なお管理者宛のメールは個人情報の変更申請と年末調整のときだけ送られます。勤怠修正・休暇申請などは、画面右上のベルのお知らせでご確認ください。' },
       { q: '管理者権限を与えるには', a: '「勤怠」→「その他」→「管理者権限」から設定します。タブ単位（勤怠・労務・人材・給与）でアクセス範囲を制限できます。マスター管理者のみが操作できます。' },
     ],
   },
@@ -11664,7 +11446,7 @@ function RecentActionsCard({ logs = [], onOpenAll }) {
   );
 }
 
-function AdminDashboardTab({ missingCount, correctionCount, leaveCount, performanceCount, gpsAlertCount, contractAlertCount, offShiftAlerts = [], shiftNoClockInCount = 0, clockInApprovalCount = 0, employeeCount, todayPresentCount = 0, monthOvertimeMin = 0, paidLeaveShortages = [], announcements = [], notifications = [], onNavigate, onNavigateTop, onOpenNotification, isDesktop, todayStatus = null, monthClosing = null, auditLogs = [] }) {
+function AdminDashboardTab({ missingCount, correctionCount, leaveCount, gpsAlertCount, contractAlertCount, offShiftAlerts = [], shiftNoClockInCount = 0, clockInApprovalCount = 0, employeeCount, todayPresentCount = 0, monthOvertimeMin = 0, paidLeaveShortages = [], announcements = [], notifications = [], onNavigate, onNavigateTop, onOpenNotification, isDesktop, todayStatus = null, monthClosing = null, auditLogs = [] }) {
   const alertRows = [
     { label: '打刻漏れ・打刻間違い', count: missingCount, tab: 'requests', icon: <AlertTriangle size={14} /> },
     { label: '位置情報が5回以上連続で未記録', count: gpsAlertCount, tab: 'attendance', icon: <MapPin size={14} /> },
@@ -11676,14 +11458,13 @@ function AdminDashboardTab({ missingCount, correctionCount, leaveCount, performa
   const unapprovedRows = [
     { label: '未承認の勤怠修正申請', count: correctionCount, tab: 'requests', icon: <FileEdit size={14} /> },
     { label: '未承認の休暇申請', count: leaveCount, tab: 'leave', icon: <Palmtree size={14} /> },
-    { label: '未承認の実績報告', count: performanceCount, tab: 'performance', icon: <ClipboardList size={14} /> },
     { label: '遅刻・早出などの出勤承認', count: clockInApprovalCount, tab: 'attendance', icon: <Clock size={14} /> },
   ];
   const quickLinks = [
     { label: '勤怠一覧', tab: 'attendance', icon: <Clock size={17} /> },
     { label: 'スタッフ管理', tab: 'accounts', icon: <Users size={17} /> },
     { label: '休暇申請', tab: 'leave', icon: <Palmtree size={17} /> },
-    { label: '実績報告（過去分）', tab: 'performance', icon: <ClipboardList size={17} /> },
+    { label: '実績の確認', tab: 'perfreview', icon: <ClipboardList size={17} /> },
   ];
 
   const alertTotal = alertRows.reduce((s, r) => s + r.count, 0);
@@ -12757,7 +12538,7 @@ function PayrollMetric({ label, value }) {
   );
 }
 
-function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveCount, performanceCount, monthlyConfirmCount = 0, approvalCount = 0, shiftPendingCount = 0, isMasterAdmin }) {
+function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveCount, monthlyConfirmCount = 0, approvalCount = 0, shiftPendingCount = 0, isMasterAdmin }) {
   const [open, setOpen] = useState(null);
   const wrapRef = useRef(null);
 
@@ -12783,10 +12564,9 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
     {
       key: 'leave-group',
       label: '休暇・申請管理',
-      tabs: ['leave', 'performance'],
+      tabs: ['leave'],
       items: [
         { tab: 'leave', label: '休暇申請', sub: '承認・却下', badge: leaveCount },
-        { tab: 'performance', label: '実績報告（過去分）', sub: '記録の確認', badge: performanceCount },
       ],
     },
     {
@@ -12814,7 +12594,7 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
     },
   ];
 
-  const totalBadge = attendanceCount + correctionCount + leaveCount + performanceCount + monthlyConfirmCount;
+  const totalBadge = attendanceCount + correctionCount + leaveCount + monthlyConfirmCount;
 
   // よく使う項目は常に横並びで表示し、1クリックで開けるようにする。
   // 残りは「その他」にまとめる。
@@ -12893,7 +12673,7 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
   );
 }
 
-function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAdminTab = null, onConsumeRequestedAdminTab, onDecide, onDecideLeave, onDecidePerformance, onDecideCommute, onNotifyEmployee, onSaveShiftPeriod, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onListMyNumbers, onDeleteMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onSaveGroupFormats, onSavePerfDeadline, onSaveShiftAlias, onDeleteShiftAlias, onAnnounceShift, onChangeLoginEmail, onDecideMonthlyConfirm, onCancelMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
+function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAdminTab = null, onConsumeRequestedAdminTab, onDecide, onDecideLeave, onDecideCommute, onNotifyEmployee, onSaveShiftPeriod, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onListMyNumbers, onDeleteMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onSaveGroupFormats, onSavePerfDeadline, onSaveShiftAlias, onDeleteShiftAlias, onAnnounceShift, onChangeLoginEmail, onDecideMonthlyConfirm, onCancelMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
   const [tab, setTab] = useState('dashboard'); // dashboard | attendance | requests | leave | performance | accounts
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
@@ -12904,8 +12684,6 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
   const decided = data.corrections.filter((c) => c.status !== 'pending').slice(0, 8);
   const leavePending = data.leaveRequests.filter((l) => l.status === 'pending');
   const leaveDecided = data.leaveRequests.filter((l) => l.status !== 'pending').slice(0, 8);
-  const performancePending = data.performanceReports.filter((r) => r.status === 'pending');
-  const performanceDecided = data.performanceReports.filter((r) => r.status !== 'pending');
   const today = todayKey();
 
   const missing = [];
@@ -13207,7 +12985,6 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
         attendanceCount={clockInApprovalCount}
         correctionCount={pending.length + missing.length}
         leaveCount={leavePending.length}
-        performanceCount={performancePending.length}
         monthlyConfirmCount={monthlyConfirmCount}
         approvalCount={approvalItems.length}
         shiftPendingCount={shiftPendingCount}
@@ -13278,7 +13055,6 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
           missingCount={missing.length}
           correctionCount={pending.length}
           leaveCount={leavePending.length}
-          performanceCount={performancePending.length}
           gpsAlertCount={gpsAlerts.length}
           offShiftAlerts={offShiftAlerts}
           shiftNoClockInCount={shiftNoClockIn.length}
@@ -13396,14 +13172,6 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
         <EoAdminIncentiveTab employeeAccounts={employeeAccounts} settings={data.settings} session={session} onNotifyEmployee={onNotifyEmployee} isDesktop={isDesktop} />
       )}
 
-      {tab === 'performance' && (
-        <PerformanceAdminTab
-          pending={performancePending}
-          decided={performanceDecided}
-          onDecide={onDecidePerformance}
-          isDesktop={isDesktop}
-        />
-      )}
 
       {tab === 'leave' && (
         <div className={isDesktop ? 'grid grid-cols-2 gap-5 items-start' : 'space-y-5'}>
@@ -13563,157 +13331,6 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
   );
 }
 
-function PerformanceAdminTab({ pending, decided, onDecide, isDesktop }) {
-  const [memos, setMemos] = useState({});
-  const setMemo = (id, v) => setMemos((m) => ({ ...m, [id]: v }));
-  const [archiveYear, setArchiveYear] = useState('all');
-  const [archiveName, setArchiveName] = useState('');
-
-  // この画面は以前の運用で提出された実績報告の記録。新しい実績の提出はここには届かない
-  const noticeCard = (
-    <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-[11.5px] leading-relaxed text-slate-500">
-      この画面は、以前の運用でスタッフから提出された実績報告の記録です。<br />
-      現在の実績入力の提出状況は「その他 →
-      <span className="font-semibold text-slate-600">インセンティブ集計</span>」でご確認ください。
-    </div>
-  );
-
-  const pendingCard = (
-    <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-      <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
-        <ClipboardList size={15} className="text-slate-400" />
-        <h2 className="font-bold text-[13.5px]">承認待ちの実績</h2>
-        {pending.length > 0 && <span className="ml-auto text-[11px] bg-amber-600 text-white rounded-full px-2 py-0.5 font-bold">{pending.length}</span>}
-      </div>
-      {pending.length === 0 ? (
-        <div className="px-5 py-8 text-center text-[12.5px] text-slate-300">承認待ちの実績はありません</div>
-      ) : (
-        <div className="divide-y divide-slate-100">
-          {pending.map((r) => (
-            <div key={r.id} className="px-5 py-4">
-              <div className="flex items-center justify-between mb-2">
-                <div className="flex items-center gap-2">
-                  <span className="text-[11px] font-bold text-slate-500 bg-slate-100 px-2 py-0.5 rounded-md">{r.type === 'half' ? '半月' : '月末'}</span>
-                  <span className="text-[13px] font-semibold text-slate-800"><EmployeeLink id={r.employeeId} name={r.employeeName} /> — {r.periodLabel}</span>
-                </div>
-                <div className="text-[10.5px] text-slate-400">{new Date(r.submittedAt).toLocaleString('ja-JP')}</div>
-              </div>
-              <div className="font-mono text-[12.5px] text-slate-600 bg-slate-50 rounded-lg px-3 py-2 mb-2 whitespace-pre-wrap">{r.summary}</div>
-              {r.numericValue !== null && r.numericValue !== '' && (
-                <div className="text-[12px] text-slate-500 mb-2">{r.numericLabel || '実績値'}：<span className="font-mono font-semibold text-slate-700">{r.numericValue}</span></div>
-              )}
-              {r.notes && <div className="text-[12px] text-slate-400 mb-2">備考：{r.notes}</div>}
-              <textarea
-                value={memos[r.id] ?? ''}
-                onChange={(e) => setMemo(r.id, e.target.value)}
-                rows={2}
-                placeholder="スタッフに送るコメント（任意）"
-                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[12.5px] resize-none mb-2"
-              />
-              <div className="flex gap-2">
-                <button onClick={() => onDecide(r.id, 'rejected', memos[r.id] || '')} className="flex-1 flex items-center justify-center gap-1 py-2 rounded-lg border border-slate-200 text-[12.5px] font-medium text-slate-500">
-                  <XCircle size={13} /> 却下
-                </button>
-                <button onClick={() => onDecide(r.id, 'approved', memos[r.id] || '')} className="flex-1 flex items-center justify-center gap-1 py-2 rounded-lg bg-emerald-600 text-white text-[12.5px] font-bold">
-                  <CheckCircle2 size={13} /> 承認
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-
-  // 過去に提出された実績報告の記録。対象年と氏名で絞り込める
-  const decidedYears = Array.from(new Set(decided.map((r) => r.year).filter(Boolean))).sort((a, b) => b - a);
-  const filteredDecided = decided
-    .filter((r) => archiveYear === 'all' || String(r.year) === String(archiveYear))
-    .filter((r) => !archiveName.trim() || (r.employeeName || '').includes(archiveName.trim()))
-    .sort((a, b) => String(b.submittedAt || '').localeCompare(String(a.submittedAt || '')));
-
-  const decidedCard = (
-    <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden h-fit">
-      <div className="px-5 py-3.5 border-b border-slate-100 space-y-2.5">
-        <div className="flex items-center gap-2">
-          <h2 className="font-bold text-[13.5px]">提出された実績報告の記録</h2>
-          <span className="ml-auto text-[11px] text-slate-400">{filteredDecided.length}件</span>
-        </div>
-        <div className="flex items-center gap-2 flex-wrap">
-          <select
-            value={archiveYear}
-            onChange={(e) => setArchiveYear(e.target.value)}
-            className="border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white"
-          >
-            <option value="all">すべての年</option>
-            {decidedYears.map((y) => (
-              <option key={y} value={y}>{y}年</option>
-            ))}
-          </select>
-          <input
-            value={archiveName}
-            onChange={(e) => setArchiveName(e.target.value)}
-            placeholder="氏名で絞り込む"
-            className="flex-1 min-w-[8rem] border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px]"
-          />
-        </div>
-      </div>
-      {filteredDecided.length === 0 ? (
-        <div className="px-5 py-8 text-center text-[12.5px] text-slate-300">
-          {decided.length === 0 ? '実績報告の記録はありません' : '条件に合う記録はありません'}
-        </div>
-      ) : (
-        <div className="divide-y divide-slate-100 max-h-[32rem] overflow-y-auto">
-          {filteredDecided.map((r) => (
-            <div key={r.id} className="px-5 py-3 text-[12.5px]">
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-semibold text-slate-800">
-                  <EmployeeLink id={r.employeeId} name={r.employeeName} /> — {r.periodLabel}
-                </span>
-                <span className={`font-medium shrink-0 text-[11.5px] ${r.status === 'approved' ? 'text-emerald-600' : 'text-slate-400'}`}>
-                  {r.status === 'approved' ? '承認済み' : '却下'}
-                </span>
-              </div>
-              <div className="mt-0.5 text-[10.5px] text-slate-400">
-                提出：{r.submittedAt ? new Date(r.submittedAt).toLocaleString('ja-JP') : '—'}
-              </div>
-              {r.summary && (
-                <div className="mt-1.5 font-mono text-[12px] text-slate-600 bg-slate-50 rounded-lg px-3 py-2 whitespace-pre-wrap">{r.summary}</div>
-              )}
-              {r.numericValue !== null && r.numericValue !== '' && (
-                <div className="mt-1 text-[12px] text-slate-500">
-                  {r.numericLabel || '実績値'}：<span className="font-mono font-semibold text-slate-700">{r.numericValue}</span>
-                </div>
-              )}
-              {r.notes && <div className="mt-1 text-[11.5px] text-slate-400">備考：{r.notes}</div>}
-              {r.adminMemo && <div className="mt-1 text-[11.5px] text-slate-400">コメント：{r.adminMemo}</div>}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-
-  if (isDesktop) {
-    return (
-      <div className="space-y-5">
-        {noticeCard}
-        <div className={pending.length > 0 ? 'grid grid-cols-2 gap-5 items-start' : ''}>
-          {pending.length > 0 && pendingCard}
-          {decidedCard}
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-5">
-      {noticeCard}
-      {pending.length > 0 && pendingCard}
-      {decidedCard}
-    </div>
-  );
-}
 
 
 function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAlerts = [], focus = null, onConsumeFocus, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, isDesktop }) {
@@ -16287,7 +15904,7 @@ function AdminNotifyEmailCard({ value, current = [], onSave }) {
           スタッフから個人情報の変更申請・年末調整の申告が届いたときに、お知らせメールを送る宛先です。
           複数指定する場合はカンマで区切ってください。
           未設定の場合は、マスター管理者の連絡用メールアドレス宛に送られます。
-          これ以外の申請（勤怠修正・休暇・実績報告など）はメールを送らず、画面のベルのお知らせでご確認いただきます。
+          これ以外の申請（勤怠修正・休暇など）はメールを送らず、画面のベルのお知らせでご確認いただきます。
         </div>
         <input
           value={input}
