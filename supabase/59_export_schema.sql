@@ -36,23 +36,24 @@ select
 from information_schema.columns c
 where c.table_schema = 'public'
   and c.table_name in (
-    'payroll_records',
-    'employee_salary_items',
-    'employee_standard_remuneration',
-    'insurance_rate_settings',
-    'year_end_adjustments',
-    'commute_expense_claims',
-    'employee_commute_routes',
-    'group_attendance_schedules',
-    'employee_attendance_schedules',
-    'profile_update_requests',
-    'audit_logs',
+    -- 本番の36テーブルのうち、リポジトリに CREATE TABLE が無い17個
     'announcements',
-    'resignation_reasons',
-    'staff_new_performance',
-    'staff_existing_performance',
+    'audit_logs',
+    'commute_expense_claims',
+    'employee_attendance_schedules',
+    'employee_commute_routes',
+    'employee_salary_items',
+    'employee_schedule_patterns',
+    'employee_standard_remuneration',
+    'group_attendance_schedules',
     'group_incentive_flags',
-    'employee_my_numbers'
+    'insurance_rate_settings',
+    'payroll_records',
+    'profile_update_requests',
+    'resignation_reasons',
+    'staff_existing_performance',
+    'staff_new_performance',
+    'year_end_adjustments'
   )
 order by c.table_name, c.ordinal_position;
 
@@ -76,6 +77,13 @@ left join information_schema.constraint_column_usage ccu
       and ccu.table_schema = tc.table_schema
       and tc.constraint_type = 'FOREIGN KEY'
 where tc.table_schema = 'public'
+  and tc.table_name in (
+    'announcements', 'audit_logs', 'commute_expense_claims', 'employee_attendance_schedules',
+    'employee_commute_routes', 'employee_salary_items', 'employee_schedule_patterns',
+    'employee_standard_remuneration', 'group_attendance_schedules', 'group_incentive_flags',
+    'insurance_rate_settings', 'payroll_records', 'profile_update_requests', 'resignation_reasons',
+    'staff_existing_performance', 'staff_new_performance', 'year_end_adjustments'
+  )
 group by tc.table_name, tc.constraint_type, tc.constraint_name, ccu.table_name, ccu.column_name
 order by tc.table_name, tc.constraint_type, tc.constraint_name;
 
