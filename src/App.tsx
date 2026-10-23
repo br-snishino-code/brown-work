@@ -2127,6 +2127,8 @@ function AttendanceApp() {
   const [correctionModal, setCorrectionModal] = useState(null);
   const [leaveModalOpen, setLeaveModalOpen] = useState(false);
   const [performanceModal, setPerformanceModal] = useState(null);
+  // スタッフ画面の「勤怠」タブの中のサブタブ（勤怠＝打刻／実績＝実績入力／シフト＝月間シフト）
+  const [employeeTab, setEmployeeTab] = useState('attendance');
   const [topTab, setTopTab] = useState('attendance'); // attendance | labor | requests(スタッフ) | hr(管理) | payroll | help
   // 各種申請タブの中でいま開いている申請（null = 候補の一覧）
   const [requestTab, setRequestTab] = useState(null);
@@ -2169,7 +2171,7 @@ function AttendanceApp() {
     window.scrollTo({ top: 0, behavior: 'auto' });
     if (CLOUD_ENABLED && session) refreshData({ showIndicator: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [topTab, requestTab, personalMode]);
+  }, [topTab, requestTab, employeeTab, personalMode]);
 
   // 今月の規定勤怠時間パターンを取得（管理者も自分の打刻画面で使うため全員分取得する）
   useEffect(() => {
@@ -2694,8 +2696,8 @@ function AttendanceApp() {
         return `${dateLabel(c.date)}　${before} → ${after}`;
       });
       const body = changes.length > 0
-        ? `${label}のシフトが変更されました。\n${lines.join('\n')}${changes.length > 10 ? `\nほか${changes.length - 10}件` : ''}\n「各種申請」→「シフト表」からご確認ください。`
-        : `${label}のシフトが公開されました。「各種申請」→「シフト表」からご確認ください。`;
+        ? `${label}のシフトが変更されました。\n${lines.join('\n')}${changes.length > 10 ? `\nほか${changes.length - 10}件` : ''}\n「勤怠」→「シフト」からご確認ください。`
+        : `${label}のシフトが公開されました。「勤怠」→「シフト」からご確認ください。`;
       // eslint-disable-next-line no-await-in-loop
       await notifyEmployeeInApp(id, `【シフト】${label}${changes.length > 0 ? 'の変更' : 'のシフトを公開しました'}`, body);
     }
@@ -4190,6 +4192,14 @@ function AttendanceApp() {
     setTopTab('requests');
     setRequestTab(key);
   };
+  // 「勤怠」タブのサブタブ。実績入力は、その業務に入力フォーマットがある方にだけ出す
+  const employeeTabItems = [
+    { key: 'attendance', label: '勤怠', icon: Clock },
+    ...(PerformanceFormatSection ? [{ key: 'performance', label: '実績', icon: BarChart3 }] : []),
+    { key: 'shifttable', label: 'シフト', icon: ListChecks },
+  ];
+  // 入力フォーマットの設定が外れた場合など、出せないサブタブを選んだままにしない
+  const activeEmployeeTab = employeeTabItems.some((t) => t.key === employeeTab) ? employeeTab : 'attendance';
   // スタッフ画面には「人材」タブがなく、管理画面には「各種申請」タブがないため、行き先を読み替える
   const effectiveTopTab = showStaffScreens
     ? (topTab === 'hr' ? 'requests' : topTab)
@@ -4302,14 +4312,6 @@ function AttendanceApp() {
                 formatKey={myShiftFormatKey}
               />
             )}
-            {requestTab === 'shifttable' && (
-              <MyShiftCalendar
-                employeeId={employeeId}
-                assignments={(data.shiftAssignments || []).filter((a) => a.employeeId === employeeId)}
-                shiftRequests={(data.shiftRequests || []).filter((r) => r.employeeId === employeeId)}
-                isDesktop={isDesktop}
-              />
-            )}
             {requestTab === 'leave' && (
               <LeaveView
                 leaveRequests={myLeaveRequests}
@@ -4341,9 +4343,6 @@ function AttendanceApp() {
                 onUpdate={updateCommuteExpenseClaim}
                 onSaveDraft={saveCommuteExpenseDraft}
               />
-            )}
-            {requestTab === 'performance' && PerformanceFormatSection && (
-              <PerformanceFormatSection employeeId={session.id} session={session} settings={data.settings} onNotifyAdmin={notifyAdmin} isDesktop={isDesktop} />
             )}
             {requestTab === 'yearend' && (
               <YearEndAdjustmentSection
@@ -4413,13 +4412,50 @@ function AttendanceApp() {
         )}
         {effectiveTopTab === 'attendance' && (showStaffScreens ? (
           <div className="space-y-5">
-            {needsMonthlyConfirm && (
+            <div className={`flex items-center bg-white rounded-2xl border border-slate-200 p-1.5 text-[12.5px] font-bold shadow-sm ${isDesktop ? 'max-w-md' : ''}`}>
+              {employeeTabItems.map((t) => {
+                const Icon = t.icon;
+                return (
+                  <button
+                    key={t.key}
+                    onClick={() => setEmployeeTab(t.key)}
+                    className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl transition-colors ${
+                      activeEmployeeTab === t.key ? 'bg-slate-950 text-white' : 'text-slate-500 hover:bg-slate-50'
+                    }`}
+                  >
+                    <Icon size={14} className={activeEmployeeTab === t.key ? 'text-white' : 'text-slate-400'} />
+                    {t.label}
+                  </button>
+                );
+              })}
+            </div>
+
+            {activeEmployeeTab === 'performance' && PerformanceFormatSection && (
+              <PerformanceFormatSection
+                employeeId={employeeId}
+                session={session}
+                settings={data.settings}
+                onNotifyAdmin={notifyAdmin}
+                isDesktop={isDesktop}
+              />
+            )}
+
+            {activeEmployeeTab === 'shifttable' && (
+              <MyShiftCalendar
+                employeeId={employeeId}
+                assignments={(data.shiftAssignments || []).filter((a) => a.employeeId === employeeId)}
+                shiftRequests={(data.shiftRequests || []).filter((r) => r.employeeId === employeeId)}
+                isDesktop={isDesktop}
+              />
+            )}
+
+            {activeEmployeeTab === 'attendance' && needsMonthlyConfirm && (
               <MonthlyConfirmReminderCard
                 targetMonth={commuteClaimTargetMonthKey}
                 onOpen={() => openRequest('monthly')}
               />
             )}
-            {(
+            {activeEmployeeTab === 'attendance' && (
               <EmployeeView
                 now={now}
                 todayRecord={todayRecord}
@@ -5839,15 +5875,13 @@ function GlobalTopTabs({
 }
 
 // 各種申請の候補（スタッフ画面）
+// 「実績入力」と「シフト表」は「勤怠」タブのサブタブ（実績・シフト）に移したため、
+// ここには入れない。シフト希望の提出だけが各種申請に残る。
 const STAFF_REQUEST_ITEMS = [
   { key: 'shift', label: 'シフト希望', desc: '翌月の出勤可能日を提出', icon: CalendarDays, shiftOnly: true },
-  { key: 'shifttable', label: 'シフト表', desc: '確定したシフトの確認', icon: ListChecks },
   { key: 'leave', label: '休暇申請', desc: '有休・欠勤などの申請と残日数', icon: Palmtree },
   { key: 'monthly', label: '月次勤怠申請', desc: '前月分の勤怠（交通費とまとめて提出）', icon: CheckCircle2 },
   { key: 'commute', label: '交通費申請', desc: '立て替えた交通費の精算', icon: Wallet },
-  // 実績入力は業務（メイングループ）ごとに入力フォーマットが変わる。
-  // 表示名・説明は PERFORMANCE_FORMATS の定義で上書きされる。
-  { key: 'performance', label: '実績入力', desc: '担当業務の実績を入力して保存', icon: BarChart3, byGroup: true },
   { key: 'yearend', label: '年末調整', desc: '年末調整の書類を提出', icon: FileText },
 ];
 
@@ -8585,7 +8619,7 @@ function GroupFormatSettingsTab({ employeeAccounts, groupLeaveSchedules = {}, se
   return (
     <div className="space-y-5">
       <div className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 text-[11.5px] leading-relaxed text-blue-800">
-        メイングループごとに、スタッフの「各種申請」に出るシフト希望と実績入力の形を設定できます。
+        メイングループごとに、スタッフの「各種申請」に出るシフト希望と、「勤怠」→「実績」に出る実績入力の形を設定できます。
         変更すると、そのグループのスタッフの画面がすぐに切り替わります。提出済みの内容は消えません。
         グループを設定していないスタッフには、既定の形（シフト希望は活動場所の入力、実績入力は表示しない）が使われます。
       </div>
@@ -9532,11 +9566,11 @@ function EoAdminIncentiveTab({ employeeAccounts, session, onNotifyEmployee, isDe
       await onNotifyEmployee(
         r.account.id,
         `【ご提出のお願い】${year}年${month}月分の実績`,
-        `${year}年${month}月分の実績がまだ提出されていません。「各種申請」→「実績入力」からご提出ください。`,
+        `${year}年${month}月分の実績がまだ提出されていません。「勤怠」→「実績」からご提出ください。`,
         null,
         [
           `${year}年${month}月分の実績がまだ提出されていません。`,
-          '「各種申請」→「実績入力」からご提出ください。',
+          '「勤怠」→「実績」からご提出ください。',
         ]
       );
     }
@@ -10070,10 +10104,11 @@ const HELP_STAFF = [
   {
     category: '画面の構成',
     items: [
-      { q: '画面の上のタブはどう分かれていますか', a: '「勤怠」＝打刻と勤怠履歴、「労務」＝会社からのお知らせ、「各種申請」＝申請の入口、「給与」＝給与明細、「ヘルプ」＝この画面です。スマートフォンでも同じ並びです。' },
-      { q: '申請はどこからしますか', a: '休暇・月次勤怠・交通費・年末調整などは「各種申請」タブからです。開くと一覧で並ぶので、必要なものを選んでください。実績を入力する業務の方は「実績入力」も同じ場所にあります。未提出のものがあるときはタブに印が付きます。ご自身の登録情報の確認と変更申請だけは、画面右上のアイコンを押して「登録情報の閲覧・変更」から行います。' },
+      { q: '画面の上のタブはどう分かれていますか', a: '「勤怠」＝打刻・実績入力・シフト、「労務」＝会社からのお知らせ、「各種申請」＝申請の入口、「給与」＝給与明細、「ヘルプ」＝この画面です。スマートフォンでも同じ並びです。' },
+      { q: '「勤怠」タブの中の3つのボタンは何ですか', a: '「勤怠」＝出退勤の打刻と勤怠履歴、「実績」＝担当業務の実績入力、「シフト」＝1か月分の確定シフトです。押すと画面が切り替わります。実績を入力しない業務の方には「実績」は表示されません。' },
+      { q: '申請はどこからしますか', a: '休暇・月次勤怠・交通費・年末調整・シフト希望は「各種申請」タブからです。開くと一覧で並ぶので、必要なものを選んでください。未提出のものがあるときはタブに印が付きます。実績の入力と確定シフトの確認は「勤怠」タブの中にあります。ご自身の登録情報の確認と変更申請だけは、画面右上のアイコンを押して「登録情報の閲覧・変更」から行います。' },
       { q: 'シフト希望はどこから出しますか', a: '受付が始まると「各種申請」に「シフト希望」が出ます。1日ごとに「●（出勤可能）」「×（希望休）」「有給（SVへ報告済み）」から選び、すべての日を選ぶと提出できます。★が付いている日は出勤依頼日（土日祝）です。「残りを●にする」で未選択の日をまとめて●にできます。締切前であれば、提出後も同じ画面から出し直せます。受付が終わると項目は表示されなくなります。' },
-      { q: '実績はどこで入力しますか', a: '「各種申請」→「実績入力」です。入力する項目は、所属している業務によって自動で切り替わります。対象の年月を選び、新規実績・既存実績（アップセルLTV）を日ごとに入力します。入力の途中でも「実績の内容を保存する」で保存でき、新規・既存の両方がまとめて保存されます。保存していない入力があるときは「未保存」と表示され、対象月を切り替えようとすると確認が出ます。' },
+      { q: '実績はどこで入力しますか', a: '「勤怠」タブを開き、上の「実績」を押してください。入力する項目は、所属している業務によって自動で切り替わります。対象の年月を選び、新規実績・既存実績（アップセルLTV）を日ごとに入力します。入力の途中でも「実績の内容を保存する」で保存でき、新規・既存の両方がまとめて保存されます。保存していない入力があるときは「未保存」と表示され、対象月を切り替えようとすると確認が出ます。' },
       { q: '月次勤怠申請とは', a: '前月分の勤怠を確認して提出する手続きです。「各種申請」→「月次勤怠申請」から、交通費とまとめて提出できます。提出すると管理者が確認し、最後にマスター管理者が最終承認して確定します。確定後にその月の給与明細が公開されます。未提出のときは「勤怠」タブにもお知らせが出ます。' },
     ],
   },
@@ -10085,7 +10120,7 @@ const HELP_STAFF = [
       { q: '打刻の時刻を間違えました', a: '打刻をやり直すことはできませんが、修正申請を出せば直せます。手順は打刻忘れと同じで、「勤怠一覧」から該当日の修正申請を出してください。' },
       { q: '休憩時間はどう記録されますか', a: '休憩は原則1時間として自動的に差し引かれます。実際の休憩時間が大きく異なる場合は、管理者にご相談ください。' },
       { q: '定時より早く帰る／遅くまで残る場合は', a: '退勤打刻時に理由を選ぶ画面が出ます。残業の場合は「残業」を選んでください。管理者の承認が必要になります。早退の場合も、該当する理由を選択してください。' },
-      { q: '自分のシフトはどこで見られますか', a: '「各種申請」→「シフト表」で、1か月分をまとめて確認できます。確定したシフトが取り込まれていればその内容が、まだであればご自身が提出した希望が表示されます。当日分は打刻画面の下にも「今日のシフト」として出ます。' },
+      { q: '自分のシフトはどこで見られますか', a: '「勤怠」タブを開き、上の「シフト」を押すと、1か月分をまとめて確認できます。確定したシフトが取り込まれていればその内容が、まだであればご自身が提出した希望が表示されます。当日分は打刻画面の下にも「今日のシフト」として出ます。' },
       { q: '今日のシフトはどこで見られますか', a: '打刻画面の下に「今日のシフト」として表示されます。シフト上が休み・有給の日に出勤を押すと確認画面が出ますが、応援や代打の場合はそのまま出勤できます。理由を入力しておくと管理者に伝わります。' },
       { q: '打刻した場所は記録されますか', a: '記録されます。不正打刻の防止のため、打刻時の位置情報を取得しています。スマートフォンで位置情報の許可を求められた場合は「許可」を選んでください。許可しないと打刻が記録されても位置情報が空になり、管理者側にアラートが出ます。' },
     ],
