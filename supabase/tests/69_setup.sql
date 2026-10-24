@@ -103,8 +103,11 @@ do $r$ begin
     create role authenticated;
   end if;
 end $r$;
-drop role if exists tester;
-create role tester in role authenticated;
+do $r$ begin
+  if not exists (select 1 from pg_roles where rolname='tester') then
+    create role tester in role authenticated;
+  end if;
+end $r$;
 grant usage on schema public, auth to tester, authenticated;
 grant select, insert, update, delete on public.announcements to tester;
 grant select, insert, delete on public._who to tester;
