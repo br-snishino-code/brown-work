@@ -150,7 +150,9 @@ const getHolidayName = (dateStr) => {
   return getJapaneseHolidays(year)[dateStr] || null;
 };
 
-// 一覧用：YYYY-MM-DD → M/D(曜) ／ 土=水色・日祝=ピンクの表示情報も返す
+// 一覧用：YYYY-MM-DD → M/D(曜) と、表示に使う色
+//   textClass  … 日付の文字色。土＝水色、日祝＝ピンク。行の背景は塗らない
+//   badgeClass … 「土」「日」「祝」の小さなバッジ用（背景つき）。カレンダー表示で使う
 const formatAdminDate = (key) => {
   const d = new Date(key + 'T00:00:00');
   const days = ['日', '月', '火', '水', '木', '金', '土'];
@@ -158,7 +160,8 @@ const formatAdminDate = (key) => {
   const holidayName = getHolidayName(key);
   const label = `${d.getMonth() + 1}/${d.getDate()}(${days[wd]}${holidayName ? '・祝' : ''})`;
   const badgeClass = (wd === 0 || holidayName) ? 'bg-rose-100 text-rose-700' : wd === 6 ? 'bg-sky-100 text-sky-700' : '';
-  return { label, badgeClass, holidayName };
+  const textClass = (wd === 0 || holidayName) ? 'text-rose-600' : wd === 6 ? 'text-sky-600' : 'text-slate-700';
+  return { label, badgeClass, textClass, holidayName };
 };
 
 // ---- Leave (休暇) ----
@@ -7901,6 +7904,14 @@ function CorrectionModal({ dateKey, record, onClose, onSubmit }) {
   );
 }
 
+// スマホの勤怠入力の枠。
+// iOS では input[type="time"] が端末標準の灰色の箱で描画され、
+// 枠線も白背景も効かず値が見えなくなるため、標準描画を止めている。
+// （このアプリの日付入力でも同じ対策をしている）
+const TIME_INPUT_STYLE = { WebkitAppearance: 'none', appearance: 'none' };
+const TIME_INPUT_CLASS = 'w-full box-border min-w-0 border border-slate-200 rounded bg-white text-slate-800 px-2 py-1.5 font-mono text-[12.5px] text-center';
+const BREAK_INPUT_CLASS = 'w-full box-border min-w-0 border border-slate-200 rounded bg-white text-slate-800 px-1 py-1.5 font-mono text-[12.5px] text-center';
+
 function Field({ label, children }) {
   return (
     <div>
@@ -14221,7 +14232,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
       clockOutPayDeductionNote: record?.clockOutPayDeductionNote || '',
       breakMinutes: record ? getRecordedBreakMinutes(record, record.clockOut ? new Date(record.clockOut) : new Date()) : null,
       dateShort: formatAdminDate(dateStr).label,
-      dateBadgeClass: formatAdminDate(dateStr).badgeClass,
+      dateTextClass: formatAdminDate(dateStr).textClass,
     });
   });
   rows.sort((a, b) => a.employeeName.localeCompare(b.employeeName, 'ja'));
@@ -14391,9 +14402,9 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
                 const e = edits[key] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: undefined };
                 const setField = (field, value) => setEdits((prev) => ({ ...prev, [key]: { ...(prev[key] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: undefined }), [field]: value } }));
                 return (
-                  <tr key={key} className={`border-b border-slate-100 last:border-0 ${r.needsApproval ? 'bg-amber-50/60' : r.dateBadgeClass}`}>
+                  <tr key={key} className={`border-b border-slate-100 last:border-0 ${r.needsApproval ? 'bg-amber-50/60' : ''}`}>
                     {employeeFilter === 'all' && <td className="px-2 py-2 font-semibold whitespace-nowrap"><EmployeeLink id={r.employeeId} name={r.employeeName} /></td>}
-                    <td className="px-2 py-2 font-mono font-semibold whitespace-nowrap">{r.dateShort}</td>
+                    <td className={`px-2 py-2 font-mono font-semibold whitespace-nowrap ${r.dateTextClass}`}>{r.dateShort}</td>
                     <td className="px-2 py-2">
                       <input type="time" value={e.clockIn || ''} onChange={(ev) => setField('clockIn', ev.target.value)} className="w-[84px] border border-slate-200 rounded px-1 py-1 font-mono text-[11.5px]" />
                       {(r.clockInActual || r.clockInStatusLabel) && (
@@ -14438,18 +14449,18 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
             const e = edits[key] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: undefined };
             const setField = (field, value) => setEdits((prev) => ({ ...prev, [key]: { ...(prev[key] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: undefined }), [field]: value } }));
             return (
-              <div key={key} className={`px-4 py-3 ${r.needsApproval ? 'bg-amber-50/60' : r.dateBadgeClass}`}>
+              <div key={key} className={`px-4 py-3 ${r.needsApproval ? 'bg-amber-50/60' : ''}`}>
                 <div className="flex items-center justify-between">
-                  <div className="inline-block font-mono text-[13px] font-semibold text-slate-700">{r.dateShort}</div>
+                  <div className={`inline-block font-mono text-[13px] font-semibold ${r.dateTextClass}`}>{r.dateShort}</div>
                   <div className="flex items-center gap-2">
                     {employeeFilter === 'all' && <div className="text-[12px] font-bold text-slate-600"><EmployeeLink id={r.employeeId} name={r.employeeName} /></div>}
                     <button onClick={() => setMonthlyViewTarget({ employeeId: r.employeeId, employeeName: r.employeeName, month: dateFilter.slice(0, 7) })} className="text-[10.5px] font-bold text-slate-500 border border-slate-200 rounded-md px-2 py-1">月間</button>
                   </div>
                 </div>
-                <div className="mt-2 grid grid-cols-3 gap-2">
-                  <Field label="出勤"><input type="time" value={e.clockIn || ''} onChange={(ev) => setField('clockIn', ev.target.value)} className="w-full border border-slate-200 rounded px-2 py-1.5 font-mono text-[12.5px]" /></Field>
-                  <Field label="退勤"><input type="time" value={e.clockOut || ''} onChange={(ev) => setField('clockOut', ev.target.value)} className="w-full border border-slate-200 rounded px-2 py-1.5 font-mono text-[12.5px]" /></Field>
-                  <Field label="休憩(分)"><input type="number" min="0" step="5" value={e.breakMinutes ?? ''} onChange={(ev) => setField('breakMinutes', ev.target.value)} className="w-full border border-slate-200 rounded px-2 py-1.5 font-mono text-[12.5px]" /></Field>
+                <div className="mt-2 grid grid-cols-[1fr_1fr_72px] gap-2">
+                  <Field label="出勤"><input type="time" value={e.clockIn || ''} onChange={(ev) => setField('clockIn', ev.target.value)} style={TIME_INPUT_STYLE} className={TIME_INPUT_CLASS} /></Field>
+                  <Field label="退勤"><input type="time" value={e.clockOut || ''} onChange={(ev) => setField('clockOut', ev.target.value)} style={TIME_INPUT_STYLE} className={TIME_INPUT_CLASS} /></Field>
+                  <Field label="休憩(分)"><input type="number" min="0" step="5" value={e.breakMinutes ?? ''} onChange={(ev) => setField('breakMinutes', ev.target.value)} className={BREAK_INPUT_CLASS} /></Field>
                 </div>
                 <div className="mt-2 text-[11px] text-slate-400">{r.status} ・実働 {minutesToHHMM(r.workedMin)}{r.overtimeMin > 0 ? ` ・ 残業 ${minutesToHHMM(r.overtimeMin)}` : ''}{r.lateMin > 0 ? ` ・ 遅刻 ${r.lateMin}分` : ''}{r.earlyLeaveMin > 0 ? ` ・ 早退 ${r.earlyLeaveMin}分` : ''}</div>
                 {r.clockInStatusLabel && <div className={`mt-1 text-[11px] font-medium ${approvalColorClass(r.clockInApproval, r.clockInPayDeduction, 'text-blue-600')}`}>{r.clockInStatusLabel}{r.clockInApproval ? `・${approvalSuffix(r.clockInApproval, r.clockInPayDeduction)}` : ''}{r.clockInActual ? `（実打刻 ${r.clockInActual}）` : ''}</div>}
@@ -14509,7 +14520,7 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
       return {
         date: dateStr,
         label: dateInfo.label,
-        badgeClass: dateInfo.badgeClass,
+        textClass: dateInfo.textClass,
         clockIn: record?.clockIn ? hhmm(new Date(record.clockIn)) : '',
         clockOut: record?.clockOut ? hhmm(new Date(record.clockOut)) : '',
         breakMin: record ? getRecordedBreakMinutes(record, record.clockOut ? new Date(record.clockOut) : new Date()) : 0,
@@ -14578,8 +14589,8 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
                   const e = edits[r.date] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: undefined };
                   const setField = (field, value) => setEdits((prev) => ({ ...prev, [r.date]: { ...(prev[r.date] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: undefined }), [field]: value } }));
                   return (
-                    <tr key={r.date} className={`border-b border-slate-100 last:border-0 ${r.needsApproval ? 'bg-amber-50/60' : r.badgeClass}`}>
-                      <td className="px-3 py-2 font-mono font-semibold whitespace-nowrap">{r.label}</td>
+                    <tr key={r.date} className={`border-b border-slate-100 last:border-0 ${r.needsApproval ? 'bg-amber-50/60' : ''}`}>
+                      <td className={`px-3 py-2 font-mono font-semibold whitespace-nowrap ${r.textClass}`}>{r.label}</td>
                       <td className="px-3 py-2">
                         <input type="time" value={e.clockIn || ''} onChange={(ev) => setField('clockIn', ev.target.value)} className="w-[92px] border border-slate-200 rounded px-1.5 py-1 font-mono text-[12px]" />
                         {r.clockInStatusLabel && (
@@ -14621,12 +14632,12 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
               const e = edits[r.date] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: undefined };
               const setField = (field, value) => setEdits((prev) => ({ ...prev, [r.date]: { ...(prev[r.date] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: undefined }), [field]: value } }));
               return (
-                <div key={r.date} className={`px-4 py-3 ${r.needsApproval ? 'bg-amber-50/60' : r.badgeClass}`}>
-                  <div className="font-mono text-[13px] font-semibold text-slate-700">{r.label}</div>
-                  <div className="mt-2 grid grid-cols-3 gap-2">
-                    <Field label="出勤"><input type="time" value={e.clockIn || ''} onChange={(ev) => setField('clockIn', ev.target.value)} className="w-full border border-slate-200 rounded px-2 py-1.5 font-mono text-[12.5px]" /></Field>
-                    <Field label="退勤"><input type="time" value={e.clockOut || ''} onChange={(ev) => setField('clockOut', ev.target.value)} className="w-full border border-slate-200 rounded px-2 py-1.5 font-mono text-[12.5px]" /></Field>
-                    <Field label="休憩(分)"><input type="number" min="0" step="5" value={e.breakMinutes ?? ''} onChange={(ev) => setField('breakMinutes', ev.target.value)} className="w-full border border-slate-200 rounded px-2 py-1.5 font-mono text-[12.5px]" /></Field>
+                <div key={r.date} className={`px-4 py-3 ${r.needsApproval ? 'bg-amber-50/60' : ''}`}>
+                  <div className={`font-mono text-[13px] font-semibold ${r.textClass}`}>{r.label}</div>
+                  <div className="mt-2 grid grid-cols-[1fr_1fr_72px] gap-2">
+                    <Field label="出勤"><input type="time" value={e.clockIn || ''} onChange={(ev) => setField('clockIn', ev.target.value)} style={TIME_INPUT_STYLE} className={TIME_INPUT_CLASS} /></Field>
+                    <Field label="退勤"><input type="time" value={e.clockOut || ''} onChange={(ev) => setField('clockOut', ev.target.value)} style={TIME_INPUT_STYLE} className={TIME_INPUT_CLASS} /></Field>
+                    <Field label="休憩(分)"><input type="number" min="0" step="5" value={e.breakMinutes ?? ''} onChange={(ev) => setField('breakMinutes', ev.target.value)} className={BREAK_INPUT_CLASS} /></Field>
                   </div>
                   <div className="mt-2 text-[11px] text-slate-400">{r.status} ・実働 {minutesToHHMM(r.workedMin)}{r.overtimeMin > 0 ? ` ・ 残業 ${minutesToHHMM(r.overtimeMin)}` : ''}</div>
                   {r.clockInStatusLabel && <div className={`mt-1 text-[11px] font-medium ${approvalColorClass(r.clockInApproval, r.clockInPayDeduction, 'text-blue-600')}`}>{r.clockInStatusLabel}{r.clockInApproval ? `・${approvalSuffix(r.clockInApproval, r.clockInPayDeduction)}` : ''}</div>}
