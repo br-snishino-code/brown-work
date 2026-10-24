@@ -14798,6 +14798,11 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
         overtimeMin: metrics?.overtimeMin ?? 0,
         status: computeDayStatus(record).label,
         hasRecord: !!record,
+        // 確定シフトだけを出す（画面を移らずに確認できるようにするため）
+        shift: (() => {
+          const found = shiftForDate(data.shiftRequests, employeeId, dateStr, data.shiftAssignments);
+          return found?.confirmed ? found : null;
+        })(),
         needsApproval: record?.clockInApproval === 'pending' || record?.clockOutApproval === 'pending',
         clockInStatusLabel: record?.clockInStatus ? (CLOCK_IN_STATUS_LABEL[record.clockInStatus] || '') : '',
         clockOutStatusLabel: record?.clockOutStatus ? (CLOCK_OUT_STATUS_LABEL[record.clockOutStatus] || '') : '',
@@ -14861,7 +14866,10 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
                   const setField = (field, value) => setEdits((prev) => ({ ...prev, [r.date]: { ...(prev[r.date] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: undefined }), [field]: value } }));
                   return (
                     <tr key={r.date} className={`border-b border-slate-100 last:border-0 ${r.needsApproval ? 'bg-amber-50/60' : ''}`}>
-                      <td className={`px-3 py-2 font-mono font-semibold whitespace-nowrap ${r.textClass}`}>{r.label}</td>
+                      <td className="px-3 py-2 whitespace-nowrap">
+                        <div className={`font-mono font-semibold ${r.textClass}`}>{r.label}</div>
+                        {r.shift && <div className="mt-0.5"><ShiftBadge shift={r.shift} compact /></div>}
+                      </td>
                       <td className="px-3 py-2">
                         <input type="time" value={e.clockIn || ''} onChange={(ev) => setField('clockIn', ev.target.value)} className="w-[92px] border border-slate-200 rounded px-1.5 py-1 font-mono text-[12px]" />
                         {r.clockInStatusLabel && (
@@ -14918,7 +14926,10 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
               return (
                 <div key={r.date} className={`px-4 py-3 ${r.needsApproval ? 'bg-amber-50/60' : ''}`}>
                   <div className="flex items-center justify-between">
-                    <div className={`font-mono text-[13px] font-semibold ${r.textClass}`}>{r.label}</div>
+                    <div className="flex items-center gap-1.5">
+                      <div className={`font-mono text-[13px] font-semibold ${r.textClass}`}>{r.label}</div>
+                      <ShiftBadge shift={r.shift} />
+                    </div>
                     {isMasterAdmin && r.hasRecord && (
                       <button
                         onClick={() => setDeleteTarget(r)}
