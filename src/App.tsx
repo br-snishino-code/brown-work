@@ -1628,7 +1628,9 @@ async function fetchAllData() {
     shiftChangeRes,
     loginAttemptRes,
   ] = await Promise.all([
-    supabase.from('employees').select('*'),
+    // 個人情報（住所・生年月日・口座・賃金など）は本人とマスター管理者にしか
+    // 返らない。管理者には null で返る。詳しくは supabase/71_employee_sensitive_fields.sql
+    supabase.from('employees_visible').select('*'),
     supabase.from('attendance_records').select('*'),
     supabase.from('corrections').select('*, employees(name)'),
     supabase.from('leave_requests').select('*, employees(name)'),
@@ -2457,8 +2459,10 @@ function AttendanceApp() {
       }
       setMfaPending(false);
 
+      // 読み取りは employees_visible に統一している（基の表は個人情報の列を
+      // 返さない）。自分の行なので、ここでは全項目がそのまま返る。
       const { data: empRow, error: empErr } = await supabase
-        .from('employees')
+        .from('employees_visible')
         .select('*')
         .eq('id', authUser.id)
         .single();
@@ -4583,7 +4587,7 @@ function AttendanceApp() {
         toast={toast}
         onDone={async () => {
           // 保存されている内容を読み直して、次に表示する画面を判定する
-          const { data: row } = await supabase.from('employees').select('*').eq('id', session.id).maybeSingle();
+          const { data: row } = await supabase.from('employees_visible').select('*').eq('id', session.id).maybeSingle();
           if (row) setSession({ ...rowToAccount(row), mustChangePassword: false });
           else setSession((prev) => ({ ...prev, mustChangePassword: false }));
           await refreshData();
@@ -13262,6 +13266,18 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
           </Field>
         </div>
 
+        {/* 賃金はマスター管理者だけが見られる（supabase/71_employee_sensitive_fields.sql）。
+            それ以外の管理者には時給・月給が届かないため、給与形態の設定も明細の作成も出さない。
+            0円で計算された誤った明細ができるのを防ぐため。 */}
+        {!isMasterAdmin && (
+          <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-[11.5px] text-amber-800">
+            <div className="font-bold mb-1">給与明細の作成はマスター管理者が行います</div>
+            賃金（時給・月給）はマスター管理者だけが扱える情報のため、この画面では明細を作成できません。
+            作成済みの明細は下の一覧で確認できます。
+          </div>
+        )}
+
+        {isMasterAdmin && (
         <div className="bg-slate-50 rounded-xl p-4 space-y-3">
           <div className="text-[12px] font-bold text-slate-600">給与形態（{employee.name}さん）</div>
           <div className="flex gap-2">
@@ -13279,6 +13295,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
           )}
           <button onClick={saveWageSettings} className="text-[11.5px] font-bold text-amber-600">この給与形態をスタッフ情報に保存</button>
         </div>
+        )}
 
         {wageType === 'monthly' && (
           <div className="grid grid-cols-2 gap-3">
@@ -13371,9 +13388,12 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
           </div>
         ) : (
           <div className="flex gap-2">
-            <button onClick={generate} className="flex-1 py-2.5 rounded-lg bg-slate-800 text-white text-[13px] font-bold">
-              {existing ? 'この内容で再計算・保存' : 'この内容で給与明細を作成'}
-            </button>
+            {/* 作成・再計算は賃金を使うため、マスター管理者だけに出す */}
+            {isMasterAdmin && (
+              <button onClick={generate} className="flex-1 py-2.5 rounded-lg bg-slate-800 text-white text-[13px] font-bold">
+                {existing ? 'この内容で再計算・保存' : 'この内容で給与明細を作成'}
+              </button>
+            )}
             {existing && existing.status === 'draft' && (
               <button
                 onClick={() => onPublish(existing.id)}
