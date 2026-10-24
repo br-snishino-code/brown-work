@@ -4345,6 +4345,13 @@ function AttendanceApp() {
               />
             )}
             {!showStaffScreens && (
+              <AttendanceLedgerTab
+                employeeAccounts={employeeAccounts}
+                records={data.records}
+                isDesktop={isDesktop}
+              />
+            )}
+            {!showStaffScreens && (
               <TurnoverAnalysisTab
                 employeeAccounts={employeeAccounts}
                 resignationReasons={data.resignationReasons}
@@ -9918,6 +9925,272 @@ function ResignationReasonSettings({ reasons = [], onRefresh, isDesktop }) {
           </table>
         )}
       </div>
+    </div>
+  );
+}
+
+// ---- 出勤簿の出力（労務タブ） ----
+//
+// 出勤簿そのものの記載項目を定めた条文は、労働基準法・同施行規則には無い。
+// 義務の実質は次の3つ。
+//   ・厚生労働省ガイドライン（平成29年1月20日 基発0120第3号）4(1)
+//     … 労働日ごとの始業・終業時刻を客観的な記録で確認し記録すること
+//   ・労働基準法施行規則第54条第1項第四号〜第六号
+//     … 労働日数・労働時間数・時間外／休日／深夜の各時間数は賃金台帳の記載事項
+//   ・労働安全衛生法第66条の8の3 … 労働時間の状況の把握
+// 保存期間は労働基準法第109条で5年、附則第143条第1項の経過措置により当分の間3年。
+const WEEKDAY_JA = ['日', '月', '火', '水', '木', '金', '土'];
+
+// Excelのシート名に使えない文字を置き換え、31文字に収め、重複を避ける
+function toSheetName(name, used) {
+  const base = (String(name || '').replace(/[:\\/?*[\]]/g, '_').slice(0, 27) || '名前なし');
+  let candidate = base;
+  let i = 2;
+  while (used.has(candidate)) {
+    candidate = `${base}(${i})`;
+    i += 1;
+  }
+  used.add(candidate);
+  return candidate;
+}
+
+function AttendanceLedgerTab({ employeeAccounts, records, isDesktop }) {
+  const now = new Date();
+  // 勤怠は月末締めのため、既定は前月分
+  const defaultTarget = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const [year, setYear] = useState(defaultTarget.getFullYear());
+  const [month, setMonth] = useState(defaultTarget.getMonth() + 1);
+  const [targetId, setTargetId] = useState('all');
+
+  const lastDay = lastDayOfMonth(year, month);
+  const monthStart = `${year}-${pad(month)}-01`;
+  const monthEnd = `${year}-${pad(month)}-${pad(lastDay)}`;
+
+  // その月に在籍していた人だけを対象にする
+  const targets = useMemo(
+    () =>
+      (employeeAccounts || []).filter(
+        (a) =>
+          (!a.hireDate || a.hireDate <= monthEnd) &&
+          (!a.resignationDate || a.resignationDate >= monthStart)
+      ),
+    [employeeAccounts, monthStart, monthEnd]
+  );
+  const selected = targetId === 'all' ? targets : targets.filter((a) => a.id === targetId);
+
+  // 1人分の日ごとの行を作る。打刻が無い日も1日ずつ並べる
+  const buildDays = (employeeId) => {
+    const mine = records[employeeId] || {};
+    const out = [];
+    for (let d = 1; d <= lastDay; d += 1) {
+      const key = `${year}-${pad(month)}-${pad(d)}`;
+      const r = mine[key];
+      const m = computeMetrics(r);
+      const notes = [];
+      if (r?.clockInStatus && CLOCK_IN_STATUS_LABEL[r.clockInStatus]) notes.push(`出勤：${CLOCK_IN_STATUS_LABEL[r.clockInStatus]}`);
+      if (r?.clockOutStatus && CLOCK_OUT_STATUS_LABEL[r.clockOutStatus]) notes.push(`退勤：${CLOCK_OUT_STATUS_LABEL[r.clockOutStatus]}`);
+      if (r?.breakMinutesOverride != null) notes.push(`休憩を${r.breakMinutesOverride}分に調整`);
+      if (r?.clockIn && !r.clockOut) notes.push('退勤打刻なし');
+      out.push({
+        day: d,
+        weekday: WEEKDAY_JA[new Date(year, month - 1, d).getDay()],
+        clockIn: r?.clockIn ? hhmm(new Date(r.clockIn)) : '',
+        clockOut: r?.clockOut ? hhmm(new Date(r.clockOut)) : '',
+        breakMin: m ? m.breakMin : '',
+        workedMin: m ? m.workedMin : null,
+        overtimeMin: m ? m.overtimeMin : null,
+        nightMin: m ? computeNightMinutes(r) : null,
+        worked: !!m,
+        note: notes.join(' / '),
+      });
+    }
+    return out;
+  };
+
+  const summaryOf = (days) =>
+    days.reduce(
+      (acc, d) => {
+        if (!d.worked) return acc;
+        acc.days += 1;
+        acc.workedMin += d.workedMin || 0;
+        acc.overtimeMin += d.overtimeMin || 0;
+        acc.nightMin += d.nightMin || 0;
+        return acc;
+      },
+      { days: 0, workedMin: 0, overtimeMin: 0, nightMin: 0 }
+    );
+
+  const preview = selected.map((a) => ({ account: a, summary: summaryOf(buildDays(a.id)) }));
+  const noData = preview.every((p) => p.summary.days === 0);
+
+  const exportExcel = () => {
+    const wb = XLSX.utils.book_new();
+    const period = `${year}年${month}月1日〜${year}年${month}月${lastDay}日`;
+
+    // --- この帳簿について ---
+    const about = [
+      ['出勤簿'],
+      [],
+      ['対象期間', period],
+      ['出力日', todayKey()],
+      ['対象人数', `${selected.length}名`],
+      [],
+      ['■ この帳簿の位置づけ'],
+      ['出勤簿の記載項目を定めた条文は、労働基準法・同施行規則にはありません。'],
+      ['厚生労働省「労働時間の適正な把握のために使用者が講ずべき措置に関するガイドライン」'],
+      ['（平成29年1月20日 基発0120第3号）4(1)にもとづき、労働日ごとの始業・終業時刻を記録しています。'],
+      ['労働日数・労働時間数・時間外労働時間数・深夜労働時間数は、賃金台帳の記載事項'],
+      ['（労働基準法施行規則第54条第1項第四号〜第六号）として必要なものです。'],
+      [],
+      ['■ 保存期間'],
+      ['労働基準法第109条では5年間ですが、同法附則第143条第1項の経過措置により、当分の間3年間です。'],
+      ['起算日は「完結の日」（施行規則第56条第1項第五号）。'],
+      ['ただし賃金支払期日が後の場合はその支払期日が起算日になります（同条第2項）。'],
+      ['当社は当月末締め・翌月25日払いのため、実質は支払期日が起算日です。'],
+      [],
+      ['■ 数字の前提（必ずお読みください）'],
+      ['・労働時間は、終業時刻から始業時刻と休憩を差し引いた時間です。1分単位で集計しています。'],
+      ['・休憩は固定60分で計算しています。実際に休憩を取った時刻は記録していません。'],
+      ['　管理者が個別に調整した日は、各シートの備考に表示しています。'],
+      ['・所定外労働時間は、1日の所定労働時間（8時間）を超えた分です。'],
+      ['・深夜労働時間は、22時から翌5時までの時間帯と勤務時間の重なりです。'],
+      ['　休憩がこの時間帯にかかる場合は差し引けません。'],
+      [],
+      ['■ この帳簿に含まれていないもの'],
+      ['・休日労働時間数は含まれていません。'],
+      ['　法定休日（週1日の休み）をどの曜日にするかの設定が未登録のためです。'],
+      ['・週40時間を超えた分の時間外労働は含まれていません。1日8時間を超えた分のみです。'],
+      ['・日をまたぐ勤務には対応していません（夜勤の運用がないため）。'],
+      ['・管理監督者（労働基準法第41条各号）に該当する方は、労働時間数・時間外等の記入が'],
+      ['　免除されます（施行規則第54条第5項）が、システムで該当者を区別していないため'],
+      ['　全員分を出力しています。'],
+    ];
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(about), 'この帳簿について');
+
+    // --- 月次集計 ---
+    const summaryRows = [
+      [`出勤簿 月次集計（${period}）`],
+      [],
+      ['氏名', '社員番号', '出勤日数', '労働時間', '所定外労働時間', '深夜労働時間'],
+      ...preview.map((p) => [
+        p.account.name,
+        p.account.staffNumber || '',
+        p.summary.days,
+        minutesToHHMM(p.summary.workedMin),
+        minutesToHHMM(p.summary.overtimeMin),
+        minutesToHHMM(p.summary.nightMin),
+      ]),
+    ];
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(summaryRows), '月次集計');
+
+    // --- 1人1シート ---
+    const used = new Set(['この帳簿について', '月次集計']);
+    preview.forEach(({ account, summary }) => {
+      const days = buildDays(account.id);
+      const aoa = [
+        ['出勤簿'],
+        ['氏名', account.name, '', '社員番号', account.staffNumber || ''],
+        ['対象期間', period],
+        ['所定労働時間', '1日8時間・休憩60分'],
+        [],
+        ['日', '曜日', '始業', '終業', '休憩(分)', '労働時間', '所定外', '深夜', '備考'],
+        ...days.map((d) => [
+          d.day,
+          d.weekday,
+          d.clockIn,
+          d.clockOut,
+          d.breakMin === '' ? '' : d.breakMin,
+          d.worked ? minutesToHHMM(d.workedMin) : '',
+          d.worked ? minutesToHHMM(d.overtimeMin) : '',
+          d.worked ? minutesToHHMM(d.nightMin) : '',
+          d.note,
+        ]),
+        [],
+        ['合計', '', '', '', '', minutesToHHMM(summary.workedMin), minutesToHHMM(summary.overtimeMin), minutesToHHMM(summary.nightMin), `出勤 ${summary.days}日`],
+      ];
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      ws['!cols'] = [{ wch: 4 }, { wch: 5 }, { wch: 7 }, { wch: 7 }, { wch: 9 }, { wch: 9 }, { wch: 8 }, { wch: 8 }, { wch: 34 }];
+      XLSX.utils.book_append_sheet(wb, ws, toSheetName(account.name, used));
+    });
+
+    const who = targetId === 'all' ? '全員' : (selected[0]?.name || '');
+    XLSX.writeFile(wb, `出勤簿_${year}年${pad(month)}月_${who}.xlsx`);
+  };
+
+  const years = [now.getFullYear() - 2, now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1];
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
+      <h2 className="font-bold text-[14px] text-slate-800 flex items-center gap-2">
+        <ClipboardList size={16} className="text-slate-400" />出勤簿の出力
+      </h2>
+      <p className="text-[12px] text-slate-500 leading-relaxed">
+        労働日ごとの始業・終業時刻の記録です。労働基準法第109条により保存義務があり、保存期間は当分の間3年です。
+        打刻が無い日も1日ずつ並べて出力します。
+      </p>
+
+      <div className={`grid gap-3 ${isDesktop ? 'grid-cols-3' : 'grid-cols-1'}`}>
+        <label className="block">
+          <span className="text-[11px] font-bold text-slate-400">年</span>
+          <select value={year} onChange={(e) => setYear(Number(e.target.value))} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px] bg-white mt-1">
+            {years.map((y) => <option key={y} value={y}>{y}年</option>)}
+          </select>
+        </label>
+        <label className="block">
+          <span className="text-[11px] font-bold text-slate-400">月</span>
+          <select value={month} onChange={(e) => setMonth(Number(e.target.value))} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px] bg-white mt-1">
+            {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => <option key={m} value={m}>{m}月</option>)}
+          </select>
+        </label>
+        <label className="block">
+          <span className="text-[11px] font-bold text-slate-400">対象</span>
+          <select value={targetId} onChange={(e) => setTargetId(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px] bg-white mt-1">
+            <option value="all">全員（{targets.length}名）</option>
+            {targets.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+          </select>
+        </label>
+      </div>
+
+      {targets.length === 0 ? (
+        <div className="rounded-lg bg-slate-50 border border-slate-200 px-4 py-3 text-[12.5px] text-slate-500">
+          {year}年{month}月に在籍していたスタッフがいません。
+        </div>
+      ) : (
+        <>
+          <div className="rounded-lg border border-slate-200 overflow-hidden">
+            <div className="px-4 py-2 bg-slate-50 text-[11.5px] font-bold text-slate-500">出力される内容（確認用）</div>
+            <div className="divide-y divide-slate-100 max-h-[240px] overflow-auto">
+              {preview.map((p) => (
+                <div key={p.account.id} className="px-4 py-2 flex items-center justify-between text-[12px]">
+                  <span className="text-slate-700">{p.account.name}</span>
+                  <span className="font-mono text-slate-500">
+                    出勤 {p.summary.days}日 ／ 労働 {minutesToHHMM(p.summary.workedMin)}
+                    {p.summary.overtimeMin > 0 ? ` ／ 所定外 ${minutesToHHMM(p.summary.overtimeMin)}` : ''}
+                    {p.summary.nightMin > 0 ? ` ／ 深夜 ${minutesToHHMM(p.summary.nightMin)}` : ''}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {noData && (
+            <div className="rounded-lg bg-amber-50 border border-amber-200 px-4 py-3 text-[12.5px] text-amber-800">
+              この月の打刻記録がありません。出力しても中身が空の帳簿になります。
+            </div>
+          )}
+
+          <div className="rounded-lg bg-slate-50 border border-slate-200 px-4 py-3 text-[11.5px] text-slate-500 leading-relaxed">
+            <div className="font-bold text-slate-600">この帳簿に含まれないもの</div>
+            休日労働時間数は含まれません（法定休日の曜日の設定が未登録のため）。
+            週40時間を超えた分の時間外も含まれません（1日8時間を超えた分のみ）。
+            前提と限界はExcelの1枚目「この帳簿について」に記載しています。
+          </div>
+
+          <button onClick={exportExcel} className="w-full py-2.5 rounded-lg bg-slate-800 text-white text-[13px] font-bold flex items-center justify-center gap-2">
+            <Download size={15} />出勤簿をExcelで出力する
+          </button>
+        </>
+      )}
     </div>
   );
 }
