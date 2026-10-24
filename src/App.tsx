@@ -2770,6 +2770,15 @@ function AttendanceApp() {
 
   // ---- 賞与明細 ----
   const saveBonus = async (payload) => {
+    // 公開済みの明細は上書きしない。給与明細と同じ扱いで、
+    // 直すときは先に公開を取り消す（マスター管理者のみ）
+    const already = (data.bonusRecords || []).find(
+      (b) => b.employeeId === payload.employeeId && b.year === payload.year && b.seq === payload.seq
+    );
+    if (already && already.status === 'published') {
+      show('この賞与明細は公開済みです。直すには先に公開を取り消してください', 'warn');
+      return false;
+    }
     const { error } = await supabase.from('bonus_records').upsert(
       {
         employee_id: payload.employeeId,
@@ -2819,6 +2828,39 @@ function AttendanceApp() {
     }
     await refreshData();
     show('賞与明細を公開しました');
+    return true;
+  };
+
+  // 公開済みの賞与明細を下書きに戻す（マスター管理者のみ）。
+  // 給与明細の unpublishPayroll と同じ扱い
+  const unpublishBonus = async (id) => {
+    if (session.role !== 'master_admin') {
+      show('公開を取り消せるのはマスター管理者のみです', 'warn');
+      return false;
+    }
+    const record = (data.bonusRecords || []).find((b) => b.id === id);
+    const { error } = await supabase
+      .from('bonus_records')
+      .update({ status: 'draft', published_at: null })
+      .eq('id', id);
+    if (error) {
+      console.error('公開の取り消しに失敗しました', error);
+      show(`公開の取り消しに失敗しました：${error.message || ''}`, 'warn');
+      return false;
+    }
+    if (record) {
+      const label = record.title || bonusDefaultTitle(record.year, record.seq);
+      await notifyEmployeeInApp(
+        record.employeeId,
+        `【賞与明細・一時非公開】${label}`,
+        `${label}の明細を、内容の確認のため一時的に非公開にしました。`
+          + '\n確認が終わりしだい、あらためて公開しお知らせします。',
+        null
+      );
+      await logAudit(session, '賞与明細の公開を取り消し', label, record.employeeId, record.employeeName);
+    }
+    await refreshData();
+    show('公開を取り消しました。内容を直したうえで再度公開してください', 'warn');
     return true;
   };
 
@@ -4481,6 +4523,8 @@ function AttendanceApp() {
                 tableReady={data.bonusTableReady !== false}
                 onSave={saveBonus}
                 onPublish={publishBonus}
+                onUnpublish={unpublishBonus}
+                isMasterAdmin={session.role === 'master_admin'}
                 onDelete={deleteBonus}
                 isDesktop={isDesktop}
               />
@@ -12105,7 +12149,7 @@ function printPayslip(p, employeeName) {
 const BONUS_DEFAULT_PAYMENTS = ['賞与'];
 const BONUS_DEFAULT_DEDUCTIONS = ['健康保険料', '厚生年金保険料', '雇用保険料', '所得税'];
 
-function BonusAdminTab({ employeeAccounts, bonusRecords = [], tableReady = true, onSave, onPublish, onDelete, isDesktop }) {
+function BonusAdminTab({ employeeAccounts, bonusRecords = [], tableReady = true, onSave, onPublish, onUnpublish, isMasterAdmin = false, onDelete, isDesktop }) {
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
   const [seq, setSeq] = useState(now.getMonth() + 1 >= 10 || now.getMonth() + 1 <= 3 ? 2 : 1);
@@ -12289,15 +12333,33 @@ function BonusAdminTab({ employeeAccounts, bonusRecords = [], tableReady = true,
           </div>
         </div>
         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-5 py-4 space-y-2">
-          <button
-            onClick={save}
-            disabled={saving}
-            className="w-full rounded-xl bg-amber-600 py-3 text-[14px] font-bold text-white disabled:bg-slate-200"
-          >
-            {saving ? '保存中…' : existing?.status === 'published' ? 'この内容で上書きする' : '下書きとして保存する'}
-          </button>
-          {existing?.status === 'published' && (
-            <div className="text-center text-[11px] text-slate-400">公開済みのため、保存するとスタッフの画面にもすぐ反映されます</div>
+          {existing?.status === 'published' ? (
+            // 公開済みは直接直せない。マスター管理者が公開を取り消してから修正する
+            <>
+              <div className="rounded-xl bg-emerald-50 border border-emerald-200 px-4 py-3 text-[12.5px] text-emerald-800">
+                <div className="font-bold">この賞与明細は公開済みです</div>
+                <div className="mt-1 text-emerald-700 leading-relaxed">
+                  スタッフが閲覧できる状態のため、内容は変更できません。直す場合は、
+                  {isMasterAdmin ? '下の「公開を取り消す」で下書きに戻してから修正し、あらためて公開してください。' : 'マスター管理者に公開の取り消しを依頼してください。'}
+                </div>
+              </div>
+              {isMasterAdmin && (
+                <button
+                  onClick={() => onUnpublish && onUnpublish(existing.id)}
+                  className="w-full rounded-xl border border-rose-300 bg-white py-3 text-[13px] font-bold text-rose-600"
+                >
+                  公開を取り消す（下書きに戻す）
+                </button>
+              )}
+            </>
+          ) : (
+            <button
+              onClick={save}
+              disabled={saving}
+              className="w-full rounded-xl bg-amber-600 py-3 text-[14px] font-bold text-white disabled:bg-slate-200"
+            >
+              {saving ? '保存中…' : '下書きとして保存する'}
+            </button>
           )}
         </div>
       </div>
