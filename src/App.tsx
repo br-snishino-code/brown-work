@@ -8040,11 +8040,11 @@ const TIME_INPUT_STYLE = { WebkitAppearance: 'none', appearance: 'none' };
 const TIME_INPUT_CLASS = 'w-full box-border min-w-0 border border-slate-200 rounded bg-white text-slate-800 px-2 py-1.5 font-mono text-[12.5px] text-center';
 const BREAK_INPUT_CLASS = 'w-full box-border min-w-0 border border-slate-200 rounded bg-white text-slate-800 px-1 py-1.5 font-mono text-[12.5px] text-center';
 
-// 勤怠一覧の日付の横に出す、その日のシフト。
-// 確定シフトは濃く、希望のまま（未確定）は薄く「希望」を添えて出す。
-// シフトが登録されていない日は何も出さない。
+// 勤怠一覧の日付の横に出す、その日の確定シフト。
+// 確定していないもの（スタッフの希望の段階）は出さない。
+// シフトが登録されていない日も何も出さない。
 function ShiftBadge({ shift, compact = false }) {
-  if (!shift) return null;
+  if (!shift || !shift.confirmed) return null;
   const tone = shift.kind === 'off'
     ? 'bg-slate-100 text-slate-500 border-slate-200'
     : shift.kind === 'paid'
@@ -8053,11 +8053,10 @@ function ShiftBadge({ shift, compact = false }) {
   const label = shift.kind === 'off' ? '休み' : shift.kind === 'paid' ? '有給' : (shift.place || '出勤');
   return (
     <span
-      className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-sans whitespace-nowrap ${tone} ${compact ? 'text-[9.5px]' : 'text-[10px]'} ${shift.confirmed ? '' : 'opacity-70'}`}
-      title={shift.confirmed ? '確定したシフト' : 'スタッフの希望（未確定）'}
+      className={`inline-flex items-center rounded border px-1.5 py-0.5 font-sans whitespace-nowrap ${tone} ${compact ? 'text-[9.5px]' : 'text-[10px]'}`}
+      title="確定したシフト"
     >
       {label}
-      {!shift.confirmed && <span className="font-bold">希望</span>}
     </span>
   );
 }
@@ -14458,7 +14457,11 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
       breakMinutes: record ? getRecordedBreakMinutes(record, record.clockOut ? new Date(record.clockOut) : new Date()) : null,
       dateShort: formatAdminDate(dateStr).label,
       hasRecord: !!record,
-      shift: shiftForDate(data.shiftRequests, acc.id, dateStr, data.shiftAssignments),
+      // 確定シフトだけを出す（スタッフの希望は出さない）
+      shift: (() => {
+        const found = shiftForDate(data.shiftRequests, acc.id, dateStr, data.shiftAssignments);
+        return found?.confirmed ? found : null;
+      })(),
     });
   });
   rows.sort((a, b) => a.employeeName.localeCompare(b.employeeName, 'ja'));
