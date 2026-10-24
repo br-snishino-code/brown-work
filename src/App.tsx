@@ -729,6 +729,49 @@ function computeMonthlySummary(records, target = new Date()) {
   }, { days: 0, workedMin: 0, overtimeMin: 0, lateMin: 0, earlyLeaveMin: 0 });
 }
 
+// ---- 給与明細・賞与明細の修正履歴 ----
+// 明細ごとに「いつ・誰が・何を変えたか」を持たせる（列は65番のSQLで追加）。
+// 新しいものを先頭に足し、増えすぎないように上限を設ける。
+const EDIT_HISTORY_MAX = 200;
+
+function makeHistoryEntry(actor, action, changes = []) {
+  return {
+    at: new Date().toISOString(),
+    by_id: actor?.id || null,
+    by_name: actor?.name || '',
+    action,
+    changes,
+  };
+}
+
+function appendHistory(existingHistory, entry) {
+  return [entry, ...(Array.isArray(existingHistory) ? existingHistory : [])].slice(0, EDIT_HISTORY_MAX);
+}
+
+// 支給項目・控除項目の差分を、読める文に直す
+function diffAmountItems(before, after, kindLabel) {
+  const toMap = (list) => {
+    const m = new Map();
+    (Array.isArray(list) ? list : []).forEach((it) => {
+      const label = String(it?.label || '').trim();
+      if (!label) return;
+      m.set(label, (m.get(label) || 0) + (Number(it?.amount) || 0));
+    });
+    return m;
+  };
+  const a = toMap(before);
+  const b = toMap(after);
+  const lines = [];
+  b.forEach((amount, label) => {
+    if (!a.has(label)) lines.push(`${kindLabel}を追加：${label} ${formatYen(amount)}`);
+    else if (a.get(label) !== amount) lines.push(`${kindLabel}：${label} ${formatYen(a.get(label))} → ${formatYen(amount)}`);
+  });
+  a.forEach((amount, label) => {
+    if (!b.has(label)) lines.push(`${kindLabel}を削除：${label} ${formatYen(amount)}`);
+  });
+  return lines;
+}
+
 // ---- 法定帳簿（賃金台帳・出勤簿）用の計算 ----
 // 賃金台帳には深夜労働時間数の記載が必要（労働基準法施行規則第54条）。
 // 深夜は22時〜翌5時。日をまたぐ勤務の運用は無いため、1日の中での重なりだけを見る。
@@ -1197,6 +1240,7 @@ const rowToPayroll = (row) => ({
   paymentItems: Array.isArray(row.payment_items) ? row.payment_items : null,
   deductionItems: Array.isArray(row.deduction_items) ? row.deduction_items : null,
   attendanceExtra: row.attendance_extra || null,
+  editHistory: Array.isArray(row.edit_history) ? row.edit_history : [],
 });
 
 const rowToRecord = (row) => ({
@@ -1505,6 +1549,7 @@ const rowToBonus = (row) => ({
   status: row.status || 'draft',
   notes: row.notes || '',
   publishedAt: row.published_at,
+  editHistory: Array.isArray(row.edit_history) ? row.edit_history : [],
 });
 
 // 賞与の呼び名。第1回＝夏季、第2回＝冬季として既定の名前を作る
@@ -1961,22 +2006,75 @@ async function fetchEmployeeSalaryItems(employeeId) {
   return (data || []).map((row) => ({ id: row.id, kind: row.kind, label: row.label, amount: Number(row.amount) || 0, sortOrder: row.sort_order }));
 }
 
-async function saveEmployeeSalaryItems(employeeId, items) {
-  // シンプルに全削除→再作成
-  const { error: delError } = await supabase.from('employee_salary_items').delete().eq('employee_id', employeeId);
-  if (delError) { console.error('固定支給・控除項目の保存に失敗しました', delError); return false; }
-  const toInsert = items.filter((it) => it.label.trim()).map((it, i) => ({
-    employee_id: employeeId,
-    kind: it.kind,
-    label: it.label.trim(),
-    amount: Number(it.amount) || 0,
-    sort_order: i,
-  }));
-  if (toInsert.length > 0) {
-    const { error } = await supabase.from('employee_salary_items').insert(toInsert);
-    if (error) { console.error('固定支給・控除項目の保存に失敗しました', error); return false; }
+// 固定支給・控除項目の保存。
+//
+// 以前は「全削除→再作成」でした。削除が成功して追加が失敗すると、その人の
+// 固定項目がすべて消えてしまうため、次の順番に変えています。
+//   1. 残す項目を更新・追加する（IDはそのまま引き継ぐ）
+//   2. 最後に、消えた項目だけを削除する
+// 途中で失敗しても既存の項目は残ります。
+// IDが変わらないので、どの項目をいくらからいくらに直したのかも記録できます。
+//
+// 戻り値：{ ok, changes }  changes は変更内容の説明（監査ログに残したもの）
+async function saveEmployeeSalaryItems(employeeId, items, actor = null, targetName = '') {
+  const before = await fetchEmployeeSalaryItems(employeeId);
+  const kept = (items || []).filter((it) => String(it.label || '').trim());
+
+  const fail = (e) => {
+    console.error('固定支給・控除項目の保存に失敗しました', e);
+    return { ok: false, changes: [] };
+  };
+
+  // 1. 残す項目を更新・追加
+  for (let i = 0; i < kept.length; i += 1) {
+    const it = kept[i];
+    const row = {
+      employee_id: employeeId,
+      kind: it.kind,
+      label: String(it.label).trim(),
+      amount: Number(it.amount) || 0,
+      sort_order: i,
+    };
+    if (it.id) {
+      const { error } = await supabase.from('employee_salary_items').update(row).eq('id', it.id);
+      if (error) return fail(error);
+    } else {
+      const { error } = await supabase.from('employee_salary_items').insert(row);
+      if (error) return fail(error);
+    }
   }
-  return true;
+
+  // 2. 消えた項目だけを削除
+  const keptIds = new Set(kept.filter((it) => it.id).map((it) => it.id));
+  const removed = before.filter((b) => !keptIds.has(b.id));
+  if (removed.length > 0) {
+    const { error } = await supabase
+      .from('employee_salary_items')
+      .delete()
+      .in('id', removed.map((r) => r.id));
+    if (error) return fail(error);
+  }
+
+  // 変更内容をまとめる
+  const kindLabel = (k) => (k === 'deduction' ? '控除' : '支給');
+  const changes = [];
+  kept.forEach((it) => {
+    const old = it.id ? before.find((b) => b.id === it.id) : null;
+    const amount = Number(it.amount) || 0;
+    const label = String(it.label).trim();
+    if (!old) {
+      changes.push(`追加：${kindLabel(it.kind)}「${label}」${formatYen(amount)}`);
+      return;
+    }
+    if (old.label !== label) changes.push(`名称：${kindLabel(it.kind)}「${old.label}」→「${label}」`);
+    if (old.amount !== amount) changes.push(`金額：${kindLabel(it.kind)}「${label}」${formatYen(old.amount)} → ${formatYen(amount)}`);
+  });
+  removed.forEach((r) => changes.push(`削除：${kindLabel(r.kind)}「${r.label}」${formatYen(r.amount)}`));
+
+  if (changes.length > 0 && actor) {
+    await logAudit(actor, '固定支給・控除項目を変更', changes.join('／'), employeeId, targetName);
+  }
+  return { ok: true, changes };
 }
 
 async function fetchEmployeeCommuteRoutes(employeeId) {
@@ -1999,25 +2097,68 @@ async function fetchEmployeeCommuteRoutes(employeeId) {
   }));
 }
 
-async function saveEmployeeCommuteRoutes(employeeId, routes) {
-  const { error: delError } = await supabase.from('employee_commute_routes').delete().eq('employee_id', employeeId);
-  if (delError) { console.error('通勤経路の保存に失敗しました', delError); return false; }
-  const toInsert = routes.map((r, i) => ({
-    employee_id: employeeId,
-    transport_method: r.transportMethod,
-    boarding_station: r.boardingStation || null,
-    alighting_station: r.alightingStation || null,
-    via_point: r.viaPoint || null,
-    payment_unit: r.paymentUnit,
-    one_way_fare: Number(r.oneWayFare) || 0,
-    pass_fare: Number(r.passFare) || 0,
-    sort_order: i,
-  }));
-  if (toInsert.length > 0) {
-    const { error } = await supabase.from('employee_commute_routes').insert(toInsert);
-    if (error) { console.error('通勤経路の保存に失敗しました', error); return false; }
+// 通勤経路の保存。固定支給・控除項目と同じ理由で、全削除→再作成はやめている
+// （途中で失敗したときに経路がすべて消えるのを防ぐため）
+async function saveEmployeeCommuteRoutes(employeeId, routes, actor = null, targetName = '') {
+  const before = await fetchEmployeeCommuteRoutes(employeeId);
+  const kept = routes || [];
+
+  const fail = (e) => {
+    console.error('通勤経路の保存に失敗しました', e);
+    return { ok: false, changes: [] };
+  };
+
+  for (let i = 0; i < kept.length; i += 1) {
+    const r = kept[i];
+    const row = {
+      employee_id: employeeId,
+      transport_method: r.transportMethod,
+      boarding_station: r.boardingStation || null,
+      alighting_station: r.alightingStation || null,
+      via_point: r.viaPoint || null,
+      payment_unit: r.paymentUnit,
+      one_way_fare: Number(r.oneWayFare) || 0,
+      pass_fare: Number(r.passFare) || 0,
+      sort_order: i,
+    };
+    if (r.id) {
+      const { error } = await supabase.from('employee_commute_routes').update(row).eq('id', r.id);
+      if (error) return fail(error);
+    } else {
+      const { error } = await supabase.from('employee_commute_routes').insert(row);
+      if (error) return fail(error);
+    }
   }
-  return true;
+
+  const keptIds = new Set(kept.filter((r) => r.id).map((r) => r.id));
+  const removed = before.filter((b) => !keptIds.has(b.id));
+  if (removed.length > 0) {
+    const { error } = await supabase
+      .from('employee_commute_routes')
+      .delete()
+      .in('id', removed.map((r) => r.id));
+    if (error) return fail(error);
+  }
+
+  const routeLabel = (r) => `${r.boardingStation || '?'}→${r.alightingStation || '?'}`;
+  const changes = [];
+  kept.forEach((r) => {
+    const old = r.id ? before.find((b) => b.id === r.id) : null;
+    if (!old) {
+      changes.push(`追加：${routeLabel(r)}（月額換算 ${formatYen(Math.round(computeRouteMonthlyAmount(r)))}）`);
+      return;
+    }
+    const beforeAmount = Math.round(computeRouteMonthlyAmount(old));
+    const afterAmount = Math.round(computeRouteMonthlyAmount(r));
+    if (routeLabel(old) !== routeLabel(r)) changes.push(`経路：${routeLabel(old)} → ${routeLabel(r)}`);
+    if (beforeAmount !== afterAmount) changes.push(`金額：${routeLabel(r)} ${formatYen(beforeAmount)} → ${formatYen(afterAmount)}`);
+  });
+  removed.forEach((r) => changes.push(`削除：${routeLabel(r)}`));
+
+  if (changes.length > 0 && actor) {
+    await logAudit(actor, '通勤経路を変更', changes.join('／'), employeeId, targetName);
+  }
+  return { ok: true, changes };
 }
 
 // 経路1件あたりの月額換算（支給単位に応じて計算）
@@ -2779,6 +2920,22 @@ function AttendanceApp() {
       show('この賞与明細は公開済みです。直すには先に公開を取り消してください', 'warn');
       return false;
     }
+    const changes = [];
+    if (already) {
+      if (Number(already.totalAmount) !== Number(payload.totalAmount)) {
+        changes.push(`差引支給額：${formatYen(already.totalAmount)} → ${formatYen(payload.totalAmount)}`);
+      }
+      changes.push(...diffAmountItems(already.paymentItems, payload.paymentItems, '支給'));
+      changes.push(...diffAmountItems(already.deductionItems, payload.deductionItems, '控除'));
+      if ((already.title || '') !== (payload.title || '')) changes.push(`名称：「${already.title}」→「${payload.title}」`);
+      if ((already.paymentDate || '') !== (payload.paymentDate || '')) changes.push(`支給日：${already.paymentDate || '未設定'} → ${payload.paymentDate || '未設定'}`);
+      if ((already.notes || '') !== (payload.notes || '')) changes.push('備考を変更');
+    }
+    const entry = makeHistoryEntry(session, already ? '金額を変更' : '明細を作成', changes);
+    const nextHistory = already && changes.length === 0
+      ? (already.editHistory || [])
+      : appendHistory(already?.editHistory, entry);
+
     const { error } = await supabase.from('bonus_records').upsert(
       {
         employee_id: payload.employeeId,
@@ -2791,6 +2948,7 @@ function AttendanceApp() {
         total_amount: payload.totalAmount,
         notes: payload.notes || null,
         updated_at: new Date().toISOString(),
+        edit_history: nextHistory,
       },
       { onConflict: 'employee_id,year,seq' }
     );
@@ -2800,14 +2958,30 @@ function AttendanceApp() {
       return false;
     }
     await refreshData();
-    show('賞与明細を保存しました');
+    const bonusLabel = payload.title || bonusDefaultTitle(payload.year, payload.seq);
+    await logAudit(
+      session,
+      already ? '賞与明細を変更' : '賞与明細を作成',
+      `${bonusLabel}${changes.length ? `／${changes.join('／')}` : ''}`,
+      payload.employeeId
+    );
+    show(
+      changes.length > 0
+        ? `賞与明細を保存しました（${changes.length}件の変更を履歴に記録しました）`
+        : '賞与明細を保存しました'
+    );
     return true;
   };
 
   const publishBonus = async (id) => {
+    const target = (data.bonusRecords || []).find((b) => b.id === id);
     const { error } = await supabase
       .from('bonus_records')
-      .update({ status: 'published', published_at: new Date().toISOString() })
+      .update({
+        status: 'published',
+        published_at: new Date().toISOString(),
+        edit_history: appendHistory(target?.editHistory, makeHistoryEntry(session, '公開')),
+      })
       .eq('id', id);
     if (error) {
       console.error('賞与明細の公開に失敗しました', error);
@@ -2841,7 +3015,11 @@ function AttendanceApp() {
     const record = (data.bonusRecords || []).find((b) => b.id === id);
     const { error } = await supabase
       .from('bonus_records')
-      .update({ status: 'draft', published_at: null })
+      .update({
+        status: 'draft',
+        published_at: null,
+        edit_history: appendHistory(record?.editHistory, makeHistoryEntry(session, '公開を取り消し')),
+      })
       .eq('id', id);
     if (error) {
       console.error('公開の取り消しに失敗しました', error);
@@ -3647,6 +3825,22 @@ function AttendanceApp() {
     }
     const target = (data.monthlyConfirmations || []).find((c) => c.id === id);
     if (!target) return false;
+
+    // その月の給与明細が公開済みなら、確定を取り消せない。
+    // 取り消すと「確定していない勤怠にもとづく公開済み明細」が残ってしまうため、
+    // 先に明細の公開を取り消してもらう
+    const [cy, cm] = String(target.targetMonth || '').split('-').map(Number);
+    const payroll = (data.payrollRecords || []).find(
+      (p) => p.employeeId === target.employeeId && p.year === cy && p.month === cm
+    );
+    if (payroll && payroll.status === 'published') {
+      show(
+        `${monthKeyLabel(target.targetMonth)}分の給与明細が公開済みのため、勤怠の確定を取り消せません。先に給与タブで明細の公開を取り消してください`,
+        'warn'
+      );
+      return false;
+    }
+
     const { error } = await supabase
       .from('monthly_attendance_confirmations')
       .update({
@@ -3673,7 +3867,15 @@ function AttendanceApp() {
     );
     await refreshData();
     await logAudit(session, '勤怠の確定を取り消し', `${monthLabel}${reason ? `／理由：${reason}` : ''}`, target.employeeId, target.employeeName);
-    show('確定を取り消しました。スタッフへ通知しています', 'warn');
+    if (payroll) {
+      // 下書きの明細は古い勤怠のままなので、作り直しが必要なことを伝える
+      show(
+        `確定を取り消しました。${monthLabel}分の給与明細（下書き）は取り消し前の勤怠で計算されています。勤怠を直したあとに再計算してください`,
+        'warn'
+      );
+    } else {
+      show('確定を取り消しました。スタッフへ通知しています', 'warn');
+    }
     return true;
   };
 
@@ -3857,19 +4059,26 @@ function AttendanceApp() {
     // 手元の控えと食い違うため、管理者に知らせて判断してもらう
     if (record.status === 'published') return 'blocked';
     const deductionTotal = (record.deductionItems || []).reduce((sum, it) => sum + (Number(it.amount) || 0), 0);
+    const previousCommute = Number(record.paymentItems.find((it) => String(it.label || '').startsWith('交通費精算'))?.amount) || 0;
     const { error } = await supabase
       .from('payroll_records')
-      .update({ payment_items: nextItems, base_amount: after, total_amount: after - deductionTotal })
+      .update({
+        payment_items: nextItems,
+        base_amount: after,
+        total_amount: after - deductionTotal,
+        edit_history: appendHistory(record.editHistory, makeHistoryEntry(session, '交通費を反映', [
+          `交通費精算：${formatYen(previousCommute)} → ${formatYen(newAmount)}`,
+        ])),
+      })
       .eq('id', record.id);
     if (error) {
       console.error('給与明細の交通費の更新に失敗しました', error);
       return 'failed';
     }
-    const previous = Number(record.paymentItems.find((it) => String(it.label || '').startsWith('交通費精算'))?.amount) || 0;
     await logAudit(
       session,
       '給与明細の交通費を更新',
-      `${y}年${m}月：${formatYen(previous)} → ${formatYen(newAmount)}`,
+      `${y}年${m}月：${formatYen(previousCommute)} → ${formatYen(newAmount)}`,
       targetEmployeeId
     );
     return 'changed';
@@ -4088,6 +4297,32 @@ function AttendanceApp() {
       show('この月の給与明細は公開済みです。直すには先に公開を取り消してください', 'warn');
       return;
     }
+    // 修正履歴に残す差分を作る（新規作成のときは「作成」の1件だけ）
+    const changes = [];
+    if (already) {
+      const yenFields = [
+        ['base_amount', '支給合計', already.baseAmount, payload.baseAmount],
+        ['total_amount', '差引支給額', already.totalAmount, payload.totalAmount],
+        ['overtime_amount', '残業手当', already.overtimeAmount, payload.overtimeAmount],
+      ];
+      yenFields.forEach(([, label, before, after]) => {
+        if (Number(before) !== Number(after)) changes.push(`${label}：${formatYen(before)} → ${formatYen(after)}`);
+      });
+      if (Number(already.workedMinutes) !== Number(payload.workedMinutes)) {
+        changes.push(`実働：${minutesToHHMM(already.workedMinutes)} → ${minutesToHHMM(payload.workedMinutes)}`);
+      }
+      if (Number(already.overtimeMinutes) !== Number(payload.overtimeMinutes)) {
+        changes.push(`残業：${minutesToHHMM(already.overtimeMinutes)} → ${minutesToHHMM(payload.overtimeMinutes)}`);
+      }
+      changes.push(...diffAmountItems(already.paymentItems, payload.paymentItems, '支給'));
+      changes.push(...diffAmountItems(already.deductionItems, payload.deductionItems, '控除'));
+      if ((already.notes || '') !== (payload.notes || '')) changes.push('備考を変更');
+    }
+    const entry = makeHistoryEntry(session, already ? '金額を変更' : '明細を作成', changes);
+    const nextHistory = already && changes.length === 0
+      ? (already.editHistory || [])            // 中身が変わっていなければ履歴は増やさない
+      : appendHistory(already?.editHistory, entry);
+
     const { error } = await supabase.from('payroll_records').upsert(
       {
         employee_id: payload.employeeId,
@@ -4105,6 +4340,7 @@ function AttendanceApp() {
         payment_items: payload.paymentItems || null,
         deduction_items: payload.deductionItems || null,
         attendance_extra: payload.attendanceExtra || null,
+        edit_history: nextHistory,
       },
       { onConflict: 'employee_id,year,month' }
     );
@@ -4113,11 +4349,31 @@ function AttendanceApp() {
       return;
     }
     await refreshData();
-    show('給与明細を下書き保存しました', 'success');
+    if (already) {
+      await logAudit(
+        session,
+        '給与明細を変更',
+        `${payload.year}年${payload.month}月分${changes.length ? `／${changes.join('／')}` : '（変更なし）'}`,
+        payload.employeeId
+      );
+    } else {
+      await logAudit(session, '給与明細を作成', `${payload.year}年${payload.month}月分`, payload.employeeId);
+    }
+    show(
+      changes.length > 0
+        ? `給与明細を下書き保存しました（${changes.length}件の変更を履歴に記録しました）`
+        : '給与明細を下書き保存しました',
+      'success'
+    );
   };
 
   const publishPayroll = async (id) => {
-    const { error } = await supabase.from('payroll_records').update({ status: 'published', published_at: new Date().toISOString() }).eq('id', id);
+    const target = data.payrollRecords.find((p) => p.id === id);
+    const { error } = await supabase.from('payroll_records').update({
+      status: 'published',
+      published_at: new Date().toISOString(),
+      edit_history: appendHistory(target?.editHistory, makeHistoryEntry(session, '公開')),
+    }).eq('id', id);
     if (error) {
       show('公開に失敗しました', 'warn');
       return;
@@ -4150,7 +4406,11 @@ function AttendanceApp() {
     const record = data.payrollRecords.find((p) => p.id === id);
     const { error } = await supabase
       .from('payroll_records')
-      .update({ status: 'draft', published_at: null })
+      .update({
+        status: 'draft',
+        published_at: null,
+        edit_history: appendHistory(record?.editHistory, makeHistoryEntry(session, '公開を取り消し')),
+      })
       .eq('id', id);
     if (error) {
       console.error('公開の取り消しに失敗しました', error);
@@ -12361,6 +12621,7 @@ function BonusAdminTab({ employeeAccounts, bonusRecords = [], tableReady = true,
               {saving ? '保存中…' : '下書きとして保存する'}
             </button>
           )}
+          {existing && <EditHistoryPanel history={existing.editHistory} />}
         </div>
       </div>
     );
@@ -12953,6 +13214,8 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
             )}
           </div>
         )}
+
+        {existing && <EditHistoryPanel history={existing.editHistory} />}
       </div>
 
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
@@ -12974,6 +13237,58 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
             ))}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// 明細ごとの修正履歴（給与明細・賞与明細の両方で使う）
+function EditHistoryPanel({ history = [], label = '修正履歴' }) {
+  const [open, setOpen] = useState(false);
+  const items = Array.isArray(history) ? history : [];
+
+  const atLabel = (iso) => {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    return `${d.getFullYear()}/${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  };
+
+  if (items.length === 0) {
+    return (
+      <div className="rounded-xl bg-slate-50 border border-slate-200 px-4 py-3 text-[11.5px] text-slate-400">
+        {label}：まだありません。この明細に対する作成・変更・公開・公開取消はこれから記録されます。
+      </div>
+    );
+  }
+
+  const shown = open ? items : items.slice(0, 3);
+  return (
+    <div className="rounded-xl border border-slate-200 overflow-hidden">
+      <div className="px-4 py-2.5 bg-slate-50 flex items-center justify-between">
+        <span className="text-[12px] font-bold text-slate-600">{label}（{items.length}件）</span>
+        {items.length > 3 && (
+          <button onClick={() => setOpen((v) => !v)} className="text-[11px] font-bold text-slate-500 underline">
+            {open ? '最新3件だけ表示' : 'すべて表示'}
+          </button>
+        )}
+      </div>
+      <div className="divide-y divide-slate-100">
+        {shown.map((h, i) => (
+          <div key={`${h.at || ''}-${i}`} className="px-4 py-2.5">
+            <div className="flex items-baseline gap-2 flex-wrap">
+              <span className="font-mono text-[11px] text-slate-400">{atLabel(h.at)}</span>
+              <span className="text-[12px] font-bold text-slate-700">{h.action || ''}</span>
+              <span className="text-[11.5px] text-slate-500">{h.by_name || '不明'}</span>
+            </div>
+            {Array.isArray(h.changes) && h.changes.length > 0 && (
+              <ul className="mt-1 space-y-0.5">
+                {h.changes.map((c, j) => (
+                  <li key={j} className="text-[11.5px] text-slate-600 pl-3 relative before:content-['・'] before:absolute before:left-0">{c}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -17099,6 +17414,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
         employeeAttendanceSchedule={employeeAttendanceSchedules?.[profileModalAccount.id] || {}}
         onSaveEmployeeAttendance={onSaveEmployeeAttendance}
         resignationReasons={resignationReasons}
+        actor={session}
         isDesktop={isDesktop}
       />
     );
@@ -17812,7 +18128,7 @@ const PROFILE_MODAL_TABS = [
   { key: 'tax', label: '住民税・税区分' },
 ];
 
-function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSaveMyNumber, isMasterAdmin, knownGroups = [], groupAttendanceSchedules = {}, employeeAttendanceSchedule = {}, onSaveEmployeeAttendance, resignationReasons = [], isDesktop }) {
+function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSaveMyNumber, isMasterAdmin, knownGroups = [], groupAttendanceSchedules = {}, employeeAttendanceSchedule = {}, onSaveEmployeeAttendance, resignationReasons = [], actor = null, isDesktop }) {
   const [activeTab, setActiveTab] = useState('basic');
   const containerRef = useRef(null);
   const sectionRefs = useRef({});
@@ -17853,6 +18169,9 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
   const [commuteRoutes, setCommuteRoutes] = useState([]);
   const [savingSalaryItems, setSavingSalaryItems] = useState(false);
   const [savingCommuteRoutes, setSavingCommuteRoutes] = useState(false);
+  // 保存の結果をボタンのそばに出す（このモーダルからは画面上部のお知らせが使えないため）
+  const [salaryItemsResult, setSalaryItemsResult] = useState(null);
+  const [commuteRoutesResult, setCommuteRoutesResult] = useState(null);
   const nowForRemuneration = new Date();
   const [remunerationYear, setRemunerationYear] = useState(nowForRemuneration.getFullYear());
   const [remunerationMonth, setRemunerationMonth] = useState(nowForRemuneration.getMonth() + 1);
@@ -17912,7 +18231,17 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
   const removeSalaryItem = (i) => setSalaryItems((prev) => prev.filter((_, idx) => idx !== i));
   const saveSalaryItemsNow = async () => {
     setSavingSalaryItems(true);
-    await saveEmployeeSalaryItems(account.id, salaryItems);
+    setSalaryItemsResult(null);
+    const res = await saveEmployeeSalaryItems(account.id, salaryItems, actor, account.name);
+    if (!res.ok) {
+      setSalaryItemsResult({ ok: false, text: '保存に失敗しました。通信の状態を確認してもう一度お試しください。既存の項目はそのまま残っています。' });
+    } else if (res.changes.length === 0) {
+      setSalaryItemsResult({ ok: true, text: '変更はありませんでした。' });
+    } else {
+      setSalaryItemsResult({ ok: true, text: `保存しました（${res.changes.length}件の変更を履歴に記録しました）` });
+      // 保存後に読み直して、新しく追加した項目にもIDを持たせる
+      setSalaryItems(await fetchEmployeeSalaryItems(account.id));
+    }
     setSavingSalaryItems(false);
   };
 
@@ -17922,7 +18251,16 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
   const commuteTotal = commuteRoutes.reduce((sum, r) => sum + computeRouteMonthlyAmount(r), 0);
   const saveCommuteRoutesNow = async () => {
     setSavingCommuteRoutes(true);
-    await saveEmployeeCommuteRoutes(account.id, commuteRoutes);
+    setCommuteRoutesResult(null);
+    const res = await saveEmployeeCommuteRoutes(account.id, commuteRoutes, actor, account.name);
+    if (!res.ok) {
+      setCommuteRoutesResult({ ok: false, text: '保存に失敗しました。通信の状態を確認してもう一度お試しください。既存の経路はそのまま残っています。' });
+    } else if (res.changes.length === 0) {
+      setCommuteRoutesResult({ ok: true, text: '変更はありませんでした。' });
+    } else {
+      setCommuteRoutesResult({ ok: true, text: `保存しました（${res.changes.length}件の変更を履歴に記録しました）` });
+      setCommuteRoutes(await fetchEmployeeCommuteRoutes(account.id));
+    }
     setSavingCommuteRoutes(false);
   };
 
@@ -18364,6 +18702,11 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                 <button onClick={addCommuteRoute} className="text-[11px] font-bold text-amber-600 flex items-center gap-1"><Plus size={12} />経路を追加</button>
                 <button onClick={saveCommuteRoutesNow} disabled={savingCommuteRoutes} className="text-[11px] font-bold text-white bg-slate-800 disabled:bg-slate-300 rounded-lg px-3 py-1.5">{savingCommuteRoutes ? '保存中…' : '通勤経路を保存'}</button>
               </div>
+              {commuteRoutesResult && (
+                <div className={`rounded-lg px-3 py-2 text-[11.5px] ${commuteRoutesResult.ok ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-rose-50 text-rose-700 border border-rose-200'}`}>
+                  {commuteRoutesResult.text}
+                </div>
+              )}
               <div className="text-[10.5px] text-slate-400">保存すると、月額換算の合計が「給与」タブの通勤手当の初期値として使えるようになります（自動反映ではなく、給与作成時にコピーする形です）。</div>
 
               {/* 毎月の固定支給・控除項目 */}
@@ -18399,6 +18742,11 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                 <button onClick={() => addSalaryItem('deduction')} className="text-[11px] font-bold text-amber-600 flex items-center gap-1"><Plus size={12} />控除項目を追加</button>
                 <button onClick={saveSalaryItemsNow} disabled={savingSalaryItems} className="text-[11px] font-bold text-white bg-slate-800 disabled:bg-slate-300 rounded-lg px-3 py-1.5">{savingSalaryItems ? '保存中…' : '固定項目を保存'}</button>
               </div>
+              {salaryItemsResult && (
+                <div className={`rounded-lg px-3 py-2 text-[11.5px] ${salaryItemsResult.ok ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-rose-50 text-rose-700 border border-rose-200'}`}>
+                  {salaryItemsResult.text}
+                </div>
+              )}
               <div className="text-[10.5px] text-slate-400">ここで登録した項目は、「給与」タブでそのスタッフの給与を新規作成する際に、毎回自動で候補として追加されます。</div>
 
               {/* 標準報酬月額（月別履歴） */}
