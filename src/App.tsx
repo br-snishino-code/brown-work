@@ -3378,6 +3378,67 @@ function AttendanceApp() {
     return okCount;
   };
 
+  // 打刻そのものを削除する（マスター管理者のみ）。
+  // 休みの日に誤って打刻したときなど、その日の記録を丸ごと消すために使う。
+  // 月次勤怠が確定済み、またはその月の給与明細が公開済みの場合は、
+  // データベース側（67番）でも拒否される。
+  const adminDeleteAttendance = async (targetEmployeeId, dateStr, { notify = false, reason = '' } = {}) => {
+    if (session.role !== 'master_admin') {
+      show('打刻を削除できるのはマスター管理者のみです', 'warn');
+      return false;
+    }
+    const target = data.accounts.find((a) => a.id === targetEmployeeId);
+    const targetName = target?.name || '';
+
+    // 画面側でも先に確認して、分かりやすい案内を出す
+    const confirmation = (data.monthlyConfirmations || []).find(
+      (c) => c.employeeId === targetEmployeeId && c.targetMonth === dateStr.slice(0, 7) && c.status === 'confirmed'
+    );
+    if (confirmation) {
+      show(`${monthKeyLabel(dateStr.slice(0, 7))}分の月次勤怠は確定済みのため、打刻を削除できません。先に確定を取り消してください`, 'warn');
+      return false;
+    }
+    const [dy, dm] = dateStr.split('-').map(Number);
+    const payroll = (data.payrollRecords || []).find(
+      (p) => p.employeeId === targetEmployeeId && p.year === dy && p.month === dm
+    );
+    if (payroll && payroll.status === 'published') {
+      show(`${dy}年${dm}月分の給与明細は公開済みのため、打刻を削除できません。先に明細の公開を取り消してください`, 'warn');
+      return false;
+    }
+
+    const { error } = await supabase
+      .from('attendance_records')
+      .delete()
+      .eq('employee_id', targetEmployeeId)
+      .eq('date', dateStr);
+    if (error) {
+      console.error('打刻の削除に失敗しました', error);
+      show(`打刻の削除に失敗しました：${error.message || ''}`, 'warn');
+      return false;
+    }
+
+    if (notify) {
+      await notifyEmployeeInApp(
+        targetEmployeeId,
+        `【打刻の削除】${dateLabel(dateStr)}`,
+        `${dateLabel(dateStr)} の打刻を管理者が削除しました。${reason ? `理由：${reason}` : ''}`
+          + '\n心当たりがない場合は管理者にご連絡ください。',
+        null
+      );
+    }
+    await refreshData();
+    await logAudit(
+      session,
+      '管理者が打刻を削除',
+      `${dateStr}${reason ? `／理由：${reason}` : ''}${notify ? '／スタッフへ通知' : '／通知なし'}`,
+      targetEmployeeId,
+      targetName
+    );
+    show(`${dateLabel(dateStr)} の打刻を削除しました`, 'warn');
+    return true;
+  };
+
   const decideCorrection = async (id, decision) => {
     const correction = data.corrections.find((c) => c.id === id);
     if (!correction) return;
@@ -4941,6 +5002,7 @@ function AttendanceApp() {
             onSaveEmployeeAttendance={saveEmployeeAttendanceSchedule}
             onAdminUpdateAttendance={adminUpdateAttendance}
             onAdminUpdateAttendanceBatch={adminUpdateAttendanceBatch}
+            onDeleteAttendance={adminDeleteAttendance}
             onRefresh={refreshData}
             isDesktop={isDesktop}
           />
@@ -13309,6 +13371,66 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
   );
 }
 
+// 打刻の削除の確認（マスター管理者のみ）。
+// 消すと元に戻せないため、対象の日付と内容を見せたうえで確認する
+function AttendanceDeleteModal({ employeeName, dateStr, clockIn, clockOut, onClose, onConfirm }) {
+  const [notify, setNotify] = useState(true);
+  const [reason, setReason] = useState('');
+  const [deleting, setDeleting] = useState(false);
+
+  const run = async () => {
+    if (deleting) return;
+    setDeleting(true);
+    try {
+      await onConfirm({ notify, reason: reason.trim() });
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  return createPortal(
+    <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-50 p-0 sm:p-4">
+      <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-sm max-h-[90vh] overflow-y-auto">
+        <div className="px-5 pt-5 pb-3 border-b border-slate-100">
+          <h3 className="font-bold text-[15px] text-rose-700">打刻を削除します</h3>
+        </div>
+        <div className="px-5 py-4 space-y-4">
+          <div className="rounded-xl bg-slate-50 border border-slate-200 px-4 py-3 text-[12.5px] space-y-1">
+            <div><span className="text-slate-400">スタッフ</span>　{employeeName}</div>
+            <div><span className="text-slate-400">日付</span>　　　{dateLabel(dateStr)}</div>
+            <div><span className="text-slate-400">打刻</span>　　　{clockIn || '--:--'} 〜 {clockOut || '--:--'}</div>
+          </div>
+          <div className="rounded-lg bg-rose-50 border border-rose-200 px-4 py-3 text-[12px] text-rose-700 leading-relaxed">
+            この日の記録を丸ごと消します。<b>元に戻せません。</b>
+            休憩や打刻修正の記録も一緒に消えます。
+          </div>
+          <Field label="理由（任意・通知と履歴に残ります）">
+            <input
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="例）休みの日に誤って打刻したため"
+              className="w-full box-border border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]"
+            />
+          </Field>
+          <label className="flex items-start gap-2 text-[12.5px] text-slate-600">
+            <input type="checkbox" checked={notify} onChange={(e) => setNotify(e.target.checked)} className="mt-0.5" />
+            <span>スタッフに知らせる（アプリ内の通知が届きます）</span>
+          </label>
+        </div>
+        <div className="px-5 pb-5 pt-1 flex gap-2">
+          <button onClick={onClose} disabled={deleting} className="flex-1 py-2.5 rounded-lg border border-slate-200 text-[13.5px] font-medium text-slate-500">
+            やめる
+          </button>
+          <button onClick={run} disabled={deleting} className="flex-1 py-2.5 rounded-lg bg-rose-600 disabled:bg-slate-200 text-white text-[13.5px] font-bold">
+            {deleting ? '削除中…' : '削除する'}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
 // 明細ごとの修正履歴（給与明細・賞与明細の両方で使う）
 function EditHistoryPanel({ history = [], label = '修正履歴' }) {
   const [open, setOpen] = useState(false);
@@ -13505,7 +13627,7 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
   );
 }
 
-function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAdminTab = null, onConsumeRequestedAdminTab, onDecide, onDecideLeave, onDecideCommute, onNotifyEmployee, onSaveShiftPeriod, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onListMyNumbers, onDeleteMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onSaveGroupFormats, onSavePerfDeadline, onSaveShiftAlias, onDeleteShiftAlias, onAnnounceShift, onChangeLoginEmail, onDecideMonthlyConfirm, onCancelMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onRefresh, isDesktop }) {
+function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAdminTab = null, onConsumeRequestedAdminTab, onDecide, onDecideLeave, onDecideCommute, onNotifyEmployee, onSaveShiftPeriod, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onListMyNumbers, onDeleteMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onSaveGroupFormats, onSavePerfDeadline, onSaveShiftAlias, onDeleteShiftAlias, onAnnounceShift, onChangeLoginEmail, onDecideMonthlyConfirm, onCancelMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onDeleteAttendance, onRefresh, isDesktop }) {
   const [tab, setTab] = useState('dashboard'); // dashboard | attendance | requests | leave | performance | accounts
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
@@ -13909,7 +14031,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
       )}
 
       {tab === 'attendance' && (
-        <AttendanceAdminTab data={data} employeeAccounts={employeeAccounts} gpsAlerts={gpsAlerts} offShiftAlerts={offShiftAlerts} focus={attendanceFocus} onConsumeFocus={() => setAttendanceFocus(null)} onAdminUpdateAttendance={onAdminUpdateAttendance} onAdminUpdateAttendanceBatch={onAdminUpdateAttendanceBatch} isDesktop={isDesktop} />
+        <AttendanceAdminTab data={data} employeeAccounts={employeeAccounts} gpsAlerts={gpsAlerts} offShiftAlerts={offShiftAlerts} focus={attendanceFocus} onConsumeFocus={() => setAttendanceFocus(null)} onAdminUpdateAttendance={onAdminUpdateAttendance} onAdminUpdateAttendanceBatch={onAdminUpdateAttendanceBatch} onDeleteAttendance={onDeleteAttendance} isMasterAdmin={session?.role === 'master_admin'} isDesktop={isDesktop} />
       )}
 
       {tab === 'accounts' && (
@@ -14165,7 +14287,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
 
 
 
-function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAlerts = [], focus = null, onConsumeFocus, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, isDesktop }) {
+function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAlerts = [], focus = null, onConsumeFocus, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onDeleteAttendance, isMasterAdmin = false, isDesktop }) {
   const now = new Date();
   const [dateFilter, setDateFilter] = useState(todayKey());
   const [employeeFilter, setEmployeeFilter] = useState('all');
@@ -14203,6 +14325,8 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
         initialMonth={monthlyViewTarget.month}
         onBack={() => setMonthlyViewTarget(null)}
         onAdminUpdateAttendanceBatch={onAdminUpdateAttendanceBatch}
+        onDeleteAttendance={onDeleteAttendance}
+        isMasterAdmin={isMasterAdmin}
         isDesktop={isDesktop}
       />
     );
@@ -14557,10 +14681,11 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
   );
 }
 
-function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onBack, onAdminUpdateAttendanceBatch, isDesktop }) {
+function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onBack, onAdminUpdateAttendanceBatch, onDeleteAttendance, isMasterAdmin = false, isDesktop }) {
   const [month, setMonth] = useState(initialMonth); // 'YYYY-MM'
   const [edits, setEdits] = useState({}); // { date: { clockIn, clockOut, breakMinutes, approve } }
   const [savingAll, setSavingAll] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState(null); // 打刻を削除する日
   const [y, m] = month.split('-').map(Number);
   const days = Array.from({ length: lastDayOfMonth(y, m) }, (_, i) => i + 1);
   const todayStr = todayKey();
@@ -14582,6 +14707,7 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
         workedMin: metrics?.workedMin ?? 0,
         overtimeMin: metrics?.overtimeMin ?? 0,
         status: computeDayStatus(record).label,
+        hasRecord: !!record,
         needsApproval: record?.clockInApproval === 'pending' || record?.clockOutApproval === 'pending',
         clockInStatusLabel: record?.clockInStatus ? (CLOCK_IN_STATUS_LABEL[record.clockInStatus] || '') : '',
         clockOutStatusLabel: record?.clockOutStatus ? (CLOCK_OUT_STATUS_LABEL[record.clockOutStatus] || '') : '',
@@ -14636,7 +14762,7 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
             <table className="w-full min-w-[760px] text-[12.5px]">
               <thead>
                 <tr className="text-left text-[10.5px] text-slate-400 border-b border-slate-100">
-                  {['日付', '出勤', '退勤', '休憩(分)', '実働', '残業', '状態', '承認'].map((h) => <th key={h} className="px-3 py-2 font-medium">{h}</th>)}
+                  {['日付', '出勤', '退勤', '休憩(分)', '実働', '残業', '状態', '承認', ...(isMasterAdmin ? ['削除'] : [])].map((h) => <th key={h} className="px-3 py-2 font-medium">{h}</th>)}
                 </tr>
               </thead>
               <tbody>
@@ -14675,6 +14801,19 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
                           <span className="text-[10.5px] font-bold text-amber-700 whitespace-nowrap">要承認</span>
                         )}
                       </td>
+                      {isMasterAdmin && (
+                        <td className="px-3 py-2">
+                          {r.hasRecord && (
+                            <button
+                              onClick={() => setDeleteTarget(r)}
+                              className="text-[10.5px] font-bold text-rose-600 border border-rose-200 rounded-md px-2 py-1 whitespace-nowrap"
+                              title="この日の打刻を削除します"
+                            >
+                              削除
+                            </button>
+                          )}
+                        </td>
+                      )}
                     </tr>
                   );
                 })}
@@ -14688,7 +14827,17 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
               const setField = (field, value) => setEdits((prev) => ({ ...prev, [r.date]: { ...(prev[r.date] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: undefined }), [field]: value } }));
               return (
                 <div key={r.date} className={`px-4 py-3 ${r.needsApproval ? 'bg-amber-50/60' : ''}`}>
-                  <div className={`font-mono text-[13px] font-semibold ${r.textClass}`}>{r.label}</div>
+                  <div className="flex items-center justify-between">
+                    <div className={`font-mono text-[13px] font-semibold ${r.textClass}`}>{r.label}</div>
+                    {isMasterAdmin && r.hasRecord && (
+                      <button
+                        onClick={() => setDeleteTarget(r)}
+                        className="text-[10.5px] font-bold text-rose-600 border border-rose-200 rounded-md px-2 py-1"
+                      >
+                        削除
+                      </button>
+                    )}
+                  </div>
                   <div className="mt-2 grid grid-cols-[1fr_1fr_72px] gap-2">
                     <Field label="出勤"><input type="time" value={e.clockIn || ''} onChange={(ev) => setField('clockIn', ev.target.value)} style={TIME_INPUT_STYLE} className={TIME_INPUT_CLASS} /></Field>
                     <Field label="退勤"><input type="time" value={e.clockOut || ''} onChange={(ev) => setField('clockOut', ev.target.value)} style={TIME_INPUT_STYLE} className={TIME_INPUT_CLASS} /></Field>
@@ -14706,6 +14855,19 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
               );
             })}
           </div>
+        )}
+        {deleteTarget && (
+          <AttendanceDeleteModal
+            employeeName={employeeName}
+            dateStr={deleteTarget.date}
+            clockIn={deleteTarget.clockIn}
+            clockOut={deleteTarget.clockOut}
+            onClose={() => setDeleteTarget(null)}
+            onConfirm={async (opts) => {
+              const ok = onDeleteAttendance ? await onDeleteAttendance(employeeId, deleteTarget.date, opts) : false;
+              if (ok) setDeleteTarget(null);
+            }}
+          />
         )}
         {rows.length > 0 && (
           <div className="px-5 py-3.5 border-t border-slate-100 flex items-center justify-end gap-2">
