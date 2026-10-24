@@ -14295,6 +14295,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
   const [edits, setEdits] = useState({}); // { 'employeeId|date': { clockIn, clockOut, breakMinutes, approve } }
   const [savingAll, setSavingAll] = useState(false);
   const [monthlyViewTarget, setMonthlyViewTarget] = useState(null); // { employeeId, employeeName, month }
+  const [deleteTarget, setDeleteTarget] = useState(null); // 打刻を削除する行
   const [approvingKey, setApprovingKey] = useState(null);
   const [deductionState, setDeductionState] = useState({}); // { 'employeeId|date': { deduction: bool, note: string } }
   const gpsAlertIds = new Set(gpsAlerts.map((g) => g.employeeId));
@@ -14412,6 +14413,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
       clockOutPayDeductionNote: record?.clockOutPayDeductionNote || '',
       breakMinutes: record ? getRecordedBreakMinutes(record, record.clockOut ? new Date(record.clockOut) : new Date()) : null,
       dateShort: formatAdminDate(dateStr).label,
+      hasRecord: !!record,
     });
   });
   rows.sort((a, b) => a.employeeName.localeCompare(b.employeeName, 'ja'));
@@ -14524,6 +14526,20 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
         </div>
       )}
 
+      {deleteTarget && (
+        <AttendanceDeleteModal
+          employeeName={deleteTarget.employeeName}
+          dateStr={deleteTarget.date}
+          clockIn={deleteTarget.clockIn}
+          clockOut={deleteTarget.clockOut}
+          onClose={() => setDeleteTarget(null)}
+          onConfirm={async (opts) => {
+            const ok = onDeleteAttendance ? await onDeleteAttendance(deleteTarget.employeeId, deleteTarget.date, opts) : false;
+            if (ok) setDeleteTarget(null);
+          }}
+        />
+      )}
+
       {gpsAlerts.length > 0 && (
         <div className="bg-rose-50 border border-rose-200 rounded-xl px-4 py-3 flex items-start gap-2.5">
           <MapPin size={16} className="text-rose-500 mt-0.5 shrink-0" />
@@ -14574,7 +14590,11 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
           <div className="overflow-x-auto">
             <table className="w-full text-[12px]">
               <thead><tr className="text-left text-[10px] text-slate-400 border-b border-slate-100">
-                {(employeeFilter === 'all' ? ['スタッフ','日付','出勤','退勤','休憩(分)','実働','残業','遅刻/早退','状態','承認','月間'] : ['日付','出勤','退勤','休憩(分)','実働','残業','遅刻/早退','状態','承認','月間']).map((h, i) => <th key={h + i} className="px-2 py-2 font-medium">{h}</th>)}
+                {[
+                  ...(employeeFilter === 'all' ? ['スタッフ'] : []),
+                  '日付','出勤','退勤','休憩(分)','実働','残業','遅刻/早退','状態','承認','月間',
+                  ...(isMasterAdmin ? ['削除'] : []),
+                ].map((h, i) => <th key={h + i} className="px-2 py-2 font-medium">{h}</th>)}
               </tr></thead>
               <tbody>{rows.map((r) => {
                 const key = `${r.employeeId}|${r.date}`;
@@ -14617,6 +14637,19 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
                     <td className="px-2 py-2">
                       <button onClick={() => setMonthlyViewTarget({ employeeId: r.employeeId, employeeName: r.employeeName, month: dateFilter.slice(0, 7) })} className="text-[10.5px] font-bold text-slate-500 border border-slate-200 rounded-md px-1.5 py-1 whitespace-nowrap">月間</button>
                     </td>
+                    {isMasterAdmin && (
+                      <td className="px-2 py-2">
+                        {r.hasRecord && (
+                          <button
+                            onClick={() => setDeleteTarget(r)}
+                            className="text-[10.5px] font-bold text-rose-600 border border-rose-200 rounded-md px-1.5 py-1 whitespace-nowrap"
+                            title="この日の打刻を削除します"
+                          >
+                            削除
+                          </button>
+                        )}
+                      </td>
+                    )}
                   </tr>
                 );
               })}</tbody>
@@ -14634,6 +14667,9 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
                   <div className="flex items-center gap-2">
                     {employeeFilter === 'all' && <div className="text-[12px] font-bold text-slate-600"><EmployeeLink id={r.employeeId} name={r.employeeName} /></div>}
                     <button onClick={() => setMonthlyViewTarget({ employeeId: r.employeeId, employeeName: r.employeeName, month: dateFilter.slice(0, 7) })} className="text-[10.5px] font-bold text-slate-500 border border-slate-200 rounded-md px-2 py-1">月間</button>
+                    {isMasterAdmin && r.hasRecord && (
+                      <button onClick={() => setDeleteTarget(r)} className="text-[10.5px] font-bold text-rose-600 border border-rose-200 rounded-md px-2 py-1">削除</button>
+                    )}
                   </div>
                 </div>
                 <div className="mt-2 grid grid-cols-[1fr_1fr_72px] gap-2">
