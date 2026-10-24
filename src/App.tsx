@@ -433,16 +433,35 @@ function computePaidLeaveShortages(employeeAccounts, leaveRequests, asOf = new D
 
 
 // 優先順位：スタッフにメイングループが設定されていればグループ規定 → 未設定なら個人別の月次設定
-function getPrescribedAttendanceDays(employee, month, groupAttendanceSchedules, employeeAttendanceSchedules) {
-  if (!employee) return null;
-  if (employee.mainGroup) {
-    const schedule = groupAttendanceSchedules?.[employee.mainGroup];
-    const v = schedule ? schedule[month] : null;
-    return v != null && v !== '' ? Number(v) : null;
+// ---- 年度（4月〜翌3月）----
+// 保存は暦年＋月で持ち、画面だけ年度ごとにまとめる。
+// 給与計算は暦年の年月で引くため、変換を挟まない。
+const FISCAL_START_MONTH = 4;
+
+// その年月が属する年度（2027年3月 → 2026年度）
+function fiscalYearOf(year, month) {
+  return month >= FISCAL_START_MONTH ? year : year - 1;
+}
+
+// 年度に含まれる12か月を、4月から順に返す
+function fiscalMonths(fiscalYear) {
+  const out = [];
+  for (let i = 0; i < 12; i += 1) {
+    const m = ((FISCAL_START_MONTH - 1 + i) % 12) + 1;
+    out.push({ year: m >= FISCAL_START_MONTH ? fiscalYear : fiscalYear + 1, month: m });
   }
-  const personal = employeeAttendanceSchedules?.[employee.id];
-  const v = personal ? personal[month] : null;
-  return v != null && v !== '' ? Number(v) : null;
+  return out;
+}
+
+// 出勤規定日数は年度ごとに登録する。その年月の登録が無ければ null
+function getPrescribedAttendanceDays(employee, year, month, groupAttendanceSchedules, employeeAttendanceSchedules) {
+  if (!employee) return null;
+  const pick = (store, key) => {
+    const v = store?.[key]?.[year]?.[month];
+    return v != null && v !== '' ? Number(v) : null;
+  };
+  if (employee.mainGroup) return pick(groupAttendanceSchedules, employee.mainGroup);
+  return pick(employeeAttendanceSchedules, employee.id);
 }
 
 // 生年月日から年齢を出す
@@ -1680,14 +1699,16 @@ async function fetchAllData() {
   const groupLeaveSchedules = {};
   (groupLeaveRes.data || []).forEach((row) => {
     groupLeaveSchedules[row.group_name] = groupLeaveSchedules[row.group_name] || {};
-    groupLeaveSchedules[row.group_name][row.month] = Number(row.days);
+    groupLeaveSchedules[row.group_name][row.year] = groupLeaveSchedules[row.group_name][row.year] || {};
+    groupLeaveSchedules[row.group_name][row.year][row.month] = Number(row.days);
   });
 
   // 個人別「出勤規定日数」（グループ未設定のスタッフが対象・月ごと）
   const employeeAttendanceSchedules = {};
   (employeeAttendanceRes.data || []).forEach((row) => {
     employeeAttendanceSchedules[row.employee_id] = employeeAttendanceSchedules[row.employee_id] || {};
-    employeeAttendanceSchedules[row.employee_id][row.month] = Number(row.days);
+    employeeAttendanceSchedules[row.employee_id][row.year] = employeeAttendanceSchedules[row.employee_id][row.year] || {};
+    employeeAttendanceSchedules[row.employee_id][row.year][row.month] = Number(row.days);
   });
 
   return {
@@ -4289,38 +4310,39 @@ function AttendanceApp() {
     }
   };
 
-  const saveGroupLeaveSchedule = async (groupName, monthlyDays) => {
-    const rows = Object.entries(monthlyDays).map(([month, days]) => ({
-      group_name: groupName,
-      month: Number(month),
-      days: Number(days) || 0,
-    }));
-    const { error } = await supabase.from('group_attendance_schedules').upsert(rows, { onConflict: 'group_name,month' });
+  // monthlyDays は { 'YYYY-M': 日数 } の形（年度の12か月ぶん）
+  const saveGroupLeaveSchedule = async (groupName, monthlyDays, fiscalYear) => {
+    const rows = Object.entries(monthlyDays).map(([key, days]) => {
+      const [yy, mm] = String(key).split('-').map(Number);
+      return { group_name: groupName, year: yy, month: mm, days: Number(days) || 0 };
+    });
+    const { error } = await supabase.from('group_attendance_schedules').upsert(rows, { onConflict: 'group_name,year,month' });
     if (error) {
+      console.error('グループの出勤規定日数の保存に失敗しました', error);
       show('グループの出勤規定日数の保存に失敗しました', 'warn');
       return;
     }
     await refreshData();
-    await logAudit(session, 'グループ別出勤規定日数を更新', groupName);
-    show(`「${groupName}」の出勤規定日数を保存しました`, 'success');
+    await logAudit(session, 'グループ別出勤規定日数を更新', `${groupName}／${fiscalYear}年度`);
+    show(`「${groupName}」の${fiscalYear}年度の出勤規定日数を保存しました`, 'success');
   };
 
   // グループ未設定のスタッフ向け：個人別の出勤規定日数（月ごと）を保存
-  const saveEmployeeAttendanceSchedule = async (employeeId, monthlyDays) => {
-    const rows = Object.entries(monthlyDays).map(([month, days]) => ({
-      employee_id: employeeId,
-      month: Number(month),
-      days: Number(days) || 0,
-    }));
-    const { error } = await supabase.from('employee_attendance_schedules').upsert(rows, { onConflict: 'employee_id,month' });
+  const saveEmployeeAttendanceSchedule = async (employeeId, monthlyDays, fiscalYear) => {
+    const rows = Object.entries(monthlyDays).map(([key, days]) => {
+      const [yy, mm] = String(key).split('-').map(Number);
+      return { employee_id: employeeId, year: yy, month: mm, days: Number(days) || 0 };
+    });
+    const { error } = await supabase.from('employee_attendance_schedules').upsert(rows, { onConflict: 'employee_id,year,month' });
     if (error) {
+      console.error('個人別の出勤規定日数の保存に失敗しました', error);
       show('個人別の出勤規定日数の保存に失敗しました', 'warn');
       return;
     }
     await refreshData();
     const target = data.accounts.find((a) => a.id === employeeId);
-    await logAudit(session, '個人別出勤規定日数を更新', target?.name || '', employeeId, target?.name || '');
-    show('出勤規定日数を保存しました', 'success');
+    await logAudit(session, '個人別出勤規定日数を更新', `${target?.name || ''}／${fiscalYear}年度`, employeeId, target?.name || '');
+    show(`${fiscalYear}年度の出勤規定日数を保存しました`, 'success');
   };
 
   const submitAnnouncement = async ({ title, category, body, file, isPinned }) => {
@@ -13115,7 +13137,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
   const attendanceConfirmed = monthlyConfirm?.status === 'confirmed';
 
   const monthly = computeMonthlySummary(records[employeeId] || {}, new Date(year, month - 1, 1));
-  const attendanceDays = employee ? getPrescribedAttendanceDays(employee, month, groupAttendanceSchedules, employeeAttendanceSchedules) : null;
+  const attendanceDays = employee ? getPrescribedAttendanceDays(employee, year, month, groupAttendanceSchedules, employeeAttendanceSchedules) : null;
   const preview = employee ? computePayrollPreview({
     wageType,
     hourlyWage,
@@ -16822,22 +16844,45 @@ function AdminProfileRequestsTab({ requests, onDecide, isDesktop }) {
 function GroupLeaveScheduleTab({ employeeAccounts, groupLeaveSchedules, onSave, isDesktop }) {
   const existingGroups = Array.from(new Set(employeeAccounts.map((a) => a.mainGroup).filter(Boolean)));
   const knownGroups = Array.from(new Set([...existingGroups, ...Object.keys(groupLeaveSchedules || {})]));
+  const now = new Date();
+  const [fiscalYear, setFiscalYear] = useState(fiscalYearOf(now.getFullYear(), now.getMonth() + 1));
   const [selectedGroup, setSelectedGroup] = useState(knownGroups[0] || '');
   const [newGroupName, setNewGroupName] = useState('');
-  const [months, setMonths] = useState(() => {
-    const initial = {};
-    for (let m = 1; m <= 12; m++) initial[m] = String((groupLeaveSchedules?.[knownGroups[0]] || {})[m] || 0);
-    return initial;
-  });
 
-  const loadGroup = (groupName) => {
-    setSelectedGroup(groupName);
-    const m = {};
-    for (let i = 1; i <= 12; i++) m[i] = String((groupLeaveSchedules?.[groupName] || {})[i] || 0);
-    setMonths(m);
+  // { 'YYYY-M': '日数' } の形で持つ
+  const readMonths = (groupName, fy) => {
+    const out = {};
+    fiscalMonths(fy).forEach(({ year, month }) => {
+      const v = groupLeaveSchedules?.[groupName]?.[year]?.[month];
+      out[`${year}-${month}`] = v != null ? String(v) : '';
+    });
+    return out;
   };
 
-  const setMonth = (m) => (e) => setMonths((prev) => ({ ...prev, [m]: e.target.value }));
+  const [months, setMonths] = useState(() => readMonths(knownGroups[0] || '', fiscalYearOf(now.getFullYear(), now.getMonth() + 1)));
+
+  const loadGroup = (groupName, fy = fiscalYear) => {
+    setSelectedGroup(groupName);
+    setMonths(readMonths(groupName, fy));
+  };
+
+  const changeFiscalYear = (fy) => {
+    setFiscalYear(fy);
+    setMonths(readMonths(selectedGroup, fy));
+  };
+
+  // 前年度の値を取り込む
+  const copyFromPreviousYear = () => {
+    const prev = readMonths(selectedGroup, fiscalYear - 1);
+    const next = {};
+    fiscalMonths(fiscalYear).forEach(({ year, month }, i) => {
+      const prevKey = Object.keys(prev)[i];
+      next[`${year}-${month}`] = prev[prevKey] || '';
+    });
+    setMonths(next);
+  };
+
+  const setMonth = (key) => (e) => setMonths((prev) => ({ ...prev, [key]: e.target.value }));
 
   const addNewGroup = () => {
     const name = newGroupName.trim();
@@ -16847,16 +16892,19 @@ function GroupLeaveScheduleTab({ employeeAccounts, groupLeaveSchedules, onSave, 
   };
 
   const total = Object.values(months).reduce((sum, v) => sum + (Number(v) || 0), 0);
+  const filled = Object.values(months).filter((v) => String(v).trim() !== '').length;
+  const prevYearHasData = Object.values(readMonths(selectedGroup, fiscalYear - 1)).some((v) => String(v).trim() !== '');
+  const fiscalYears = [fiscalYear - 2, fiscalYear - 1, fiscalYear, fiscalYear + 1, fiscalYear + 2];
 
   const save = () => {
     if (!selectedGroup) return;
-    onSave(selectedGroup, months);
+    onSave(selectedGroup, months, fiscalYear);
   };
 
   return (
     <div className="space-y-5">
       <div className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 text-[11.5px] text-blue-800">
-        メイングループごとに、月ごとの「出勤規定日数」（所定労働日数）を設定できます。ここで設定した日数は、そのグループに所属するスタッフの月給日割り計算（給与タブ）に使われます。グループを設定していないスタッフは、スタッフアカウント編集画面の「グループ」タブで個人別に出勤規定日数を入力してください。
+        メイングループごと・年度ごとに、月ごとの「出勤規定日数」（所定労働日数）を設定できます。年度は4月から翌年3月までです。ここで設定した日数は、そのグループに所属するスタッフの月給日割り計算（給与タブ）に使われます。グループを設定していないスタッフは、スタッフアカウント編集画面の「グループ」タブで個人別に出勤規定日数を入力してください。
       </div>
 
       <div className={isDesktop ? 'grid grid-cols-[240px_1fr] gap-5 items-start' : 'space-y-4'}>
@@ -16875,26 +16923,57 @@ function GroupLeaveScheduleTab({ employeeAccounts, groupLeaveSchedules, onSave, 
             ))}
           </div>
           <div className="p-3 border-t border-slate-100 flex gap-2">
-            <input value={newGroupName} onChange={(e) => setNewGroupName(e.target.value)} placeholder="新しいグループ名" className="flex-1 border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px]" />
+            <input value={newGroupName} onChange={(e) => setNewGroupName(e.target.value)} placeholder="新しいグループ名" className="flex-1 min-w-0 box-border border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px]" />
             <button onClick={addNewGroup} className="text-[12px] font-bold text-amber-600 shrink-0">追加</button>
           </div>
         </div>
 
         {selectedGroup ? (
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-            <div className="px-5 py-3.5 border-b border-slate-100">
-              <h2 className="font-bold text-[14px] text-slate-800">{selectedGroup}</h2>
-              <p className="text-[11px] text-slate-400 mt-0.5">月ごとの出勤規定日数（年間合計 {total}日）</p>
+            <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-3 flex-wrap">
+              <div>
+                <h2 className="font-bold text-[14px] text-slate-800">{selectedGroup}</h2>
+                <p className="text-[11px] text-slate-400 mt-0.5">
+                  {fiscalYear}年度（{fiscalYear}年4月〜{fiscalYear + 1}年3月）／ 入力済み {filled}/12か月・合計 {total}日
+                </p>
+              </div>
+              <select
+                value={fiscalYear}
+                onChange={(e) => changeFiscalYear(Number(e.target.value))}
+                className="ml-auto border border-slate-200 rounded-lg px-3 py-2 text-[13px] bg-white"
+              >
+                {fiscalYears.map((fy) => <option key={fy} value={fy}>{fy}年度</option>)}
+              </select>
             </div>
+            {filled === 0 && (
+              <div className="mx-5 mt-4 rounded-lg bg-amber-50 border border-amber-200 px-4 py-2.5 text-[11.5px] text-amber-800">
+                {fiscalYear}年度はまだ登録されていません。登録が無い月は給与の日割り計算を行いません。
+                {prevYearHasData && <>　<button onClick={copyFromPreviousYear} className="font-bold underline">{fiscalYear - 1}年度からコピーする</button></>}
+              </div>
+            )}
             <div className="p-5 grid grid-cols-3 sm:grid-cols-4 gap-3">
-              {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
-                <Field key={m} label={`${m}月`}>
-                  <input type="number" step="0.5" value={months[m]} onChange={setMonth(m)} className="w-full border border-slate-200 rounded-lg px-2.5 py-2 font-mono text-[13px]" />
+              {fiscalMonths(fiscalYear).map(({ year, month }) => (
+                <Field key={`${year}-${month}`} label={`${month}月`}>
+                  <input
+                    type="number"
+                    step="0.5"
+                    placeholder="未登録"
+                    value={months[`${year}-${month}`] ?? ''}
+                    onChange={setMonth(`${year}-${month}`)}
+                    className="w-full border border-slate-200 rounded-lg px-2.5 py-2 font-mono text-[13px]"
+                  />
                 </Field>
               ))}
             </div>
-            <div className="px-5 pb-5">
-              <button onClick={save} className="w-full py-2.5 rounded-lg bg-slate-800 text-white text-[13px] font-bold">この内容で保存する</button>
+            <div className="px-5 pb-5 flex gap-2">
+              {prevYearHasData && filled > 0 && (
+                <button onClick={copyFromPreviousYear} className="py-2.5 px-4 rounded-lg border border-slate-200 text-[12.5px] font-medium text-slate-500 whitespace-nowrap">
+                  前年度からコピー
+                </button>
+              )}
+              <button onClick={save} className="flex-1 py-2.5 rounded-lg bg-slate-800 text-white text-[13px] font-bold">
+                {fiscalYear}年度の内容で保存する
+              </button>
             </div>
           </div>
         ) : (
@@ -18534,17 +18613,32 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
     setSavingRemuneration(false);
   };
 
-  const [personalMonths, setPersonalMonths] = useState(() => {
-    const initial = {};
-    for (let m = 1; m <= 12; m++) initial[m] = String(employeeAttendanceSchedule[m] || 0);
-    return initial;
-  });
+  // 出勤規定日数は年度（4月〜翌3月）ごとに登録する
+  const nowForFiscal = new Date();
+  const [attendanceFiscalYear, setAttendanceFiscalYear] = useState(
+    fiscalYearOf(nowForFiscal.getFullYear(), nowForFiscal.getMonth() + 1)
+  );
+  const readPersonalMonths = (fy) => {
+    const out = {};
+    fiscalMonths(fy).forEach(({ year, month }) => {
+      const v = employeeAttendanceSchedule?.[year]?.[month];
+      out[`${year}-${month}`] = v != null ? String(v) : '';
+    });
+    return out;
+  };
+  const [personalMonths, setPersonalMonths] = useState(() =>
+    readPersonalMonths(fiscalYearOf(nowForFiscal.getFullYear(), nowForFiscal.getMonth() + 1))
+  );
   const [savingAttendance, setSavingAttendance] = useState(false);
-  const setPersonalMonth = (m) => (e) => setPersonalMonths((prev) => ({ ...prev, [m]: e.target.value }));
+  const changeAttendanceFiscalYear = (fy) => {
+    setAttendanceFiscalYear(fy);
+    setPersonalMonths(readPersonalMonths(fy));
+  };
+  const setPersonalMonth = (key) => (e) => setPersonalMonths((prev) => ({ ...prev, [key]: e.target.value }));
   const setPostalCodeValue = (v) => setForm((prev) => ({ ...prev, postalCode: v }));
   const savePersonalAttendance = async () => {
     setSavingAttendance(true);
-    await onSaveEmployeeAttendance(account.id, personalMonths);
+    await onSaveEmployeeAttendance(account.id, personalMonths, attendanceFiscalYear);
     setSavingAttendance(false);
   };
   const [form, setForm] = useState({
@@ -18839,30 +18933,62 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
 
               {form.mainGroup ? (
                 <div className="bg-slate-50 rounded-xl p-4 space-y-2">
-                  <div className="text-[12px] font-bold text-slate-600">「{form.mainGroup}」の出勤規定日数（月別・参照のみ）</div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <div className="text-[12px] font-bold text-slate-600">「{form.mainGroup}」の出勤規定日数（参照のみ）</div>
+                    <select
+                      value={attendanceFiscalYear}
+                      onChange={(e) => changeAttendanceFiscalYear(Number(e.target.value))}
+                      className="ml-auto border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white"
+                    >
+                      {[attendanceFiscalYear - 2, attendanceFiscalYear - 1, attendanceFiscalYear, attendanceFiscalYear + 1, attendanceFiscalYear + 2]
+                        .map((fy) => <option key={fy} value={fy}>{fy}年度</option>)}
+                    </select>
+                  </div>
                   <div className="grid grid-cols-4 gap-2">
-                    {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
-                      <div key={m} className="bg-white rounded-lg border border-slate-200 px-2 py-1.5 text-center">
-                        <div className="text-[9.5px] text-slate-400">{m}月</div>
-                        <div className="font-mono text-[12.5px] font-bold text-slate-700">{(groupAttendanceSchedules?.[form.mainGroup] || {})[m] || 0}</div>
+                    {fiscalMonths(attendanceFiscalYear).map(({ year, month }) => (
+                      <div key={`${year}-${month}`} className="bg-white rounded-lg border border-slate-200 px-2 py-1.5 text-center">
+                        <div className="text-[9.5px] text-slate-400">{month}月</div>
+                        <div className="font-mono text-[12.5px] font-bold text-slate-700">
+                          {groupAttendanceSchedules?.[form.mainGroup]?.[year]?.[month] ?? '—'}
+                        </div>
                       </div>
                     ))}
                   </div>
-                  <div className="text-[10.5px] text-slate-400">日数の変更は「出勤規定日数設定」タブから行ってください。</div>
+                  <div className="text-[10.5px] text-slate-400">「—」は未登録です。日数の変更は「出勤規定日数設定」タブから行ってください。</div>
                 </div>
               ) : (
                 <div className="bg-slate-50 rounded-xl p-4 space-y-3">
-                  <div className="text-[12px] font-bold text-slate-600">個人別の出勤規定日数（月別）</div>
-                  <div className="text-[10.5px] text-slate-400 -mt-1">グループ未設定のため、月ごとの出勤規定日数をここで入力してください。給与計算（月給制）で日割りの基準として使われます。</div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <div className="text-[12px] font-bold text-slate-600">個人別の出勤規定日数（年度・月別）</div>
+                    <select
+                      value={attendanceFiscalYear}
+                      onChange={(e) => changeAttendanceFiscalYear(Number(e.target.value))}
+                      className="ml-auto border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white"
+                    >
+                      {[attendanceFiscalYear - 2, attendanceFiscalYear - 1, attendanceFiscalYear, attendanceFiscalYear + 1, attendanceFiscalYear + 2]
+                        .map((fy) => <option key={fy} value={fy}>{fy}年度</option>)}
+                    </select>
+                  </div>
+                  <div className="text-[10.5px] text-slate-400 -mt-1">
+                    グループ未設定のため、月ごとの出勤規定日数をここで入力してください。給与計算（月給制）で日割りの基準として使われます。
+                    年度は{attendanceFiscalYear}年4月〜{attendanceFiscalYear + 1}年3月です。登録が無い月は日割りを行いません。
+                  </div>
                   <div className="grid grid-cols-3 sm:grid-cols-4 gap-3">
-                    {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
-                      <Field key={m} label={`${m}月`}>
-                        <input type="number" step="0.5" value={personalMonths[m]} onChange={setPersonalMonth(m)} className="w-full border border-slate-200 rounded-lg px-2.5 py-2 font-mono text-[13px] bg-white" />
+                    {fiscalMonths(attendanceFiscalYear).map(({ year, month }) => (
+                      <Field key={`${year}-${month}`} label={`${month}月`}>
+                        <input
+                          type="number"
+                          step="0.5"
+                          placeholder="未登録"
+                          value={personalMonths[`${year}-${month}`] ?? ''}
+                          onChange={setPersonalMonth(`${year}-${month}`)}
+                          className="w-full border border-slate-200 rounded-lg px-2.5 py-2 font-mono text-[13px] bg-white"
+                        />
                       </Field>
                     ))}
                   </div>
                   <button onClick={savePersonalAttendance} disabled={savingAttendance} className="w-full py-2.5 rounded-lg bg-slate-800 text-white text-[13px] font-bold disabled:opacity-50">
-                    {savingAttendance ? '保存中…' : '出勤規定日数を保存する'}
+                    {savingAttendance ? '保存中…' : `${attendanceFiscalYear}年度の出勤規定日数を保存する`}
                   </button>
                 </div>
               )}
