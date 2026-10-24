@@ -8040,6 +8040,28 @@ const TIME_INPUT_STYLE = { WebkitAppearance: 'none', appearance: 'none' };
 const TIME_INPUT_CLASS = 'w-full box-border min-w-0 border border-slate-200 rounded bg-white text-slate-800 px-2 py-1.5 font-mono text-[12.5px] text-center';
 const BREAK_INPUT_CLASS = 'w-full box-border min-w-0 border border-slate-200 rounded bg-white text-slate-800 px-1 py-1.5 font-mono text-[12.5px] text-center';
 
+// 勤怠一覧の日付の横に出す、その日のシフト。
+// 確定シフトは濃く、希望のまま（未確定）は薄く「希望」を添えて出す。
+// シフトが登録されていない日は何も出さない。
+function ShiftBadge({ shift, compact = false }) {
+  if (!shift) return null;
+  const tone = shift.kind === 'off'
+    ? 'bg-slate-100 text-slate-500 border-slate-200'
+    : shift.kind === 'paid'
+      ? 'bg-sky-50 text-sky-700 border-sky-200'
+      : 'bg-emerald-50 text-emerald-700 border-emerald-200';
+  const label = shift.kind === 'off' ? '休み' : shift.kind === 'paid' ? '有給' : (shift.place || '出勤');
+  return (
+    <span
+      className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-sans whitespace-nowrap ${tone} ${compact ? 'text-[9.5px]' : 'text-[10px]'} ${shift.confirmed ? '' : 'opacity-70'}`}
+      title={shift.confirmed ? '確定したシフト' : 'スタッフの希望（未確定）'}
+    >
+      {label}
+      {!shift.confirmed && <span className="font-bold">希望</span>}
+    </span>
+  );
+}
+
 function Field({ label, children }) {
   return (
     <div>
@@ -14436,6 +14458,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
       breakMinutes: record ? getRecordedBreakMinutes(record, record.clockOut ? new Date(record.clockOut) : new Date()) : null,
       dateShort: formatAdminDate(dateStr).label,
       hasRecord: !!record,
+      shift: shiftForDate(data.shiftRequests, acc.id, dateStr, data.shiftAssignments),
     });
   });
   rows.sort((a, b) => a.employeeName.localeCompare(b.employeeName, 'ja'));
@@ -14625,7 +14648,10 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
                 return (
                   <tr key={key} className={`border-b border-slate-100 last:border-0 ${r.needsApproval ? 'bg-amber-50/60' : ''}`}>
                     {employeeFilter === 'all' && <td className="px-2 py-2 font-semibold whitespace-nowrap"><EmployeeLink id={r.employeeId} name={r.employeeName} /></td>}
-                    <td className="px-2 py-2 font-mono font-semibold whitespace-nowrap text-slate-700">{r.dateShort}</td>
+                    <td className="px-2 py-2 whitespace-nowrap">
+                      <div className="font-mono font-semibold text-slate-700">{r.dateShort}</div>
+                      {r.shift && <div className="mt-0.5"><ShiftBadge shift={r.shift} compact /></div>}
+                    </td>
                     <td className="px-2 py-2">
                       <input type="time" value={e.clockIn || ''} onChange={(ev) => setField('clockIn', ev.target.value)} className="w-[84px] border border-slate-200 rounded px-1 py-1 font-mono text-[11.5px]" />
                       {(r.clockInActual || r.clockInStatusLabel) && (
@@ -14685,7 +14711,10 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
             return (
               <div key={key} className={`px-4 py-3 ${r.needsApproval ? 'bg-amber-50/60' : ''}`}>
                 <div className="flex items-center justify-between">
-                  <div className="inline-block font-mono text-[13px] font-semibold text-slate-700">{r.dateShort}</div>
+                  <div className="flex items-center gap-1.5">
+                    <div className="font-mono text-[13px] font-semibold text-slate-700">{r.dateShort}</div>
+                    <ShiftBadge shift={r.shift} />
+                  </div>
                   <div className="flex items-center gap-2">
                     {employeeFilter === 'all' && <div className="text-[12px] font-bold text-slate-600"><EmployeeLink id={r.employeeId} name={r.employeeName} /></div>}
                     <button onClick={() => setMonthlyViewTarget({ employeeId: r.employeeId, employeeName: r.employeeName, month: dateFilter.slice(0, 7) })} className="text-[10.5px] font-bold text-slate-500 border border-slate-200 rounded-md px-2 py-1">月間</button>
