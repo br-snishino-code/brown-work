@@ -21,11 +21,9 @@
 --   登録が無い月は、これまでどおり日割りなしで計算します。
 --
 -- 何度流しても同じ結果になります（2回目以降は何も起きません）。
-
-
--- 移す先の年度。別の年度に移したい場合はここだけ変えてください。
--- 2026 とすると 4〜12月は2026年、1〜3月は2027年として登録されます。
-\set target_fiscal_year 2026
+--
+-- ※ Supabase の SQL Editor にそのまま貼り付けて実行できます。
+--    （psql 専用の記法は使っていません）
 
 
 -- ========================================================
@@ -41,13 +39,27 @@ alter table public.employee_attendance_schedules
 -- ========================================================
 -- 2. いまの値を対象の年度に移す（年が空の行だけ）
 -- ========================================================
-update public.group_attendance_schedules
-set year = case when month >= 4 then :target_fiscal_year else :target_fiscal_year + 1 end
-where year is null;
+do $do$
+declare
+  -- 移す先の年度。別の年度に移したい場合はこの数字だけ変えてください。
+  -- 2026 とすると 4〜12月は2026年、1〜3月は2027年として登録されます。
+  v_target_fiscal_year integer := 2026;
+  v_group_count integer;
+  v_employee_count integer;
+begin
+  update public.group_attendance_schedules
+  set year = case when month >= 4 then v_target_fiscal_year else v_target_fiscal_year + 1 end
+  where year is null;
+  get diagnostics v_group_count = row_count;
 
-update public.employee_attendance_schedules
-set year = case when month >= 4 then :target_fiscal_year else :target_fiscal_year + 1 end
-where year is null;
+  update public.employee_attendance_schedules
+  set year = case when month >= 4 then v_target_fiscal_year else v_target_fiscal_year + 1 end
+  where year is null;
+  get diagnostics v_employee_count = row_count;
+
+  raise notice '%年度に移しました：グループ別 %件／個人別 %件',
+    v_target_fiscal_year, v_group_count, v_employee_count;
+end $do$;
 
 
 -- ========================================================
