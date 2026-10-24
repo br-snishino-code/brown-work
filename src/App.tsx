@@ -14780,9 +14780,9 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
   const days = Array.from({ length: lastDayOfMonth(y, m) }, (_, i) => i + 1);
   const todayStr = todayKey();
 
+  // 月末まで並べる（先の日付も確定シフトを確認できるようにするため）
   const rows = days
     .map((d) => `${y}-${pad(m)}-${pad(d)}`)
-    .filter((dateStr) => dateStr <= todayStr)
     .map((dateStr) => {
       const record = data.records[employeeId]?.[dateStr] || null;
       const metrics = computeMetrics(record);
@@ -14798,6 +14798,8 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
         overtimeMin: metrics?.overtimeMin ?? 0,
         status: computeDayStatus(record).label,
         hasRecord: !!record,
+        isToday: dateStr === todayStr,
+        isFuture: dateStr > todayStr,
         // 確定シフトだけを出す（画面を移らずに確認できるようにするため）
         shift: (() => {
           const found = shiftForDate(data.shiftRequests, employeeId, dateStr, data.shiftAssignments);
@@ -14850,7 +14852,7 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
         <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2">
           <Clock size={15} className="text-slate-400" />
           <h2 className="font-bold text-[13.5px]">{month} の勤怠</h2>
-          <span className="text-[10.5px] text-slate-400">出勤・退勤・休憩を直接書き換えて、下の「まとめて更新」で保存できます</span>
+          <span className="text-[10.5px] text-slate-400">出勤・退勤・休憩を直接書き換えて、下の「まとめて更新」で保存できます（月末まで表示。水色が今日）</span>
         </div>
         {isDesktop ? (
           <div className="overflow-x-auto">
@@ -14865,7 +14867,7 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
                   const e = edits[r.date] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: undefined };
                   const setField = (field, value) => setEdits((prev) => ({ ...prev, [r.date]: { ...(prev[r.date] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: undefined }), [field]: value } }));
                   return (
-                    <tr key={r.date} className={`border-b border-slate-100 last:border-0 ${r.needsApproval ? 'bg-amber-50/60' : ''}`}>
+                    <tr key={r.date} className={`border-b border-slate-100 last:border-0 ${r.needsApproval ? 'bg-amber-50/60' : r.isToday ? 'bg-sky-50/70' : r.isFuture ? 'bg-slate-50/60' : ''}`}>
                       <td className="px-3 py-2 whitespace-nowrap">
                         <div className={`font-mono font-semibold ${r.textClass}`}>{r.label}</div>
                         {r.shift && <div className="mt-0.5"><ShiftBadge shift={r.shift} compact /></div>}
@@ -14924,7 +14926,7 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
               const e = edits[r.date] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: undefined };
               const setField = (field, value) => setEdits((prev) => ({ ...prev, [r.date]: { ...(prev[r.date] || { clockIn: r.clockIn, clockOut: r.clockOut, breakMinutes: r.breakMin, approve: undefined }), [field]: value } }));
               return (
-                <div key={r.date} className={`px-4 py-3 ${r.needsApproval ? 'bg-amber-50/60' : ''}`}>
+                <div key={r.date} className={`px-4 py-3 ${r.needsApproval ? 'bg-amber-50/60' : r.isToday ? 'bg-sky-50/70' : r.isFuture ? 'bg-slate-50/60' : ''}`}>
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-1.5">
                       <div className={`font-mono text-[13px] font-semibold ${r.textClass}`}>{r.label}</div>
