@@ -14232,7 +14232,6 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
       clockOutPayDeductionNote: record?.clockOutPayDeductionNote || '',
       breakMinutes: record ? getRecordedBreakMinutes(record, record.clockOut ? new Date(record.clockOut) : new Date()) : null,
       dateShort: formatAdminDate(dateStr).label,
-      dateTextClass: formatAdminDate(dateStr).textClass,
     });
   });
   rows.sort((a, b) => a.employeeName.localeCompare(b.employeeName, 'ja'));
@@ -14404,7 +14403,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
                 return (
                   <tr key={key} className={`border-b border-slate-100 last:border-0 ${r.needsApproval ? 'bg-amber-50/60' : ''}`}>
                     {employeeFilter === 'all' && <td className="px-2 py-2 font-semibold whitespace-nowrap"><EmployeeLink id={r.employeeId} name={r.employeeName} /></td>}
-                    <td className={`px-2 py-2 font-mono font-semibold whitespace-nowrap ${r.dateTextClass}`}>{r.dateShort}</td>
+                    <td className="px-2 py-2 font-mono font-semibold whitespace-nowrap text-slate-700">{r.dateShort}</td>
                     <td className="px-2 py-2">
                       <input type="time" value={e.clockIn || ''} onChange={(ev) => setField('clockIn', ev.target.value)} className="w-[84px] border border-slate-200 rounded px-1 py-1 font-mono text-[11.5px]" />
                       {(r.clockInActual || r.clockInStatusLabel) && (
@@ -14451,7 +14450,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
             return (
               <div key={key} className={`px-4 py-3 ${r.needsApproval ? 'bg-amber-50/60' : ''}`}>
                 <div className="flex items-center justify-between">
-                  <div className={`inline-block font-mono text-[13px] font-semibold ${r.dateTextClass}`}>{r.dateShort}</div>
+                  <div className="inline-block font-mono text-[13px] font-semibold text-slate-700">{r.dateShort}</div>
                   <div className="flex items-center gap-2">
                     {employeeFilter === 'all' && <div className="text-[12px] font-bold text-slate-600"><EmployeeLink id={r.employeeId} name={r.employeeName} /></div>}
                     <button onClick={() => setMonthlyViewTarget({ employeeId: r.employeeId, employeeName: r.employeeName, month: dateFilter.slice(0, 7) })} className="text-[10.5px] font-bold text-slate-500 border border-slate-200 rounded-md px-2 py-1">月間</button>
