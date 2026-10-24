@@ -3251,30 +3251,46 @@ function AttendanceApp() {
   };
 
   const submitCorrection = async (payload) => {
-    const { data: inserted, error } = await supabase
-      .from('corrections')
-      .insert({
-        employee_id: employeeId,
-        date: payload.date,
-        original: employeeRecords[payload.date] || null,
-        requested: payload,
-        reason: payload.reason,
-        status: 'pending',
-      })
-      .select()
-      .single();
-    if (error) {
-      show('修正申請の送信に失敗しました', 'warn');
-      return;
-    }
-    await notifyAdmin(
-      `【勤怠修正申請】${session.name} - ${dateLabel(payload.date)}`,
-      `${session.name}さんより ${dateLabel(payload.date)} の勤怠修正申請が届きました。内容をご確認のうえ承認してください。`,
-      inserted?.id
+    // 同じ日の未処理の申請があれば、新しく作らずその申請を書き換える。
+    // 送信ボタンを連打したときに同じ内容の申請が並ぶのを防ぐため
+    // （交通費精算の申請と同じ扱い）
+    const pending = (data.corrections || []).find(
+      (c) => c.employeeId === employeeId && c.date === payload.date && c.status === 'pending'
     );
+    const row = {
+      employee_id: employeeId,
+      date: payload.date,
+      original: employeeRecords[payload.date] || null,
+      requested: payload,
+      reason: payload.reason,
+      status: 'pending',
+    };
+    const { data: saved, error } = pending
+      ? await supabase.from('corrections').update(row).eq('id', pending.id).select().single()
+      : await supabase.from('corrections').insert(row).select().single();
+    if (error) {
+      console.error('修正申請の送信に失敗しました', error);
+      show('修正申請の送信に失敗しました', 'warn');
+      return false;
+    }
+    // 書き換えで中身が変わっていないときは、管理者に同じ通知を重ねて送らない
+    const sameAsBefore = pending && JSON.stringify(pending.requested || {}) === JSON.stringify(payload);
+    if (!sameAsBefore) {
+      await notifyAdmin(
+        `【勤怠修正申請${pending ? '・修正' : ''}】${session.name} - ${dateLabel(payload.date)}`,
+        `${session.name}さんより ${dateLabel(payload.date)} の勤怠修正申請が${pending ? '修正されました' : '届きました'}。内容をご確認のうえ承認してください。`,
+        saved?.id
+      );
+    }
     await refreshData();
     setCorrectionModal(null);
-    show('修正申請を送信しました。管理者に通知しました', 'success');
+    show(
+      pending
+        ? (sameAsBefore ? 'この日の修正申請はすでに送信済みです' : '修正申請の内容を更新しました。管理者に通知しました')
+        : '修正申請を送信しました。管理者に通知しました',
+      pending && sameAsBefore ? 'warn' : 'success'
+    );
+    return true;
   };
 
   // 管理者が勤怠一覧から直接、出退勤時刻を修正する（承認フローを介さず即時反映）
@@ -3402,6 +3418,20 @@ function AttendanceApp() {
 
   const submitLeaveRequest = async (payload) => {
     const days = payload.halfDay ? 0.5 : daysBetweenInclusive(payload.startDate, payload.endDate);
+    // まったく同じ内容の未処理の申請があれば、重ねて作らない（連打対策）
+    const duplicate = (data.leaveRequests || []).find(
+      (l) => l.employeeId === employeeId
+        && l.status === 'pending'
+        && l.type === payload.type
+        && !!l.halfDay === !!payload.halfDay
+        && l.startDate === payload.startDate
+        && l.endDate === payload.endDate
+    );
+    if (duplicate) {
+      setLeaveModalOpen(false);
+      show('同じ内容の休暇申請がすでに送信済みです', 'warn');
+      return false;
+    }
     const { data: inserted, error } = await supabase
       .from('leave_requests')
       .insert({
@@ -3417,8 +3447,9 @@ function AttendanceApp() {
       .select()
       .single();
     if (error) {
+      console.error('休暇申請の送信に失敗しました', error);
       show('休暇申請の送信に失敗しました', 'warn');
-      return;
+      return false;
     }
     const rangeLabel = payload.startDate === payload.endDate ? dateLabel(payload.startDate) : `${dateLabel(payload.startDate)}〜${dateLabel(payload.endDate)}`;
     const typeLabel = payload.halfDay ? `${payload.type}（半休）` : payload.type;
@@ -3430,6 +3461,7 @@ function AttendanceApp() {
     await refreshData();
     setLeaveModalOpen(false);
     show('休暇申請を送信しました。管理者に通知しました', 'success');
+    return true;
   };
 
   const decideLeaveRequest = async (id, decision) => {
@@ -7858,7 +7890,19 @@ function CorrectionModal({ dateKey, record, onClose, onSubmit }) {
   const [clockOut, setClockOut] = useState(record?.clockOut ? hhmm(new Date(record.clockOut)) : '');
   const [breakMinutes, setBreakMinutes] = useState(record?.breakMinutes ?? BREAK_MINUTES_DEFAULT);
   const [reason, setReason] = useState('');
-  const canSubmit = reason.trim().length > 0 && (clockIn || clockOut);
+  // 送信中は押せないようにする（連打で同じ申請が何件も入るのを防ぐ）
+  const [sending, setSending] = useState(false);
+  const canSubmit = reason.trim().length > 0 && (clockIn || clockOut) && !sending;
+
+  const handleSubmit = async () => {
+    if (!canSubmit) return;
+    setSending(true);
+    try {
+      await onSubmit({ date: dateKey, clockIn: clockIn || null, clockOut: clockOut || null, breakMinutes: Number(breakMinutes), reason });
+    } finally {
+      setSending(false);
+    }
+  };
 
   return createPortal(
     <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-40 p-0 sm:p-4">
@@ -7891,11 +7935,11 @@ function CorrectionModal({ dateKey, record, onClose, onSubmit }) {
         <div className="px-5 pb-5 pt-1 flex gap-2 sticky bottom-0 bg-white">
           <button onClick={onClose} className="flex-1 py-2.5 rounded-lg border border-slate-200 text-[13.5px] font-medium text-slate-500">キャンセル</button>
           <button
-            onClick={() => canSubmit && onSubmit({ date: dateKey, clockIn: clockIn || null, clockOut: clockOut || null, breakMinutes: Number(breakMinutes), reason })}
+            onClick={handleSubmit}
             disabled={!canSubmit}
             className="flex-1 py-2.5 rounded-lg bg-slate-800 disabled:bg-slate-200 text-white text-[13.5px] font-bold"
           >
-            申請する
+            {sending ? '送信中…' : '申請する'}
           </button>
         </div>
       </div>
@@ -8019,7 +8063,19 @@ function LeaveRequestModal({ leaveRemaining, onClose, onSubmit }) {
   const isSingleDay = startDate === endDate;
   const days = halfDay && isSingleDay ? 0.5 : daysBetweenInclusive(startDate, endDate);
   const exceedsBalance = type === '有休' && days > leaveRemaining;
-  const canSubmit = reason.trim().length > 0 && startDate && endDate && new Date(endDate) >= new Date(startDate) && !exceedsBalance;
+  // 送信中は押せないようにする（連打で同じ申請が何件も入るのを防ぐ）
+  const [sending, setSending] = useState(false);
+  const canSubmit = reason.trim().length > 0 && startDate && endDate && new Date(endDate) >= new Date(startDate) && !exceedsBalance && !sending;
+
+  const handleSubmit = async () => {
+    if (!canSubmit) return;
+    setSending(true);
+    try {
+      await onSubmit({ type, startDate, endDate, halfDay: halfDay && isSingleDay, reason });
+    } finally {
+      setSending(false);
+    }
+  };
 
   const handleTypeChange = (t) => {
     setType(t);
@@ -8105,11 +8161,11 @@ function LeaveRequestModal({ leaveRemaining, onClose, onSubmit }) {
         <div className="px-5 pb-5 pt-1 flex gap-2 sticky bottom-0 bg-white">
           <button onClick={onClose} className="flex-1 py-2.5 rounded-lg border border-slate-200 text-[13.5px] font-medium text-slate-500">キャンセル</button>
           <button
-            onClick={() => canSubmit && onSubmit({ type, startDate, endDate, halfDay: halfDay && isSingleDay, reason })}
+            onClick={handleSubmit}
             disabled={!canSubmit}
             className="flex-1 py-2.5 rounded-lg bg-amber-600 disabled:bg-slate-200 text-white text-[13.5px] font-bold"
           >
-            申請する
+            {sending ? '送信中…' : '申請する'}
           </button>
         </div>
       </div>
