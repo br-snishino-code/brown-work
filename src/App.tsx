@@ -5109,14 +5109,29 @@ function AttendanceApp() {
         )}
         {effectiveTopTab === 'hr' && !showStaffScreens && (
           <div className="space-y-5">
-              <AdminYearEndAdjustmentTab
-                requests={data.yearEndAdjustments}
-                onDecide={decideYearEndAdjustment}
-                employeeAccounts={employeeAccounts}
-                onNotifyEmployee={notifyEmployeeUser}
-                isMasterAdmin={session.role === 'master_admin'}
-                isDesktop={isDesktop}
-              />
+              {/* 年末調整はマスター管理者だけが扱う
+                  （supabase/78_year_end_master_only.sql）。
+                  配偶者の所得・保険料・住宅ローン控除額が入っているため、
+                  給与明細と同じ扱いにした。
+                  データベース側で読めなくなるので、ここで出し分けないと
+                  管理者には「0名」の空の一覧が出て混乱する。 */}
+              {session.role !== 'master_admin' ? (
+                <div className="rounded-2xl border border-amber-200 bg-amber-50 px-5 py-4 text-[12px] text-amber-800">
+                  <div className="font-bold mb-1">年末調整はマスター管理者が扱います</div>
+                  配偶者の所得や保険料など、給与明細と同じ扱いの情報が含まれるためです。
+                  内容の確認が必要なときは、総務担当へご依頼ください。ご自身の年末調整は
+                  「自分の勤怠」に切り替えて「各種申請」からご提出いただけます。
+                </div>
+              ) : (
+                <AdminYearEndAdjustmentTab
+                  requests={data.yearEndAdjustments}
+                  onDecide={decideYearEndAdjustment}
+                  employeeAccounts={employeeAccounts}
+                  onNotifyEmployee={notifyEmployeeUser}
+                  isMasterAdmin={session.role === 'master_admin'}
+                  isDesktop={isDesktop}
+                />
+              )}
               <AdminProfileRequestsTab
                 requests={data.profileUpdateRequests}
                 onDecide={decideProfileUpdateRequest}
