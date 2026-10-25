@@ -1609,6 +1609,17 @@ const rowToMonthlyConfirm = (row) => ({
 
 const ANNOUNCEMENT_CATEGORIES = ['お知らせ', '制度・インセンティブ', '資料・料金表', 'キャンペーン', 'その他'];
 
+// バックアップのときに、別の場所から読む表。
+//
+// employees は 71b で表ごとの読み取り権限を外し、個人情報の列だけを
+// employees_visible ビュー越しに見せる作りにした。そのため
+// 「employees の全列を取り出す」操作は、マスター管理者であっても
+// permission denied になる（手元のPostgreSQLで確認済み）。
+// バックアップはビューから読む。マスター管理者にはすべての列が見える。
+const BACKUP_SOURCE = {
+  employees: 'employees_visible',
+};
+
 // 全データバックアップの対象テーブル。
 // マイナンバー（employee_my_numbers）は意図的に含めていない。
 // ・暗号化して保存しており、鍵が無ければ書き出しても読めない
@@ -11373,7 +11384,7 @@ const HELP_ADMIN = [
     category: 'お知らせ・その他',
     items: [
       { q: 'お知らせを投稿するには', a: '管理画面の「労務」タブ上部にある投稿フォームから、カテゴリ・タイトル・本文を入力して投稿します。ファイルの添付もできます。重要なものは固定表示にすると一番上に表示されます。スタッフ画面に切り替えているときは投稿ボタンは出ません。' },
-      { q: 'データのバックアップを取るには', a: '「勤怠」→「スタッフ一覧」の右上にある「データバックアップ」を押すと、全データがExcelファイルでダウンロードされます。マスター管理者のみ利用できます。月1回を目安に実行してください。マイナンバーを含むため、保管場所には十分ご注意ください。' },
+      { q: 'データのバックアップを取るには', a: '「勤怠」→「スタッフ一覧」の右上にある「データバックアップ」を押すと、全データがExcelファイルでダウンロードされます。マスター管理者のみ利用できます。月1回を目安に実行してください。マイナンバーは含まれません（番号が必要なときはスタッフ詳細から1件ずつ確認してください）。ただし住所・口座情報・給与は含まれるため、保管場所には十分ご注意ください。' },
       { q: '監査ログとは何ですか', a: '誰がいつどの操作をしたかの記録です。「勤怠」→「その他」→「監査ログ」で確認できます。承認・却下・アカウント操作などが記録されます。' },
       { q: '「同期エラー」と表示されました', a: '通信が一時的に不安定な場合に表示されます。画面を再読み込み（Ctrl + Shift + R）すると復帰することが多いです。繰り返し発生する場合は開発者にご相談ください。' },
     ],
@@ -18147,7 +18158,8 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
         const CHUNK = 1000;
         let tableFailed = false;
         for (;;) {
-          const { data: chunk, error } = await supabase.from(table).select('*').range(from, from + CHUNK - 1);
+          const source = BACKUP_SOURCE[table] || table;
+          const { data: chunk, error } = await supabase.from(source).select('*').range(from, from + CHUNK - 1);
           if (error) {
             tableFailed = true;
             break;
