@@ -207,11 +207,40 @@ function EmployeeLink({ id, name, className = '' }) {
 const APP_LOGIN_URL = 'https://brown-work.vercel.app';
 
 // 仮パスワードの自動生成（紛らわしい文字 O/0/I/l/1 は使わない）
+//
+// 以前は56文字の中から無作為に10文字選ぶだけだったため、数字が1つも
+// 入らないことが5回に1回ほどあり、パスワードの決まりを満たさなかった。
+// 各種類から1文字ずつ先に取り、残りを埋めてから並びを混ぜる形にして、
+// 必ず「数字・英大文字・英小文字」をそれぞれ含むようにしている。
+const PW_LOWER = 'abcdefghijkmnpqrstuvwxyz';
+const PW_UPPER = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+const PW_DIGIT = '23456789';
+const PW_LENGTH = 12;
+
+// 0以上max未満の整数。Math.random より偏りがなく、予測もされにくい。
+// 端数の範囲を捨てることで、剰余による偏りも避けている。
+function randomBelow(max) {
+  const limit = Math.floor(0xffffffff / max) * max;
+  const buf = new Uint32Array(1);
+  let v;
+  do { crypto.getRandomValues(buf); v = buf[0]; } while (v >= limit);
+  return v % max;
+}
+
 function generateTempPassword() {
-  const chars = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let out = '';
-  for (let i = 0; i < 10; i++) out += chars[Math.floor(Math.random() * chars.length)];
-  return out;
+  const all = PW_LOWER + PW_UPPER + PW_DIGIT;
+  const picks = [
+    PW_LOWER[randomBelow(PW_LOWER.length)],
+    PW_UPPER[randomBelow(PW_UPPER.length)],
+    PW_DIGIT[randomBelow(PW_DIGIT.length)],
+  ];
+  while (picks.length < PW_LENGTH) picks.push(all[randomBelow(all.length)]);
+  // 先頭が必ず「小文字・大文字・数字」の順になってしまうので、並びを混ぜる
+  for (let i = picks.length - 1; i > 0; i--) {
+    const j = randomBelow(i + 1);
+    [picks[i], picks[j]] = [picks[j], picks[i]];
+  }
+  return picks.join('');
 }
 
 // 招待メールの本文（件名と本文をここで組み立てる）
