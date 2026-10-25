@@ -12609,6 +12609,18 @@ function BonusAdminTab({ employeeAccounts, bonusRecords = [], tableReady = true,
     );
   }
 
+  // 賞与明細もマスター管理者だけが扱う（supabase/72_payslip_master_only.sql）。
+  // それ以外の管理者には他人の明細が届かないため、作成画面ごと出さない。
+  if (!isMasterAdmin) {
+    return (
+      <div className="rounded-2xl border border-amber-200 bg-amber-50 px-5 py-4 text-[11.5px] text-amber-800">
+        <div className="font-bold mb-1">賞与明細はマスター管理者が扱います</div>
+        この画面では、ご自身の明細以外は作成も閲覧もできません。
+        内容の確認が必要なときは総務担当へご依頼ください。
+      </div>
+    );
+  }
+
   const staff = employeeAccounts.filter((a) => !a.resignationDate);
   const periodRecords = bonusRecords.filter((b) => b.year === year && b.seq === seq);
   const byEmployee = {};
@@ -13271,9 +13283,9 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
             0円で計算された誤った明細ができるのを防ぐため。 */}
         {!isMasterAdmin && (
           <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-[11.5px] text-amber-800">
-            <div className="font-bold mb-1">給与明細の作成はマスター管理者が行います</div>
-            賃金（時給・月給）はマスター管理者だけが扱える情報のため、この画面では明細を作成できません。
-            作成済みの明細は下の一覧で確認できます。
+            <div className="font-bold mb-1">給与明細はマスター管理者が扱います</div>
+            給与明細は、賃金とあわせてマスター管理者だけが扱える情報です。この画面では、
+            ご自身の明細以外は作成も閲覧もできません。内容の確認が必要なときは総務担当へご依頼ください。
           </div>
         )}
 
