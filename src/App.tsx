@@ -9366,6 +9366,7 @@ const PRODUCT_GROUPS = [
   {
     name: 'インターネット',
     tone: 'bg-blue-50',
+    single: true,   // この区分の中では1つだけ選べる
     items: [
       { key: 'net500m', label: 'ネット500M' },
       { key: 'net1g', label: 'ネット1ギガ' },
@@ -9380,6 +9381,7 @@ const PRODUCT_GROUPS = [
   {
     name: 'テレビコース',
     tone: 'bg-green-50',
+    single: true,   // この区分の中では1つだけ選べる
     items: [
       { key: 'tvGeneral', label: 'TV(一般)' },
       { key: 'tvSelect', label: 'TV(選べる)' },
@@ -9407,7 +9409,32 @@ const PRODUCT_GROUPS = [
 ];
 
 const PRODUCT_ITEMS = PRODUCT_GROUPS.flatMap((g) => g.items);
-const PRODUCT_ROWS_DEFAULT = 20;   // はじめに出す行数
+
+// どの商品がどの区分に属するか（排他の判定に使う）
+const PRODUCT_GROUP_OF = Object.fromEntries(
+  PRODUCT_GROUPS.flatMap((g) => g.items.map((it) => [it.key, g]))
+);
+
+// 印の付け外し。single の区分（インターネット・テレビコース）は、
+// その区分の中で1つだけ選べる。別のものを押すと前の印は外れる。
+// すでに付いているものをもう一度押すと、その区分は「選択なし」に戻る。
+function toggleProductItem(items, key) {
+  const next = { ...(items || {}) };
+  if (next[key]) {
+    delete next[key];
+    return next;
+  }
+  const group = PRODUCT_GROUP_OF[key];
+  if (group?.single) {
+    group.items.forEach((it) => { delete next[it.key]; });
+  }
+  next[key] = true;
+  return next;
+}
+
+const PRODUCT_SINGLE_GROUP_NAMES = PRODUCT_GROUPS.filter((g) => g.single && g.items.length > 1).map((g) => g.name);
+
+const PRODUCT_ROWS_DEFAULT = 10;   // はじめに出す行数
 const PRODUCT_ROWS_STEP = 10;      // 「行を追加」で増える数
 
 // daily（JSON）には { rows: [{ date, items: { ネットのキー: true } }] } の形で入れる。
@@ -9491,9 +9518,7 @@ function ProductPerformanceSection({ employeeId, settings, onNotifyAdmin, isDesk
     setDirty(true);
     setRows((prev) => prev.map((r, i) => {
       if (i !== index) return r;
-      const items = { ...(r.items || {}) };
-      if (items[key]) delete items[key]; else items[key] = true;
-      return { ...r, items };
+      return { ...r, items: toggleProductItem(r.items, key) };
     }));
   };
 
@@ -9593,7 +9618,7 @@ function ProductPerformanceSection({ employeeId, settings, onNotifyAdmin, isDesk
           <div className="rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-[11.5px] leading-relaxed text-slate-600">
             {locked
               ? `${deadlineLabel ? `${deadlineLabel}で締め切りました。` : '受付を終了しました。'}内容の確認はできますが、入力はできません。直したい箇所がある場合は管理者にご連絡ください。`
-              : `契約1件につき1行です。日付を選び、その契約に含まれる商品に印を付けてください。同じ日に2件あるときは、行を分けて入力します。途中まででも「一時保存」で残せます。${deadlineLabel ? `入力できるのは${deadlineLabel}までです。` : ''}`}
+              : `契約1件につき1行です。日付を選び、その契約に含まれる商品に印を付けてください。${PRODUCT_SINGLE_GROUP_NAMES.join('と')}は、それぞれ1つだけ選べます（別のものを押すと切り替わります）。同じ日に2件あるときは、行を分けて入力します。途中まででも「一時保存」で残せます。${deadlineLabel ? `入力できるのは${deadlineLabel}までです。` : ''}`}
           </div>
           {adminEdit && (
             <div className="rounded-xl border border-sky-200 bg-sky-50 px-3.5 py-2.5 text-[11.5px] leading-relaxed text-sky-800">
@@ -9756,7 +9781,12 @@ function ProductPerformanceSection({ employeeId, settings, onNotifyAdmin, isDesk
                 <div className="px-4 py-3 space-y-2.5">
                   {PRODUCT_GROUPS.map((g) => (
                     <div key={g.name}>
-                      <div className="mb-1 text-[10.5px] font-bold text-slate-400">{g.name}</div>
+                      <div className="mb-1 text-[10.5px] font-bold text-slate-400">
+                        {g.name}
+                        {g.single && g.items.length > 1 && (
+                          <span className="ml-1 font-medium text-slate-300">（1つだけ）</span>
+                        )}
+                      </div>
                       <div className="flex flex-wrap gap-1.5">
                         {g.items.map((it) => {
                           const on = !!r.items?.[it.key];
@@ -10426,9 +10456,7 @@ function ProductAdminPerfEditModal({ employee, year, month, session, onNotifyEmp
   const toggleItem = (index, key) =>
     setRows((prev) => prev.map((r, i) => {
       if (i !== index) return r;
-      const items = { ...(r.items || {}) };
-      if (items[key]) delete items[key]; else items[key] = true;
-      return { ...r, items };
+      return { ...r, items: toggleProductItem(r.items, key) };
     }));
 
   const filledRows = compactProductRows(rows);
