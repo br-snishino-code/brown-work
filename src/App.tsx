@@ -8131,9 +8131,9 @@ function ShiftBadge({ shift, compact = false }) {
   );
 }
 
-function Field({ label, children }) {
+function Field({ label, children, className = '' }) {
   return (
-    <div>
+    <div className={className}>
       <label className="block text-[11.5px] font-medium text-slate-500 mb-1">{label}</label>
       {children}
     </div>
@@ -16120,16 +16120,18 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate, onSav
             </div>
           )}
           <div className="grid grid-cols-2 gap-3">
-            <Field label="対象月">
-              <input type="month" value={targetMonth} onChange={(e) => setTargetMonth(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
+            {/* min-w-0 が無いと、日付の入力欄が列幅を超えて左にはみ出す
+                （グリッドの子は既定で min-width:auto のため） */}
+            <Field label="対象月" className="min-w-0">
+              <input type="month" value={targetMonth} onChange={(e) => setTargetMonth(e.target.value)} className="w-full min-w-0 box-border border border-slate-200 rounded-lg px-2.5 py-2 font-mono text-[13px]" />
             </Field>
             {/* 提出日は保存・申請した日を自動で入れる。手で変えられないようにして、
                 空にして保存に失敗する事故を防ぐ */}
-            <Field label="提出日">
-              <div className="w-full border border-slate-200 bg-slate-50 rounded-lg px-3 py-2 font-mono text-[13.5px] text-slate-500">
+            <Field label="提出日" className="min-w-0">
+              <div className="w-full min-w-0 box-border border border-slate-200 bg-slate-50 rounded-lg px-2.5 py-2 font-mono text-[13px] text-slate-500 truncate">
                 {dateLabel(todayKey())}
               </div>
-              <div className="mt-1 text-[10.5px] text-slate-400">保存・申請した日が自動で入ります。</div>
+              <div className="mt-1 text-[10.5px] text-slate-400">保存した日が入ります</div>
             </Field>
           </div>
 
