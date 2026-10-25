@@ -89,6 +89,11 @@ async function checkApiKey(
   } catch (_) { /* 記録が使えなくても本来の処理は続ける */ }
 
   const given = req.headers.get('x-api-key') || '';
+  // 【順番が大事】expected が空文字のときは、ヘッダを付けずに呼ぶと
+  // '' と '' の比較になって通ってしまう。
+  // そのため呼び出し元（Deno.serve の中）で、この関数を呼ぶ前に
+  // 「EXPORT_KEY が空なら 500 で返す」ガードを入れてある。
+  // ここを別の場所から呼ぶときは、同じガードを必ず先に置くこと。
   if (await constantTimeEqual(given, expected)) return null;
 
   try {
