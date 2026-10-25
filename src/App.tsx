@@ -11268,9 +11268,18 @@ function ZtvIncentiveView({ staff, newRows, rates, year, month, onSaveRates, isM
   return (
     <div className="space-y-5">
       <div className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-[11px] leading-relaxed text-sky-800">
-        ZTV業務の支給額は「商品ごとの件数 × 単価」の合計です。
-        提出済み・未提出にかかわらず、入力されている内容をそのまま集計しています。
-        eo業務のような目標達成フラグ・順位・半額の扱いはありません。
+        {isMasterAdmin ? (
+          <>
+            ZTV業務の支給額は「商品ごとの件数 × 単価」の合計です。
+            提出済み・未提出にかかわらず、入力されている内容をそのまま集計しています。
+            eo業務のような目標達成フラグ・順位・半額の扱いはありません。
+          </>
+        ) : (
+          <>
+            商品ごとの件数を集計しています。提出済み・未提出にかかわらず、入力されている内容をそのまま数えています。
+            単価と支給額はマスター管理者のみが確認できます。
+          </>
+        )}
       </div>
 
       {/* ---- 単価の一覧と変更（マスター管理者のみ）----
@@ -11338,8 +11347,12 @@ function ZtvIncentiveView({ staff, newRows, rates, year, month, onSaveRates, isM
         <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2 flex-wrap">
           <span className="text-[12.5px] font-bold text-slate-700">{year}年{month}月分の支給額</span>
           <span className="ml-auto text-[12px] text-slate-500">
-            合計 <span className="font-mono text-[15px] font-bold text-slate-800">{formatYen(grand.total)}</span>
-            <span className="ml-2 text-slate-400">（{grand.cases}件）</span>
+            {isMasterAdmin && (
+              <>合計 <span className="font-mono text-[15px] font-bold text-slate-800">{formatYen(grand.total)}</span></>
+            )}
+            <span className={isMasterAdmin ? 'ml-2 text-slate-400' : ''}>
+              {isMasterAdmin ? `（${grand.cases}件）` : `合計 ${grand.cases}件`}
+            </span>
           </span>
         </div>
         {perStaff.length === 0 ? (
@@ -11354,7 +11367,7 @@ function ZtvIncentiveView({ staff, newRows, rates, year, month, onSaveRates, isM
                   {PRODUCT_ITEMS.map((it) => (
                     <th key={it.key} className="px-2 py-2 font-medium text-right whitespace-nowrap">{it.label}</th>
                   ))}
-                  <th className="px-4 py-2 font-medium text-right whitespace-nowrap">支給額</th>
+                  {isMasterAdmin && <th className="px-4 py-2 font-medium text-right whitespace-nowrap">支給額</th>}
                 </tr>
               </thead>
               <tbody>
@@ -11370,7 +11383,9 @@ function ZtvIncentiveView({ staff, newRows, rates, year, month, onSaveRates, isM
                         {x.count}
                       </td>
                     ))}
-                    <td className="px-4 py-2 text-right font-mono font-bold text-slate-800 whitespace-nowrap">{formatYen(r.total)}</td>
+                    {isMasterAdmin && (
+                      <td className="px-4 py-2 text-right font-mono font-bold text-slate-800 whitespace-nowrap">{formatYen(r.total)}</td>
+                    )}
                   </tr>
                 ))}
                 <tr className="border-t-2 border-slate-300 bg-slate-50">
@@ -11381,7 +11396,9 @@ function ZtvIncentiveView({ staff, newRows, rates, year, month, onSaveRates, isM
                       {grand.byItem[it.key]}
                     </td>
                   ))}
-                  <td className="px-4 py-2 text-right font-mono font-bold text-slate-900 whitespace-nowrap">{formatYen(grand.total)}</td>
+                  {isMasterAdmin && (
+                    <td className="px-4 py-2 text-right font-mono font-bold text-slate-900 whitespace-nowrap">{formatYen(grand.total)}</td>
+                  )}
                 </tr>
               </tbody>
             </table>
@@ -11395,14 +11412,16 @@ function ZtvIncentiveView({ staff, newRows, rates, year, month, onSaveRates, isM
                     <EmployeeLink id={r.account.id} name={r.account.name} />
                   </span>
                   {!r.submittedAt && <span className="text-[10.5px] font-bold text-amber-600">未提出</span>}
-                  <span className="ml-auto font-mono text-[15px] font-bold text-slate-800">{formatYen(r.total)}</span>
+                  <span className="ml-auto font-mono text-[15px] font-bold text-slate-800">
+                    {isMasterAdmin ? formatYen(r.total) : `${r.cases}件`}
+                  </span>
                 </div>
                 <div className="text-[11px] text-slate-400">{r.cases}件</div>
                 <div className="flex flex-wrap gap-x-3 gap-y-1">
                   {r.items.filter((x) => x.count > 0).map((x) => (
                     <span key={x.key} className="text-[11px] text-slate-600">
                       {x.label} <span className="font-mono font-bold">{x.count}</span>
-                      <span className="text-slate-400">（{formatYen(x.amount)}）</span>
+                      {isMasterAdmin && <span className="text-slate-400">（{formatYen(x.amount)}）</span>}
                     </span>
                   ))}
                   {r.items.every((x) => x.count === 0) && <span className="text-[11px] text-slate-300">入力なし</span>}
