@@ -4884,6 +4884,17 @@ function AttendanceApp() {
             </div>
           ) : (
             <div className="space-y-5">
+              {/* 給与明細・賞与明細はマスター管理者だけが扱う
+                  （supabase/72_payslip_master_only.sql）。
+                  それ以外の管理者には交通費精算だけを出す。 */}
+              {session.role !== 'master_admin' && (
+                <div className="rounded-2xl border border-amber-200 bg-amber-50 px-5 py-4 text-[12px] text-amber-800">
+                  <div className="font-bold mb-1">給与明細・賞与明細はマスター管理者が扱います</div>
+                  この画面では交通費精算の確認のみ行えます。給与・賞与の内容について確認が必要なときは、
+                  総務担当へご依頼ください。ご自身の明細は「自分の勤怠」に切り替えるとご覧になれます。
+                </div>
+              )}
+              {session.role === 'master_admin' && (
               <PayrollAdminTab
                 employeeAccounts={employeeAccounts}
                 records={data.records}
@@ -4899,6 +4910,8 @@ function AttendanceApp() {
                 onUpdateWage={updateEmployeeProfile}
                 isDesktop={isDesktop}
               />
+              )}
+              {session.role === 'master_admin' && (
               <BonusAdminTab
                 employeeAccounts={employeeAccounts}
                 bonusRecords={data.bonusRecords || []}
@@ -4910,6 +4923,7 @@ function AttendanceApp() {
                 onDelete={deleteBonus}
                 isDesktop={isDesktop}
               />
+              )}
               <AdminCommuteExpenseClaimsTab
                 isMasterAdmin={session.role === 'master_admin'}
                 claims={data.commuteExpenseClaims}
