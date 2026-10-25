@@ -9356,7 +9356,11 @@ function SimplePerformanceSection({ employeeId, settings, onNotifyAdmin, isDeskt
   );
 }
 
-// ---- 商品別の実績入力（契約1件ごとに商品をチェックする型）----
+// ---- ZTV業務用の実績入力（契約1件ごとに商品をチェックする型）----
+//
+// 設定画面での名前は「ZTV業務用」。
+// 保存に使う型の名前（group_formats の 'products'）は変えていない。
+// 変えると、すでに設定済みのグループの指定が外れてしまうため。
 // 紙の集計表と同じ形。1行が1件の契約で、その契約に含まれる商品に印を付ける。
 // 同じ日に2件あれば、同じ日付の行が2つ並ぶ。
 //
@@ -9435,7 +9439,7 @@ function toggleProductItem(items, key) {
 const PRODUCT_SINGLE_GROUP_NAMES = PRODUCT_GROUPS.filter((g) => g.single && g.items.length > 1).map((g) => g.name);
 
 const PRODUCT_ROWS_DEFAULT = 10;   // はじめに出す行数
-const PRODUCT_ROWS_STEP = 10;      // 「行を追加」で増える数
+const PRODUCT_ROWS_STEP = 1;       // 「行を追加」で増える数
 
 // daily（JSON）には { rows: [{ date, items: { ネットのキー: true } }] } の形で入れる。
 // 壊れていても画面は動かす。
@@ -9737,7 +9741,7 @@ function ProductPerformanceSection({ employeeId, settings, onNotifyAdmin, isDesk
                 onClick={addRows}
                 className="rounded-lg border border-slate-300 px-3 py-1.5 text-[12px] font-bold text-slate-600"
               >
-                行を{PRODUCT_ROWS_STEP}行追加する
+                行を追加する
               </button>
             </div>
           )}
@@ -9825,7 +9829,7 @@ function ProductPerformanceSection({ employeeId, settings, onNotifyAdmin, isDesk
               onClick={addRows}
               className="w-full rounded-2xl border border-slate-300 bg-white py-3 text-[13px] font-bold text-slate-600"
             >
-              行を{PRODUCT_ROWS_STEP}行追加する
+              行を追加する
             </button>
           )}
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">{totalsRow}</div>
@@ -9878,7 +9882,7 @@ const PERFORMANCE_FORMATS = {
   products: {
     label: '実績入力',
     desc: '契約1件ごとに商品を選んで保存',
-    adminLabel: '商品別（1件ごとに商品をチェック）',
+    adminLabel: 'ZTV業務用（契約1件ごとに商品をチェック）',
     Component: ProductPerformanceSection,
   },
 };
