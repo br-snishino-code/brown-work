@@ -16039,7 +16039,6 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate, onSav
   const [formOpen, setFormOpen] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [targetMonth, setTargetMonth] = useState(() => prevMonthKey());
-  const [submittedDate, setSubmittedDate] = useState(todayKey());
   const [saving, setSaving] = useState(false);
   const editor = useCommuteRows(claims);
   const { total } = editor;
@@ -16047,7 +16046,6 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate, onSav
   const resetForm = () => {
     setEditingId(null);
     setTargetMonth(prevMonthKey());
-    setSubmittedDate(todayKey());
     editor.reset();
     setFormOpen(false);
   };
@@ -16056,7 +16054,6 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate, onSav
   const startEdit = (claim) => {
     setEditingId(claim.id);
     setTargetMonth(claim.targetMonth || prevMonthKey());
-    setSubmittedDate(claim.submittedDate || todayKey());
     editor.reset([...(claim.items || []).map((r) => ({ ...emptyCommuteRow(), ...r })), emptyCommuteRow()]);
     setFormOpen(true);
   };
@@ -16070,12 +16067,11 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate, onSav
 
   // 申請はせず、入力内容だけ残す
   const saveDraft = async () => {
-    if (!submittedDate) return;   // 提出日は必須（画面に理由を出している）
     const items = editor.toItems();
     setSaving(true);
     const ok = await onSaveDraft({
       targetMonth,
-      submittedDate,
+      submittedDate: todayKey(),   // 提出日は保存した日。画面では変えられない
       items,
       totalAmount: items.reduce((s, r) => s + r.subtotal, 0),
     });
@@ -16084,12 +16080,12 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate, onSav
   };
 
   const submit = async () => {
-    if (!submittedDate) return;   // 提出日は必須（画面に理由を出している）
     const items = editor.toItems();
     const totalAmount = items.reduce((s, r) => s + r.subtotal, 0);
     // 0円での申請は、入力漏れと区別がつかないため確認する
     if (totalAmount === 0 && !window.confirm(confirmZeroMessage(items.length, targetMonth))) return;
-    const payload = { targetMonth, submittedDate, items, totalAmount };
+    // 提出日は保存した日。画面では変えられない
+    const payload = { targetMonth, submittedDate: todayKey(), items, totalAmount };
     setSaving(true);
     const ok = editingId ? await onUpdate(editingId, payload) : await onSubmit(payload);
     setSaving(false);
@@ -16127,15 +16123,13 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate, onSav
             <Field label="対象月">
               <input type="month" value={targetMonth} onChange={(e) => setTargetMonth(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
             </Field>
+            {/* 提出日は保存・申請した日を自動で入れる。手で変えられないようにして、
+                空にして保存に失敗する事故を防ぐ */}
             <Field label="提出日">
-              <input type="date" value={submittedDate} onChange={(e) => setSubmittedDate(e.target.value)} className={`w-full border rounded-lg px-3 py-2 font-mono text-[13.5px] ${submittedDate ? 'border-slate-200' : 'border-rose-300 bg-rose-50'}`} />
-              {/* 提出日はデータベース側で必須。空のまま送ると保存に失敗するため、
-                  ここで止めて理由を伝える */}
-              {!submittedDate && (
-                <div className="mt-1 text-[11px] font-bold text-rose-600">
-                  提出日を入れてください。空のままでは保存・申請できません。
-                </div>
-              )}
+              <div className="w-full border border-slate-200 bg-slate-50 rounded-lg px-3 py-2 font-mono text-[13.5px] text-slate-500">
+                {dateLabel(todayKey())}
+              </div>
+              <div className="mt-1 text-[10.5px] text-slate-400">保存・申請した日が自動で入ります。</div>
             </Field>
           </div>
 
@@ -16159,14 +16153,13 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate, onSav
           <div className="flex gap-2">
             <button
               onClick={saveDraft}
-              disabled={saving || !submittedDate}
-              title={submittedDate ? '' : '提出日を入れてください'}
+              disabled={saving}
               className={`py-2.5 rounded-lg text-[13.5px] font-bold ${showSubmitButton ? 'flex-1 border border-slate-300 disabled:border-slate-200 disabled:text-slate-300 text-slate-600' : 'w-full bg-amber-600 disabled:bg-slate-200 text-white'}`}
             >
               {saving ? '保存中…' : '交通費の内容を保存する'}
             </button>
             {showSubmitButton && (
-              <button onClick={submit} disabled={saving || !submittedDate} title={submittedDate ? '' : '提出日を入れてください'} className="flex-1 py-2.5 rounded-lg bg-amber-600 disabled:bg-slate-200 text-white text-[13.5px] font-bold">
+              <button onClick={submit} disabled={saving} className="flex-1 py-2.5 rounded-lg bg-amber-600 disabled:bg-slate-200 text-white text-[13.5px] font-bold">
                 {saving ? '送信中…' : editingSubmitted ? 'この内容で修正する' : '交通費を申請する'}
               </button>
             )}
