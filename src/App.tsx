@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef, useContext, createContext } from 'react';
 import { createPortal } from 'react-dom';
 import * as XLSX from 'xlsx';
-import { Clock, MapPin, CheckCircle2, XCircle, AlertTriangle, LogIn, LogOut, FileEdit, Users, Bell, Calendar, Mail, LogOut as LogoutIcon, UserPlus, Lock, User, Monitor, Smartphone, Palmtree, Plus, Pencil, CalendarDays, ListChecks, ClipboardList, MessageSquare, Coffee, BarChart3, Home, Download, ChevronRight, LayoutGrid, Wallet, Briefcase, UserCog, Construction, Megaphone, Paperclip, FileText, Pin, Trash2, Key, ShieldCheck, ShieldAlert, HelpCircle, ChevronDown, ChevronLeft, Settings } from 'lucide-react';
+import { Clock, MapPin, CheckCircle2, XCircle, AlertTriangle, LogIn, LogOut, FileEdit, Users, Bell, Calendar, Mail, LogOut as LogoutIcon, UserPlus, Lock, User, Monitor, Smartphone, Palmtree, Plus, Pencil, CalendarDays, ListChecks, ClipboardList, MessageSquare, Coffee, BarChart3, Home, Download, ChevronRight, LayoutGrid, Wallet, Briefcase, UserCog, Construction, Megaphone, Paperclip, FileText, Pin, Trash2, Key, ShieldCheck, ShieldAlert, HelpCircle, ChevronDown, ChevronLeft, Settings, X } from 'lucide-react';
 import { supabase, CLOUD_ENABLED, usernameToEmail } from './supabaseClient';
 
 // ---- constants ----
@@ -15980,7 +15980,22 @@ function CommuteRowsEditor({ editor }) {
                 {rows.map((r, i) => (
                   <tr key={i} className="border-b border-slate-100 last:border-0 align-top">
                     <td className="px-2 py-1.5">
-                      <input type="date" value={r.date} onChange={(e) => updateRow(i, 'date', e.target.value)} className="w-[128px] border border-slate-200 rounded px-1.5 py-1 font-mono text-[11.5px]" />
+                      {/* スマホの日付入力は、いったん入れた日付を消す手立てが
+                          端末によって無いため、消すためのボタンを添える */}
+                      <div className="flex items-center gap-1">
+                        <input type="date" value={r.date} onChange={(e) => updateRow(i, 'date', e.target.value)} className="w-[128px] border border-slate-200 rounded px-1.5 py-1 font-mono text-[11.5px]" />
+                        {r.date && (
+                          <button
+                            type="button"
+                            onClick={() => updateRow(i, 'date', '')}
+                            title="この行の利用日を空にします"
+                            aria-label="利用日を消す"
+                            className="shrink-0 w-7 h-7 flex items-center justify-center rounded text-slate-400 hover:text-rose-500 hover:bg-rose-50"
+                          >
+                            <X size={14} />
+                          </button>
+                        )}
+                      </div>
                       {i > 0 && <button onClick={() => copyPrevRow(i)} className="block mt-1 text-[10px] text-amber-600 font-bold">↑前日をコピー</button>}
                     </td>
                     <td className="px-2 py-1.5"><input value={r.workplace} onChange={(e) => updateRow(i, 'workplace', e.target.value)} placeholder="勤務先" className="w-24 border border-slate-200 rounded px-1.5 py-1 text-[11.5px]" /></td>
