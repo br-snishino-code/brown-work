@@ -8107,6 +8107,9 @@ function CorrectionModal({ dateKey, record, onClose, onSubmit }) {
 // 枠線も白背景も効かず値が見えなくなるため、標準描画を止めている。
 // （このアプリの日付入力でも同じ対策をしている）
 const TIME_INPUT_STYLE = { WebkitAppearance: 'none', appearance: 'none' };
+// iOS は日付・月の入力欄に独自の見た目（灰色の背景・右寄せ）を当てるため、
+// 他の入力欄と揃うように外す。タップして選ぶ動きは変わらない。
+const DATE_INPUT_STYLE = { WebkitAppearance: 'none', appearance: 'none' };
 const TIME_INPUT_CLASS = 'w-full box-border min-w-0 border border-slate-200 rounded bg-white text-slate-800 px-2 py-1.5 font-mono text-[12.5px] text-center';
 const BREAK_INPUT_CLASS = 'w-full box-border min-w-0 border border-slate-200 rounded bg-white text-slate-800 px-1 py-1.5 font-mono text-[12.5px] text-center';
 
@@ -15983,7 +15986,7 @@ function CommuteRowsEditor({ editor }) {
                       {/* スマホの日付入力は、いったん入れた日付を消す手立てが
                           端末によって無いため、消すためのボタンを添える */}
                       <div className="flex items-center gap-1">
-                        <input type="date" value={r.date} onChange={(e) => updateRow(i, 'date', e.target.value)} className="w-[128px] border border-slate-200 rounded px-1.5 py-1 font-mono text-[11.5px]" />
+                        <input type="date" value={r.date} onChange={(e) => updateRow(i, 'date', e.target.value)} style={DATE_INPUT_STYLE} className="w-[128px] box-border border border-slate-200 rounded bg-white text-slate-800 text-left px-1.5 py-1 font-mono text-[11.5px]" />
                         {r.date && (
                           <button
                             type="button"
@@ -16123,7 +16126,7 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate, onSav
             {/* min-w-0 が無いと、日付の入力欄が列幅を超えて左にはみ出す
                 （グリッドの子は既定で min-width:auto のため） */}
             <Field label="対象月" className="min-w-0">
-              <input type="month" value={targetMonth} onChange={(e) => setTargetMonth(e.target.value)} className="w-full min-w-0 box-border border border-slate-200 rounded-lg px-2.5 py-2 font-mono text-[13px]" />
+              <input type="month" value={targetMonth} onChange={(e) => setTargetMonth(e.target.value)} style={DATE_INPUT_STYLE} className="w-full min-w-0 box-border border border-slate-200 rounded-lg bg-white text-slate-800 text-left px-2.5 py-2 font-mono text-[13px]" />
             </Field>
             {/* 提出日は保存・申請した日を自動で入れる。手で変えられないようにして、
                 空にして保存に失敗する事故を防ぐ */}
