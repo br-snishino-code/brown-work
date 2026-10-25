@@ -2757,7 +2757,10 @@ function AttendanceApp() {
           .from('employees')
           .update({
             must_change_password: true,
-            profile_setup_completed: false,
+            // 登録情報（住所・口座など）の入力を求めるかどうか。
+            // 既定は従来どおり求める。作成画面で外すと、初回ログインでは
+            // パスワードの変更だけになる（既存スタッフの登録などで使う）。
+            profile_setup_completed: payload.requireProfileSetup === false,
             invited_at: new Date().toISOString(),
           })
           .eq('id', newId);
@@ -18057,6 +18060,9 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
       return (a.name || '').localeCompare(b.name || '', 'ja');
     });
 
+  // 登録情報の入力を求めるか（既定は求める）
+  const [requireProfileSetup, setRequireProfileSetup] = useState(true);
+
   const toggleAdminPermission = (key) => {
     setAdminPermissions((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
   };
@@ -18075,6 +18081,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
       adminPermissions: role === 'admin' ? adminPermissions : undefined,
       // ユーザー名がメールアドレス形式の場合は、連絡用メールアドレスにも自動で反映する
       contactEmail: trimmedUsername.includes('@') ? trimmedUsername : undefined,
+      requireProfileSetup,
     });
     if (ok) {
       setSei('');
@@ -18322,6 +18329,24 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
         </div>
         <div className="text-[10.5px] text-slate-400 mt-1">初回ログイン時に、本人がパスワードを変更します。</div>
       </Field>
+      {/* すでに在籍している方を登録するときなど、登録情報の入力を省きたい場合に外す。
+          外しても、本人があとから「登録情報の閲覧・変更」で入力できる。 */}
+      <label className="flex items-start gap-2 cursor-pointer select-none">
+        <input
+          type="checkbox"
+          checked={requireProfileSetup}
+          onChange={(e) => setRequireProfileSetup(e.target.checked)}
+          className="mt-0.5 w-4 h-4 shrink-0 accent-amber-600"
+        />
+        <span className="text-[12.5px] text-slate-600 leading-relaxed">
+          初回ログイン時に、登録情報（住所・口座など）の入力を求める
+          <span className="block text-[10.5px] text-slate-400 mt-0.5">
+            {requireProfileSetup
+              ? 'パスワードの変更のあと、登録情報の入力画面が出ます。'
+              : 'パスワードの変更だけで、すぐ通常の画面に入れます。登録情報は本人があとから入力できます。'}
+          </span>
+        </span>
+      </label>
       <Field label="入職日">
         <input type="date" value={hireDate} onChange={(e) => setHireDate(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
       </Field>
@@ -18575,6 +18600,8 @@ function CsvImportModal({ onClose, onAddAccount }) {
   const [invalid, setInvalid] = useState([]);
   // 一括登録では既定でログイン案内メールを送らない
   const [sendInvite, setSendInvite] = useState(false);
+  // 登録情報の入力を求めるか（単体の作成画面と同じ。既定は求める）
+  const [requireProfileSetup, setRequireProfileSetup] = useState(true);
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState([]);
 
@@ -18628,7 +18655,7 @@ function CsvImportModal({ onClose, onAddAccount }) {
     setRunning(true);
     const nextResults = [];
     for (const row of rows) {
-      const ok = await onAddAccount({ ...row, skipInvite: !sendInvite });
+      const ok = await onAddAccount({ ...row, skipInvite: !sendInvite, requireProfileSetup });
       nextResults.push({ ...row, ok });
     }
     setResults(nextResults);
@@ -18670,6 +18697,24 @@ function CsvImportModal({ onClose, onAddAccount }) {
                 {sendInvite
                   ? '各メールアドレス宛に、ログインURLと仮パスワードを記載した案内を送信します。'
                   : 'チェックを入れない場合は送信しません。ログインURLと仮パスワードは別途ご本人にお伝えください。'}
+              </span>
+            </span>
+          </label>
+
+          {/* すでに在籍している方をまとめて登録するときに外す */}
+          <label className="flex items-start gap-2 text-[12px] text-slate-600 cursor-pointer border border-slate-200 rounded-lg px-3 py-2.5">
+            <input
+              type="checkbox"
+              checked={requireProfileSetup}
+              onChange={(e) => setRequireProfileSetup(e.target.checked)}
+              className="mt-0.5"
+            />
+            <span>
+              初回ログイン時に、登録情報（住所・口座など）の入力を求める
+              <span className="block text-[11px] text-slate-400">
+                {requireProfileSetup
+                  ? 'パスワードの変更のあと、登録情報の入力画面が出ます。'
+                  : 'パスワードの変更だけで、すぐ通常の画面に入れます。登録情報は本人があとから入力できます。'}
               </span>
             </span>
           </label>
