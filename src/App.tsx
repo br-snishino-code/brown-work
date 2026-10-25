@@ -754,6 +754,44 @@ function computeMonthlySummary(records, target = new Date()) {
 // ---- 給与明細・賞与明細の修正履歴 ----
 // 明細ごとに「いつ・誰が・何を変えたか」を持たせる（列は65番のSQLで追加）。
 // 新しいものを先頭に足し、増えすぎないように上限を設ける。
+// ---- 本人とマスター管理者だけが扱える個人情報の列 ----
+// supabase/71a_employee_visible_view.sql の employee_sensitive_columns() と
+// 同じ内容にすること。片方だけ直すとずれる。
+// employees_visible ビューがこれらを null で返すため、それ以外の管理者の
+// 画面では空欄になる。保存時に送ってしまうと中身を消す更新になるので、
+// updateEmployeeProfile で取り除いている。
+const EMPLOYEE_SENSITIVE_COLUMNS = [
+  // 住まい・本人
+  'postal_code', 'address', 'resident_address',
+  'householder_name', 'householder_relation',
+  'birth_date', 'gender', 'phone', 'contact_email',
+  // 緊急連絡先
+  'emergency_contact_name', 'emergency_contact_furigana',
+  'emergency_contact_relation', 'emergency_contact_phone',
+  'emergency_contact_address',
+  // 賃金
+  'wage_type', 'hourly_wage', 'monthly_salary',
+  // 口座情報
+  'bank_code', 'bank_name', 'branch_code', 'branch_name',
+  'account_type', 'account_holder', 'account_number',
+  // 社会保険・年金・雇用保険
+  'health_insurance_status', 'health_insurance_number',
+  'health_insurance_acquired_date', 'health_insurance_lost_date',
+  'pension_status', 'pension_basic_number',
+  'pension_acquired_date', 'pension_lost_date',
+  'employment_insurance_status', 'employment_insurance_number',
+  'employment_insurance_acquired_date', 'employment_insurance_lost_date',
+  'standard_remuneration_health', 'standard_remuneration_pension',
+  // 税・扶養
+  'spouse_status', 'spouse_annual_income', 'spouse_monthly_income',
+  'family_members',
+  'resident_tax_municipality_code', 'resident_tax_municipality',
+  'resident_tax_collection_method',
+  'tax_table_type', 'is_non_resident',
+  'disability_classification', 'is_working_student',
+  'single_parent_classification',
+];
+
 const EDIT_HISTORY_MAX = 200;
 
 function makeHistoryEntry(actor, action, changes = []) {
@@ -3648,6 +3686,19 @@ function AttendanceApp() {
     Object.entries(patch).forEach(([key, value]) => {
       if (value !== undefined && colMap[key]) dbPatch[colMap[key]] = value;
     });
+    // 個人情報（住所・口座・賃金など）は本人とマスター管理者にしか届かない。
+    // それ以外の管理者の画面では空欄になっているため、そのまま送ると
+    // 「中身を空にする更新」になってしまう。送らずに取り除く。
+    // データベース側でも 71b のトリガーが拒むが、ここで落として
+    // 「更新に失敗しました」と出ないようにする。
+    const canEditDetail = session.role === 'master_admin' || session.id === targetEmployeeId;
+    if (!canEditDetail) {
+      EMPLOYEE_SENSITIVE_COLUMNS.forEach((col) => { delete dbPatch[col]; });
+    }
+    if (Object.keys(dbPatch).length === 0) {
+      show('変更できる項目がありませんでした', 'warn');
+      return false;
+    }
     const { error } = await supabase.from('employees').update(dbPatch).eq('id', targetEmployeeId);
     if (error) {
       show('スタッフ情報の更新に失敗しました', 'warn');
@@ -18880,6 +18931,18 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
         </div>
 
         <div className="px-6 py-5 space-y-4">
+          {/* 個人情報はマスター管理者と本人にしか届かない（71a/71b）。
+              それ以外の管理者には空欄で表示されるため、空欄が「未登録」ではなく
+              「非表示」であることを伝える。入力しても保存されない。 */}
+          {!isMasterAdmin && actor && actor.id !== account.id && (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-[11.5px] leading-relaxed text-amber-800">
+              <div className="font-bold mb-1">空欄の項目は「非表示」です（未登録ではありません）</div>
+              住所・生年月日・電話・緊急連絡先・口座情報・社会保険の番号・賃金・扶養の情報は、
+              ご本人とマスター管理者だけが扱えます。この画面では空欄で表示され、入力しても保存されません。
+              変更が必要なときは総務担当へご依頼ください。
+              所属グループ・雇用形態・契約期間・スタッフメモなどは、これまでどおり編集・保存できます。
+            </div>
+          )}
           {activeTab !== 'mynumber' && (
           <>
           <div ref={(el) => (sectionRefs.current.basic = el)} className="space-y-4">
