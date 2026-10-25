@@ -11559,6 +11559,10 @@ function ConfirmedShiftAdminCard({
   const [aliasPick, setAliasPick] = useState({});
   const [announcing, setAnnouncing] = useState(false);
   const [showChanges, setShowChanges] = useState(false);
+  // この下に「確定シフトの準備ができていません」の早期 return があるため、
+  // フックはかならずそれより前に置くこと。後ろに書くと、準備の有無が
+  // 切り替わったときにフックの数が変わり、React が描画を止める（error #300）
+  const days = useMemo(() => shiftMonthDays(month), [month]);
 
   if (!tableReady) {
     return (
@@ -11576,7 +11580,6 @@ function ConfirmedShiftAdminCard({
     );
   }
 
-  const days = useMemo(() => shiftMonthDays(month), [month]);
   const monthAssignments = assignments.filter((a) => String(a.date || '').startsWith(`${month}-`));
   const staff = employeeAccounts.filter((a) => !a.resignationDate);
   const byEmployee = {};
@@ -18109,6 +18112,11 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
   const [resetPasswordTarget, setResetPasswordTarget] = useState(null);
   const [loginEmailTarget, setLoginEmailTarget] = useState(null);
   const [backingUp, setBackingUp] = useState(false);
+  // 登録情報の入力を求めるか（既定は求める）。
+  // この下にスタッフ詳細を開くときの早期 return があるため、
+  // useState はかならずそれより前に置くこと。後ろに書くと、詳細を開いた
+  // ときだけフックの数が減り、React が描画を止める（error #300）。
+  const [requireProfileSetup, setRequireProfileSetup] = useState(true);
   const isMasterAdmin = session?.role === 'master_admin';
 
   // 詳細を開いたとき・一覧に戻ったときは、前の画面のスクロール位置を引き継がない
@@ -18232,9 +18240,6 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
       if (listSort === 'hireDateAsc') return (a.hireDate || '').localeCompare(b.hireDate || '');
       return (a.name || '').localeCompare(b.name || '', 'ja');
     });
-
-  // 登録情報の入力を求めるか（既定は求める）
-  const [requireProfileSetup, setRequireProfileSetup] = useState(true);
 
   const toggleAdminPermission = (key) => {
     setAdminPermissions((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
