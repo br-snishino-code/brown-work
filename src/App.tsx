@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo, useRef, useContext, c
 import { createPortal } from 'react-dom';
 import * as XLSX from 'xlsx';
 import { Clock, MapPin, CheckCircle2, XCircle, AlertTriangle, LogIn, LogOut, FileEdit, Users, Bell, Calendar, Mail, LogOut as LogoutIcon, UserPlus, Lock, User, Monitor, Smartphone, Palmtree, Plus, Pencil, CalendarDays, ListChecks, ClipboardList, MessageSquare, Coffee, BarChart3, Home, Download, ChevronRight, LayoutGrid, Wallet, Briefcase, UserCog, Construction, Megaphone, Paperclip, FileText, Pin, Trash2, Key, ShieldCheck, ShieldAlert, HelpCircle, ChevronDown, ChevronLeft, Settings, X } from 'lucide-react';
-import { supabase, CLOUD_ENABLED, usernameToEmail } from './supabaseClient';
+import { supabase, CLOUD_ENABLED, INITIAL_URL, usernameToEmail } from './supabaseClient';
 
 // ---- constants ----
 const SCHEDULED_START = '09:00';
@@ -2434,6 +2434,8 @@ function AttendanceApp() {
   const [schedulePatterns, setSchedulePatterns] = useState([]);
   const [activePatternNo, setActivePatternNo] = useState(1);
   const [passwordRecoveryMode, setPasswordRecoveryMode] = useState(false);
+  // メールのリンクから戻ってきたときのエラー文（ログイン画面に出す）
+  const [linkError, setLinkError] = useState('');
   // 「要対応」や通知から、管理画面の特定のサブ画面を開くための指定
   const [pendingAdminTab, setPendingAdminTab] = useState(null);
   // 初回ログインのパスワード設定・登録情報の入力中は、時計の更新を止める
@@ -2569,6 +2571,43 @@ function AttendanceApp() {
       setCloudStatus('error');
       show('クラウドからの読み込みに失敗しました', 'warn');
     }
+  }, []);
+
+  // メールのリンクから戻ってきたときの処理。起動時に一度だけ見る。
+  //
+  // ① リンクが期限切れ・使用済みのとき、Supabase は #error=... を付けて
+  //    戻してくるが、以前はこれを拾っておらず、理由の分からないまま
+  //    ただのログイン画面が出ていた。画面に理由を出す。
+  // ② 再設定モードへの切り替えを onAuthStateChange の通知だけに頼ると、
+  //    画面の準備が整う前に通知が飛んだ場合に取りこぼす。
+  //    URL を直接見ても判断するようにして、二重に拾う。
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    // supabase-js に消される前に控えておいたURLを使う（supabaseClient.ts 参照）
+    const url = new URL(INITIAL_URL || window.location.href);
+    const hash = new URLSearchParams(url.hash.replace(/^#/, ''));
+    const query = url.searchParams;
+    const pick = (key) => hash.get(key) || query.get(key);
+    const errorCode = pick('error_code');
+    const errorText = pick('error_description');
+    if (errorCode || errorText) {
+      const joined = `${errorCode || ''} ${errorText || ''}`;
+      // 3秒で消えるトーストではなく、ログイン画面に残る案内として出す。
+      // 再設定に失敗したことは、読み飛ばされては困るため。
+      setLinkError(
+        /expired|invalid/i.test(joined)
+          ? 'このリンクは期限切れか、すでに使用済みです。お手数ですが、もう一度「パスワードをお忘れですか？」からやり直してください。'
+          : `リンクの確認に失敗しました（${errorText || errorCode}）。総務担当へご連絡ください。`
+      );
+      // URL に残したままだと再読み込みのたびに同じ表示が出るため消す
+      window.history.replaceState(null, '', window.location.pathname);
+      return;
+    }
+    if (pick('type') === 'recovery') {
+      setPasswordRecoveryMode(true);
+    }
+    // 起動時の1回だけ。show と setPasswordRecoveryMode は初回のもので足りる
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -4718,7 +4757,7 @@ function AttendanceApp() {
   }
 
   if (!session) {
-    return <LoginScreen onLogin={handleLogin} toast={toast} />;
+    return <LoginScreen onLogin={handleLogin} toast={toast} linkError={linkError} onClearLinkError={() => setLinkError('')} />;
   }
 
   const isDesktop = viewMode === 'desktop';
@@ -5218,7 +5257,7 @@ function MfaChallengeScreen({ onVerify, onCancel, toast }) {
   );
 }
 
-function LoginScreen({ onLogin, toast }) {
+function LoginScreen({ onLogin, toast, linkError = '', onClearLinkError }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [forgotMode, setForgotMode] = useState(false);
@@ -5258,6 +5297,23 @@ function LoginScreen({ onLogin, toast }) {
           </div>
           <h1 className="text-slate-800 font-bold text-[21px] tracking-tight">Brown Work</h1>
           <p className="text-slate-500 text-[13px] mt-1.5">勤怠・シフト・申請をひとつに</p>
+        </div>
+        {/* メールのリンクから戻ってきて失敗していたときの案内。
+            以前は何も出ず、理由の分からないままログイン画面になっていた */}
+        {linkError && (
+          <div className="mb-5 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-left">
+            <div className="text-[12.5px] font-bold text-rose-700 mb-1">パスワードの再設定ができませんでした</div>
+            <div className="text-[11.5px] leading-relaxed text-rose-700">{linkError}</div>
+            <button
+              type="button"
+              onClick={() => { onClearLinkError?.(); setForgotMode(true); }}
+              className="mt-2 text-[11.5px] font-bold text-rose-700 underline"
+            >
+              もう一度やり直す
+            </button>
+          </div>
+        )}
+        <div className="hidden">
         </div>
 
         {!forgotMode ? (

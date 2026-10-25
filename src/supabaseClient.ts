@@ -6,6 +6,12 @@ const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
 
 export const CLOUD_ENABLED = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
 
+// メールのリンクから戻ってきたときのURLを、消される前に控えておく。
+// 下の createClient は detectSessionInUrl: true のため、生成した時点で
+// URLのハッシュ（#access_token=... や #error=...）を読み取って消す。
+// そのあとで画面側が読もうとしても、もう残っていない。
+export const INITIAL_URL = typeof window !== 'undefined' ? window.location.href : '';
+
 // CLOUD_ENABLEDがfalseのときも呼び出し側が落ちないよう、
 // 値が無い場合はダミーURLでクライアントだけ作っておく（実際には使われない）
 export const supabase = createClient(
