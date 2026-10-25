@@ -11273,17 +11273,16 @@ function ZtvIncentiveView({ staff, newRows, rates, year, month, onSaveRates, isM
         eo業務のような目標達成フラグ・順位・半額の扱いはありません。
       </div>
 
-      {/* ---- 単価の設定（マスター管理者のみ）---- */}
+      {/* ---- 単価の一覧と変更（マスター管理者のみ）----
+           一覧そのものも管理者には見せない。見えると支給額の内訳が分かるため。 */}
+      {isMasterAdmin && (
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
         <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2 flex-wrap">
           <span className="text-[12.5px] font-bold text-slate-700">1件あたりの単価</span>
-          {isMasterAdmin && !editing && (
+          {!editing && (
             <button onClick={openEditor} className="ml-auto rounded-lg border border-slate-300 px-3 py-1.5 text-[12px] font-bold text-slate-600">
               単価を変更する
             </button>
-          )}
-          {!isMasterAdmin && (
-            <span className="ml-auto text-[11px] text-slate-400">変更できるのはマスター管理者だけです</span>
           )}
         </div>
         {editing ? (
@@ -11332,6 +11331,7 @@ function ZtvIncentiveView({ staff, newRows, rates, year, month, onSaveRates, isM
           </div>
         )}
       </div>
+      )}
 
       {/* ---- スタッフごとの支給額 ---- */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
