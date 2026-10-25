@@ -120,6 +120,9 @@ begin
     || 'where e.id = auth.uid() or public.is_admin()',
     array_to_string(parts, ', '));
   execute 'alter view public.employees_visible set (security_invoker = false)';
+  -- 利用者が書いた条件が、ビュー自身の絞り込みより先に評価されるのを防ぐ
+  -- （付けないと、細工した述語で他人の行の氏名などが覗けてしまう）
+  execute 'alter view public.employees_visible set (security_barrier = true)';
   execute 'grant select on public.employees_visible to authenticated';
 
   execute 'revoke select on public.employees from authenticated';

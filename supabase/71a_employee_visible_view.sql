@@ -121,6 +121,9 @@ begin
     array_to_string(parts, ', '));
   -- 作成者の権限で動かす（行の絞り込みは上の where で行っている）
   execute 'alter view public.employees_visible set (security_invoker = false)';
+  -- 利用者が書いた条件が、ビュー自身の絞り込みより先に評価されるのを防ぐ
+  -- （付けないと、細工した述語で他人の行の氏名などが覗けてしまう）
+  execute 'alter view public.employees_visible set (security_barrier = true)';
   execute 'grant select on public.employees_visible to authenticated';
 
   select array_agg(s) into missing
