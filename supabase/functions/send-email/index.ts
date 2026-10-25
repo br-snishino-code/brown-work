@@ -92,6 +92,13 @@ Deno.serve(async (req) => {
     if (!caller) {
       return json({ error: 'メールを送信する権限がありません' }, 403);
     }
+    // 退職した方は送れない。
+    // 退職日を入れると sync-resigned-auth がログインを止めるが、それを
+    // 実行するまでの間はトークンが生きている。ここでも見ておく。
+    // （resignation_date を取得しておきながら、使い忘れていた）
+    if (caller.resignation_date && caller.resignation_date <= new Date().toISOString().slice(0, 10)) {
+      return json({ error: 'メールを送信する権限がありません' }, 403);
+    }
 
     // ---- 2. 宛先と本文を受け取る ----
     const { to, subject, text, html } = await req.json();
