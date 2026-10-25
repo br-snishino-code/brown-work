@@ -1270,38 +1270,67 @@ function requirementLabel(kind, account, settings) {
 }
 
 // ---- 実績入力の締切 ----
-// app_settings に「翌月の何日まで本人が編集できるか」を数字1つで保存する。
-// 0（または未設定）は「締切を設けない」＝これまでどおり、いつでも本人が直せる。
+// 「翌月の何日まで本人が編集できるか」を日にちの数字で持つ。
+// 0（または未設定）は「締切を設けない」＝いつでも本人が直せる。
 // 締切を過ぎても、管理者は「実績の確認」からいつでも直せる。
+//
+// 設定は2段構え：
+//   ・全業務に共通の既定 … app_settings の performance_deadline_day（数字1つ）
+//   ・業務ごとの設定     … group_formats の perfDeadline（業務ごとの数字）
+// 業務ごとの設定が無い業務は、共通の既定に従う。
 const SETTING_PERF_DEADLINE_DAY = 'performance_deadline_day';
 
-function perfDeadlineDay(settings) {
-  const n = Number(settings?.[SETTING_PERF_DEADLINE_DAY]);
-  if (!Number.isFinite(n)) return 0;
+// 1〜28 だけを有効な日にちとする（月末が28日の2月でも必ず来る日に限る）
+function normalizePerfDeadlineDay(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
   const d = Math.floor(n);
-  // 月末が28日の月（2月）でも必ず来る日に限る
-  if (d < 1 || d > 28) return 0;
+  if (d === 0) return 0;
+  if (d < 1 || d > 28) return null;
   return d;
+}
+
+// 全業務に共通の既定
+function perfDeadlineDefaultDay(settings) {
+  return normalizePerfDeadlineDay(settings?.[SETTING_PERF_DEADLINE_DAY]) ?? 0;
+}
+
+// その業務に設定された日にち。未設定なら共通の既定に従う。
+// 業務に 0 が設定されているときは「この業務は締切なし」として扱う。
+function perfDeadlineDayFor(group, settings) {
+  const raw = parseGroupFormats(settings)[group]?.perfDeadline;
+  if (raw !== undefined && raw !== null && raw !== '') {
+    const own = normalizePerfDeadlineDay(raw);
+    if (own !== null) return own;
+  }
+  return perfDeadlineDefaultDay(settings);
+}
+
+// その業務に専用の設定があるか（画面で「既定に従う」と区別するため）
+function hasOwnPerfDeadline(group, settings) {
+  const raw = parseGroupFormats(settings)[group]?.perfDeadline;
+  if (raw === undefined || raw === null || raw === '') return false;
+  return normalizePerfDeadlineDay(raw) !== null;
 }
 
 // 対象月（year年month月分）の実績を、本人が編集できる最後の瞬間
 // 「翌月○日のおわり」まで。日本時間で判定する（端末の時計を使う）
-function perfDeadlineAt(year, month, settings) {
-  const day = perfDeadlineDay(settings);
+function perfDeadlineAt(group, year, month, settings) {
+  const day = perfDeadlineDayFor(group, settings);
   if (!day) return null;
   // new Date の月は0始まりのため、month をそのまま渡すと「翌月」になる
   return new Date(year, month, day, 23, 59, 59, 999);
 }
 
-function perfDeadlineLabel(year, month, settings) {
-  const at = perfDeadlineAt(year, month, settings);
+function perfDeadlineLabel(group, year, month, settings) {
+  const at = perfDeadlineAt(group, year, month, settings);
   if (!at) return '';
   return `${at.getFullYear()}年${at.getMonth() + 1}月${at.getDate()}日`;
 }
 
 // 本人の編集が締め切られているか
-function isPerfLockedForStaff(year, month, settings, now = new Date()) {
-  const at = perfDeadlineAt(year, month, settings);
+function isPerfLockedForStaff(group, year, month, settings, now = new Date()) {
+  const at = perfDeadlineAt(group, year, month, settings);
   if (!at) return false;
   return now.getTime() > at.getTime();
 }
@@ -3115,10 +3144,39 @@ function AttendanceApp() {
   };
 
   // スタッフが実績を入力できる期限（翌月の何日まで）を保存する（マスター管理者のみ）
-  // 0 は「締切を設けない」
-  const savePerfDeadlineDay = async (value) => {
-    const n = Number(value);
-    const day = Number.isFinite(n) && n >= 1 && n <= 28 ? String(Math.floor(n)) : '0';
+  //   group が null … 全業務に共通の既定（app_settings）
+  //   group が業務名 … その業務だけの設定（group_formats）
+  // 値の意味：'' は「既定に従う」（業務ごとの設定のみ）、'0' は「締切を設けない」
+  const savePerfDeadlineDay = async (value, group = null) => {
+    const label = (v) => (v === '' ? '既定に従う' : v === '0' ? '締切なし' : `翌月${v}日まで`);
+    const normalized = value === '' ? '' : String(normalizePerfDeadlineDay(value) ?? 0);
+
+    if (group) {
+      const saved = parseGroupFormats(data.settings);
+      const next = { ...saved, [group]: { ...(saved[group] || {}) } };
+      if (normalized === '') delete next[group].perfDeadline;
+      else next[group].perfDeadline = Number(normalized);
+      const { error } = await supabase.from('app_settings').upsert(
+        {
+          key: SETTING_GROUP_FORMATS,
+          value: JSON.stringify(next),
+          updated_by: session.id,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'key' }
+      );
+      if (error) {
+        console.error('業務ごとの入力期限の保存に失敗しました', error);
+        show('入力期限の保存に失敗しました', 'warn');
+        return false;
+      }
+      await logAudit(session, '実績の入力期限を変更', `${group}：${label(normalized)}`);
+      await refreshData();
+      show(`「${group}」の入力期限を${label(normalized)}に設定しました`);
+      return true;
+    }
+
+    const day = normalized === '' ? '0' : normalized;
     const { error } = await supabase.from('app_settings').upsert(
       {
         key: SETTING_PERF_DEADLINE_DAY,
@@ -3133,9 +3191,9 @@ function AttendanceApp() {
       show('入力期限の保存に失敗しました', 'warn');
       return false;
     }
-    await logAudit(session, '実績の入力期限を変更', day === '0' ? '締切なし' : `翌月${day}日まで`);
+    await logAudit(session, '実績の入力期限を変更（既定）', label(day));
     await refreshData();
-    show(day === '0' ? '締切を設けない設定にしました' : `入力期限を翌月${day}日に設定しました`);
+    show(day === '0' ? '締切を設けない設定にしました（既定）' : `既定の入力期限を翌月${day}日に設定しました`);
     return true;
   };
 
@@ -8976,8 +9034,10 @@ function EoPerformanceSection({ employeeId, session, settings, onNotifyAdmin, is
   }, [employeeId, year, month]);
 
   // 締切（翌月○日）を過ぎた月は、本人は見るだけ。直したいときは管理者に頼む
-  const locked = isPerfLockedForStaff(year, month, settings);
-  const deadlineLabel = perfDeadlineLabel(year, month, settings);
+  // 締切は所属している業務（メイングループ）ごとに決まる
+  const myGroup = session?.mainGroup || '';
+  const locked = isPerfLockedForStaff(myGroup, year, month, settings);
+  const deadlineLabel = perfDeadlineLabel(myGroup, year, month, settings);
 
   // 保存していない入力があるまま対象月を変えると消えてしまうため、確認する
   const changeMonthSafely = (apply) => {
@@ -9192,7 +9252,7 @@ function EoPerformanceSection({ employeeId, session, settings, onNotifyAdmin, is
 // ---- 簡易版の実績入力 ----
 // 日ごとに「件数」と「内容・備考」だけを書く形。eo業務以外のグループ向け。
 // 保存先はeo業務と同じ staff_new_performance の daily（形だけが違う）。
-function SimplePerformanceSection({ employeeId, settings, onNotifyAdmin, isDesktop }) {
+function SimplePerformanceSection({ employeeId, session, settings, onNotifyAdmin, isDesktop }) {
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
   const [month, setMonth] = useState(now.getMonth() + 1);
@@ -9209,8 +9269,10 @@ function SimplePerformanceSection({ employeeId, settings, onNotifyAdmin, isDeskt
   const days = useMemo(() => shiftMonthDays(monthKey), [monthKey]);
 
   // 締切（翌月○日）を過ぎた月は、本人は見るだけ
-  const locked = isPerfLockedForStaff(year, month, settings);
-  const deadlineLabel = perfDeadlineLabel(year, month, settings);
+  // 締切は所属している業務（メイングループ）ごとに決まる
+  const myGroup = session?.mainGroup || '';
+  const locked = isPerfLockedForStaff(myGroup, year, month, settings);
+  const deadlineLabel = perfDeadlineLabel(myGroup, year, month, settings);
 
   useEffect(() => {
     let cancelled = false;
@@ -9547,7 +9609,7 @@ function countProductItem(rows, key) {
   return rows.reduce((n, r) => n + (r.items?.[key] ? 1 : 0), 0);
 }
 
-function ProductPerformanceSection({ employeeId, settings, onNotifyAdmin, isDesktop }) {
+function ProductPerformanceSection({ employeeId, session, settings, onNotifyAdmin, isDesktop }) {
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
   const [month, setMonth] = useState(now.getMonth() + 1);
@@ -9561,8 +9623,10 @@ function ProductPerformanceSection({ employeeId, settings, onNotifyAdmin, isDesk
   const [adminEdit, setAdminEdit] = useState(null);
 
   // 締切（翌月○日）を過ぎた月は、本人は見るだけ
-  const locked = isPerfLockedForStaff(year, month, settings);
-  const deadlineLabel = perfDeadlineLabel(year, month, settings);
+  // 締切は所属している業務（メイングループ）ごとに決まる
+  const myGroup = session?.mainGroup || '';
+  const locked = isPerfLockedForStaff(myGroup, year, month, settings);
+  const deadlineLabel = perfDeadlineLabel(myGroup, year, month, settings);
 
   const blankRow = () => ({ date: '', items: {} });
   const padRows = (list) => {
@@ -10002,7 +10066,12 @@ function GroupFormatSettingsTab({ employeeAccounts, groupLeaveSchedules = {}, se
   const save = async () => {
     if (!selectedGroup) return;
     setSaving(true);
-    const next = { ...saved, [selectedGroup]: { shift: shiftKey, performance: perfKey, commute: commuteKey } };
+    // perfDeadline（業務ごとの実績入力の期限）は、この画面では扱わない。
+    // そのまま上書きすると消えてしまうため、既存の中身を残したうえで書き換える。
+    const next = {
+      ...saved,
+      [selectedGroup]: { ...(saved[selectedGroup] || {}), shift: shiftKey, performance: perfKey, commute: commuteKey },
+    };
     const ok = await onSave(next);
     setSaving(false);
     if (ok) setSavedAt(new Date());
@@ -10981,10 +11050,19 @@ function PerfReviewTab({ employeeAccounts, settings, session, isMasterAdmin, onN
   const [existingRows, setExistingRows] = useState([]);
   const [editing, setEditing] = useState(null);
   const [reloadKey, setReloadKey] = useState(0);
-  const [deadlineDraft, setDeadlineDraft] = useState(String(perfDeadlineDay(settings) || 0));
+  // 期限の下書き。'' は「全体の既定に従う」
+  const [deadlineDraft, setDeadlineDraft] = useState('');
   const [savingDeadline, setSavingDeadline] = useState(false);
 
-  useEffect(() => { setDeadlineDraft(String(perfDeadlineDay(settings) || 0)); }, [settings]);
+  useEffect(() => {
+    // 業務を選んでいるときはその業務の設定、「すべての業務」のときは全体の既定
+    if (group) {
+      setDeadlineDraft(hasOwnPerfDeadline(group, settings) ? String(perfDeadlineDayFor(group, settings)) : '');
+    } else {
+      setDeadlineDraft(String(perfDeadlineDefaultDay(settings)));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings, group]);
 
   // 実績入力を使っているグループのスタッフだけを対象にする。
   // おひとりだけ「不要」に設定されている方も外す（77番）
@@ -11046,34 +11124,40 @@ function PerfReviewTab({ employeeAccounts, settings, session, isMasterAdmin, onN
   const notSubmitted = rows.filter((r) => !r.submittedAt);
   const years = [now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1];
   const months = Array.from({ length: 12 }, (_, i) => i + 1);
-  const deadlineDay = perfDeadlineDay(settings);
-  const deadlineLabel = perfDeadlineLabel(year, month, settings);
-  const lockedNow = isPerfLockedForStaff(year, month, settings);
+  // 業務を選んでいるときはその業務の期限、「すべての業務」のときは全体の既定
+  const deadlineDay = group ? perfDeadlineDayFor(group, settings) : perfDeadlineDefaultDay(settings);
+  const deadlineLabel = perfDeadlineLabel(group, year, month, settings);
+  const lockedNow = isPerfLockedForStaff(group, year, month, settings);
+  const usesDefault = !!group && !hasOwnPerfDeadline(group, settings);
+  const savedDraft = group
+    ? (hasOwnPerfDeadline(group, settings) ? String(perfDeadlineDayFor(group, settings)) : '')
+    : String(perfDeadlineDefaultDay(settings));
 
   const saveDeadline = async () => {
     if (!onSavePerfDeadline) return;
     setSavingDeadline(true);
-    await onSavePerfDeadline(deadlineDraft);
+    await onSavePerfDeadline(deadlineDraft, group || null);
     setSavingDeadline(false);
   };
 
   return (
     <div className="space-y-5">
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
+        {/* 見出しの並びはインセンティブ集計の画面と揃えてある（題名の下に 年・月・業務） */}
         <div className="flex items-center gap-2 flex-wrap">
           <h2 className="font-bold text-[14px] text-slate-800 flex items-center gap-2"><BarChart3 size={16} className="text-slate-400" />実績の確認</h2>
-          <div className="ml-auto flex items-center gap-2 flex-wrap">
-            <select value={group} onChange={(e) => setGroup(e.target.value)} className="border border-slate-200 rounded-lg px-2 py-1.5 text-[12.5px] bg-white">
-              <option value="">すべての業務</option>
-              {groups.map((g) => <option key={g} value={g}>{g}</option>)}
-            </select>
-            <select value={year} onChange={(e) => setYear(Number(e.target.value))} className="border border-slate-200 rounded-lg px-2 py-1.5 text-[12.5px] bg-white">
-              {years.map((y) => <option key={y} value={y}>{y}年</option>)}
-            </select>
-            <select value={month} onChange={(e) => setMonth(Number(e.target.value))} className="border border-slate-200 rounded-lg px-2 py-1.5 text-[12.5px] bg-white">
-              {months.map((m) => <option key={m} value={m}>{m}月</option>)}
-            </select>
-          </div>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <select value={year} onChange={(e) => setYear(Number(e.target.value))} className="border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white">
+            {years.map((y) => <option key={y} value={y}>{y}年</option>)}
+          </select>
+          <select value={month} onChange={(e) => setMonth(Number(e.target.value))} className="border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white">
+            {months.map((m) => <option key={m} value={m}>{m}月</option>)}
+          </select>
+          <select value={group} onChange={(e) => setGroup(e.target.value)} className="border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white">
+            <option value="">すべての業務</option>
+            {groups.map((g) => <option key={g} value={g}>{g}</option>)}
+          </select>
         </div>
 
         <div className={`rounded-xl border px-4 py-3 text-[11.5px] leading-relaxed ${lockedNow ? 'border-slate-300 bg-slate-50 text-slate-600' : 'border-emerald-200 bg-emerald-50 text-emerald-800'}`}>
@@ -11087,7 +11171,11 @@ function PerfReviewTab({ employeeAccounts, settings, session, isMasterAdmin, onN
         </div>
 
         <div className="bg-slate-50 rounded-xl p-4 space-y-2">
-          <div className="text-[12px] font-bold text-slate-600">スタッフ本人が実績を入力できる期限（全業務に共通）</div>
+          <div className="text-[12px] font-bold text-slate-600">
+            {group
+              ? `「${group}」のスタッフが実績を入力できる期限`
+              : 'スタッフ本人が実績を入力できる期限（業務ごとの設定が無いときの既定）'}
+          </div>
           <div className="flex items-center gap-2 flex-wrap">
             <select
               value={deadlineDraft}
@@ -11095,21 +11183,36 @@ function PerfReviewTab({ employeeAccounts, settings, session, isMasterAdmin, onN
               disabled={!isMasterAdmin}
               className="border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white disabled:bg-slate-100 disabled:text-slate-400"
             >
+              {group && (
+                <option value="">既定に従う（いまは{perfDeadlineDefaultDay(settings) === 0 ? '締切なし' : `翌月${perfDeadlineDefaultDay(settings)}日まで`}）</option>
+              )}
               <option value="0">締切を設けない（いつでも直せる）</option>
               {Array.from({ length: 28 }, (_, i) => i + 1).map((d) => (
                 <option key={d} value={String(d)}>翌月{d}日まで</option>
               ))}
             </select>
             {isMasterAdmin ? (
-              <button onClick={saveDeadline} disabled={savingDeadline || deadlineDraft === String(deadlineDay)} className="text-[11.5px] font-bold text-amber-600 disabled:text-slate-300">
+              <button onClick={saveDeadline} disabled={savingDeadline || deadlineDraft === savedDraft} className="text-[11.5px] font-bold text-amber-600 disabled:text-slate-300">
                 {savingDeadline ? '保存中…' : '期限を保存する'}
               </button>
             ) : (
               <span className="text-[11px] text-slate-400">変更できるのはマスター管理者のみです</span>
             )}
           </div>
-          <div className="text-[11px] text-slate-400">
-            「翌月5日まで」にすると、10月分は11月5日のおわりまで本人が入力できます。期限を過ぎても、この画面からは管理者がいつでも直せます。
+          <div className="text-[11px] leading-relaxed text-slate-400">
+            {group ? (
+              <>
+                「翌月5日まで」にすると、10月分は11月5日のおわりまで「{group}」のスタッフが入力できます。
+                {usesDefault && '　いまは業務ごとの設定が無いため、既定に従っています。'}
+                　期限を過ぎても、この画面からは管理者がいつでも直せます。
+              </>
+            ) : (
+              <>
+                ここで決めるのは、業務ごとの設定が無いときに使われる既定です。
+                業務ごとに変えるときは、上の選択からその業務を選んでください。
+                期限を過ぎても、この画面からは管理者がいつでも直せます。
+              </>
+            )}
           </div>
         </div>
       </div>
