@@ -11647,7 +11647,6 @@ function EoAdminIncentiveTab({ employeeAccounts, settings, session, onNotifyEmpl
             <h2 className="font-bold text-[14px] text-slate-800 flex items-center gap-2">
               <Wallet size={16} className="text-slate-400" />インセンティブ集計
             </h2>
-            <span className="rounded-full bg-sky-50 px-2 py-0.5 text-[10.5px] font-bold text-sky-700">ZTV業務用</span>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
             <select
@@ -11687,12 +11686,12 @@ function EoAdminIncentiveTab({ employeeAccounts, settings, session, onNotifyEmpl
 
   return (
     <div className="space-y-5">
-      {/* 見出しの並びは ZTV業務用の画面と揃えてある（題名と印、その下に 年・月・業務）。
+      {/* 見出しの並びは ZTV業務用の画面と揃えてある（題名の下に 年・月・業務）。
+          どの業務かは業務の選択欄に出るため、題名の横には出さない。
           計算そのものは従来どおりポイント制のまま。 */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
         <div className="flex items-center gap-2 flex-wrap">
           <h2 className="font-bold text-[14px] text-slate-800 flex items-center gap-2"><Wallet size={16} className="text-slate-400" />インセンティブ集計</h2>
-          <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10.5px] font-bold text-amber-700">eo業務用</span>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           <select value={year} onChange={(e) => setYear(Number(e.target.value))} className="border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white">
