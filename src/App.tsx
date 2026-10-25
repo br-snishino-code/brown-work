@@ -5063,6 +5063,8 @@ function AttendanceApp() {
                 request={myShiftRequest}
                 onSubmit={submitShiftRequest}
                 formatKey={myShiftFormatKey}
+                groupAttendanceSchedules={data.groupLeaveSchedules}
+                employeeAttendanceSchedules={data.employeeAttendanceSchedules}
               />
             )}
             {requestTab === 'leave' && (
@@ -6780,9 +6782,18 @@ function defaultRequestDays(targetMonth) {
   return shiftMonthDays(targetMonth).filter((d) => d.isWeekendOrHoliday).map((d) => d.key);
 }
 
-function ShiftRequestSection({ session, period, request, onSubmit, formatKey = 'symbol' }) {
+function ShiftRequestSection({ session, period, request, onSubmit, formatKey = 'symbol', groupAttendanceSchedules = {}, employeeAttendanceSchedules = {} }) {
   const targetMonth = period?.targetMonth || '';
   const days = useMemo(() => shiftMonthDays(targetMonth), [targetMonth]);
+  // その月の出勤規定日数（給与の日割りに使う日数）。
+  // 所属グループに登録があればその日数、グループ未設定なら個人別の登録を見る。
+  // 登録が無い月は null。78番でスタッフ本人も自分の分を読めるようにしてある。
+  const prescribedDays = useMemo(() => {
+    const [y, m] = String(targetMonth).split('-').map(Number);
+    if (!y || !m) return null;
+    return getPrescribedAttendanceDays(session, y, m, groupAttendanceSchedules, employeeAttendanceSchedules);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [targetMonth, session?.id, session?.mainGroup, groupAttendanceSchedules, employeeAttendanceSchedules]);
   const [answers, setAnswers] = useState({});
   const [loadedFor, setLoadedFor] = useState(null);
   const [note, setNote] = useState('');
@@ -6890,6 +6901,10 @@ function ShiftRequestSection({ session, period, request, onSubmit, formatKey = '
           <h2 className="font-bold text-[13.5px]">{monthKeyLabel(targetMonth)}のシフト希望</h2>
           {period.deadline && (
             <span className="rounded-full bg-rose-50 px-2 py-0.5 text-[10.5px] font-bold text-rose-700">締切 {dateLabel(period.deadline)}</span>
+          )}
+          {/* その月の出勤規定日数。登録が無い月は出さない */}
+          {prescribedDays != null && (
+            <span className="rounded-full bg-sky-50 px-2 py-0.5 text-[10.5px] font-bold text-sky-700">出勤規定日数 {prescribedDays}日</span>
           )}
           {request && (
             <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10.5px] font-bold text-emerald-700">提出済み</span>
