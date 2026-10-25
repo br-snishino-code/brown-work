@@ -5445,6 +5445,26 @@ function PasswordInput({ inputRef, id, name, className, autoFocus }) {
 // （日本語入力のまま打つと全角文字が混ざり、次回ログインできなくなるため）
 const isHalfWidthPassword = (v) => /^[\x21-\x7e]+$/.test(String(v || ''));
 
+// ---- パスワードの決まり ----
+// Supabase側の設定（Authentication のパスワード設定）と必ず揃えること。
+// 片方だけ変えると、画面では通るのにサーバーで弾かれ、分かりにくいエラーになる。
+//   最低文字数：8
+//   必要な文字：数字・英大文字・英小文字
+const PASSWORD_MIN_LENGTH = 8;
+const PASSWORD_RULE_TEXT = '8文字以上・数字と英大小文字';
+const PASSWORD_RULE_HINT = `パスワードは${PASSWORD_MIN_LENGTH}文字以上で、数字・英大文字・英小文字をそれぞれ1つ以上入れてください。`;
+
+// 問題があればその理由を返す。問題なければ null。
+function passwordProblem(value) {
+  const v = String(value || '');
+  if (v.length < PASSWORD_MIN_LENGTH) return `パスワードは${PASSWORD_MIN_LENGTH}文字以上にしてください`;
+  if (!/[0-9]/.test(v)) return 'パスワードに数字を1つ以上入れてください';
+  if (!/[A-Z]/.test(v)) return 'パスワードに英大文字（A〜Z）を1つ以上入れてください';
+  if (!/[a-z]/.test(v)) return 'パスワードに英小文字（a〜z）を1つ以上入れてください';
+  return null;
+}
+const isPasswordOk = (v) => passwordProblem(v) === null;
+
 // ---- 初回ログイン：パスワード変更（必須） ----
 function FirstLoginPasswordScreen({ session, toast, onDone, onLogout }) {
   // 入力欄はReactで値を持たない（非制御）。
@@ -5459,8 +5479,9 @@ function FirstLoginPasswordScreen({ session, toast, onDone, onLogout }) {
     setError('');
     const password = passwordRef.current?.value || '';
     const confirmPassword = confirmRef.current?.value || '';
-    if (password.length < 6) {
-      setError('パスワードは6文字以上にしてください');
+    const pwProblem = passwordProblem(password);
+    if (pwProblem) {
+      setError(pwProblem);
       return;
     }
     if (!isHalfWidthPassword(password)) {
@@ -5511,7 +5532,7 @@ function FirstLoginPasswordScreen({ session, toast, onDone, onLogout }) {
           </div>
 
           <form onSubmit={submit} className="space-y-4">
-            <Field label="新しいパスワード（6文字以上）">
+            <Field label={`新しいパスワード（${PASSWORD_RULE_TEXT}）`}>
               <PasswordInput
                 inputRef={passwordRef}
                 id="new-password"
@@ -6204,8 +6225,9 @@ function ResetPasswordRecoveryScreen({ toast, onDone }) {
     setError('');
     const password = passwordRef.current?.value || '';
     const confirmPassword = confirmRef.current?.value || '';
-    if (password.length < 6) {
-      setError('パスワードは6文字以上にしてください');
+    const pwProblem = passwordProblem(password);
+    if (pwProblem) {
+      setError(pwProblem);
       return;
     }
     if (!isHalfWidthPassword(password)) {
@@ -6248,7 +6270,7 @@ function ResetPasswordRecoveryScreen({ toast, onDone }) {
           ) : (
             <form onSubmit={submit} className="space-y-4">
               <div>
-                <label className="block text-[12.5px] font-bold text-slate-800 mb-1.5">新しいパスワード（6文字以上）</label>
+                <label className="block text-[12.5px] font-bold text-slate-800 mb-1.5">{`新しいパスワード（${PASSWORD_RULE_TEXT}）`}</label>
                 <PasswordInput
                   inputRef={passwordRef}
                   id="recovery-password"
@@ -17932,7 +17954,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
   }
 
   // ログイン案内メールを送るため、ログインIDはメールアドレス形式を必須にする
-  const canSubmit = sei.trim() && mei.trim() && username.trim().includes('@') && password.trim().length >= 6 && hireDate;
+  const canSubmit = sei.trim() && mei.trim() && username.trim().includes('@') && isPasswordOk(password.trim()) && hireDate;
 
   const filteredEmployeeAccounts = employeeAccounts
     .filter((acc) => {
@@ -18208,7 +18230,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
         <input type="email" value={username} onChange={(e) => setUsername(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" placeholder="例）tanaka@example.com" />
         <div className="text-[10.5px] text-slate-400 mt-1">このアドレスがログインIDになり、ログイン案内のメールもここへ届きます。</div>
       </Field>
-      <Field label="仮パスワード（6文字以上）">
+      <Field label={`仮パスワード（${PASSWORD_RULE_TEXT}）`}>
         <div className="flex gap-2">
           <input type="text" value={password} onChange={(e) => setPassword(e.target.value)} className="flex-1 border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" placeholder="仮パスワードを入力" />
           <button type="button" onClick={() => setPassword(generateTempPassword())} className="shrink-0 text-[12px] font-bold text-slate-500 border border-slate-200 rounded-lg px-3">自動生成</button>
@@ -18381,7 +18403,7 @@ function ChangeLoginEmailModal({ account, onClose, onConfirm }) {
 function ResetPasswordModal({ account, onClose, onConfirm }) {
   const [newPassword, setNewPassword] = useState('');
   const [saving, setSaving] = useState(false);
-  const canSubmit = newPassword.trim().length >= 6;
+  const canSubmit = isPasswordOk(newPassword.trim());
 
   const run = async () => {
     setSaving(true);
@@ -18400,7 +18422,7 @@ function ResetPasswordModal({ account, onClose, onConfirm }) {
         </div>
         <div className="px-5 py-4 space-y-3">
           <div className="text-[12.5px] text-slate-500">{account.name}（ID: {account.username}）の新しいパスワードを設定します。</div>
-          <Field label="新しいパスワード（6文字以上）">
+          <Field label={`新しいパスワード（${PASSWORD_RULE_TEXT}）`}>
             <input type="text" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="新しいパスワードを入力" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
           </Field>
           <div className="text-[11px] text-slate-400">設定後、このパスワードをご本人に直接お伝えください（画面には再表示されません）。</div>
@@ -18500,13 +18522,13 @@ function CsvImportModal({ onClose, onAddAccount }) {
         hireDate: idx.hireDate >= 0 ? cols[idx.hireDate] || todayKey() : todayKey(),
       };
     }).filter((r) => r.name || r.username || r.password);
-    // ログイン案内メールを送るため、メールアドレス形式とパスワード6文字以上を必須とする
+    // ログイン案内メールを送るため、メールアドレス形式とパスワードの決まりを満たすことを必須とする
     const ok = [];
     const ng = [];
     all.forEach((r) => {
       if (!r.name || !r.username || !r.password) ng.push({ ...r, reason: '未入力の項目があります' });
       else if (!r.username.includes('@')) ng.push({ ...r, reason: 'メールアドレスの形式ではありません' });
-      else if (r.password.length < 6) ng.push({ ...r, reason: 'パスワードが6文字未満です' });
+      else if (passwordProblem(r.password)) ng.push({ ...r, reason: passwordProblem(r.password) });
       else ok.push(r);
     });
     setRows(ok);
@@ -18535,7 +18557,7 @@ function CsvImportModal({ onClose, onAddAccount }) {
         <div className="px-5 py-4 space-y-3">
           <div className="text-[11.5px] text-slate-500 bg-slate-50 rounded-lg p-3">
             1行目は見出し（<code className="font-mono">name,email,password,hireDate</code>）にしてください。<br />
-            2行目以降に1人ずつ、カンマ区切りで入力します。<code className="font-mono">email</code>はログインIDになります。登録フォームと同じく、メールアドレスでご入力ください（このアドレス宛にログイン案内が届きます）。<code className="font-mono">hireDate</code>は省略可（形式：YYYY-MM-DD）。<code className="font-mono">password</code>は仮パスワードで、6文字以上にしてください。
+            2行目以降に1人ずつ、カンマ区切りで入力します。<code className="font-mono">email</code>はログインIDになります。登録フォームと同じく、メールアドレスでご入力ください（このアドレス宛にログイン案内が届きます）。<code className="font-mono">hireDate</code>は省略可（形式：YYYY-MM-DD）。<code className="font-mono">password</code>は仮パスワードです。{PASSWORD_RULE_HINT}
           </div>
           <textarea
             value={csvText}

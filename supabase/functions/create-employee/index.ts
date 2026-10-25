@@ -67,8 +67,21 @@ Deno.serve(async (req) => {
     if (!username || !password || !name) {
       return json({ error: 'username, password, name は必須です' }, 400);
     }
-    if (String(password).length < 6) {
-      return json({ error: 'パスワードは6文字以上にしてください' }, 400);
+    // パスワードの決まり。Supabase側の設定（Authentication のパスワード設定）と
+    // 画面側（src/App.tsx の passwordProblem）と、三者を揃えること。
+    //   最低文字数：8 ／ 必要な文字：数字・英大文字・英小文字
+    const pw = String(password);
+    if (pw.length < 8) {
+      return json({ error: 'パスワードは8文字以上にしてください' }, 400);
+    }
+    if (!/[0-9]/.test(pw)) {
+      return json({ error: 'パスワードに数字を1つ以上入れてください' }, 400);
+    }
+    if (!/[A-Z]/.test(pw)) {
+      return json({ error: 'パスワードに英大文字（A〜Z）を1つ以上入れてください' }, 400);
+    }
+    if (!/[a-z]/.test(pw)) {
+      return json({ error: 'パスワードに英小文字（a〜z）を1つ以上入れてください' }, 400);
     }
 
     // ログインIDがメールアドレス形式ならそのまま、そうでなければ内部用のアドレスを割り当てる
