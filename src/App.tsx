@@ -3087,6 +3087,33 @@ function AttendanceApp() {
     return true;
   };
 
+  // ZTV業務のインセンティブの単価を保存する（マスター管理者のみ。
+  // app_settings の書き込みは 27番のポリシーでマスター管理者に限られている）
+  const saveZtvRates = async (map) => {
+    const { error } = await supabase.from('app_settings').upsert(
+      {
+        key: SETTING_ZTV_RATES,
+        value: JSON.stringify(map || {}),
+        updated_by: session.id,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'key' }
+    );
+    if (error) {
+      console.error('ZTVインセンティブの単価の保存に失敗しました', error);
+      show('単価の保存に失敗しました', 'warn');
+      return false;
+    }
+    const before = parseZtvRates(data.settings);
+    const changed = PRODUCT_ITEMS
+      .filter((it) => Number(before[it.key]) !== Number(map[it.key]))
+      .map((it) => `${it.label}：${before[it.key]} → ${map[it.key]}`);
+    await logAudit(session, 'ZTVインセンティブの単価を変更', changed.join(' / ') || '（変更なし）');
+    await refreshData();
+    show('単価を保存しました');
+    return true;
+  };
+
   // スタッフが実績を入力できる期限（翌月の何日まで）を保存する（マスター管理者のみ）
   // 0 は「締切を設けない」
   const savePerfDeadlineDay = async (value) => {
@@ -5321,6 +5348,7 @@ function AttendanceApp() {
             onUpdateAdminAccess={updateAdminAccess}
             onSaveAdminNotifyEmail={saveAdminNotifyEmail}
             onSaveGroupFormats={saveGroupFormats}
+            onSaveZtvRates={saveZtvRates}
             onSavePerfDeadline={savePerfDeadlineDay}
             onSaveShiftAlias={saveShiftNameAlias}
             onDeleteShiftAlias={deleteShiftNameAlias}
@@ -9438,6 +9466,60 @@ function toggleProductItem(items, key) {
 
 const PRODUCT_SINGLE_GROUP_NAMES = PRODUCT_GROUPS.filter((g) => g.single && g.items.length > 1).map((g) => g.name);
 
+// ---- ZTV業務のインセンティブ ----
+// 商品1件ごとの単価。app_settings に1件だけJSONで保存する。
+// 設定が無い商品は下の既定値を使う（画面の「単価の設定」から変更できる）。
+const SETTING_ZTV_RATES = 'ztv_incentive_rates';
+const ZTV_DEFAULT_RATES = {
+  net500m: 4300,
+  net1g: 5300,
+  net10g: 6000,
+  tel: 100,
+  tvGeneral: 600,
+  tvSelect: 600,
+  tvSky: 1700,
+  tvStb: 2200,
+  bluray: 700,
+  cable: 500,
+  more: 300,
+  ipStick: 500,
+  support: 200,
+};
+
+// 保存されている単価を読む。壊れていても画面は動かす
+function parseZtvRates(settings) {
+  let saved = {};
+  try {
+    const raw = settings?.[SETTING_ZTV_RATES];
+    if (raw) {
+      const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      if (parsed && typeof parsed === 'object') saved = parsed;
+    }
+  } catch (e) {
+    console.error('ZTVインセンティブの単価の読み取りに失敗しました', e);
+  }
+  const rates = {};
+  PRODUCT_ITEMS.forEach((it) => {
+    const v = Number(saved[it.key]);
+    rates[it.key] = Number.isFinite(v) && v >= 0 ? v : (ZTV_DEFAULT_RATES[it.key] ?? 0);
+  });
+  return rates;
+}
+
+// 実績の行から、商品ごとの件数・単価・金額と合計を出す
+function ztvIncentiveBreakdown(rows, rates) {
+  const items = PRODUCT_ITEMS.map((it) => {
+    const count = countProductItem(rows, it.key);
+    const rate = Number(rates?.[it.key]) || 0;
+    return { key: it.key, label: it.label, count, rate, amount: count * rate };
+  });
+  return {
+    items,
+    cases: rows.length,
+    total: items.reduce((s, x) => s + x.amount, 0),
+  };
+}
+
 const PRODUCT_ROWS_DEFAULT = 10;   // はじめに出す行数
 const PRODUCT_ROWS_STEP = 1;       // 「行を追加」で増える数
 
@@ -11129,7 +11211,212 @@ function PerfReviewTab({ employeeAccounts, settings, session, isMasterAdmin, onN
 // 管理者用：インセンティブ集計
 // 支給額の計算式は eo業務 のものを使う。業務を切り替えて表示でき、
 // 目標達成フラグとアップセル順位は業務ごとに持つ。
-function EoAdminIncentiveTab({ employeeAccounts, settings, session, onNotifyEmployee, isDesktop }) {
+// ---- ZTV業務のインセンティブ集計（管理者）----
+// 「インセンティブ集計」タブの中で、選んだ業務の実績の型が
+// ZTV業務用（products）のときに、eo用の代わりにこちらを出す。
+//
+// 計算は単純で、商品ごとの件数 × 単価 の合計。
+// eo用のような目標達成フラグ・順位・半額の扱いは無い。
+//
+// 集計の対象は、提出済み・未提出を問わず入力されている内容すべて。
+function ZtvIncentiveView({ staff, newRows, rates, year, month, onSaveRates, isMasterAdmin, isDesktop }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState({});
+  const [saving, setSaving] = useState(false);
+
+  const openEditor = () => {
+    setDraft(Object.fromEntries(PRODUCT_ITEMS.map((it) => [it.key, String(rates[it.key] ?? 0)])));
+    setEditing(true);
+  };
+
+  const saveRates = async () => {
+    const next = {};
+    for (const it of PRODUCT_ITEMS) {
+      const v = Number(draft[it.key]);
+      if (!Number.isFinite(v) || v < 0) {
+        window.alert(`${it.label}の単価が正しくありません。0以上の数字を入れてください。`);
+        return;
+      }
+      next[it.key] = Math.round(v);
+    }
+    setSaving(true);
+    const ok = await onSaveRates(next);
+    setSaving(false);
+    if (ok) setEditing(false);
+  };
+
+  // スタッフごとの内訳
+  const perStaff = staff.map((a) => {
+    const row = newRows.find((r) => r.employee_id === a.id);
+    const rows = readProductRows(row?.daily);
+    const b = ztvIncentiveBreakdown(rows, rates);
+    return { account: a, ...b, submittedAt: row?.submitted_at || null };
+  });
+
+  // 全員分の合計
+  const grand = {
+    cases: perStaff.reduce((s, r) => s + r.cases, 0),
+    total: perStaff.reduce((s, r) => s + r.total, 0),
+    byItem: Object.fromEntries(
+      PRODUCT_ITEMS.map((it) => [
+        it.key,
+        perStaff.reduce((s, r) => s + (r.items.find((x) => x.key === it.key)?.count || 0), 0),
+      ])
+    ),
+  };
+
+  return (
+    <div className="space-y-5">
+      <div className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-[11px] leading-relaxed text-sky-800">
+        ZTV業務の支給額は「商品ごとの件数 × 単価」の合計です。
+        提出済み・未提出にかかわらず、入力されている内容をそのまま集計しています。
+        eo業務のような目標達成フラグ・順位・半額の扱いはありません。
+      </div>
+
+      {/* ---- 単価の設定（マスター管理者のみ）---- */}
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2 flex-wrap">
+          <span className="text-[12.5px] font-bold text-slate-700">1件あたりの単価</span>
+          {isMasterAdmin && !editing && (
+            <button onClick={openEditor} className="ml-auto rounded-lg border border-slate-300 px-3 py-1.5 text-[12px] font-bold text-slate-600">
+              単価を変更する
+            </button>
+          )}
+          {!isMasterAdmin && (
+            <span className="ml-auto text-[11px] text-slate-400">変更できるのはマスター管理者だけです</span>
+          )}
+        </div>
+        {editing ? (
+          <div className="px-5 py-4 space-y-3">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              {PRODUCT_ITEMS.map((it) => (
+                <Field key={it.key} label={it.label}>
+                  <input
+                    type="number"
+                    min="0"
+                    step="100"
+                    value={draft[it.key] ?? ''}
+                    onChange={(e) => setDraft((p) => ({ ...p, [it.key]: e.target.value }))}
+                    className="w-full box-border border border-slate-200 rounded-lg px-2.5 py-2 font-mono text-[14px] text-right"
+                  />
+                </Field>
+              ))}
+            </div>
+            <div className="text-[11px] text-slate-400">
+              単価を変えると、過去の月の集計金額も新しい単価で計算し直されます。
+              月によって単価が違う場合は、金額を確定したあとに変更してください。
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setEditing(false)}
+                className="flex-1 rounded-xl border border-slate-300 py-2.5 text-[13px] font-bold text-slate-600"
+              >
+                やめる
+              </button>
+              <button
+                onClick={saveRates}
+                disabled={saving}
+                className="flex-1 rounded-xl bg-amber-600 py-2.5 text-[13px] font-bold text-white disabled:bg-slate-200"
+              >
+                {saving ? '保存中…' : '単価を保存する'}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="px-5 py-3 flex flex-wrap gap-x-4 gap-y-1.5">
+            {PRODUCT_ITEMS.map((it) => (
+              <span key={it.key} className="text-[11.5px] text-slate-600">
+                {it.label} <span className="font-mono font-bold text-slate-800">{formatYen(rates[it.key])}</span>
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* ---- スタッフごとの支給額 ---- */}
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2 flex-wrap">
+          <span className="text-[12.5px] font-bold text-slate-700">{year}年{month}月分の支給額</span>
+          <span className="ml-auto text-[12px] text-slate-500">
+            合計 <span className="font-mono text-[15px] font-bold text-slate-800">{formatYen(grand.total)}</span>
+            <span className="ml-2 text-slate-400">（{grand.cases}件）</span>
+          </span>
+        </div>
+        {perStaff.length === 0 ? (
+          <div className="px-5 py-10 text-center text-[12.5px] text-slate-300">対象のスタッフがいません</div>
+        ) : isDesktop ? (
+          <div className="overflow-x-auto">
+            <table className="w-full text-[12px]">
+              <thead className="bg-slate-50 text-slate-500">
+                <tr className="text-left">
+                  <th className="px-4 py-2 font-medium whitespace-nowrap">氏名</th>
+                  <th className="px-3 py-2 font-medium text-right whitespace-nowrap">件数</th>
+                  {PRODUCT_ITEMS.map((it) => (
+                    <th key={it.key} className="px-2 py-2 font-medium text-right whitespace-nowrap">{it.label}</th>
+                  ))}
+                  <th className="px-4 py-2 font-medium text-right whitespace-nowrap">支給額</th>
+                </tr>
+              </thead>
+              <tbody>
+                {perStaff.map((r) => (
+                  <tr key={r.account.id} className="border-t border-slate-100">
+                    <td className="px-4 py-2 font-semibold text-slate-800 whitespace-nowrap">
+                      <EmployeeLink id={r.account.id} name={r.account.name} />
+                      {!r.submittedAt && <span className="ml-1.5 text-[10.5px] font-bold text-amber-600">未提出</span>}
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-slate-600">{r.cases}</td>
+                    {r.items.map((x) => (
+                      <td key={x.key} className={`px-2 py-2 text-right font-mono ${x.count > 0 ? 'text-slate-700' : 'text-slate-300'}`}>
+                        {x.count}
+                      </td>
+                    ))}
+                    <td className="px-4 py-2 text-right font-mono font-bold text-slate-800 whitespace-nowrap">{formatYen(r.total)}</td>
+                  </tr>
+                ))}
+                <tr className="border-t-2 border-slate-300 bg-slate-50">
+                  <td className="px-4 py-2 font-bold text-slate-700">合計</td>
+                  <td className="px-3 py-2 text-right font-mono font-bold text-slate-700">{grand.cases}</td>
+                  {PRODUCT_ITEMS.map((it) => (
+                    <td key={it.key} className={`px-2 py-2 text-right font-mono font-bold ${grand.byItem[it.key] > 0 ? 'text-rose-600' : 'text-slate-300'}`}>
+                      {grand.byItem[it.key]}
+                    </td>
+                  ))}
+                  <td className="px-4 py-2 text-right font-mono font-bold text-slate-900 whitespace-nowrap">{formatYen(grand.total)}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="divide-y divide-slate-100">
+            {perStaff.map((r) => (
+              <div key={r.account.id} className="px-4 py-3 space-y-1.5">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-[13px] font-bold text-slate-800">
+                    <EmployeeLink id={r.account.id} name={r.account.name} />
+                  </span>
+                  {!r.submittedAt && <span className="text-[10.5px] font-bold text-amber-600">未提出</span>}
+                  <span className="ml-auto font-mono text-[15px] font-bold text-slate-800">{formatYen(r.total)}</span>
+                </div>
+                <div className="text-[11px] text-slate-400">{r.cases}件</div>
+                <div className="flex flex-wrap gap-x-3 gap-y-1">
+                  {r.items.filter((x) => x.count > 0).map((x) => (
+                    <span key={x.key} className="text-[11px] text-slate-600">
+                      {x.label} <span className="font-mono font-bold">{x.count}</span>
+                      <span className="text-slate-400">（{formatYen(x.amount)}）</span>
+                    </span>
+                  ))}
+                  {r.items.every((x) => x.count === 0) && <span className="text-[11px] text-slate-300">入力なし</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function EoAdminIncentiveTab({ employeeAccounts, settings, session, onNotifyEmployee, onSaveZtvRates, isDesktop }) {
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
   const [month, setMonth] = useState(now.getMonth() + 1);
@@ -11315,6 +11602,70 @@ function EoAdminIncentiveTab({ employeeAccounts, settings, session, onNotifyEmpl
     eoStaff.filter((a) => performanceFormatKeyFor(a.mainGroup, settings) === 'simple').map((a) => a.mainGroup)
   )).sort();
 
+  // ZTV業務用の実績を使っている業務は、計算式がまったく違うため画面ごと差し替える。
+  // 業務を1つ選んでいるときだけ切り替える（「すべての業務」では混ざるため）
+  const isZtvGroup = !!activeGroup && performanceFormatKeyFor(activeGroup, settings) === 'products';
+  const ztvGroups = Array.from(new Set(
+    eoStaff.filter((a) => performanceFormatKeyFor(a.mainGroup, settings) === 'products').map((a) => a.mainGroup)
+  )).sort();
+
+  const groupPicker = (
+    <select
+      value={activeGroup}
+      onChange={(e) => setGroup(e.target.value)}
+      className="border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white"
+    >
+      <option value="">すべての業務</option>
+      {groups.map((g) => <option key={g} value={g}>{g}</option>)}
+    </select>
+  );
+
+  if (isZtvGroup) {
+    return (
+      <div className="space-y-5">
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-3">
+          <div className="flex items-center gap-2 flex-wrap">
+            <h2 className="font-bold text-[14px] text-slate-800 flex items-center gap-2">
+              <Wallet size={16} className="text-slate-400" />インセンティブ集計
+            </h2>
+            <span className="rounded-full bg-sky-50 px-2 py-0.5 text-[10.5px] font-bold text-sky-700">ZTV業務用</span>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <select
+              value={year}
+              onChange={(e) => setYear(Number(e.target.value))}
+              className="border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white"
+            >
+              {[now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1].map((y) => <option key={y} value={y}>{y}年</option>)}
+            </select>
+            <select
+              value={month}
+              onChange={(e) => setMonth(Number(e.target.value))}
+              className="border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white"
+            >
+              {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => <option key={m} value={m}>{m}月</option>)}
+            </select>
+            {groupPicker}
+          </div>
+        </div>
+        {loading ? (
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-5 py-10 text-center text-[12.5px] text-slate-300">読み込み中…</div>
+        ) : (
+          <ZtvIncentiveView
+            staff={eoStaff}
+            newRows={newRows}
+            rates={parseZtvRates(settings)}
+            year={year}
+            month={month}
+            onSaveRates={onSaveZtvRates}
+            isMasterAdmin={session?.role === 'master_admin'}
+            isDesktop={isDesktop}
+          />
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-5">
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
@@ -11396,6 +11747,14 @@ function EoAdminIncentiveTab({ employeeAccounts, settings, session, onNotifyEmpl
             {simpleGroups.join('、')}は簡易版の実績入力（日ごとの件数・内容）を使っています。
             支給額の計算式はeo業務の実績の形に合わせて作られているため、これらの業務のポイントと金額は0のまま変わりません。
             別の計算式が必要な場合はご相談ください。
+          </div>
+        )}
+
+        {ztvGroups.length > 0 && (
+          <div className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-[11px] leading-relaxed text-sky-800">
+            {ztvGroups.join('、')}はZTV業務用の実績入力を使っており、支給額の計算式が違います。
+            上の選択からその業務を選ぶと、ZTV業務用の集計に切り替わります。
+            「すべての業務」の一覧では、これらの業務の金額は0のまま変わりません。
           </div>
         )}
       </div>
@@ -14935,7 +15294,7 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
   );
 }
 
-function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAdminTab = null, onConsumeRequestedAdminTab, onDecide, onDecideLeave, onDecideCommute, onNotifyEmployee, onSaveShiftPeriod, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onListMyNumbers, onDeleteMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onSaveGroupFormats, onSavePerfDeadline, onSaveShiftAlias, onDeleteShiftAlias, onAnnounceShift, onChangeLoginEmail, onDecideMonthlyConfirm, onCancelMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onDeleteAttendance, onRefresh, isDesktop }) {
+function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAdminTab = null, onConsumeRequestedAdminTab, onDecide, onDecideLeave, onDecideCommute, onNotifyEmployee, onSaveShiftPeriod, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onListMyNumbers, onDeleteMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onSaveGroupFormats, onSaveZtvRates, onSavePerfDeadline, onSaveShiftAlias, onDeleteShiftAlias, onAnnounceShift, onChangeLoginEmail, onDecideMonthlyConfirm, onCancelMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onDeleteAttendance, onRefresh, isDesktop }) {
   const [tab, setTab] = useState('dashboard'); // dashboard | attendance | requests | leave | performance | accounts
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
@@ -15439,7 +15798,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
       )}
 
       {tab === 'eoincentive' && (
-        <EoAdminIncentiveTab employeeAccounts={employeeAccounts} settings={data.settings} session={session} onNotifyEmployee={onNotifyEmployee} isDesktop={isDesktop} />
+        <EoAdminIncentiveTab employeeAccounts={employeeAccounts} settings={data.settings} session={session} onNotifyEmployee={onNotifyEmployee} onSaveZtvRates={onSaveZtvRates} isDesktop={isDesktop} />
       )}
 
 
