@@ -1179,6 +1179,71 @@ function performanceFormatKeyFor(group, settings) {
   return group === EO_GROUP_NAME ? 'eo' : 'none';
 }
 
+// 交通費申請の扱い。既定は「使う」（これまでどおり全員が対象）
+const COMMUTE_FORMATS = {
+  use: { label: '使う', desc: 'このグループのスタッフに「交通費申請」を表示します' },
+  none: { label: '使わない', desc: 'このグループには「交通費申請」を表示しません' },
+};
+
+function commuteFormatKeyFor(group, settings) {
+  const key = parseGroupFormats(settings)[group]?.commute;
+  return COMMUTE_FORMATS[key] ? key : 'use';
+}
+
+// ---- 申請の対象かどうか（グループの既定 ＋ スタッフごとの例外）----
+// グループごとの既定は上の group_formats（app_settings）で決める。
+// スタッフごとの例外は employees の3列で、マスター管理者だけが変えられる（77番）。
+//   null       … グループの設定に従う（これまでどおり。既存のスタッフは全員これ）
+//   'exempt'   … この方には出さない
+//   'required' … この方には出す
+//
+// シフト希望と実績入力は「入力の形」がグループ側にしかないため、
+// グループが「使わない」設定のときに個人だけ「必要」にすることはできない。
+// （出す形が決まらないため。画面でも「不要」だけを選べるようにしてある）
+// 交通費申請は形が無く、出すか出さないかだけなので、両方向に設定できる。
+const REQUIREMENT_FIELDS = {
+  shift: { column: 'shiftRequestRequirement', label: 'シフト希望', canForce: false },
+  performance: { column: 'performanceRequirement', label: '実績入力', canForce: false },
+  commute: { column: 'commuteClaimRequirement', label: '交通費申請', canForce: true },
+};
+
+// グループの設定で「使う」ことになっているか
+function groupUsesRequest(kind, group, settings) {
+  if (kind === 'shift') return shiftFormatKeyFor(group, settings) !== 'none';
+  if (kind === 'performance') return performanceFormatKeyFor(group, settings) !== 'none';
+  if (kind === 'commute') return commuteFormatKeyFor(group, settings) !== 'none';
+  return true;
+}
+
+// その方に申請を出すか。account は employees の1件（mainGroup と上の3列を持つ）
+function requiresRequest(kind, account, settings) {
+  const field = REQUIREMENT_FIELDS[kind];
+  if (!field) return true;
+  const own = account?.[field.column];
+  if (own === 'exempt') return false;
+  if (own === 'required' && field.canForce) return true;
+  return groupUsesRequest(kind, account?.mainGroup || '', settings);
+}
+
+// スタッフ詳細で選べる値
+const REQUIREMENT_CHOICES = [
+  { value: '', label: 'グループの設定に従う' },
+  { value: 'exempt', label: '不要（この方には出さない）' },
+];
+const REQUIREMENT_CHOICES_FORCEABLE = [
+  { value: '', label: 'グループの設定に従う' },
+  { value: 'required', label: '必要（この方には出す）' },
+  { value: 'exempt', label: '不要（この方には出さない）' },
+];
+
+function requirementLabel(kind, account, settings) {
+  const field = REQUIREMENT_FIELDS[kind];
+  const own = account?.[field?.column];
+  if (own === 'exempt') return '不要';
+  if (own === 'required' && field?.canForce) return '必要';
+  return groupUsesRequest(kind, account?.mainGroup || '', settings) ? 'グループの設定どおり（必要）' : 'グループの設定どおり（不要）';
+}
+
 // ---- 実績入力の締切 ----
 // app_settings に「翌月の何日まで本人が編集できるか」を数字1つで保存する。
 // 0（または未設定）は「締切を設けない」＝これまでどおり、いつでも本人が直せる。
@@ -1265,6 +1330,10 @@ const rowToAccount = (row) => ({
   residentAddress: row.resident_address || '',
   householderName: row.householder_name || '',
   commuteClaimMode: row.commute_claim_mode || 'bundled',
+  // 申請の対象かどうか（スタッフごとの例外）。null はグループの設定に従う
+  shiftRequestRequirement: row.shift_request_requirement || null,
+  performanceRequirement: row.performance_requirement || null,
+  commuteClaimRequirement: row.commute_claim_requirement || null,
   householderRelation: row.householder_relation || '',
   phone: row.phone || '',
   emergencyContactName: row.emergency_contact_name || '',
@@ -3260,7 +3329,9 @@ function AttendanceApp() {
     (c) => c.employeeId === employeeId && c.targetMonth === commuteClaimTargetMonthKey
       && c.status !== 'rejected' && c.status !== 'draft'
   );
-  const needsCommuteClaimReminder = !hasSubmittedCommuteClaim;
+  // 交通費申請の対象でない方には、打刻時のリマインドも出さない（77番）
+  const needsCommuteClaimReminder = !hasSubmittedCommuteClaim
+    && requiresRequest('commute', session, data.settings);
 
   const handleClockIn = async (confirm = {}) => {
     const loc = await geo.capture();
@@ -3758,6 +3829,9 @@ function AttendanceApp() {
       spouseStatus: 'spouse_status',
       householderName: 'householder_name',
       commuteClaimMode: 'commute_claim_mode',
+      shiftRequestRequirement: 'shift_request_requirement',
+      performanceRequirement: 'performance_requirement',
+      commuteClaimRequirement: 'commute_claim_requirement',
       householderRelation: 'householder_relation',
       spouseAnnualIncome: 'spouse_annual_income',
       spouseMonthlyIncome: 'spouse_monthly_income',
@@ -3784,6 +3858,17 @@ function AttendanceApp() {
     if (!canEditDetail) {
       EMPLOYEE_SENSITIVE_COLUMNS.forEach((col) => { delete dbPatch[col]; });
     }
+    // 申請の対象かどうか（シフト希望・実績入力・交通費申請）はマスター管理者だけが変えられる。
+    // 画面では選べないようにしてあり、データベース側でも 77番のトリガーが拒むが、
+    // ここで落として「更新に失敗しました」と出ないようにする。
+    const REQUIREMENT_DB_COLUMNS = [
+      'shift_request_requirement', 'performance_requirement', 'commute_claim_requirement',
+    ];
+    REQUIREMENT_DB_COLUMNS.forEach((col) => {
+      if (session.role !== 'master_admin') { delete dbPatch[col]; return; }
+      // 「グループの設定に従う」は選択欄では空文字になる。列の制限に合わせて null に直す
+      if (dbPatch[col] === '') dbPatch[col] = null;
+    });
     if (Object.keys(dbPatch).length === 0) {
       show('変更できる項目がありませんでした', 'warn');
       return false;
@@ -4803,7 +4888,9 @@ function AttendanceApp() {
   // シフト希望：受付中の月があるときだけ各種申請に出す
   // シフト希望の入力の型は、所属するメイングループの設定で決まる
   const myShiftFormatKey = shiftFormatKeyFor(session.mainGroup, data.settings);
-  const openShiftPeriod = myShiftFormatKey === 'none' ? null : ((data.shiftPeriods || []).find(
+  // この方がシフト希望の対象か（グループの設定 ＋ ご本人の例外。77番）
+  const myShiftRequired = requiresRequest('shift', session, data.settings);
+  const openShiftPeriod = (myShiftFormatKey === 'none' || !myShiftRequired) ? null : ((data.shiftPeriods || []).find(
     (p) => p.isOpen && (!p.targetEmployeeIds || p.targetEmployeeIds.length === 0 || p.targetEmployeeIds.includes(employeeId))
   ) || null);
   const myShiftRequest = openShiftPeriod
@@ -4815,15 +4902,24 @@ function AttendanceApp() {
     shift: openShiftPeriod && !myShiftRequest ? '未提出' : null,
   };
   // 実績入力は、所属している業務（メイングループ）の入力フォーマットを自動で出す。
-  // 定義がない業務の方には「実績入力」自体を出さない。
-  const perfFormat = PERFORMANCE_FORMATS[performanceFormatKeyFor(session.mainGroup, data.settings)] || null;
+  // 定義がない業務の方、およびご本人が「不要」に設定されている方には「実績入力」自体を出さない。
+  const perfFormat = requiresRequest('performance', session, data.settings)
+    ? PERFORMANCE_FORMATS[performanceFormatKeyFor(session.mainGroup, data.settings)] || null
+    : null;
   const PerformanceFormatSection = perfFormat?.Component || null;
+  // 交通費申請も、グループの設定とご本人の例外で出し分ける（77番）
+  const myCommuteRequired = requiresRequest('commute', session, data.settings);
   const staffRequestItems = STAFF_REQUEST_ITEMS
-    .filter((it) => (!it.byGroup || !!perfFormat) && (!it.shiftOnly || !!openShiftPeriod))
+    .filter((it) => (!it.byGroup || !!perfFormat) && (!it.shiftOnly || !!openShiftPeriod)
+      && (it.key !== 'commute' || myCommuteRequired))
     .map((it) => {
       if (it.byGroup && perfFormat) return { ...it, label: perfFormat.label, desc: perfFormat.desc };
       if (it.shiftOnly && openShiftPeriod) {
         return { ...it, desc: `${monthKeyLabel(openShiftPeriod.targetMonth)}分${openShiftPeriod.deadline ? `（締切 ${dateLabel(openShiftPeriod.deadline)}）` : ''}` };
+      }
+      // 交通費申請の対象外の方には「交通費とまとめて提出」と書かない（77番）
+      if (it.key === 'monthly' && !myCommuteRequired) {
+        return { ...it, desc: '前月分の勤怠を確認して提出' };
       }
       return it;
     });
@@ -4979,9 +5075,10 @@ function AttendanceApp() {
                 onUpdateCommute={updateCommuteExpenseClaim}
                 onSaveAttendanceDraft={saveMonthlyAttendanceDraft}
                 onGoToCommute={() => openRequest('commute')}
+                commuteRequired={myCommuteRequired}
               />
             )}
-            {requestTab === 'commute' && (
+            {requestTab === 'commute' && myCommuteRequired && (
               <CommuteExpenseClaimSection
                 session={session}
                 claims={data.commuteExpenseClaims.filter((c) => c.employeeId === employeeId)}
@@ -9222,6 +9319,7 @@ function GroupFormatSettingsTab({ employeeAccounts, groupLeaveSchedules = {}, se
   const [newGroupName, setNewGroupName] = useState('');
   const [shiftKey, setShiftKey] = useState(() => shiftFormatKeyFor(knownGroups[0] || '', settings));
   const [perfKey, setPerfKey] = useState(() => performanceFormatKeyFor(knownGroups[0] || '', settings));
+  const [commuteKey, setCommuteKey] = useState(() => commuteFormatKeyFor(knownGroups[0] || '', settings));
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState(null);
 
@@ -9229,6 +9327,7 @@ function GroupFormatSettingsTab({ employeeAccounts, groupLeaveSchedules = {}, se
     setSelectedGroup(groupName);
     setShiftKey(shiftFormatKeyFor(groupName, settings));
     setPerfKey(performanceFormatKeyFor(groupName, settings));
+    setCommuteKey(commuteFormatKeyFor(groupName, settings));
     setSavedAt(null);
   };
 
@@ -9242,7 +9341,7 @@ function GroupFormatSettingsTab({ employeeAccounts, groupLeaveSchedules = {}, se
   const save = async () => {
     if (!selectedGroup) return;
     setSaving(true);
-    const next = { ...saved, [selectedGroup]: { shift: shiftKey, performance: perfKey } };
+    const next = { ...saved, [selectedGroup]: { shift: shiftKey, performance: perfKey, commute: commuteKey } };
     const ok = await onSave(next);
     setSaving(false);
     if (ok) setSavedAt(new Date());
@@ -9257,9 +9356,10 @@ function GroupFormatSettingsTab({ employeeAccounts, groupLeaveSchedules = {}, se
   return (
     <div className="space-y-5">
       <div className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 text-[11.5px] leading-relaxed text-blue-800">
-        メイングループごとに、スタッフの「各種申請」に出るシフト希望と、「勤怠」→「実績」に出る実績入力の形を設定できます。
+        メイングループごとに、スタッフの「各種申請」に出るシフト希望と交通費申請、「勤怠」→「実績」に出る実績入力の形を設定できます。
         変更すると、そのグループのスタッフの画面がすぐに切り替わります。提出済みの内容は消えません。
-        グループを設定していないスタッフには、既定の形（シフト希望は活動場所の入力、実績入力は表示しない）が使われます。
+        グループを設定していないスタッフには、既定の形（シフト希望は活動場所の入力、実績入力は表示しない、交通費申請は使う）が使われます。
+        スタッフおひとりだけ外したいときは、ここではなく「人材」→そのスタッフの詳細で設定してください。
       </div>
 
       <div className={isDesktop ? 'grid grid-cols-[240px_1fr] gap-5 items-start' : 'space-y-4'}>
@@ -9350,6 +9450,30 @@ function GroupFormatSettingsTab({ employeeAccounts, groupLeaveSchedules = {}, se
                     ))}
                   </div>
                 </div>
+
+                <div>
+                  <div className="text-[11px] font-bold text-slate-400 mb-1.5">交通費申請</div>
+                  <div className="space-y-2">
+                    {Object.entries(COMMUTE_FORMATS).map(([key, f]) => (
+                      <label
+                        key={key}
+                        className={`flex items-start gap-2.5 rounded-xl border px-3.5 py-2.5 cursor-pointer ${commuteKey === key ? 'border-amber-500 bg-amber-50' : 'border-slate-200 bg-white hover:bg-slate-50'}`}
+                      >
+                        <input
+                          type="radio"
+                          name="commuteFormat"
+                          checked={commuteKey === key}
+                          onChange={() => setCommuteKey(key)}
+                          className="mt-0.5 h-4 w-4 accent-amber-600"
+                        />
+                        <span className="flex-1 min-w-0">
+                          <span className="block text-[13px] font-bold text-slate-800">{f.label}</span>
+                          <span className="mt-0.5 block text-[11.5px] text-slate-500">{f.desc}</span>
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
               </div>
               <div className="px-5 py-4 border-t border-slate-100 space-y-2">
                 <button
@@ -9375,19 +9499,22 @@ function GroupFormatSettingsTab({ employeeAccounts, groupLeaveSchedules = {}, se
                 <th className="px-4 py-2 font-medium">グループ</th>
                 <th className="px-4 py-2 font-medium">シフト希望</th>
                 <th className="px-4 py-2 font-medium">実績入力</th>
+                <th className="px-4 py-2 font-medium">交通費申請</th>
               </tr>
             </thead>
             <tbody>
               {knownGroups.length === 0 ? (
-                <tr><td colSpan={3} className="px-4 py-6 text-center text-slate-300">グループがまだありません</td></tr>
+                <tr><td colSpan={4} className="px-4 py-6 text-center text-slate-300">グループがまだありません</td></tr>
               ) : knownGroups.map((g) => {
                 const sk = shiftFormatKeyFor(g, settings);
                 const pk = performanceFormatKeyFor(g, settings);
+                const ck = commuteFormatKeyFor(g, settings);
                 return (
                   <tr key={g} className="border-t border-slate-100">
                     <td className="px-4 py-2.5 font-semibold text-slate-800 whitespace-nowrap">{g}</td>
                     <td className="px-4 py-2.5 text-slate-600">{SHIFT_FORMATS[sk]?.label || sk}</td>
                     <td className="px-4 py-2.5 text-slate-600">{pk === 'none' ? '使わない' : PERFORMANCE_FORMATS[pk]?.adminLabel || pk}</td>
+                    <td className="px-4 py-2.5 text-slate-600">{COMMUTE_FORMATS[ck]?.label || ck}</td>
                   </tr>
                 );
               })}
@@ -9909,9 +10036,10 @@ function PerfReviewTab({ employeeAccounts, settings, session, isMasterAdmin, onN
 
   useEffect(() => { setDeadlineDraft(String(perfDeadlineDay(settings) || 0)); }, [settings]);
 
-  // 実績入力を使っているグループのスタッフだけを対象にする
+  // 実績入力を使っているグループのスタッフだけを対象にする。
+  // おひとりだけ「不要」に設定されている方も外す（77番）
   const targets = employeeAccounts
-    .filter((a) => !a.resignationDate)
+    .filter((a) => !a.resignationDate && requiresRequest('performance', a, settings))
     .map((a) => ({ account: a, format: performanceFormatKeyFor(a.mainGroup, settings) }))
     .filter((t) => t.format !== 'none' && PERFORMANCE_FORMATS[t.format]);
   const groups = Array.from(new Set(targets.map((t) => t.account.mainGroup).filter(Boolean))).sort();
@@ -10130,9 +10258,10 @@ function EoAdminIncentiveTab({ employeeAccounts, settings, session, onNotifyEmpl
   const [savingCounts, setSavingCounts] = useState(false);
   const [countsSavedAt, setCountsSavedAt] = useState(null);
 
-  // 実績入力を使っている業務だけを対象にする（実績が無いと計算できないため）
+  // 実績入力を使っている業務だけを対象にする（実績が無いと計算できないため）。
+  // おひとりだけ「不要」に設定されている方も外す（77番）
   const perfStaff = employeeAccounts
-    .filter((a) => !a.resignationDate && a.mainGroup)
+    .filter((a) => !a.resignationDate && a.mainGroup && requiresRequest('performance', a, settings))
     .filter((a) => performanceFormatKeyFor(a.mainGroup, settings) !== 'none');
   const groups = Array.from(new Set(perfStaff.map((a) => a.mainGroup))).sort();
   // 選んだ業務が無くなった場合（設定変更など）は、先頭の業務に寄せる
@@ -11794,7 +11923,7 @@ function ConfirmedShiftAdminCard({
   );
 }
 
-function ShiftAdminTab({ employeeAccounts, periods = [], requests = [], tablesReady = true, onSavePeriod, onNotifyEmployee, isDesktop }) {
+function ShiftAdminTab({ employeeAccounts, periods = [], requests = [], tablesReady = true, settings = {}, onSavePeriod, onNotifyEmployee, isDesktop }) {
   const nextMonth = (() => {
     const d = new Date();
     const y = d.getMonth() === 11 ? d.getFullYear() + 1 : d.getFullYear();
@@ -11813,7 +11942,12 @@ function ShiftAdminTab({ employeeAccounts, periods = [], requests = [], tablesRe
 
   const period = periods.find((p) => p.targetMonth === targetMonth) || null;
   const days = useMemo(() => shiftMonthDays(targetMonth), [targetMonth]);
-  const allStaff = employeeAccounts.filter((a) => !a.resignationDate);
+  // シフト希望の対象でない方は、一覧にも対象者の選択にも出さない。
+  // グループの設定で「使わない」にしている方と、おひとりだけ「不要」に
+  // 設定されている方（77番）。スタッフの画面にも出ないため、ここに残すと
+  // いつまでも「未提出」として数えてしまう。
+  const allStaff = employeeAccounts
+    .filter((a) => !a.resignationDate && requiresRequest('shift', a, settings));
   // 対象者を絞っているときは、その方だけを一覧・件数・依頼の対象にする
   // メイングループの一覧と、選んだグループに属する方
   const staffGroups = Array.from(new Set(allStaff.map((a) => a.mainGroup).filter(Boolean))).sort();
@@ -12426,8 +12560,10 @@ function TodayStatusCard({ working = 0, done = 0, absent = 0, absentees = [], on
 }
 
 // ダッシュボード右側：今月の締めまで（提出状況）
-function MonthClosingCard({ targetMonth, total = 0, monthlyDone = 0, commuteDone = 0, pendingNames = [], onRemind, reminding = false }) {
-  const pct = (n) => (total > 0 ? Math.round((n / total) * 100) : 0);
+function MonthClosingCard({ targetMonth, total = 0, commuteTotal = null, monthlyDone = 0, commuteDone = 0, pendingNames = [], onRemind, reminding = false }) {
+  const pct = (n, base = total) => (base > 0 ? Math.round((n / base) * 100) : 0);
+  // 交通費は対象の方だけを分母にする
+  const commuteBase = commuteTotal === null ? total : commuteTotal;
   return (
     <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
       <div className="px-4 py-2.5 border-b border-slate-100 flex items-center justify-between">
@@ -12444,10 +12580,10 @@ function MonthClosingCard({ targetMonth, total = 0, monthlyDone = 0, commuteDone
         </div>
         <div className="flex items-center justify-between">
           <span className="text-[12px] text-slate-600">交通費の提出</span>
-          <span className="text-[12px] font-bold text-slate-800">{commuteDone}／{total}名</span>
+          <span className="text-[12px] font-bold text-slate-800">{commuteDone}／{commuteBase}名</span>
         </div>
         <div className="h-[7px] rounded-full bg-slate-200 overflow-hidden">
-          <div className="h-[7px] bg-teal-700" style={{ width: `${pct(commuteDone)}%` }} />
+          <div className="h-[7px] bg-teal-700" style={{ width: `${pct(commuteDone, commuteBase)}%` }} />
         </div>
         {pendingNames.length > 0 ? (
           <button
@@ -12677,6 +12813,7 @@ function AdminDashboardTab({ missingCount, correctionCount, leaveCount, gpsAlert
         <MonthClosingCard
           targetMonth={monthClosing.targetMonth}
           total={monthClosing.total}
+          commuteTotal={monthClosing.commuteTotal}
           monthlyDone={monthClosing.monthlyDone}
           commuteDone={monthClosing.commuteDone}
           pendingNames={monthClosing.pendingNames}
@@ -14011,9 +14148,11 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
 
   // シフト希望：受付中の月の未提出件数
   const openShiftPeriodAdmin = (data.shiftPeriods || []).find((p) => p.isOpen) || null;
+  // シフト希望の対象でない方は数えない（グループの設定、およびおひとりだけの「不要」。77番）
   const shiftPendingCount = openShiftPeriodAdmin
     ? employeeAccounts.filter(
         (a) => !a.resignationDate
+          && requiresRequest('shift', a, data.settings)
           && (!openShiftPeriodAdmin.targetEmployeeIds
             || openShiftPeriodAdmin.targetEmployeeIds.length === 0
             || openShiftPeriodAdmin.targetEmployeeIds.includes(a.id))
@@ -14051,11 +14190,15 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
         .map((c) => c.employeeId)
     );
     const pendingStaff = activeStaff.filter((acc) => !submittedMonthly.has(acc.id));
+    // 交通費申請の対象の方だけを分母にする（77番）。
+    // 対象外の方を含めると、いつまでも「○／○名」が埋まらない
+    const commuteStaff = activeStaff.filter((acc) => requiresRequest('commute', acc, data.settings));
     return {
       targetMonth: closingMonth,
       total: activeStaff.length,
+      commuteTotal: commuteStaff.length,
       monthlyDone: activeStaff.filter((acc) => submittedMonthly.has(acc.id)).length,
-      commuteDone: activeStaff.filter((acc) => submittedCommute.has(acc.id)).length,
+      commuteDone: commuteStaff.filter((acc) => submittedCommute.has(acc.id)).length,
       pendingNames: pendingStaff.map((a) => a.name),
       reminding,
       onRemind: async () => {
@@ -14257,6 +14400,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
           periods={data.shiftPeriods || []}
           tablesReady={data.shiftTablesReady !== false}
           requests={data.shiftRequests || []}
+          settings={data.settings}
           onSavePeriod={onSaveShiftPeriod}
           onNotifyEmployee={onNotifyEmployee}
           isDesktop={isDesktop}
@@ -14319,6 +14463,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
           employeeAttendanceSchedules={data.employeeAttendanceSchedules}
           onSaveEmployeeAttendance={onSaveEmployeeAttendance}
           resignationReasons={data.resignationReasons}
+          settings={data.settings}
           initialProfileId={pendingProfileId}
           onConsumeInitialProfile={() => setPendingProfileId(null)}
           rowInfo={staffRowInfo}
@@ -15545,7 +15690,7 @@ function AdminYearEndAdjustmentTab({ requests, onDecide, employeeAccounts = [], 
 }
 
 // ---- 月次勤怠の確定（スタッフ側）----
-function MonthlyAttendanceConfirmSection({ session, records, confirmations, commuteClaims = [], onSubmit, onSubmitCommute, onUpdateCommute, onSaveAttendanceDraft, onGoToCommute }) {
+function MonthlyAttendanceConfirmSection({ session, records, confirmations, commuteClaims = [], onSubmit, onSubmitCommute, onUpdateCommute, onSaveAttendanceDraft, onGoToCommute, commuteRequired = true }) {
   const [targetMonth, setTargetMonth] = useState(() => prevMonthKey());
   const [note, setNote] = useState('');
   const [noteLoadedFor, setNoteLoadedFor] = useState(null);
@@ -15565,13 +15710,14 @@ function MonthlyAttendanceConfirmSection({ session, records, confirmations, comm
 
   // 交通費を個別に申請する設定の方は、この画面に交通費の欄を出さない。
   // ただし月ごとに「今月はまとめて申請する」へ切り替えられる。
-  const separateByDefault = session?.commuteClaimMode === 'separate';
-  const [bundleCommute, setBundleCommute] = useState(!separateByDefault);
+  // 交通費申請そのものが「不要」の方（77番）には、まとめる選択肢も出さない。
+  const separateByDefault = !commuteRequired || session?.commuteClaimMode === 'separate';
+  const [bundleCommute, setBundleCommute] = useState(commuteRequired && !separateByDefault);
   useEffect(() => {
     // 対象月を変えたら設定どおりに戻す（その月に入力済みの分があれば表示する）
-    setBundleCommute(!separateByDefault || !!commuteClaim);
+    setBundleCommute(commuteRequired && (!separateByDefault || !!commuteClaim));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [targetMonth, separateByDefault, commuteClaim?.id]);
+  }, [targetMonth, separateByDefault, commuteRequired, commuteClaim?.id]);
 
   // 保存済みのメモを読み込む（対象月を変えたときも）
   useEffect(() => {
@@ -15680,6 +15826,9 @@ function MonthlyAttendanceConfirmSection({ session, records, confirmations, comm
           </div>
         ) : (
           <>
+            {/* 交通費申請が「不要」の方には欄を出さない。
+                ただし過去に提出された分があるときは、履歴として残すため表示する（77番） */}
+            {(commuteRequired || commuteClaim) && (
             <div className="border-t border-slate-100 pt-3 space-y-2">
               <div className="flex items-center gap-2 flex-wrap">
                 <Wallet size={14} className="text-slate-400" />
@@ -15697,6 +15846,11 @@ function MonthlyAttendanceConfirmSection({ session, records, confirmations, comm
               ) : commuteAlreadySent ? (
                 <div className="text-[11.5px] text-slate-500">
                   {monthKeyLabel(targetMonth)}分の交通費精算は申請済みです（{formatYen(commuteClaim.totalAmount)}・{(commuteClaim.items || []).length}件）。
+                </div>
+              ) : !commuteRequired ? (
+                <div className="text-[11.5px] text-slate-500">
+                  交通費申請の対象外に設定されています。この画面では交通費を提出しません。
+                  必要になった場合は総務担当へご連絡ください。
                 </div>
               ) : !bundleCommute ? (
                 <div className="space-y-1.5">
@@ -15744,6 +15898,7 @@ function MonthlyAttendanceConfirmSection({ session, records, confirmations, comm
                 </div>
               )}
             </div>
+            )}
 
             <Field label="管理者へのメモ（任意）">
               <textarea
@@ -17931,7 +18086,7 @@ function MyNumberRetentionCard({ accounts, onListMyNumbers, onDeleteMyNumber, is
   );
 }
 
-function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail, onUpdateDates, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onListMyNumbers, onDeleteMyNumber, groupLeaveSchedules, employeeAttendanceSchedules, onSaveEmployeeAttendance, resignationReasons = [], initialProfileId = null, onConsumeInitialProfile, rowInfo = {}, rowActions = {}, session, isDesktop }) {
+function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail, onUpdateDates, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onListMyNumbers, onDeleteMyNumber, groupLeaveSchedules, employeeAttendanceSchedules, onSaveEmployeeAttendance, resignationReasons = [], settings = {}, initialProfileId = null, onConsumeInitialProfile, rowInfo = {}, rowActions = {}, session, isDesktop }) {
   const knownGroups = Array.from(new Set([...employeeAccounts.map((a) => a.mainGroup).filter(Boolean), ...Object.keys(groupLeaveSchedules || {})]));
   const [listGroupFilter, setListGroupFilter] = useState('all');
   const [listStaffTypeFilter, setListStaffTypeFilter] = useState('all');
@@ -18052,6 +18207,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
         employeeAttendanceSchedule={employeeAttendanceSchedules?.[profileModalAccount.id] || {}}
         onSaveEmployeeAttendance={onSaveEmployeeAttendance}
         resignationReasons={resignationReasons}
+        settings={settings}
         actor={session}
         isDesktop={isDesktop}
       />
@@ -18811,7 +18967,7 @@ const PROFILE_MODAL_TABS = [
   { key: 'tax', label: '住民税・税区分' },
 ];
 
-function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSaveMyNumber, isMasterAdmin, knownGroups = [], groupAttendanceSchedules = {}, employeeAttendanceSchedule = {}, onSaveEmployeeAttendance, resignationReasons = [], actor = null, isDesktop }) {
+function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSaveMyNumber, isMasterAdmin, knownGroups = [], groupAttendanceSchedules = {}, employeeAttendanceSchedule = {}, onSaveEmployeeAttendance, resignationReasons = [], settings = {}, actor = null, isDesktop }) {
   const [activeTab, setActiveTab] = useState('basic');
   const containerRef = useRef(null);
   const sectionRefs = useRef({});
@@ -18995,6 +19151,10 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
     residentAddress: account.residentAddress || '',
     householderName: account.householderName || '',
     commuteClaimMode: account.commuteClaimMode || 'bundled',
+    // 申請の対象かどうか（空文字＝グループの設定に従う）
+    shiftRequestRequirement: account.shiftRequestRequirement || '',
+    performanceRequirement: account.performanceRequirement || '',
+    commuteClaimRequirement: account.commuteClaimRequirement || '',
     householderRelation: account.householderRelation || '',
     phone: account.phone || '',
     emergencyContactName: account.emergencyContactName || '',
@@ -19281,6 +19441,56 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
               </div>
               <div className="text-[10.5px] text-slate-400 -mt-2">
                 メイングループを選択すると、そのグループに設定された「出勤規定日数」（給与タブ →出勤規定日数設定 で管理）が月給の日割り計算に使われます。一覧に無いグループ名は、先に給与タブの「出勤規定日数設定」で新規追加してください。
+              </div>
+
+              {/* 申請の対象かどうか。グループの設定に対する、この方だけの例外。
+                  変更できるのはマスター管理者だけ（データベース側でも 77番のトリガーが拒む）。
+                  管理者にも見えるようにしてあるのは、「なぜこの人にシフト希望が出ないのか」を
+                  確認できるようにするため。 */}
+              <div className="rounded-xl border border-slate-200 p-4 space-y-3">
+                <div className="text-[12px] font-bold text-slate-600">申請の対象（この方だけの設定）</div>
+                <div className="text-[10.5px] leading-relaxed text-slate-400">
+                  ふだんはメイングループの設定（その他タブ →グループごとの入力設定）に従います。この方だけ外したいときに変更してください。
+                  {isMasterAdmin ? '' : '変更できるのはマスター管理者だけです。'}
+                  「不要」にしても、すでに提出された内容は消えません。
+                </div>
+                {[
+                  { kind: 'shift', label: 'シフト希望' },
+                  { kind: 'performance', label: '実績入力' },
+                  { kind: 'commute', label: '交通費申請' },
+                ].map(({ kind, label }) => {
+                  const field = REQUIREMENT_FIELDS[kind];
+                  const current = form[field.column] || '';
+                  const base = field.canForce ? REQUIREMENT_CHOICES_FORCEABLE : REQUIREMENT_CHOICES;
+                  // 画面では選べない値が入っていても、選択欄から消えないようにする
+                  const choices = base.some((c) => c.value === current)
+                    ? base
+                    : [...base, { value: current, label: `${current}（この項目では使えない設定です）` }];
+                  const usesByGroup = groupUsesRequest(kind, form.mainGroup || '', settings);
+                  return (
+                    <Field key={kind} label={label}>
+                      <select
+                        value={current}
+                        onChange={set(field.column)}
+                        disabled={!isMasterAdmin}
+                        className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white disabled:bg-slate-50 disabled:text-slate-400"
+                      >
+                        {choices.map((c) => (
+                          <option key={c.value} value={c.value}>
+                            {c.value === ''
+                              ? `グループの設定に従う（いまは「${usesByGroup ? '必要' : '不要'}」）`
+                              : c.label}
+                          </option>
+                        ))}
+                      </select>
+                      {!field.canForce && (
+                        <div className="mt-1 text-[10.5px] text-slate-400">
+                          入力の形がグループごとに決まるため、グループが「使わない」設定のときにこの方だけ「必要」にすることはできません。
+                        </div>
+                      )}
+                    </Field>
+                  );
+                })}
               </div>
 
               {form.mainGroup ? (
