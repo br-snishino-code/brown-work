@@ -771,6 +771,7 @@ const EMPLOYEE_SENSITIVE_COLUMNS = [
   'emergency_contact_address',
   // 賃金
   'wage_type', 'hourly_wage', 'monthly_salary',
+  'commute_allowance',
   // 口座情報
   'bank_code', 'bank_name', 'branch_code', 'branch_name',
   'account_type', 'account_holder', 'account_number',

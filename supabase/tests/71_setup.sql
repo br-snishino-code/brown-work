@@ -63,6 +63,7 @@ create table public.employees (
   single_parent_classification text
 );
 
+update public.employees set commute_allowance=4200, nearest_station='亀岡' where true;
 insert into public.employees
   (id, username, name, role, admin_permissions, main_group,
    address, birth_date, phone, hourly_wage, account_number, bank_name,
@@ -106,6 +107,26 @@ language sql stable security definer set search_path = public as $$
   select exists (select 1 from public.employees e
     where e.id = auth.uid() and e.role = 'master_admin');
 $$;
+
+-- 45番相当のガード（スタッフだけを止める。管理者は素通り）
+create or replace function public.guard_employee_self_update()
+returns trigger language plpgsql security definer set search_path = public, pg_temp as $g$
+declare caller uuid := auth.uid(); caller_role text;
+begin
+  if caller is null then return new; end if;
+  select e.role into caller_role from public.employees e where e.id = caller;
+  if caller_role in ('admin','master_admin') then return new; end if;
+  if caller is distinct from new.id then
+    raise exception '他のスタッフの情報は変更できません' using errcode='42501';
+  end if;
+  if new.role is distinct from old.role then
+    raise exception 'ご自身では変更できない項目が含まれています（role）' using errcode='42501';
+  end if;
+  return new;
+end $g$;
+drop trigger if exists guard_employee_self_update on public.employees;
+create trigger guard_employee_self_update before update on public.employees
+  for each row execute function public.guard_employee_self_update();
 
 alter table public.employees enable row level security;
 
