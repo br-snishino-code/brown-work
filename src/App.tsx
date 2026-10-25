@@ -18452,7 +18452,10 @@ function ResetPasswordModal({ account, onClose, onConfirm }) {
         <div className="px-5 py-4 space-y-3">
           <div className="text-[12.5px] text-slate-500">{account.name}（ID: {account.username}）の新しいパスワードを設定します。</div>
           <Field label={`新しいパスワード（${PASSWORD_RULE_TEXT}）`}>
-            <input type="text" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="新しいパスワードを入力" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
+            <div className="flex gap-2">
+              <input type="text" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="新しいパスワードを入力" className="flex-1 min-w-0 box-border border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
+              <button type="button" onClick={() => setNewPassword(generateTempPassword())} className="shrink-0 text-[12px] font-bold text-slate-500 border border-slate-200 rounded-lg px-3">自動生成</button>
+            </div>
           </Field>
           <div className="text-[11px] text-slate-400">設定後、このパスワードをご本人に直接お伝えください（画面には再表示されません）。</div>
         </div>
