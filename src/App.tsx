@@ -9356,6 +9356,479 @@ function SimplePerformanceSection({ employeeId, settings, onNotifyAdmin, isDeskt
   );
 }
 
+// ---- 商品別の実績入力（契約1件ごとに商品をチェックする型）----
+// 紙の集計表と同じ形。1行が1件の契約で、その契約に含まれる商品に印を付ける。
+// 同じ日に2件あれば、同じ日付の行が2つ並ぶ。
+//
+// 商品の並びは紙の表と同じ。変更が必要になったらこの配列を直す
+// （設定画面からは変えられない。過去の実績との整合を保つため）。
+const PRODUCT_GROUPS = [
+  {
+    name: 'インターネット',
+    tone: 'bg-blue-50',
+    items: [
+      { key: 'net500m', label: 'ネット500M' },
+      { key: 'net1g', label: 'ネット1ギガ' },
+      { key: 'net10g', label: 'ネット10ギガ' },
+    ],
+  },
+  {
+    name: '電話',
+    tone: 'bg-orange-50',
+    items: [{ key: 'tel', label: '電話' }],
+  },
+  {
+    name: 'テレビコース',
+    tone: 'bg-green-50',
+    items: [
+      { key: 'tvGeneral', label: 'TV(一般)' },
+      { key: 'tvSelect', label: 'TV(選べる)' },
+      { key: 'tvSky', label: 'TV(スカパ)' },
+      { key: 'tvStb', label: 'TV(STB)' },
+    ],
+  },
+  {
+    name: 'STB',
+    tone: 'bg-pink-50',
+    items: [
+      { key: 'bluray', label: 'ブルーレイ' },
+      { key: 'cable', label: 'ケーブル' },
+      { key: 'more', label: 'モア' },
+    ],
+  },
+  {
+    name: 'OP',
+    tone: 'bg-slate-100',
+    items: [
+      { key: 'ipStick', label: 'IPスティック' },
+      { key: 'support', label: '安心サポ' },
+    ],
+  },
+];
+
+const PRODUCT_ITEMS = PRODUCT_GROUPS.flatMap((g) => g.items);
+const PRODUCT_ROWS_DEFAULT = 20;   // はじめに出す行数
+const PRODUCT_ROWS_STEP = 10;      // 「行を追加」で増える数
+
+// daily（JSON）には { rows: [{ date, items: { ネットのキー: true } }] } の形で入れる。
+// 壊れていても画面は動かす。
+function readProductRows(daily) {
+  const raw = daily && Array.isArray(daily.rows) ? daily.rows : [];
+  return raw.map((r) => ({
+    date: typeof r?.date === 'string' ? r.date : '',
+    items: r?.items && typeof r.items === 'object' ? r.items : {},
+  }));
+}
+
+// 保存するのは中身のある行だけ（日付か、商品の印が1つでもある行）
+function compactProductRows(rows) {
+  return rows
+    .map((r) => ({
+      date: r.date || '',
+      items: Object.fromEntries(PRODUCT_ITEMS.filter((it) => r.items?.[it.key]).map((it) => [it.key, true])),
+    }))
+    .filter((r) => r.date || Object.keys(r.items).length > 0);
+}
+
+function countProductItem(rows, key) {
+  return rows.reduce((n, r) => n + (r.items?.[key] ? 1 : 0), 0);
+}
+
+function ProductPerformanceSection({ employeeId, settings, onNotifyAdmin, isDesktop }) {
+  const now = new Date();
+  const [year, setYear] = useState(now.getFullYear());
+  const [month, setMonth] = useState(now.getMonth() + 1);
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const [savedAt, setSavedAt] = useState(null);
+  const [submittedAt, setSubmittedAt] = useState(null);
+  const [adminEdit, setAdminEdit] = useState(null);
+
+  // 締切（翌月○日）を過ぎた月は、本人は見るだけ
+  const locked = isPerfLockedForStaff(year, month, settings);
+  const deadlineLabel = perfDeadlineLabel(year, month, settings);
+
+  const blankRow = () => ({ date: '', items: {} });
+  const padRows = (list) => {
+    const next = [...list];
+    while (next.length < PRODUCT_ROWS_DEFAULT) next.push(blankRow());
+    return next;
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    fetchNewPerf(employeeId, year, month).then((row) => {
+      if (cancelled) return;
+      setRows(padRows(readProductRows(row?.daily)));
+      setSubmittedAt(row?.submitted_at || null);
+      setAdminEdit(row?.admin_edited_at ? { at: row.admin_edited_at, by: row.admin_edited_by_name || '' } : null);
+      setDirty(false);
+      setSavedAt(null);
+      setLoading(false);
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [employeeId, year, month]);
+
+  // 保存していない入力があるまま対象月を変えると消えてしまうため、確認する
+  const changeMonthSafely = (apply) => {
+    if (dirty && !window.confirm('保存していない入力があります。保存せずに対象月を切り替えますか？')) return;
+    apply();
+  };
+
+  const setRowDate = (index, value) => {
+    if (locked) return;
+    setDirty(true);
+    setRows((prev) => prev.map((r, i) => (i === index ? { ...r, date: value } : r)));
+  };
+
+  const toggleItem = (index, key) => {
+    if (locked) return;
+    setDirty(true);
+    setRows((prev) => prev.map((r, i) => {
+      if (i !== index) return r;
+      const items = { ...(r.items || {}) };
+      if (items[key]) delete items[key]; else items[key] = true;
+      return { ...r, items };
+    }));
+  };
+
+  const clearRow = (index) => {
+    if (locked) return;
+    setDirty(true);
+    setRows((prev) => prev.map((r, i) => (i === index ? blankRow() : r)));
+  };
+
+  const addRows = () => {
+    setRows((prev) => [...prev, ...Array.from({ length: PRODUCT_ROWS_STEP }, blankRow)]);
+  };
+
+  const filledRows = compactProductRows(rows);
+  const monthTotal = filledRows.length;
+
+  const save = async () => {
+    setSaving(true);
+    await saveNewPerf(employeeId, year, month, { daily: { rows: filledRows } });
+    setSaving(false);
+    setDirty(false);
+    setSavedAt(new Date());
+  };
+
+  const submit = async () => {
+    if (!window.confirm(`${year}年${month}月分の実績を提出します。よろしいですか？`)) return;
+    setSubmitting(true);
+    const at = new Date().toISOString();
+    await saveNewPerf(employeeId, year, month, { daily: { rows: filledRows }, submitted_at: at });
+    if (onNotifyAdmin) await onNotifyAdmin(`${year}年${month}月分の実績が提出されました`);
+    setSubmitting(false);
+    setDirty(false);
+    setSavedAt(new Date());
+    setSubmittedAt(at);
+  };
+
+  const years = [now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1];
+  const months = Array.from({ length: 12 }, (_, i) => i + 1);
+
+  // 日付の入力欄は、その月の中から選べるようにする
+  const monthKey = `${year}-${pad(month)}`;
+  const monthFirst = `${monthKey}-01`;
+  const monthLast = `${monthKey}-${pad(new Date(year, month, 0).getDate())}`;
+
+  const totalsRow = (
+    <div className="flex items-center gap-2 flex-wrap px-4 py-3 bg-slate-50 border-t-2 border-slate-300">
+      <span className="text-[12px] font-bold text-slate-600">合計</span>
+      <span className="text-[12px] text-slate-500">{monthTotal}件</span>
+      <div className="w-full flex flex-wrap gap-x-3 gap-y-1 mt-1">
+        {PRODUCT_ITEMS.map((it) => {
+          const n = countProductItem(filledRows, it.key);
+          return (
+            <span key={it.key} className={`text-[11px] ${n > 0 ? 'font-bold text-slate-800' : 'text-slate-300'}`}>
+              {it.label} <span className="font-mono">{n}</span>
+            </span>
+          );
+        })}
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="space-y-3">
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2 flex-wrap">
+          <BarChart3 size={15} className="text-slate-400" />
+          <h2 className="font-bold text-[13.5px]">実績入力</h2>
+          {submittedAt && (
+            <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10.5px] font-bold text-emerald-700">
+              提出済み {dateLabel(String(submittedAt).slice(0, 10))}
+            </span>
+          )}
+          {locked && (
+            <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[10.5px] font-bold text-slate-600">受付終了</span>
+          )}
+        </div>
+        <div className="px-5 py-4 space-y-3">
+          <div className="flex items-center gap-2 flex-wrap">
+            <select
+              value={year}
+              onChange={(e) => changeMonthSafely(() => setYear(Number(e.target.value)))}
+              className="border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white"
+            >
+              {years.map((y) => <option key={y} value={y}>{y}年</option>)}
+            </select>
+            <select
+              value={month}
+              onChange={(e) => changeMonthSafely(() => setMonth(Number(e.target.value)))}
+              className="border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white"
+            >
+              {months.map((m) => <option key={m} value={m}>{m}月</option>)}
+            </select>
+            <span className="ml-auto text-[12px] text-slate-500">
+              合計 <span className="font-mono text-[13.5px] font-bold text-slate-800">{monthTotal}</span>件
+            </span>
+          </div>
+          <div className="rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-[11.5px] leading-relaxed text-slate-600">
+            {locked
+              ? `${deadlineLabel ? `${deadlineLabel}で締め切りました。` : '受付を終了しました。'}内容の確認はできますが、入力はできません。直したい箇所がある場合は管理者にご連絡ください。`
+              : `契約1件につき1行です。日付を選び、その契約に含まれる商品に印を付けてください。同じ日に2件あるときは、行を分けて入力します。途中まででも「一時保存」で残せます。${deadlineLabel ? `入力できるのは${deadlineLabel}までです。` : ''}`}
+          </div>
+          {adminEdit && (
+            <div className="rounded-xl border border-sky-200 bg-sky-50 px-3.5 py-2.5 text-[11.5px] leading-relaxed text-sky-800">
+              この月の実績は、{dateLabel(String(adminEdit.at).slice(0, 10))}に
+              {adminEdit.by ? `${adminEdit.by}さん（管理者）` : '管理者'}が修正しています。
+              変更箇所はお知らせでご確認ください。
+            </div>
+          )}
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-5 py-10 text-center text-[12.5px] text-slate-300">読み込み中…</div>
+      ) : isDesktop ? (
+        /* ---- パソコン：紙の集計表と同じ並び ---- */
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full border-collapse text-[11.5px]">
+              <thead>
+                <tr>
+                  <th className="sticky left-0 z-10 bg-white border border-slate-300 px-2 py-1.5 font-bold text-slate-700" colSpan={2}>区分</th>
+                  {PRODUCT_GROUPS.map((g) => (
+                    <th key={g.name} colSpan={g.items.length} className={`border border-slate-300 px-2 py-1.5 font-bold text-slate-700 ${g.tone}`}>
+                      {g.name}
+                    </th>
+                  ))}
+                  <th className="border border-slate-300 px-2 py-1.5" />
+                </tr>
+                <tr>
+                  <th className="sticky left-0 z-10 bg-white border border-slate-300 px-2 py-1.5 font-medium text-slate-500 w-[3.5rem]">件数</th>
+                  <th className="border border-slate-300 px-2 py-1.5 font-medium text-slate-500 w-[7.5rem]">日付</th>
+                  {PRODUCT_GROUPS.flatMap((g) =>
+                    g.items.map((it) => (
+                      <th key={it.key} className={`border border-slate-300 px-1 py-1.5 font-medium text-slate-600 whitespace-nowrap ${g.tone}`}>
+                        {it.label}
+                      </th>
+                    ))
+                  )}
+                  <th className="border border-slate-300 px-2 py-1.5 w-[3rem]" />
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r, i) => (
+                  <tr key={i}>
+                    <td className="sticky left-0 z-10 bg-white border border-slate-300 px-2 py-1 text-center font-mono text-slate-500">{i + 1}</td>
+                    <td className="border border-slate-300 px-1 py-1">
+                      {locked ? (
+                        <span className="block px-1 text-slate-600">{r.date ? dateLabel(r.date) : '—'}</span>
+                      ) : (
+                        <input
+                          type="date"
+                          min={monthFirst}
+                          max={monthLast}
+                          value={r.date}
+                          onChange={(e) => setRowDate(i, e.target.value)}
+                          style={DATE_INPUT_STYLE}
+                          className="w-full min-w-0 box-border rounded border border-slate-200 bg-white px-1.5 py-1 font-mono text-[11.5px]"
+                        />
+                      )}
+                    </td>
+                    {PRODUCT_GROUPS.flatMap((g) =>
+                      g.items.map((it) => (
+                        <td key={it.key} className={`border border-slate-300 p-0 text-center ${g.tone}`}>
+                          {locked ? (
+                            <span className="block py-1.5 font-mono text-slate-700">{r.items?.[it.key] ? '1' : ''}</span>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => toggleItem(i, it.key)}
+                              aria-label={`${i + 1}件目の${it.label}`}
+                              aria-pressed={!!r.items?.[it.key]}
+                              className={`w-full py-1.5 font-mono text-[12.5px] ${r.items?.[it.key] ? 'bg-amber-500 font-bold text-white' : 'text-transparent hover:bg-white/60'}`}
+                            >
+                              1
+                            </button>
+                          )}
+                        </td>
+                      ))
+                    )}
+                    <td className="border border-slate-300 p-0 text-center">
+                      {!locked && (r.date || Object.keys(r.items || {}).length > 0) && (
+                        <button
+                          type="button"
+                          onClick={() => clearRow(i)}
+                          aria-label={`${i + 1}件目を消す`}
+                          className="w-full py-1.5 text-[11px] font-bold text-slate-400 hover:text-rose-600"
+                        >
+                          消す
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+                <tr>
+                  <td className="sticky left-0 z-10 bg-slate-50 border-2 border-slate-400 px-2 py-1.5 text-center text-[11px] font-bold text-slate-600">合計</td>
+                  <td className="border-2 border-slate-400 bg-slate-50 px-2 py-1.5 text-right font-mono font-bold text-slate-700">{monthTotal}件</td>
+                  {PRODUCT_GROUPS.flatMap((g) =>
+                    g.items.map((it) => {
+                      const n = countProductItem(filledRows, it.key);
+                      return (
+                        <td key={it.key} className={`border-2 border-slate-400 px-1 py-1.5 text-center font-mono font-bold ${n > 0 ? 'text-rose-600' : 'text-slate-300'} ${g.tone}`}>
+                          {n}
+                        </td>
+                      );
+                    })
+                  )}
+                  <td className="border-2 border-slate-400 bg-slate-50" />
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          {!locked && (
+            <div className="border-t border-slate-100 px-4 py-3">
+              <button
+                type="button"
+                onClick={addRows}
+                className="rounded-lg border border-slate-300 px-3 py-1.5 text-[12px] font-bold text-slate-600"
+              >
+                行を{PRODUCT_ROWS_STEP}行追加する
+              </button>
+            </div>
+          )}
+        </div>
+      ) : (
+        /* ---- スマートフォン：1件ずつのカード ---- */
+        <div className="space-y-2">
+          {rows.map((r, i) => {
+            const chosen = PRODUCT_ITEMS.filter((it) => r.items?.[it.key]);
+            const used = !!r.date || chosen.length > 0;
+            return (
+              <div key={i} className={`bg-white rounded-2xl border shadow-sm overflow-hidden ${used ? 'border-amber-300' : 'border-slate-200'}`}>
+                <div className="flex items-center gap-2 px-4 py-2.5 border-b border-slate-100">
+                  <span className="shrink-0 text-[12px] font-bold text-slate-500">{i + 1}件目</span>
+                  {locked ? (
+                    <span className="text-[13px] text-slate-700">{r.date ? dateLabel(r.date) : '—'}</span>
+                  ) : (
+                    <>
+                      <input
+                        type="date"
+                        min={monthFirst}
+                        max={monthLast}
+                        value={r.date}
+                        onChange={(e) => setRowDate(i, e.target.value)}
+                        style={DATE_INPUT_STYLE}
+                        className="flex-1 min-w-0 box-border rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-left font-mono text-[14px]"
+                      />
+                      {used && (
+                        <button
+                          type="button"
+                          onClick={() => clearRow(i)}
+                          aria-label={`${i + 1}件目を消す`}
+                          className="shrink-0 rounded-lg border border-slate-200 px-2 py-1.5 text-[11px] font-bold text-slate-400"
+                        >
+                          消す
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
+                <div className="px-4 py-3 space-y-2.5">
+                  {PRODUCT_GROUPS.map((g) => (
+                    <div key={g.name}>
+                      <div className="mb-1 text-[10.5px] font-bold text-slate-400">{g.name}</div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {g.items.map((it) => {
+                          const on = !!r.items?.[it.key];
+                          if (locked) {
+                            return (
+                              <span
+                                key={it.key}
+                                className={`rounded-full px-2.5 py-1 text-[12px] ${on ? 'bg-amber-500 font-bold text-white' : 'bg-slate-100 text-slate-300'}`}
+                              >
+                                {it.label}
+                              </span>
+                            );
+                          }
+                          return (
+                            <button
+                              key={it.key}
+                              type="button"
+                              onClick={() => toggleItem(i, it.key)}
+                              aria-pressed={on}
+                              className={`rounded-full px-2.5 py-1.5 text-[12.5px] ${on ? 'bg-amber-500 font-bold text-white' : 'border border-slate-200 bg-white text-slate-600'}`}
+                            >
+                              {it.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+          {!locked && (
+            <button
+              type="button"
+              onClick={addRows}
+              className="w-full rounded-2xl border border-slate-300 bg-white py-3 text-[13px] font-bold text-slate-600"
+            >
+              行を{PRODUCT_ROWS_STEP}行追加する
+            </button>
+          )}
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">{totalsRow}</div>
+        </div>
+      )}
+
+      {!locked && (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-5 py-4 space-y-2">
+          <div className="flex gap-2">
+            <button
+              onClick={save}
+              disabled={saving || loading}
+              className="flex-1 rounded-xl border border-slate-300 py-3 text-[13.5px] font-bold text-slate-600 disabled:opacity-60"
+            >
+              {saving ? '保存中…' : '一時保存'}
+            </button>
+            <button
+              onClick={submit}
+              disabled={submitting || loading}
+              className="flex-1 rounded-xl bg-amber-600 py-3 text-[13.5px] font-bold text-white disabled:bg-slate-200"
+            >
+              {submitting ? '送信中…' : submittedAt ? '出し直す' : '提出する'}
+            </button>
+          </div>
+          <div className="text-center text-[11px] text-slate-400">
+            {dirty ? '保存していない入力があります' : savedAt ? `${savedAt.toLocaleTimeString('ja-JP')} に保存しました` : '提出後も、出し直せます'}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ---- 実績入力のフォーマット ----
 // どのグループにどの型を使うかは「グループごとの入力フォーマット」設定で決める。
 // 新しい型を足すときは、ここに1行足す。
@@ -9371,6 +9844,12 @@ const PERFORMANCE_FORMATS = {
     desc: '日ごとの件数と内容を入力して保存',
     adminLabel: '簡易版（日別の件数・内容）',
     Component: SimplePerformanceSection,
+  },
+  products: {
+    label: '実績入力',
+    desc: '契約1件ごとに商品を選んで保存',
+    adminLabel: '商品別（1件ごとに商品をチェック）',
+    Component: ProductPerformanceSection,
   },
 };
 
@@ -9874,6 +10353,297 @@ function EoAdminPerfEditModal({ employee, year, month, session, onNotifyEmployee
 }
 
 // 管理者用：簡易版フォーマット（日ごとの件数・内容）の実績を直す画面
+// 商品別の実績について、管理者が直した箇所を1行ずつ並べる。
+// 行は「○件目」で数える。日付が入っていればそれも添える。
+function diffProductRows(before, after) {
+  const b = readProductRows(before);
+  const a = readProductRows(after);
+  const changes = [];
+  const max = Math.max(b.length, a.length);
+  for (let i = 0; i < max; i++) {
+    const br = b[i] || { date: '', items: {} };
+    const ar = a[i] || { date: '', items: {} };
+    const rowLabel = `${i + 1}件目`;
+    if ((br.date || '') !== (ar.date || '')) {
+      changes.push({
+        dayLabel: rowLabel,
+        fieldLabel: '日付',
+        from: br.date ? dateLabel(br.date) : '未入力',
+        to: ar.date ? dateLabel(ar.date) : '未入力',
+      });
+    }
+    PRODUCT_ITEMS.forEach((it) => {
+      const bo = !!br.items?.[it.key];
+      const ao = !!ar.items?.[it.key];
+      if (bo !== ao) {
+        changes.push({
+          dayLabel: `${rowLabel}${ar.date ? `（${dateLabel(ar.date)}）` : ''}`,
+          fieldLabel: it.label,
+          from: bo ? 'あり' : 'なし',
+          to: ao ? 'あり' : 'なし',
+        });
+      }
+    });
+  }
+  return changes;
+}
+
+function ProductAdminPerfEditModal({ employee, year, month, session, onNotifyEmployee, onClose, onSaved }) {
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [original, setOriginal] = useState(null);
+  const [rows, setRows] = useState([]);
+  const [submittedAt, setSubmittedAt] = useState(null);
+  const [notifyStaff, setNotifyStaff] = useState(true);
+  const [note, setNote] = useState('');
+
+  const monthKey = `${year}-${pad(month)}`;
+  const monthFirst = `${monthKey}-01`;
+  const monthLast = `${monthKey}-${pad(new Date(year, month, 0).getDate())}`;
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError('');
+    fetchNewPerf(employee.id, year, month).then((row) => {
+      if (cancelled) return;
+      const d = row?.daily || {};
+      const list = readProductRows(d);
+      // 行を足せるよう、末尾に空の行を少し用意しておく
+      setRows([...list, ...Array.from({ length: 5 }, () => ({ date: '', items: {} }))]);
+      setOriginal(d);
+      setSubmittedAt(row?.submitted_at || null);
+      setLoading(false);
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [employee.id, year, month]);
+
+  const setRowDate = (index, value) =>
+    setRows((prev) => prev.map((r, i) => (i === index ? { ...r, date: value } : r)));
+
+  const toggleItem = (index, key) =>
+    setRows((prev) => prev.map((r, i) => {
+      if (i !== index) return r;
+      const items = { ...(r.items || {}) };
+      if (items[key]) delete items[key]; else items[key] = true;
+      return { ...r, items };
+    }));
+
+  const filledRows = compactProductRows(rows);
+  const nextDaily = { rows: filledRows };
+  const changes = original ? diffProductRows(original, nextDaily) : [];
+  const changeLines = changes.map((c) => perfChangeLine(c, ''));
+  const hasChanges = changeLines.length > 0;
+  const monthTotal = filledRows.length;
+
+  const save = async () => {
+    if (!hasChanges) return;
+    const confirmText = notifyStaff
+      ? `${employee.name}さんの${year}年${month}月分の実績を${changeLines.length}か所変更し、本人にお知らせを送ります。よろしいですか？`
+      : `${employee.name}さんの${year}年${month}月分の実績を${changeLines.length}か所変更します。本人へのお知らせは送りません。よろしいですか？`;
+    if (!window.confirm(confirmText)) return;
+    setSaving(true);
+    setError('');
+    const at = new Date().toISOString();
+    const ok = await saveNewPerf(employee.id, year, month, {
+      daily: nextDaily,
+      admin_edited_at: at,
+      admin_edited_by_id: session?.id || null,
+      admin_edited_by_name: session?.name || '',
+    });
+    if (!ok) {
+      setSaving(false);
+      setError('保存できませんでした。通信の状態を確かめて、もう一度お試しください。権限の設定が原因の場合は開発者にご連絡ください。');
+      return;
+    }
+
+    if (notifyStaff && onNotifyEmployee) {
+      const shown = changeLines.slice(0, 30);
+      const rest = changeLines.length - shown.length;
+      const lines = [
+        `${year}年${month}月分の実績について、管理者が次の箇所を修正しました。`,
+        '',
+        ...shown.map((l) => `・${l}`),
+        ...(rest > 0 ? [`・ほか${rest}か所`] : []),
+        '',
+        `修正後の合計：${monthTotal}件`,
+        ...(note.trim() ? ['', `管理者からの連絡：${note.trim()}`] : []),
+        '',
+        '内容をご確認ください。相違がある場合は管理者までご連絡ください。',
+      ];
+      await onNotifyEmployee(
+        employee.id,
+        `【実績の修正】${year}年${month}月分`,
+        `${year}年${month}月分の実績について、管理者が${changeLines.length}か所を修正しました。内容をご確認ください。`,
+        null,
+        lines
+      );
+    }
+
+    await logAudit(
+      session,
+      'スタッフの実績を修正',
+      [`${year}年${month}月分（${changeLines.length}か所）`, notifyStaff ? '本人へ通知済み' : '本人への通知なし', ...changeLines.slice(0, 50)].join(' / '),
+      employee.id,
+      employee.name
+    );
+
+    setSaving(false);
+    if (onSaved) onSaved();
+    onClose();
+  };
+
+  const closeSafely = () => {
+    if (hasChanges && !window.confirm('保存していない変更があります。閉じてよろしいですか？')) return;
+    onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-50 p-0 sm:p-4">
+      <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-4xl max-h-[92vh] overflow-y-auto">
+        <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center gap-2 flex-wrap">
+          <div className="w-9 h-9 rounded-xl bg-amber-50 flex items-center justify-center shrink-0">
+            <Pencil size={16} className="text-amber-600" />
+          </div>
+          <div>
+            <h3 className="font-bold text-[15px]">{employee.name}さんの実績を修正</h3>
+            <div className="text-[11.5px] text-slate-400">
+              {year}年{month}月分
+              {submittedAt ? `・提出済み ${dateLabel(String(submittedAt).slice(0, 10))}` : '・未提出'}
+              ・合計 {monthTotal}件
+            </div>
+          </div>
+          <button onClick={closeSafely} className="ml-auto text-[12.5px] font-bold text-slate-400 px-2 py-1">閉じる</button>
+        </div>
+
+        {loading ? (
+          <div className="px-5 py-10 text-center text-[12.5px] text-slate-300">読み込み中…</div>
+        ) : (
+          <div className="px-5 py-4 space-y-3">
+            <div className="overflow-x-auto">
+              <table className="w-full border-collapse text-[11.5px]">
+                <thead>
+                  <tr>
+                    <th className="border border-slate-300 px-2 py-1.5 font-medium text-slate-500 w-[3rem]">件数</th>
+                    <th className="border border-slate-300 px-2 py-1.5 font-medium text-slate-500 w-[7.5rem]">日付</th>
+                    {PRODUCT_GROUPS.flatMap((g) =>
+                      g.items.map((it) => (
+                        <th key={it.key} className={`border border-slate-300 px-1 py-1.5 font-medium text-slate-600 whitespace-nowrap ${g.tone}`}>
+                          {it.label}
+                        </th>
+                      ))
+                    )}
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r, i) => (
+                    <tr key={i}>
+                      <td className="border border-slate-300 px-2 py-1 text-center font-mono text-slate-500">{i + 1}</td>
+                      <td className="border border-slate-300 px-1 py-1">
+                        <input
+                          type="date"
+                          min={monthFirst}
+                          max={monthLast}
+                          value={r.date}
+                          onChange={(e) => setRowDate(i, e.target.value)}
+                          style={DATE_INPUT_STYLE}
+                          className="w-full min-w-0 box-border rounded border border-slate-200 bg-white px-1.5 py-1 font-mono text-[11.5px]"
+                        />
+                      </td>
+                      {PRODUCT_GROUPS.flatMap((g) =>
+                        g.items.map((it) => (
+                          <td key={it.key} className={`border border-slate-300 p-0 text-center ${g.tone}`}>
+                            <button
+                              type="button"
+                              onClick={() => toggleItem(i, it.key)}
+                              aria-label={`${i + 1}件目の${it.label}`}
+                              aria-pressed={!!r.items?.[it.key]}
+                              className={`w-full py-1.5 font-mono text-[12.5px] ${r.items?.[it.key] ? 'bg-amber-500 font-bold text-white' : 'text-transparent hover:bg-white/60'}`}
+                            >
+                              1
+                            </button>
+                          </td>
+                        ))
+                      )}
+                    </tr>
+                  ))}
+                  <tr>
+                    <td className="border-2 border-slate-400 bg-slate-50 px-2 py-1.5 text-center text-[11px] font-bold text-slate-600">合計</td>
+                    <td className="border-2 border-slate-400 bg-slate-50 px-2 py-1.5 text-right font-mono font-bold text-slate-700">{monthTotal}件</td>
+                    {PRODUCT_GROUPS.flatMap((g) =>
+                      g.items.map((it) => {
+                        const n = countProductItem(filledRows, it.key);
+                        return (
+                          <td key={it.key} className={`border-2 border-slate-400 px-1 py-1.5 text-center font-mono font-bold ${n > 0 ? 'text-rose-600' : 'text-slate-300'} ${g.tone}`}>
+                            {n}
+                          </td>
+                        );
+                      })
+                    )}
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div className="rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-[11.5px] leading-relaxed text-slate-600">
+              {hasChanges
+                ? `${changeLines.length}か所を変更しています。保存すると変更前後が監査ログに残ります。`
+                : '変更はまだありません。'}
+            </div>
+
+            {hasChanges && (
+              <div className="rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5 space-y-1">
+                <div className="text-[11.5px] font-bold text-amber-900">変更した箇所</div>
+                {changeLines.slice(0, 12).map((l, i) => (
+                  <div key={i} className="text-[11.5px] text-amber-800">・{l}</div>
+                ))}
+                {changeLines.length > 12 && (
+                  <div className="text-[11.5px] text-amber-800">・ほか{changeLines.length - 12}か所</div>
+                )}
+              </div>
+            )}
+
+            <Field label="本人への連絡（任意）">
+              <input
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                placeholder="例）報告書と照合して直しました"
+                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]"
+              />
+            </Field>
+
+            <label className="flex items-start gap-2.5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={notifyStaff}
+                onChange={(e) => setNotifyStaff(e.target.checked)}
+                className="mt-0.5 h-4 w-4 accent-amber-600"
+              />
+              <span className="text-[12px] text-slate-600">
+                本人にお知らせを送る（変更した箇所の一覧が届きます）
+              </span>
+            </label>
+
+            {error && (
+              <div className="rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-[11.5px] text-rose-700">{error}</div>
+            )}
+
+            <button
+              onClick={save}
+              disabled={saving || !hasChanges}
+              className="w-full rounded-xl bg-amber-600 py-3 text-[14px] font-bold text-white disabled:bg-slate-200"
+            >
+              {saving ? '保存中…' : '変更を保存する'}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function SimpleAdminPerfEditModal({ employee, year, month, session, onNotifyEmployee, onClose, onSaved }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -10137,6 +10907,17 @@ function PerfReviewTab({ employeeAccounts, settings, session, isMasterAdmin, onN
     if (t.format === 'eo') {
       const newPoints = computeNewPerfMonthPoints(newDaily) + computeExistingPerfMonthNewPoints(existingDaily);
       summary = `新規${newPoints}P／既存${computeExistingPerfMonthPoints(existingDaily)}P／エンパケ${computeMonthEmpakeCount(newDaily)}枚`;
+    } else if (t.format === 'products') {
+      // 商品別：件数と、印の付いた商品の上位をいくつか出す
+      const prodRows = readProductRows(newDaily);
+      const counts = PRODUCT_ITEMS
+        .map((it) => ({ label: it.label, n: countProductItem(prodRows, it.key) }))
+        .filter((x) => x.n > 0)
+        .sort((a, b) => b.n - a.n);
+      const head = counts.slice(0, 4).map((x) => `${x.label}${x.n}`).join('／');
+      summary = prodRows.length === 0
+        ? '入力なし'
+        : `${prodRows.length}件${head ? `（${head}${counts.length > 4 ? ' ほか' : ''}）` : ''}`;
     } else {
       const total = Object.values(newDaily).reduce((s, d) => s + (Number(d?.count) || 0), 0);
       const filled = Object.values(newDaily).filter((d) => (d?.count ?? '') !== '' || (d?.note ?? '')).length;
@@ -10287,7 +11068,18 @@ function PerfReviewTab({ employeeAccounts, settings, session, isMasterAdmin, onN
           onSaved={() => setReloadKey((k) => k + 1)}
         />
       )}
-      {editing && editing.format !== 'eo' && (
+      {editing && editing.format === 'products' && (
+        <ProductAdminPerfEditModal
+          employee={editing.account}
+          year={year}
+          month={month}
+          session={session}
+          onNotifyEmployee={onNotifyEmployee}
+          onClose={() => setEditing(null)}
+          onSaved={() => setReloadKey((k) => k + 1)}
+        />
+      )}
+      {editing && editing.format !== 'eo' && editing.format !== 'products' && (
         <SimpleAdminPerfEditModal
           employee={editing.account}
           year={year}
