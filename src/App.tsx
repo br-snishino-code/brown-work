@@ -498,15 +498,40 @@ function fiscalMonths(fiscalYear) {
   return out;
 }
 
-// 出勤規定日数は年度ごとに登録する。その年月の登録が無ければ null
+// 出勤規定日数は年度ごとに登録する。その年月の登録が無ければ null。
+//
+// シフト希望などと同じく「グループごとの既定 ＋ 個人の例外」で決める。
+//   ① その方個人にその月の登録があれば、それを使う（グループより優先）
+//   ② なければ、所属グループのその月の登録を使う
+//   ③ どちらも無ければ null（日割りを行わない）
+//
+// 以前は「グループがあればグループのみ、無ければ個人別」という
+// どちらか一方の作りで、グループに所属していると個人の登録は無視されていた。
 function getPrescribedAttendanceDays(employee, year, month, groupAttendanceSchedules, employeeAttendanceSchedules) {
   if (!employee) return null;
   const pick = (store, key) => {
     const v = store?.[key]?.[year]?.[month];
     return v != null && v !== '' ? Number(v) : null;
   };
+  const own = pick(employeeAttendanceSchedules, employee.id);
+  if (own != null) return own;
   if (employee.mainGroup) return pick(groupAttendanceSchedules, employee.mainGroup);
-  return pick(employeeAttendanceSchedules, employee.id);
+  return null;
+}
+
+// その日数がどこから来たかを返す（画面に出して取り違えを防ぐため）
+//   'personal' … この方個人の登録
+//   'group'    … 所属グループの登録
+//   null       … どちらも未登録
+function prescribedAttendanceSource(employee, year, month, groupAttendanceSchedules, employeeAttendanceSchedules) {
+  if (!employee) return null;
+  const pick = (store, key) => {
+    const v = store?.[key]?.[year]?.[month];
+    return v != null && v !== '' ? Number(v) : null;
+  };
+  if (pick(employeeAttendanceSchedules, employee.id) != null) return 'personal';
+  if (employee.mainGroup && pick(groupAttendanceSchedules, employee.mainGroup) != null) return 'group';
+  return null;
 }
 
 // 生年月日から年齢を出す
@@ -13552,6 +13577,8 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
 
   const monthly = computeMonthlySummary(records[employeeId] || {}, new Date(year, month - 1, 1));
   const attendanceDays = employee ? getPrescribedAttendanceDays(employee, year, month, groupAttendanceSchedules, employeeAttendanceSchedules) : null;
+  // どちらの設定が使われているかを画面に出す（取り違えを防ぐため）
+  const attendanceSource = employee ? prescribedAttendanceSource(employee, year, month, groupAttendanceSchedules, employeeAttendanceSchedules) : null;
   const preview = employee ? computePayrollPreview({
     wageType,
     hourlyWage,
@@ -13627,7 +13654,9 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
         paidLeaveDays: Number(paidLeaveDays) || 0,
         paidLeaveHours: Number(paidLeaveHours) || 0,
       },
-      notes: preview.prorated ? `出勤規定日数 ${attendanceDays}日に対し実出勤 ${monthly.days}日で日割り計算` : null,
+      notes: preview.prorated
+        ? `出勤規定日数 ${attendanceDays}日（${attendanceSource === 'personal' ? 'この方だけの設定' : `${employee.mainGroup}の設定`}）に対し実出勤 ${monthly.days}日で日割り計算`
+        : null,
     });
   };
 
@@ -13688,15 +13717,18 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
 
         {wageType === 'monthly' && (
           <div className="grid grid-cols-2 gap-3">
-            <PayrollMetric label={`${month}月の出勤規定日数`} value={attendanceDays != null ? `${attendanceDays}日` : '未設定'} />
+            <PayrollMetric
+              label={`${month}月の出勤規定日数${attendanceSource === 'personal' ? '（この方だけの設定）' : attendanceSource === 'group' ? `（${employee.mainGroup}の設定）` : ''}`}
+              value={attendanceDays != null ? `${attendanceDays}日` : '未設定'}
+            />
             <PayrollMetric label="実出勤日数" value={`${monthly.days}日`} />
           </div>
         )}
         {wageType === 'monthly' && attendanceDays == null && (
           <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-[11.5px] text-amber-800">
             {employee.mainGroup
-              ? `「${employee.mainGroup}」の${month}月の出勤規定日数が未設定のため、月給を満額（日割りなし）で計算しています。出勤規定日数設定タブから設定してください。`
-              : `${employee.name}さんの出勤規定日数が未設定のため、月給を満額（日割りなし）で計算しています。スタッフアカウント編集画面の「グループ」タブから設定してください。`}
+              ? `「${employee.mainGroup}」の${month}月の出勤規定日数も、${employee.name}さん個人の設定も未登録のため、月給を満額（日割りなし）で計算しています。グループの日数は「出勤規定日数設定」タブから、この方だけの日数はスタッフ詳細の「グループ」タブから設定できます。`
+              : `${employee.name}さんの出勤規定日数が未設定のため、月給を満額（日割りなし）で計算しています。スタッフ詳細の「グループ」タブから設定してください。`}
           </div>
         )}
 
@@ -19540,7 +19572,10 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                 })}
               </div>
 
-              {form.mainGroup ? (
+              {/* 出勤規定日数は「グループごとの既定 ＋ 個人の例外」で決まる。
+                  グループに所属していても、個人に入力があればそちらが優先される。
+                  以前はグループがあると個人の入力欄自体を出していなかった。 */}
+              {form.mainGroup && (
                 <div className="bg-slate-50 rounded-xl p-4 space-y-2">
                   <div className="flex items-center gap-2 flex-wrap">
                     <div className="text-[12px] font-bold text-slate-600">「{form.mainGroup}」の出勤規定日数（参照のみ）</div>
@@ -19563,12 +19598,13 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                       </div>
                     ))}
                   </div>
-                  <div className="text-[10.5px] text-slate-400">「—」は未登録です。日数の変更は「出勤規定日数設定」タブから行ってください。</div>
+                  <div className="text-[10.5px] text-slate-400">「—」は未登録です。グループの日数の変更は「出勤規定日数設定」タブから行ってください。</div>
                 </div>
-              ) : (
+              )}
+              {(
                 <div className="bg-slate-50 rounded-xl p-4 space-y-3">
                   <div className="flex items-center gap-2 flex-wrap">
-                    <div className="text-[12px] font-bold text-slate-600">個人別の出勤規定日数（年度・月別）</div>
+                    <div className="text-[12px] font-bold text-slate-600">この方だけの出勤規定日数（年度・月別）</div>
                     <select
                       value={attendanceFiscalYear}
                       onChange={(e) => changeAttendanceFiscalYear(Number(e.target.value))}
@@ -19578,9 +19614,13 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                         .map((fy) => <option key={fy} value={fy}>{fy}年度</option>)}
                     </select>
                   </div>
-                  <div className="text-[10.5px] text-slate-400 -mt-1">
-                    グループ未設定のため、月ごとの出勤規定日数をここで入力してください。給与計算（月給制）で日割りの基準として使われます。
-                    年度は{attendanceFiscalYear}年4月〜{attendanceFiscalYear + 1}年3月です。登録が無い月は日割りを行いません。
+                  <div className="text-[10.5px] leading-relaxed text-slate-400 -mt-1">
+                    {form.mainGroup
+                      ? <>ここに入力した月は、<b>上のグループの日数より優先されます</b>。グループと同じでよい月は空欄のままにしてください。</>
+                      : <>グループ未設定のため、月ごとの出勤規定日数をここで入力してください。</>}
+                    {' '}給与計算（月給制）で日割りの基準として使われます。
+                    年度は{attendanceFiscalYear}年4月〜{attendanceFiscalYear + 1}年3月です。
+                    {form.mainGroup ? 'ここもグループも未登録の月は' : '登録が無い月は'}日割りを行いません。
                   </div>
                   <div className="grid grid-cols-3 sm:grid-cols-4 gap-3">
                     {fiscalMonths(attendanceFiscalYear).map(({ year, month }) => (
