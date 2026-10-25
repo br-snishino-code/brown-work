@@ -11687,21 +11687,21 @@ function EoAdminIncentiveTab({ employeeAccounts, settings, session, onNotifyEmpl
 
   return (
     <div className="space-y-5">
+      {/* 見出しの並びは ZTV業務用の画面と揃えてある（題名と印、その下に 年・月・業務）。
+          計算そのものは従来どおりポイント制のまま。 */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
         <div className="flex items-center gap-2 flex-wrap">
           <h2 className="font-bold text-[14px] text-slate-800 flex items-center gap-2"><Wallet size={16} className="text-slate-400" />インセンティブ集計</h2>
-          <div className="ml-auto flex items-center gap-2 flex-wrap">
-            <select value={activeGroup} onChange={(e) => setGroup(e.target.value)} className="border border-slate-200 rounded-lg px-2 py-1.5 text-[12.5px] bg-white">
-              <option value="">すべての業務</option>
-              {groups.map((g) => <option key={g} value={g}>{g}</option>)}
-            </select>
-            <select value={year} onChange={(e) => setYear(Number(e.target.value))} className="border border-slate-200 rounded-lg px-2 py-1.5 text-[12.5px] bg-white">
-              {years.map((y) => <option key={y} value={y}>{y}年</option>)}
-            </select>
-            <select value={month} onChange={(e) => setMonth(Number(e.target.value))} className="border border-slate-200 rounded-lg px-2 py-1.5 text-[12.5px] bg-white">
-              {months.map((m) => <option key={m} value={m}>{m}月</option>)}
-            </select>
-          </div>
+          <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10.5px] font-bold text-amber-700">eo業務用</span>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <select value={year} onChange={(e) => setYear(Number(e.target.value))} className="border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white">
+            {years.map((y) => <option key={y} value={y}>{y}年</option>)}
+          </select>
+          <select value={month} onChange={(e) => setMonth(Number(e.target.value))} className="border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white">
+            {months.map((m) => <option key={m} value={m}>{m}月</option>)}
+          </select>
+          {groupPicker}
         </div>
 
         {!showFlags && (
