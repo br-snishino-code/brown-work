@@ -258,8 +258,36 @@ function buildStaffMailText(name, lines) {
   ].join('\n');
 }
 
-function buildInviteMail({ name, email, tempPassword }) {
+// 招待メールを組み立てる。
+// 登録情報（住所・口座・マイナンバーなど）の入力を求めるかどうかで、
+// ご利用の流れと持ち物の案内を切り替える。求めない場合は登録情報に
+// 一切触れない（アカウント作成画面のチェックと連動）。
+function buildInviteMail({ name, email, tempPassword, requireProfileSetup = true }) {
   const subject = '【Brown Work】勤怠システムのご利用開始について';
+
+  // 登録情報の入力を求める場合の案内
+  const profileLines = [
+    '3. ご登録情報を入力します（すべて必須です）',
+    '',
+    '【手順3でご入力いただく内容】',
+    '　ふりがな／生年月日',
+    '　連絡用メールアドレス／電話番号',
+    '　郵便番号／現住所／住民票の住所',
+    '　配偶者の有無／世帯主の氏名・続柄',
+    '　緊急連絡先（お名前・ふりがな・続柄・電話番号・住所）',
+    '　給与振込先の口座情報（銀行名・支店名・口座番号・口座名義）',
+    '　マイナンバー（12桁）',
+    '',
+    '※ 通帳またはキャッシュカードと、マイナンバーカード（または通知カード）を',
+    '　 お手元にご用意のうえ、ログインしてください。',
+  ];
+
+  // 求めない場合は、ログインとパスワード変更だけを案内する
+  const noProfileLines = [
+    '',
+    '以上で、すぐにご利用いただけます。',
+  ];
+
   const text = [
     `${name} 様`,
     '',
@@ -275,19 +303,7 @@ function buildInviteMail({ name, email, tempPassword }) {
     '【ご利用の流れ】',
     '1. 上記URLを開き、ログインIDと仮パスワードでログインします',
     '2. ご自身の新しいパスワードを設定します（初回のみ必須）',
-    '3. ご登録情報を入力します（すべて必須です）',
-    '',
-    '【手順3でご入力いただく内容】',
-    '　ふりがな／生年月日',
-    '　連絡用メールアドレス／電話番号',
-    '　郵便番号／現住所／住民票の住所',
-    '　配偶者の有無／世帯主の氏名・続柄',
-    '　緊急連絡先（お名前・ふりがな・続柄・電話番号・住所）',
-    '　給与振込先の口座情報（銀行名・支店名・口座番号・口座名義）',
-    '　マイナンバー（12桁）',
-    '',
-    '※ 通帳またはキャッシュカードと、マイナンバーカード（または通知カード）を',
-    '　 お手元にご用意のうえ、ログインしてください。',
+    ...(requireProfileSetup ? profileLines : noProfileLines),
     '',
     '【ご注意】',
     '・仮パスワードは初回ログイン専用です。必ずご自身のパスワードに変更してください',
@@ -2773,6 +2789,7 @@ function AttendanceApp() {
           name: payload.name,
           email: payload.username,
           tempPassword: payload.password,
+          requireProfileSetup: payload.requireProfileSetup !== false,
         });
         await sendEmailBestEffort(payload.username, mail.subject, mail.text);
       }
