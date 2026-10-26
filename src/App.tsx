@@ -76,6 +76,14 @@ const dateLabel = (key) => {
   return `${d.getMonth() + 1}/${d.getDate()}（${days[d.getDay()]}）`;
 };
 
+// 年をつけた日付。有休の付与日や時効日のように、何年もまたいで並べるところで使います。
+// dateLabel（「10/1（水）」）は年が出ないため、一覧にすると同じ月日の行が見分けられません。
+const dateLabelY = (key) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(key || ''))) return String(key || '');
+  const [y, m, d] = String(key).split('-').map(Number);
+  return `${y}/${m}/${d}`;
+};
+
 // ---- 日本の祝日判定 ----
 const _nthMonday = (year, month, n) => {
   let count = 0;
@@ -395,8 +403,155 @@ function computeProportionalLeaveDays(hireDateStr, weeklyDays, asOf = new Date()
   return granted;
 }
 
+// ============================================================
+// 有休の付与・繰越・時効（supabase/79_paid_leave_grants.sql）
+// ============================================================
+// 決めたこと（就業規則にあわせて確認済み）：
+//   ・未消化分は翌年度に繰り越す
+//   ・時効は2年（付与日から2年後の前日まで）
+//   ・消化は繰越分（古い付与）から先に充てる
+//   ・ジョブカンの残日数は引き継ぐ（employee_leave_grants に登録）
+//
+// 「移行日」より前の付与と、より前の有休の消化は、どちらも計算に入れません。
+// 引き継いだ残日数にすでに含まれているため、二重に数えないようにしています。
+const LEAVE_EXPIRY_YEARS = 2;
+const SETTING_LEAVE_MIGRATION_DATE = 'paid_leave_migration_date';
+// 有休の時効が近いことを知らせる日数
+const LEAVE_EXPIRY_SOON_DAYS = 90;
+const r1 = (n) => Math.round(n * 10) / 10;
+// 日数の表示（半休があるため、整数なら「3」、端数があれば「3.5」）
+const fmtDays = (n) => (Number.isInteger(n) ? String(n) : Number(n).toFixed(1));
+
+// 日付に月を足す。足した先に同じ日が無いときは、その月の末日に寄せます。
+// 例）8月31日 + 6ヶ月 → 2月28日（うるう年は29日）
+//
+// ⚠ 29〜31日入社の方の付与日は、この寄せ方で決まります。
+//   民法の期間計算を厳密にとると翌月1日とする解釈もあります。
+//   対象の方がいる場合は運用に合わせて確認してください。
+function addMonthsKey(key, months) {
+  const [y, m, d] = String(key).split('-').map(Number);
+  if (!y || !m || !d) return key;
+  const total = (m - 1) + months;
+  const ny = y + Math.floor(total / 12);
+  const nm = ((total % 12) + 12) % 12;
+  const lastDay = new Date(ny, nm + 1, 0).getDate();
+  return `${ny}-${pad(nm + 1)}-${pad(Math.min(d, lastDay))}`;
+}
+
+// 「使える最後の日」。expiresOnKey はその日から使えなくなる日なので、1日前を返します。
+// 例）2025-10-01付与 → expiresOnKey は 2027-10-01 → 使えるのは 2027-09-30 まで
+function leaveExpiryLastDayKey(expiresOnKey) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(expiresOnKey || ''))) return expiresOnKey;
+  const d = new Date(expiresOnKey + 'T00:00:00');
+  d.setDate(d.getDate() - 1);
+  return todayKey(d);
+}
+
+// 入職日から、法定の付与の一覧（付与日と日数）を導きます。
+// 勤続6年6ヶ月より後は、1年ごとに同じ日数を付与し続けます
+// （STATUTORY_LEAVE_SCHEDULE は7段目で止まるため、ここで延長しています）。
+function statutoryGrantSchedule(employee, asOfKey) {
+  if (!employee?.hireDate) return [];
+  const table = isProportionalLeaveStaffType(employee.staffType) && employee.scheduledWeeklyDays
+    ? PROPORTIONAL_LEAVE_TABLE[employee.scheduledWeeklyDays]
+    : null;
+  const out = [];
+  STATUTORY_LEAVE_SCHEDULE.forEach((tier, i) => {
+    out.push({ dateKey: addMonthsKey(employee.hireDate, tier.months), days: table ? table[i] : tier.days });
+  });
+  const last = STATUTORY_LEAVE_SCHEDULE[STATUTORY_LEAVE_SCHEDULE.length - 1];
+  const lastDays = table ? table[table.length - 1] : last.days;
+  for (let months = last.months + 12; ; months += 12) {
+    const dateKey = addMonthsKey(employee.hireDate, months);
+    if (dateKey > asOfKey) break;
+    out.push({ dateKey, days: lastDays });
+  }
+  return out.filter((g) => g.dateKey <= asOfKey);
+}
+
+// 消化を古い付与から順に充てます（繰越分が先に消える）。
+// 時効で消えた付与には充てません。付与が足りなかった分は shortages に出します
+// （残日数をマイナスにして隠さず、データの不整合として見せるため）。
+function allocatePaidLeave(grants, usages, asOfKey) {
+  const pool = grants
+    .map((g) => ({ ...g, expiresOnKey: addMonthsKey(g.dateKey, LEAVE_EXPIRY_YEARS * 12), used: 0 }))
+    .sort((a, b) => (a.dateKey < b.dateKey ? -1 : a.dateKey > b.dateKey ? 1 : 0));
+  const shortages = [];
+  [...usages]
+    .sort((a, b) => (a.dateKey < b.dateKey ? -1 : a.dateKey > b.dateKey ? 1 : 0))
+    .forEach((u) => {
+      let left = Number(u.days) || 0;
+      for (const g of pool) {
+        if (left <= 0) break;
+        if (g.dateKey > u.dateKey) continue;         // まだ付与されていない
+        if (g.expiresOnKey <= u.dateKey) continue;   // 時効で消えている
+        const take = Math.min(left, r1(g.days - g.used));
+        if (take <= 0) continue;
+        g.used = r1(g.used + take);
+        left = r1(left - take);
+      }
+      if (left > 0) shortages.push({ dateKey: u.dateKey, days: left });
+    });
+  const live = pool.filter((g) => g.dateKey <= asOfKey && g.expiresOnKey > asOfKey);
+  const granted = r1(live.reduce((s, g) => s + g.days, 0));
+  const remaining = r1(live.reduce((s, g) => s + r1(g.days - g.used), 0));
+  return { pool, live, granted, remaining, usedFromLive: r1(granted - remaining), shortages };
+}
+
+// app_settings から移行日を読みます。未設定なら空文字（＝全期間を計算に入れる）。
+function leaveMigrationDateKey(settings) {
+  const v = String(settings?.[SETTING_LEAVE_MIGRATION_DATE] || '').slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : '';
+}
+
+// スタッフ1人分の有休の残日数と内訳。画面はこれを使ってください。
+function computePaidLeaveBalance({ employee, grantRows = [], leaveRequests = [], settings = {}, asOf = new Date() }) {
+  const asOfKey = todayKey(asOf);
+  const empty = {
+    pool: [], live: [], granted: 0, remaining: 0, usedFromLive: 0,
+    shortages: [], adjustment: 0, usedAllTime: 0, expiringSoon: [],
+  };
+  if (!employee?.hireDate) return empty;
+  const migrationDateKey = leaveMigrationDateKey(settings);
+
+  // 付与を付与日でまとめる。表の行は同じ付与日の法定付与を上書きします
+  // （入職日から導いた日数が実態と違うときに直せるようにしてあります）。
+  const byDate = new Map();
+  statutoryGrantSchedule(employee, asOfKey)
+    .filter((g) => !migrationDateKey || g.dateKey >= migrationDateKey)
+    .forEach((g) => byDate.set(g.dateKey, { ...g, kind: 'statutory' }));
+  grantRows
+    .filter((r) => r.employeeId === employee.id)
+    .forEach((r) => byDate.set(r.grantDate, {
+      dateKey: r.grantDate, days: Number(r.days) || 0, kind: r.kind, note: r.note || '', id: r.id,
+    }));
+
+  const mine = leaveRequests.filter((l) => l.employeeId === employee.id && l.type === '有休' && l.status === 'approved');
+  const usages = mine
+    .filter((l) => !migrationDateKey || l.startDate >= migrationDateKey)
+    .map((l) => ({ dateKey: l.startDate, days: Number(l.days) || 0 }));
+
+  const alloc = allocatePaidLeave([...byDate.values()], usages, asOfKey);
+  const adjustment = Number(employee.leaveAdjustment) || 0;
+  const soonKey = todayKey(new Date(new Date(asOfKey + 'T00:00:00').getTime() + LEAVE_EXPIRY_SOON_DAYS * 86400000));
+  return {
+    ...alloc,
+    adjustment,
+    migrationDateKey,
+    usedAllTime: r1(mine.reduce((s, l) => s + (Number(l.days) || 0), 0)),
+    // 時効が近く、まだ残っている付与
+    expiringSoon: alloc.live.filter((g) => g.expiresOnKey <= soonKey && r1(g.days - g.used) > 0),
+    remaining: Math.max(0, r1(alloc.remaining + adjustment)),
+  };
+}
+
 // スタッフ1人分の有休付与日数（優先順位：スポット系の種別は比例付与 → 法定自動計算）＋手動調整
 // ※グループ別の月次規定日数は「出勤規定日数」（給与計算用）に用途変更されたため、有休計算では使用しない
+//
+// ⚠ この関数が返すのは「その時点の勤続年数に対応する1年分の付与日数」です。
+//   繰越を含む残日数には使えません（分母と分子の単位が合わず、マイナスになります）。
+//   残日数は computePaidLeaveBalance を使ってください。
+//   ここは年5日取得義務の判定（付与年度1年分を見る）だけで使っています。
 function computeLeaveTotal(employee, now, groupLeaveSchedules) {
   if (!employee) return 0;
   const isPartTime = isProportionalLeaveStaffType(employee.staffType);
@@ -413,25 +568,26 @@ function computeLeaveTotal(employee, now, groupLeaveSchedules) {
 
 // 有休の「付与日」は入職から6ヶ月後、以降は1年ごとの応当日。
 // 労基法39条の年5日取得義務は、この付与日から1年間を1単位として判定する。
+// 付与日の出し方は statutoryGrantSchedule と同じ addMonthsKey に揃えてあります。
+// 以前は Date.setMonth で足していたため、29〜31日入社の方の付与日が
+// 翌月あふれ（例：8月31日＋6ヶ月 → 3月3日）になり、残日数の計算とずれていました。
 function getPaidLeavePeriod(hireDateStr, asOf = new Date()) {
-  if (!hireDateStr) return null;
-  const hire = new Date(hireDateStr + 'T00:00:00');
-  if (isNaN(hire.getTime())) return null;
-  const first = new Date(hire);
-  first.setMonth(first.getMonth() + 6);
-  if (first > asOf) return null; // 初回付与前（義務の対象外）
-  let start = new Date(first);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(hireDateStr || ''))) return null;
+  const asOfKey = todayKey(asOf);
+  let months = 6;
+  let startKey = addMonthsKey(hireDateStr, months);
+  if (startKey > asOfKey) return null; // 初回付与前（義務の対象外）
   for (;;) {
-    const next = new Date(start);
-    next.setFullYear(next.getFullYear() + 1);
-    if (next > asOf) break;
-    start = next;
+    const nextMonths = months + 12;
+    const nextKey = addMonthsKey(hireDateStr, nextMonths);
+    if (nextKey > asOfKey) break;
+    months = nextMonths;
+    startKey = nextKey;
   }
-  const endExclusive = new Date(start);
-  endExclusive.setFullYear(endExclusive.getFullYear() + 1);
-  const end = new Date(endExclusive);
+  // 次の付与日の前日までが、この付与年度
+  const end = new Date(addMonthsKey(hireDateStr, months + 12) + 'T00:00:00');
   end.setDate(end.getDate() - 1);
-  return { startKey: todayKey(start), endKey: todayKey(end), start, end };
+  return { startKey, endKey: todayKey(end), start: new Date(startKey + 'T00:00:00'), end };
 }
 
 // 指定期間内に承認された有休の消化日数を合計する（半休は0.5日として計上済み）
@@ -985,7 +1141,7 @@ function ToastView({ toast }) {
 // 以降のコンポーネント（LoginScreenなど）は一切変更していません。
 // ============================================================
 
-const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, employeeAttendanceSchedules: {}, announcements: [], yearEndAdjustments: [], commuteExpenseClaims: [], resignationReasons: [], monthlyConfirmations: [], shiftPeriods: [], shiftRequests: [], shiftTablesReady: true, bonusRecords: [], bonusTableReady: true, shiftAssignments: [], shiftAssignmentReady: true, shiftImportLogs: [], shiftNameAliases: [], shiftChanges: [], loginAttempts: [], settings: {} };
+const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, employeeAttendanceSchedules: {}, leaveGrants: [], leaveGrantsReady: true, announcements: [], yearEndAdjustments: [], commuteExpenseClaims: [], resignationReasons: [], monthlyConfirmations: [], shiftPeriods: [], shiftRequests: [], shiftTablesReady: true, bonusRecords: [], bonusTableReady: true, shiftAssignments: [], shiftAssignmentReady: true, shiftImportLogs: [], shiftNameAliases: [], shiftChanges: [], loginAttempts: [], settings: {} };
 
 // 管理者宛の通知メールの送信先（app_settings の key）
 const SETTING_ADMIN_NOTIFY_EMAIL = 'admin_notify_email';
@@ -1527,6 +1683,19 @@ const rowToLeave = (row) => ({
   decidedAt: row.decided_at,
 });
 
+// 有休の付与レコード（employee_leave_grants）
+// kind: 'carryover' ＝ ジョブカンからの引き継ぎ／'manual' ＝ 手で足す・直す
+const rowToLeaveGrant = (row) => ({
+  id: row.id,
+  employeeId: row.employee_id,
+  grantDate: row.grant_date,
+  days: Number(row.days),
+  kind: row.kind,
+  note: row.note || '',
+  createdAt: row.created_at,
+  createdBy: row.created_by,
+});
+
 const rowToNotif = (row) => ({
   id: row.id,
   to: row.to_role || row.to_employee_id,
@@ -1845,6 +2014,7 @@ async function fetchAllData() {
     aliasRes,
     shiftChangeRes,
     loginAttemptRes,
+    leaveGrantRes,
   ] = await Promise.all([
     // 個人情報（住所・生年月日・口座・賃金など）は本人とマスター管理者にしか
     // 返らない。管理者には null で返る。詳しくは supabase/71_employee_sensitive_fields.sql
@@ -1872,6 +2042,8 @@ async function fetchAllData() {
     supabase.from('shift_name_aliases').select('*'),
     supabase.from('shift_assignment_changes').select('*').order('changed_at', { ascending: false }).limit(500),
     supabase.from('login_attempts').select('*').order('occurred_at', { ascending: false }).limit(100),
+    // 有休の付与レコード（引き継ぎ・手動分。法定付与は入職日から導く）
+    supabase.from('employee_leave_grants').select('*').order('grant_date', { ascending: true }),
   ]);
 
   for (const res of [employeesRes, recordsRes, correctionsRes, leaveRes, notifRes, payrollRes, auditRes, profileReqRes, groupLeaveRes, employeeAttendanceRes, announcementsRes, yearEndRes, commuteClaimsRes]) {
@@ -1902,6 +2074,11 @@ async function fetchAllData() {
 
   // ログイン失敗の記録（管理者以外はRLSで0件、SQL未実行ならエラー→空扱い）
   const loginAttempts = loginAttemptRes?.error ? [] : (loginAttemptRes?.data || []).map(rowToLoginAttempt);
+
+  // 有休の付与レコード（SQL未実行でも画面が落ちないよう、エラー時は空扱いにする）
+  // 空のときは法定付与だけで計算されます（引き継ぎ分は入らない）。
+  const leaveGrants = leaveGrantRes?.error ? [] : (leaveGrantRes?.data || []).map(rowToLeaveGrant);
+  const leaveGrantsReady = !leaveGrantRes?.error;
 
   // アプリ全体の設定（SQL未実行でも画面が落ちないよう、エラー時は空扱いにする）
   const settings = {};
@@ -1943,6 +2120,8 @@ async function fetchAllData() {
     profileUpdateRequests: (profileReqRes.data || []).map(rowToProfileRequest),
     groupLeaveSchedules,
     employeeAttendanceSchedules,
+    leaveGrants,
+    leaveGrantsReady,
     announcements: (announcementsRes.data || []).map(rowToAnnouncement),
     yearEndAdjustments: (yearEndRes.data || []).map(rowToYearEndAdjustment),
     commuteExpenseClaims: (commuteClaimsRes.data || []).map(rowToCommuteClaim),
@@ -2237,6 +2416,53 @@ async function saveGroupIncentiveFlags(groupName, year, month, flags) {
   );
   if (error) { console.error('グループ目標フラグの保存に失敗しました', error); return false; }
   return true;
+}
+
+// ---- 有休の付与レコードの登録・削除（管理者以上。RLSでも絞っています） ----
+// 法定の付与は入職日から導くため、ここで登録するのは
+//   ・ジョブカンからの引き継ぎ（carryover）
+//   ・法定どおりに導けない分を手で足す／直す（manual）
+// の2種類だけです。同じ付与日の法定付与は、この行で上書きされます。
+async function saveLeaveGrant({ id, employeeId, grantDate, days, kind, note }, actor = null, targetName = '') {
+  const payload = {
+    employee_id: employeeId,
+    grant_date: grantDate,
+    days: Number(days),
+    kind,
+    note: note || null,
+    created_by: actor?.id || null,
+  };
+  const { error } = id
+    ? await supabase.from('employee_leave_grants').update(payload).eq('id', id)
+    : await supabase.from('employee_leave_grants').insert(payload);
+  if (error) {
+    console.error('有休の付与の保存に失敗しました', error);
+    return { ok: false, message: error.message || '' };
+  }
+  await logAudit(
+    actor,
+    id ? '有休の付与を変更' : '有休の付与を登録',
+    `${dateLabelY(grantDate)}付与・${fmtDays(Number(days))}日（${kind === 'carryover' ? '引き継ぎ' : '手動'}）${note ? `／${note}` : ''}`,
+    employeeId,
+    targetName
+  );
+  return { ok: true };
+}
+
+async function deleteLeaveGrant(grant, actor = null, targetName = '') {
+  const { error } = await supabase.from('employee_leave_grants').delete().eq('id', grant.id);
+  if (error) {
+    console.error('有休の付与の削除に失敗しました', error);
+    return { ok: false, message: error.message || '' };
+  }
+  await logAudit(
+    actor,
+    '有休の付与を削除',
+    `${dateLabelY(grant.grantDate)}付与・${fmtDays(grant.days)}日`,
+    grant.employeeId,
+    targetName
+  );
+  return { ok: true };
 }
 
 // ---- 給与設定（毎月の固定支給・控除項目／通勤手当の経路／標準報酬月額） ----
@@ -4991,10 +5217,18 @@ function AttendanceApp() {
   const historyDates = Array.from(new Set([...Object.keys(employeeRecords), today])).sort((a, b) => (a < b ? 1 : -1));
   const myCorrections = data.corrections.filter((c) => c.employeeId === employeeId);
   const myLeaveRequests = data.leaveRequests.filter((l) => l.employeeId === employeeId);
-  const myLeaveTotal = computeLeaveTotal(session, now, data.groupLeaveSchedules);
-  const myLeaveUsed = myLeaveRequests
-    .filter((l) => l.type === '有休' && l.status === 'approved')
-    .reduce((sum, l) => sum + l.days, 0);
+  // 有休の残日数。繰越・2年時効・繰越分優先の消化を含めて出します。
+  // 以前は「今年度の付与日数 − 入社以来の消化日数」で出していたため、
+  // 勤続1年を超えると残日数がマイナスになり、有休の申請ができなくなっていました。
+  const myLeaveBalance = computePaidLeaveBalance({
+    employee: session,
+    grantRows: data.leaveGrants,
+    leaveRequests: myLeaveRequests,
+    settings: data.settings,
+    asOf: now,
+  });
+  const myLeaveTotal = myLeaveBalance.granted;
+  const myLeaveUsed = myLeaveBalance.usedFromLive;
 
   // 管理者・マスター管理者も「働く人」として勤怠・給与の対象に含める
   const employeeAccounts = data.accounts;
@@ -5182,6 +5416,7 @@ function AttendanceApp() {
                 leaveRequests={myLeaveRequests}
                 leaveTotal={myLeaveTotal}
                 leaveUsed={myLeaveUsed}
+                balance={myLeaveBalance}
                 hireDate={session.hireDate}
                 onOpenLeaveModal={() => setLeaveModalOpen(true)}
                 isDesktop={isDesktop}
@@ -5434,7 +5669,7 @@ function AttendanceApp() {
       )}
       {leaveModalOpen && (
         <LeaveRequestModal
-          leaveRemaining={myLeaveTotal - myLeaveUsed}
+          leaveRemaining={myLeaveBalance.remaining}
           onClose={() => setLeaveModalOpen(false)}
           onSubmit={submitLeaveRequest}
         />
@@ -8519,9 +8754,14 @@ function Field({ label, children, className = '' }) {
   );
 }
 
-function LeaveView({ leaveRequests, leaveTotal, leaveUsed, hireDate, onOpenLeaveModal, isDesktop }) {
-  const remaining = leaveTotal - leaveUsed;
+function LeaveView({ leaveRequests, leaveTotal, leaveUsed, balance = null, hireDate, onOpenLeaveModal, isDesktop }) {
+  // 残日数は computePaidLeaveBalance が出した値を使います（繰越・時効を含む）。
+  // balance が渡っていない場合だけ、引き算で出します。
+  const remaining = balance ? balance.remaining : r1(leaveTotal - leaveUsed);
   const pct = leaveTotal > 0 ? Math.min(100, Math.round((leaveUsed / leaveTotal) * 100)) : 0;
+  // 付与の明細。古い付与（＝繰越分）から順に並びます。
+  const liveGrants = balance?.live || [];
+  const expiringSoon = balance?.expiringSoon || [];
 
   const balanceCard = (
     <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
@@ -8547,7 +8787,55 @@ function LeaveView({ leaveRequests, leaveTotal, leaveUsed, hireDate, onOpenLeave
         <div className="h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">
           <div className="h-full bg-amber-600 rounded-full" style={{ width: `${pct}%` }} />
         </div>
-        <div className="text-[10.5px] text-slate-400 mt-1.5">これまでの有休消化：{leaveUsed}日　／　{tenureLabel(hireDate)}（法定基準で自動計算）</div>
+        <div className="text-[10.5px] text-slate-400 mt-1.5">
+          いま使える有休のうち消化済み：{fmtDays(leaveUsed)}日　／　{tenureLabel(hireDate)}（法定基準で自動計算）
+        </div>
+
+        {/* 時効が近く、まだ残っている分の注意 */}
+        {expiringSoon.length > 0 && (
+          <div className="mt-2.5 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 space-y-0.5">
+            <div className="text-[11px] font-bold text-amber-900">使える期限が近い有休があります</div>
+            {expiringSoon.map((g) => (
+              <div key={g.dateKey} className="text-[11px] text-amber-800">
+                {fmtDays(r1(g.days - g.used))}日を {dateLabelY(leaveExpiryLastDayKey(g.expiresOnKey))} まで
+              </div>
+            ))}
+            <div className="text-[10.5px] text-amber-700 pt-0.5">期限を過ぎた分は使えなくなります。</div>
+          </div>
+        )}
+
+        {/* 付与ごとの内訳（繰越分が上） */}
+        {liveGrants.length > 0 && (
+          <div className="mt-2.5 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+            <div className="text-[11px] font-bold text-slate-500 mb-1">内訳</div>
+            <div className="space-y-0.5">
+              {liveGrants.map((g, i) => (
+                <div key={g.dateKey} className="flex items-baseline gap-2 text-[11px]">
+                  <span className="text-slate-400 w-[5.5rem] shrink-0">
+                    {i < liveGrants.length - 1 ? '繰越分' : '当年度分'}
+                  </span>
+                  <span className="font-mono font-bold text-slate-700 w-[3rem] text-right shrink-0">
+                    {fmtDays(r1(g.days - g.used))}日
+                  </span>
+                  <span className="text-slate-400">
+                    （{dateLabelY(g.dateKey)}付与 → {dateLabelY(leaveExpiryLastDayKey(g.expiresOnKey))}まで）
+                  </span>
+                </div>
+              ))}
+              {balance?.adjustment ? (
+                <div className="flex items-baseline gap-2 text-[11px]">
+                  <span className="text-slate-400 w-[5.5rem] shrink-0">手動調整</span>
+                  <span className="font-mono font-bold text-slate-700 w-[3rem] text-right shrink-0">
+                    {balance.adjustment > 0 ? '+' : ''}{fmtDays(balance.adjustment)}日
+                  </span>
+                </div>
+              ) : null}
+            </div>
+            <div className="text-[10.5px] text-slate-400 pt-1.5">
+              有休は使える期限が古いものから順に消えます。相違がある場合は管理者までご連絡ください。
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -12837,7 +13125,6 @@ function HelpTab({ session, isDesktop }) {
 }
 
 // ---- 有休取得状況（労務タブ） ----
-const fmtDays = (n) => (Number.isInteger(n) ? String(n) : n.toFixed(1));
 
 function PaidLeaveSummaryTab({ employeeAccounts, leaveRequests, isDesktop }) {
   const now = new Date();
@@ -15680,17 +15967,20 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
   employeeAccounts.forEach((acc) => {
     const recs = data.records[acc.id] || {};
     const r = recs[today];
-    const used = data.leaveRequests
-      .filter((l) => l.employeeId === acc.id && l.type === '有休' && l.status === 'approved')
-      .reduce((sum, l) => sum + l.days, 0);
-    const total = computeLeaveTotal(acc, new Date(), data.groupLeaveSchedules);
+    // 繰越・時効を含めた残日数（computePaidLeaveBalance）
+    const leaveBalance = computePaidLeaveBalance({
+      employee: acc,
+      grantRows: data.leaveGrants,
+      leaveRequests: data.leaveRequests,
+      settings: data.settings,
+    });
     const kinds = approvalItems.filter((it) => it.employeeId === acc.id).map((it) => it.kind);
     const kindCounts = {};
     kinds.forEach((k) => { kindCounts[k] = (kindCounts[k] || 0) + 1; });
     staffRowInfo[acc.id] = {
       todayState: r?.clockOut ? 'done' : r?.clockIn ? 'working' : 'absent',
       monthWorkedMin: computeMonthlySummary(recs).workedMin,
-      leaveRemaining: Math.max(0, total - used),
+      leaveRemaining: leaveBalance.remaining,
       leaveShort: paidLeaveShortages.some((s) => s.employeeId === acc.id),
       pendingCount: kinds.length,
       pendingKinds: Object.entries(kindCounts).map(([kind, count]) => ({ kind, count })),
@@ -15849,6 +16139,9 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
           rowInfo={staffRowInfo}
           rowActions={staffRowActions}
           session={session}
+          leaveGrants={data.leaveGrants}
+          leaveRequests={data.leaveRequests}
+          onLeaveGrantsChanged={onRefresh}
           isDesktop={isDesktop}
         />
       )}
@@ -19466,7 +19759,7 @@ function MyNumberRetentionCard({ accounts, onListMyNumbers, onDeleteMyNumber, is
   );
 }
 
-function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail, onUpdateDates, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onListMyNumbers, onDeleteMyNumber, groupLeaveSchedules, employeeAttendanceSchedules, onSaveEmployeeAttendance, resignationReasons = [], settings = {}, initialProfileId = null, onConsumeInitialProfile, rowInfo = {}, rowActions = {}, session, isDesktop }) {
+function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail, onUpdateDates, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onListMyNumbers, onDeleteMyNumber, groupLeaveSchedules, employeeAttendanceSchedules, onSaveEmployeeAttendance, resignationReasons = [], settings = {}, initialProfileId = null, onConsumeInitialProfile, rowInfo = {}, rowActions = {}, session, leaveGrants = [], leaveRequests = [], onLeaveGrantsChanged, isDesktop }) {
   const knownGroups = Array.from(new Set([...employeeAccounts.map((a) => a.mainGroup).filter(Boolean), ...Object.keys(groupLeaveSchedules || {})]));
   const [listGroupFilter, setListGroupFilter] = useState('all');
   const [listStaffTypeFilter, setListStaffTypeFilter] = useState('all');
@@ -19595,6 +19888,9 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
         resignationReasons={resignationReasons}
         settings={settings}
         actor={session}
+        leaveGrants={leaveGrants}
+        leaveRequests={leaveRequests}
+        onLeaveGrantsChanged={onLeaveGrantsChanged}
         isDesktop={isDesktop}
       />
     );
@@ -20350,7 +20646,251 @@ const PROFILE_MODAL_TABS = [
   { key: 'tax', label: '住民税・税区分' },
 ];
 
-function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSaveMyNumber, isMasterAdmin, knownGroups = [], groupAttendanceSchedules = {}, employeeAttendanceSchedule = {}, onSaveEmployeeAttendance, resignationReasons = [], settings = {}, actor = null, isDesktop }) {
+// ---- 有休の付与の一覧と登録（スタッフ詳細→業務・契約） ----
+// 法定の付与は入職日から導いて灰色で並べ、表に登録した行（引き継ぎ・手動）は色を変えています。
+// 時効が切れた付与も「使えた期間」を見るために残して表示します。
+function PaidLeaveGrantsPanel({ employee, grantRows = [], leaveRequests = [], settings = {}, actor = null, onChanged, isDesktop }) {
+  const [editing, setEditing] = useState(null); // null か { id?, grantDate, days, kind, note }
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  // 時効が切れた付与は既定でたたみます。勤続が長い方ほど行数が増えるためです。
+  const [showExpired, setShowExpired] = useState(false);
+
+  const balance = computePaidLeaveBalance({ employee, grantRows, leaveRequests, settings });
+  const migrationDateKey = balance.migrationDateKey;
+  const todayK = todayKey();
+  const mine = grantRows.filter((r) => r.employeeId === employee?.id);
+  const hasCarryover = mine.some((r) => r.kind === 'carryover');
+  const expiredGrants = balance.pool.filter((g) => g.expiresOnKey <= todayK);
+  const visiblePool = showExpired ? balance.pool : balance.pool.filter((g) => g.expiresOnKey > todayK);
+
+  const startAdd = () => {
+    setError('');
+    setEditing({ grantDate: todayK, days: '', kind: 'carryover', note: '' });
+  };
+  const startEdit = (g) => {
+    setError('');
+    const row = mine.find((r) => r.id === g.id);
+    if (!row) return;
+    setEditing({ id: row.id, grantDate: row.grantDate, days: String(row.days), kind: row.kind, note: row.note || '' });
+  };
+
+  const save = async () => {
+    if (!editing) return;
+    const days = Number(editing.days);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(editing.grantDate)) { setError('付与日を入れてください。'); return; }
+    if (!Number.isFinite(days) || days <= 0 || days > 40) { setError('日数は0より大きく40以下の数字で入れてください。'); return; }
+    // 同じ付与日は1件だけ（表側にも制約があります）
+    const clash = mine.find((r) => r.grantDate === editing.grantDate && r.id !== editing.id);
+    if (clash) { setError(`${dateLabelY(editing.grantDate)}はすでに登録されています。日数を直すか、まとめて1件にしてください。`); return; }
+    setSaving(true);
+    const res = await saveLeaveGrant({ ...editing, days, employeeId: employee.id }, actor, employee.name);
+    setSaving(false);
+    if (!res.ok) { setError(`保存できませんでした。${res.message}`); return; }
+    setEditing(null);
+    if (onChanged) await onChanged();
+  };
+
+  const remove = async (g) => {
+    const row = mine.find((r) => r.id === g.id);
+    if (!row) return;
+    if (!window.confirm(`${dateLabelY(row.grantDate)}付与の${fmtDays(row.days)}日を削除します。よろしいですか？`)) return;
+    setSaving(true);
+    const res = await deleteLeaveGrant(row, actor, employee.name);
+    setSaving(false);
+    if (!res.ok) { setError(`削除できませんでした。${res.message}`); return; }
+    if (onChanged) await onChanged();
+  };
+
+  if (!employee?.hireDate) {
+    return (
+      <div className="rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-3 text-[11.5px] text-slate-500">
+        入職日が未登録のため、有休の付与を計算できません。先に入職日を登録してください。
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-xl border border-slate-200 overflow-hidden">
+      <div className="px-3.5 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center gap-2 flex-wrap">
+        <span className="text-[12px] font-bold text-slate-600">有休の付与</span>
+        <span className="text-[11px] text-slate-400">
+          残 <span className="font-mono font-bold text-slate-700">{fmtDays(balance.remaining)}</span>日
+          （使える分 {fmtDays(balance.granted)}日・消化 {fmtDays(balance.usedFromLive)}日）
+        </span>
+        <button
+          onClick={startAdd}
+          className="ml-auto rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-[11.5px] font-bold text-slate-600"
+        >
+          付与を登録する
+        </button>
+      </div>
+
+      {/* 注意の表示 */}
+      <div className="px-3.5 py-2 space-y-1.5">
+        {!migrationDateKey && (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[11px] text-amber-800">
+            移行日が未設定です。入職以来すべての付与と消化を計算に入れています。
+            ジョブカンから引き継ぐ場合は、先に移行日を設定してください（supabase/79_paid_leave_grants.sql）。
+          </div>
+        )}
+        {hasCarryover && balance.adjustment !== 0 && (
+          <div className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-700">
+            引き継ぎの付与と「有休の手動調整（{balance.adjustment > 0 ? '+' : ''}{fmtDays(balance.adjustment)}日）」が
+            両方入っています。二重に足されている可能性があります。手動調整を0に戻してください。
+          </div>
+        )}
+        {balance.shortages.length > 0 && (
+          <div className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-700">
+            <div className="font-bold">付与より多く消化されています（{fmtDays(balance.shortages.reduce((s, x) => s + x.days, 0))}日分）</div>
+            {balance.shortages.slice(0, 5).map((s, i) => (
+              <div key={i}>{dateLabelY(s.dateKey)}の{fmtDays(s.days)}日が、どの付与にも充てられません。</div>
+            ))}
+            <div className="pt-0.5">引き継ぎの登録漏れか、移行日の設定をご確認ください。</div>
+          </div>
+        )}
+      </div>
+
+      {/* 登録・変更のフォーム */}
+      {editing && (
+        <div className="px-3.5 py-3 border-y border-slate-200 bg-amber-50/40 space-y-2.5">
+          <div className={`grid gap-2.5 ${isDesktop ? 'grid-cols-3' : 'grid-cols-1'}`}>
+            <Field label="付与日">
+              <input
+                type="date"
+                value={editing.grantDate}
+                onChange={(e) => setEditing((p) => ({ ...p, grantDate: e.target.value }))}
+                style={DATE_INPUT_STYLE}
+                className="w-full box-border border border-slate-200 rounded-lg px-2.5 py-2 font-mono text-[13px] bg-white"
+              />
+            </Field>
+            <Field label="日数">
+              <input
+                type="number"
+                step="0.5"
+                min="0.5"
+                max="40"
+                value={editing.days}
+                onChange={(e) => setEditing((p) => ({ ...p, days: e.target.value }))}
+                className="w-full box-border border border-slate-200 rounded-lg px-2.5 py-2 font-mono text-[13px] text-right bg-white"
+              />
+            </Field>
+            <Field label="種別">
+              <select
+                value={editing.kind}
+                onChange={(e) => setEditing((p) => ({ ...p, kind: e.target.value }))}
+                className="w-full border border-slate-200 rounded-lg px-2.5 py-2 text-[13px] bg-white"
+              >
+                <option value="carryover">ジョブカンからの引き継ぎ</option>
+                <option value="manual">手動で足す・直す</option>
+              </select>
+            </Field>
+          </div>
+          <Field label="メモ（任意）">
+            <input
+              value={editing.note}
+              onChange={(e) => setEditing((p) => ({ ...p, note: e.target.value }))}
+              placeholder="例）ジョブカンの2026年10月時点の残日数"
+              className="w-full border border-slate-200 rounded-lg px-2.5 py-2 text-[13px] bg-white"
+            />
+          </Field>
+          <div className="text-[10.5px] text-slate-500 leading-relaxed">
+            引き継ぎのときは<b>もとの付与日</b>を入れてください。時効（付与日から2年）の判定に使うため、
+            移行日を入れると期限がずれます。繰越分と当年度分が分かれている場合は、2件に分けて登録してください。
+          </div>
+          {error && <div className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-700">{error}</div>}
+          <div className="flex gap-2">
+            <button onClick={() => { setEditing(null); setError(''); }} className="flex-1 rounded-lg border border-slate-300 bg-white py-2 text-[12.5px] font-bold text-slate-600">やめる</button>
+            <button onClick={save} disabled={saving} className="flex-1 rounded-lg bg-slate-800 py-2 text-[12.5px] font-bold text-white disabled:bg-slate-300">{saving ? '保存中…' : '保存する'}</button>
+          </div>
+        </div>
+      )}
+
+      {/* 時効が切れた付与の開け閉め */}
+      {expiredGrants.length > 0 && (
+        <div className="px-3.5 py-1.5 border-t border-slate-100">
+          <button
+            onClick={() => setShowExpired((v) => !v)}
+            className="text-[11px] font-bold text-slate-500"
+          >
+            {showExpired ? '時効が切れた付与を隠す' : `時効が切れた付与も見る（${expiredGrants.length}件）`}
+          </button>
+        </div>
+      )}
+
+      {/* 付与の一覧 */}
+      {visiblePool.length === 0 ? (
+        <div className="px-3.5 py-6 text-center text-[11.5px] text-slate-300">
+          {balance.pool.length === 0 ? '付与がまだありません' : 'いま使える付与はありません'}
+        </div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-[11.5px]">
+            <thead className="bg-slate-50 text-slate-500">
+              <tr className="text-left">
+                <th className="px-3 py-1.5 font-medium whitespace-nowrap">付与日</th>
+                <th className="px-2 py-1.5 font-medium whitespace-nowrap">出所</th>
+                <th className="px-2 py-1.5 font-medium text-right whitespace-nowrap">付与</th>
+                <th className="px-2 py-1.5 font-medium text-right whitespace-nowrap">消化</th>
+                <th className="px-2 py-1.5 font-medium text-right whitespace-nowrap">残</th>
+                <th className="px-3 py-1.5 font-medium whitespace-nowrap">使える最後の日</th>
+                <th className="px-2 py-1.5 font-medium whitespace-nowrap"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {visiblePool.map((g) => {
+                const expired = g.expiresOnKey <= todayK;
+                const notYet = g.dateKey > todayK;
+                const left = r1(g.days - g.used);
+                return (
+                  <tr key={g.dateKey} className={`border-t border-slate-100 ${expired ? 'bg-slate-50 text-slate-400' : ''}`}>
+                    <td className="px-3 py-1.5 font-mono whitespace-nowrap">{dateLabelY(g.dateKey)}</td>
+                    <td className="px-2 py-1.5 whitespace-nowrap">
+                      {g.kind === 'statutory' ? (
+                        <span className="text-slate-400">法定</span>
+                      ) : g.kind === 'carryover' ? (
+                        <span className="font-bold text-teal-700">引き継ぎ</span>
+                      ) : (
+                        <span className="font-bold text-amber-700">手動</span>
+                      )}
+                    </td>
+                    <td className="px-2 py-1.5 text-right font-mono">{fmtDays(g.days)}</td>
+                    <td className="px-2 py-1.5 text-right font-mono">{g.used > 0 ? fmtDays(g.used) : '—'}</td>
+                    <td className={`px-2 py-1.5 text-right font-mono font-bold ${expired && left > 0 ? 'text-rose-500 line-through' : ''}`}>
+                      {fmtDays(left)}
+                    </td>
+                    <td className="px-3 py-1.5 font-mono whitespace-nowrap">
+                      {dateLabelY(leaveExpiryLastDayKey(g.expiresOnKey))}
+                      {expired && <span className="ml-1 text-[10.5px] font-bold">時効</span>}
+                      {notYet && <span className="ml-1 text-[10.5px] font-bold text-slate-400">付与前</span>}
+                    </td>
+                    <td className="px-2 py-1.5 whitespace-nowrap text-right">
+                      {g.id && (
+                        <>
+                          <button onClick={() => startEdit(g)} className="text-[11px] font-bold text-slate-500 px-1">直す</button>
+                          <button onClick={() => remove(g)} className="text-[11px] font-bold text-rose-500 px-1">削除</button>
+                        </>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div className="px-3.5 py-2 border-t border-slate-100 text-[10.5px] text-slate-400 leading-relaxed">
+        「法定」の行は入職日から自動で導いています。日数が実態と違う場合は、
+        同じ付与日で「手動」の行を登録すると上書きできます。
+        消化は使える期限が古い付与から順に充てています（繰越分が先に消えます）。
+        {migrationDateKey && `移行日（${dateLabelY(migrationDateKey)}）より前の付与と消化は計算に入れていません。`}
+      </div>
+    </div>
+  );
+}
+
+function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSaveMyNumber, isMasterAdmin, knownGroups = [], groupAttendanceSchedules = {}, employeeAttendanceSchedule = {}, onSaveEmployeeAttendance, resignationReasons = [], settings = {}, actor = null, leaveGrants = [], leaveRequests = [], onLeaveGrantsChanged, isDesktop }) {
   const [activeTab, setActiveTab] = useState('basic');
   const containerRef = useRef(null);
   const sectionRefs = useRef({});
@@ -20971,7 +21511,20 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
               <Field label="有休の手動調整（日・マイナス可）">
                 <input type="number" value={form.leaveAdjustment} onChange={set('leaveAdjustment')} placeholder="0" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
               </Field>
-              <div className="text-[10.5px] text-slate-400 -mt-2">自動計算された有休日数に、この日数を加算（マイナスなら減算）します。</div>
+              <div className="text-[10.5px] text-slate-400 -mt-2">
+                自動計算された有休日数に、この日数を加算（マイナスなら減算）します。
+                下の「有休の付与」で引き継ぎを登録した場合は、二重に足さないよう0に戻してください。
+              </div>
+
+              <PaidLeaveGrantsPanel
+                employee={account}
+                grantRows={leaveGrants}
+                leaveRequests={leaveRequests}
+                settings={settings}
+                actor={actor}
+                onChanged={onLeaveGrantsChanged}
+                isDesktop={isDesktop}
+              />
           </div>
 
           <div ref={(el) => (sectionRefs.current.pay = el)} className="space-y-4 pt-1">
