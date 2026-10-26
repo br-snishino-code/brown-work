@@ -15561,7 +15561,7 @@ const sumItems = (items) => (items || []).reduce((s, it) => s + (Number(it.amoun
 // 自動で入れた金額が何から出たのかを必ず見せます。
 // 「候補として入れて、確定は人が確認してから」という決め方のため、
 // 標準報酬月額・料率・保険料の対象月を画面で確かめられるようにしています。
-function SocialInsuranceNote({ social, standardRemuneration, insuranceRates, loading, employee, year, month, isPublished }) {
+function SocialInsuranceNote({ social, standardRemuneration, insuranceRates, loading, employee, year, month, isPublished, differs = false, onApply }) {
   if (loading) {
     return (
       <div className="rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-[11.5px] text-slate-400">
@@ -15611,6 +15611,21 @@ function SocialInsuranceNote({ social, standardRemuneration, insuranceRates, loa
           ? `社会保険料の一部を自動で入れました（${year}年${month}月分の保険料）`
           : `社会保険料を自動で入れました（${year}年${month}月分の保険料）`}
       </div>
+      {differs && !isPublished && onApply && (
+        <div className="rounded-lg border border-amber-300 bg-white/70 px-2.5 py-2 space-y-1.5">
+          <div className="text-[11px] font-bold text-amber-900">下の控除欄の金額が、計算した金額と違います</div>
+          <div className="text-[10.5px] text-amber-800">
+            すでに作った明細には自動で入りません（手で直した金額を書き換えないため）。
+            計算した金額に入れ直す場合は、下のボタンを押してください。ほかの控除項目はそのままです。
+          </div>
+          <button
+            onClick={onApply}
+            className="w-full rounded-lg border-2 border-amber-300 bg-white py-1.5 text-[12px] font-bold text-amber-800"
+          >
+            社会保険料を計算した金額に入れ直す
+          </button>
+        </div>
+      )}
       <div className="flex flex-wrap gap-x-4 gap-y-0.5">
         {items.map((it) => (
           <span key={it.key}>
@@ -15833,6 +15848,37 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
   const deductionTotal = sumItems(deductionItems);
   const netAmount = paymentTotal - deductionTotal;
 
+  // 自動計算した社会保険料の、その月の確定値（介護の対象外は0円）
+  const socialAmounts = () => {
+    if (!social) return [];
+    return Object.entries(AUTO_DEDUCTION_KEYS).map(([label, key]) => ({
+      label,
+      value: key === 'nursing' && !social.nursingTarget ? 0 : social[key],
+    })).filter((x) => x.value != null); // 料率が未設定のものは触らない
+  };
+
+  // いま欄に入っている金額が、計算した金額と違うか
+  const socialDiffers = socialAmounts().some(({ label, value }) => {
+    const cur = deductionItems.find((it) => String(it.label).trim() === label);
+    return !cur || Number(cur.amount) !== value;
+  });
+
+  // 社会保険料の欄だけを計算した金額に入れ直す。ほかの控除項目には触りません。
+  // すでに作った下書きは自動では入らないため、ここから入れ直します。
+  const applySocialInsurance = () => {
+    const amounts = socialAmounts();
+    if (amounts.length === 0) return;
+    setDeductionItems((prev) => {
+      const next = [...prev];
+      amounts.forEach(({ label, value }) => {
+        const i = next.findIndex((it) => String(it.label).trim() === label);
+        if (i >= 0) next[i] = { ...next[i], amount: value };
+        else next.push({ label, amount: value });
+      });
+      return next;
+    });
+  };
+
   const saveWageSettings = async () => {
     await onUpdateWage(employeeId, {
       wageType,
@@ -15987,6 +16033,8 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
           year={year}
           month={month}
           isPublished={isPublished}
+          differs={socialDiffers}
+          onApply={applySocialInsurance}
         />
         <PayrollItemsEditor title="控除項目" items={deductionItems} onChange={setDeductionItems} addLabel="控除項目を追加" />
 
