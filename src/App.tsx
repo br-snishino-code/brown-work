@@ -16587,7 +16587,8 @@ function computeWeekendHolidayBonus({
 
   const base = {
     amount: null, reason: '',
-    targetDays: [], absentCount: 0, usedAbsent: 0, overridden: false,
+    weekendDays: [], targetDays: [], missingShiftCount: 0,
+    absentCount: 0, usedAbsent: 0, overridden: false,
     baseAmount: 0, workedDays: 0, prescribedDays: prescribedDays ?? null, prorated: false,
   };
 
@@ -16595,25 +16596,33 @@ function computeWeekendHolidayBonus({
   // 「出勤日が0日」と区別するため、ここで止めます。
   if (monthAssignments.length === 0) return { ...base, reason: 'noShift' };
 
-  // ---- 対象日（出勤日とされた土日祝）と、その日の状態 ----
-  const targetDays = [];
-  monthAssignments.forEach((a) => {
-    if (a.kind !== 'work' && a.kind !== 'paid') return;   // 'off' は出勤日ではない
-    if (!isWeekendOrHoliday(a.date)) return;
-    const leave = approvedLeaveOn(leaveRequests, employeeId, a.date);
-    const worked = Boolean(computeMetrics(dayRecords[a.date]));
+  // ---- その月の土日祝を全部並べ、1日ずつ状態をつける ----
+  // 対象日（シフトが出勤・有給）だけでなく、休みの日や、シフトの行が
+  // 無い日も出します。そうしないと画面を見たときに
+  //   「休みだから対象外」なのか「取り込み漏れ」なのか
+  // が分からず、日が抜けているように見えてしまいます。
+  const byDate = new Map(monthAssignments.map((a) => [a.date, a]));
+  const weekendDays = keys.filter(isWeekendOrHoliday).map((key) => {
+    const a = byDate.get(key);
+    const leave = approvedLeaveOn(leaveRequests, employeeId, key);
+    const holidayName = getHolidayName(key) || '';
+    // シフトの行が無い日。取り込み漏れの可能性があるので、休みとは分けます
+    if (!a) return { key, state: 'noshift', target: false, holidayName, leaveType: '' };
+    if (a.kind !== 'work' && a.kind !== 'paid') {
+      return { key, state: 'off', target: false, holidayName, leaveType: '' };
+    }
+    const worked = Boolean(computeMetrics(dayRecords[key]));
     let state = 'absent';
     if (worked) state = 'worked';
     else if (a.kind === 'paid' || (leave && leave.type === WEEKEND_BONUS_PAID_LEAVE_TYPE)) state = 'paid';
     else if (leave) state = 'leave';   // 振休・代休・特別休暇。欠勤には数えません
-    targetDays.push({
-      key: a.date,
-      state,
-      holidayName: getHolidayName(a.date) || '',
+    return {
+      key, state, target: true, holidayName,
       leaveType: leave ? leave.type : (a.kind === 'paid' ? '有休' : ''),
-    });
+    };
   });
-  targetDays.sort((x, y) => (x.key < y.key ? -1 : 1));
+  const targetDays = weekendDays.filter((d) => d.target);
+  const missingShiftCount = weekendDays.filter((d) => d.state === 'noshift').length;
 
   const absentCount = targetDays.filter((d) => d.state === 'absent').length;
   const usedAbsent = absentOverride == null ? absentCount : Math.max(0, Math.floor(Number(absentOverride) || 0));
@@ -16621,11 +16630,17 @@ function computeWeekendHolidayBonus({
 
   // 出勤日とされた土日祝が0日の月は支給しません
   if (targetDays.length === 0) {
-    return { ...base, amount: 0, reason: 'noTarget', targetDays, absentCount, usedAbsent, overridden };
+    return {
+      ...base, amount: 0, reason: 'noTarget',
+      weekendDays, targetDays, missingShiftCount, absentCount, usedAbsent, overridden,
+    };
   }
 
   const baseAmount = usedAbsent === 0 ? WEEKEND_BONUS_FULL : usedAbsent === 1 ? WEEKEND_BONUS_HALF : 0;
-  const common = { ...base, targetDays, absentCount, usedAbsent, overridden, baseAmount };
+  const common = {
+    ...base, weekendDays, targetDays, missingShiftCount,
+    absentCount, usedAbsent, overridden, baseAmount,
+  };
 
   // 欠勤2日以上は0円。日割をかけても0円なので、規定日数が無くても出せます。
   if (baseAmount === 0) return { ...common, amount: 0 };
@@ -16894,7 +16909,10 @@ function WeekendBonusNote({ bonus, employee, override, onOverride, current, onAp
     const wd = ['日', '月', '火', '水', '木', '金', '土'][new Date(d.key).getDay()];
     return `${m}/${day}(${d.holidayName ? '祝' : wd})`;
   };
-  const stateLabel = { worked: '出勤', paid: '有休', leave: '', absent: '欠勤' };
+  const stateLabel = {
+    worked: '出勤', paid: '有休', leave: '', absent: '欠勤',
+    off: '休み', noshift: 'シフトなし',
+  };
 
   if (bonus.amount == null) {
     const why = {
@@ -16923,15 +16941,19 @@ function WeekendBonusNote({ bonus, employee, override, onOverride, current, onAp
         {bonus.reason === 'noTarget' && '（出勤日とされた土日祝がないため支給しません）'}
       </div>
 
-      {bonus.targetDays.length > 0 && (
+      {/* その月の土日祝を全部出します。対象外の日も、なぜ対象外なのかが
+          分かるように薄い色で並べます（日が抜けて見えるのを防ぐため）。 */}
+      {bonus.weekendDays.length > 0 && (
         <div className="flex flex-wrap gap-1">
-          {bonus.targetDays.map((d) => (
+          {bonus.weekendDays.map((d) => (
             <span
               key={d.key}
               className={`rounded-full px-2 py-0.5 text-[10.5px] font-bold ${
                 d.state === 'absent' ? 'bg-rose-100 text-rose-700'
-                  : d.state === 'worked' ? 'bg-white/70'
-                    : 'bg-teal-100 text-teal-800'
+                  : d.state === 'noshift' ? 'bg-amber-100 text-amber-800'
+                    : !d.target ? 'bg-slate-100 text-slate-400'
+                      : d.state === 'worked' ? 'bg-white/70'
+                        : 'bg-teal-100 text-teal-800'
               }`}
             >
               {dayLabel(d)} {d.state === 'leave' ? (d.leaveType || '休暇') : stateLabel[d.state]}
@@ -16940,8 +16962,16 @@ function WeekendBonusNote({ bonus, employee, override, onOverride, current, onAp
         </div>
       )}
 
+      {bonus.missingShiftCount > 0 && (
+        <div className="text-[11px] font-bold">
+          シフトの登録が無い土日祝が{bonus.missingShiftCount}日あります。
+          出勤日だった場合は対象日から漏れています。シフトを確認してください。
+        </div>
+      )}
+
       <div className="text-[10.5px] opacity-80">
-        出勤日とされた土日祝 {bonus.targetDays.length}日／自動で数えた欠勤 {bonus.absentCount}日
+        その月の土日祝 {bonus.weekendDays.length}日のうち、出勤日とされたのは {bonus.targetDays.length}日
+        （残りはシフトが休みのため対象外）／自動で数えた欠勤 {bonus.absentCount}日
         {bonus.overridden && <b>／画面で {bonus.usedAbsent}日 に直しています</b>}
         {' '}→ 基準額 {formatYen(bonus.baseAmount)}
         {bonus.prorated
@@ -16981,6 +17011,7 @@ function WeekendBonusNote({ bonus, employee, override, onOverride, current, onAp
       )}
 
       <div className="text-[10.5px] opacity-80">
+        灰色の日はシフトが休みのため対象外です（賃金規程の「出勤日とされた土曜日、日曜日および国民の祝日」に当たらないため）。
         有休は出勤と同じ扱いです。振休・代休・特別休暇も欠勤には数えていません。
         遅刻・早退は数えていません（賃金規程に定めがないため）。違う場合は上の欄で直してください。
       </div>
