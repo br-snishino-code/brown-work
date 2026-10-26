@@ -2788,6 +2788,29 @@ async function fetchEffectiveStandardRemuneration(employeeId, year, month) {
   };
 }
 
+// 雇用保険の料率と、支給項目ごとの扱いを保存する（全社共通・マスター管理者のみ）
+async function saveEmploymentInsuranceSettings({ rate, flags }, actor = null) {
+  const rows = [];
+  if (rate != null) {
+    rows.push({ key: SETTING_EI_RATE, value: String(rate), updated_by: actor?.id || null, updated_at: new Date().toISOString() });
+  }
+  if (flags != null) {
+    rows.push({ key: SETTING_PAYMENT_ITEM_FLAGS, value: JSON.stringify(flags), updated_by: actor?.id || null, updated_at: new Date().toISOString() });
+  }
+  if (rows.length === 0) return { ok: true };
+  const { error } = await supabase.from('app_settings').upsert(rows, { onConflict: 'key' });
+  if (error) {
+    console.error('雇用保険の設定の保存に失敗しました', error);
+    return { ok: false, message: error.message || '' };
+  }
+  await logAudit(
+    actor,
+    '雇用保険の設定を変更',
+    [rate != null ? `料率 ${rate}%` : '', flags != null ? '支給項目の扱い' : ''].filter(Boolean).join('／')
+  );
+  return { ok: true };
+}
+
 // 住民税の控除月の取り方を保存する（全社共通の設定・マスター管理者のみ）。
 // app_settings の書き込みは27番でマスター管理者に限っています。
 async function saveResidentTaxOffset(value, actor = null) {
@@ -5757,6 +5780,7 @@ function AttendanceApp() {
                 employeeAttendanceSchedules={data.employeeAttendanceSchedules}
                 settings={data.settings}
                 session={session}
+                onRefresh={refreshData}
                 onSaveDraft={savePayrollDraft}
                 onPublish={publishPayroll}
                 onUnpublish={unpublishPayroll}
@@ -16070,18 +16094,253 @@ function residentTaxCheck(row) {
   return { sum, annual, ok: sum === annual, diff: sum - annual };
 }
 
+// ============================================================
+// 雇用保険料の自動計算
+// ============================================================
+// 計算は 賃金総額 × 労働者負担の料率。端数は社会保険料と同じく
+// 「50銭以下は切り捨て、50銭を超えたら1円に切り上げ」。
+//
+// 「賃金総額」に何を含めるかは支給項目ごとに決めます（画面で切り替え）。
+// 通勤手当は雇用保険の賃金には含みますが、所得税では一定額まで非課税です。
+// この2つは扱いが違うため、項目ごとに別々の印を持たせています。
+//
+// 料率は年度ごとに変わり、事業の種類でも違います（令和8年度・労働者負担）：
+//   一般の事業 5/1000 ／ 農林水産・清酒製造 6/1000 ／ 建設 6/1000
+// 年度が変わったら画面で入れ替えてください。
+const SETTING_EI_RATE = 'employment_insurance_rate';        // 労働者負担（％）
+const SETTING_PAYMENT_ITEM_FLAGS = 'payment_item_flags';    // 支給項目ごとの扱い（JSON）
+
+const EI_RATE_PRESETS = [
+  { key: 'general', label: '一般の事業', rate: 0.5 },
+  { key: 'agriculture', label: '農林水産・清酒製造の事業', rate: 0.6 },
+  { key: 'construction', label: '建設の事業', rate: 0.6 },
+];
+
+// 「交通費精算（10月分）」のように末尾が月で変わる項目を、ひとつにまとめます。
+// そうしないと月ごとに別の項目として設定しなければならなくなります。
+function paymentItemKey(label) {
+  return String(label || '').replace(/（[^（）]*）\s*$/, '').trim();
+}
+
+// 設定が無いときの既定。
+//   ei  … 雇用保険の賃金総額に含めるか
+//   tax … 所得税の課税対象か
+// 通勤手当と交通費精算は、雇用保険には含むが所得税は非課税が原則のため分けています。
+// ⚠ 通勤手当の非課税には限度額があります（通勤の手段と距離で変わります）。
+//   いまは限度額を見ていません。限度を超える方がいる場合は手で直してください。
+const PAYMENT_ITEM_DEFAULTS = {
+  通勤手当: { ei: true, tax: false },
+  交通費精算: { ei: true, tax: false },
+};
+
+function parsePaymentItemFlags(settings) {
+  try {
+    const v = JSON.parse(settings?.[SETTING_PAYMENT_ITEM_FLAGS] || '{}');
+    return v && typeof v === 'object' ? v : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function paymentItemFlag(label, flags) {
+  const key = paymentItemKey(label);
+  const saved = flags?.[key];
+  if (saved && typeof saved === 'object') {
+    return { ei: saved.ei !== false, tax: saved.tax !== false };
+  }
+  const d = PAYMENT_ITEM_DEFAULTS[key];
+  return d ? { ...d } : { ei: true, tax: true };
+}
+
+function employmentInsuranceRate(settings) {
+  const v = Number(settings?.[SETTING_EI_RATE]);
+  return Number.isFinite(v) && v > 0 ? v : 0;
+}
+
+// その月の雇用保険料（本人負担分）。料率が未設定なら null を返します。
+function computeEmploymentInsurance({ paymentItems, settings }) {
+  const rate = employmentInsuranceRate(settings);
+  const flags = parsePaymentItemFlags(settings);
+  const all = (paymentItems || []).map((it) => ({
+    label: it.label || '',
+    amount: Number(it.amount) || 0,
+    included: paymentItemFlag(it.label, flags).ei,
+  }));
+  const base = all.filter((x) => x.included).reduce((s, x) => s + x.amount, 0);
+  return {
+    amount: rate > 0 ? roundInsurancePremium((base * rate) / 100) : null,
+    base,
+    rate,
+    items: all,
+    excluded: all.filter((x) => !x.included),
+  };
+}
+
 // 自動で金額を入れる控除項目。ここに無いものは手入力のままです。
 const AUTO_DEDUCTION_KEYS = { 健康保険料: 'health', 介護保険料: 'nursing', 厚生年金保険料: 'pension' };
 // 住民税は別の仕組みで出すため、金額の取り出し方が違います
 const RESIDENT_TAX_LABEL = '住民税';
+const EI_LABEL = '雇用保険料';
+// 設定画面に最初から並べておく支給項目（実際に使われていなくても出す）
+const DEFAULT_PAYMENT_ITEM_HINTS = ['基本給', '通勤手当', '残業手当', '交通費精算'];
 const DEFAULT_DEDUCTION_LABELS = ['健康保険料', '介護保険料', '厚生年金保険料', '雇用保険料', '所得税', '住民税'];
 const sumItems = (items) => (items || []).reduce((s, it) => s + (Number(it.amount) || 0), 0);
+
+// ---- 雇用保険の設定（給与計算画面・全社共通） ----
+// 料率と、支給項目ごとの「雇用保険の対象か」「所得税の課税対象か」を決めます。
+// 項目は、いま使われているものを集めて並べます（決め打ちではありません）。
+function EmploymentInsuranceSettings({ settings, knownItems, actor, isMasterAdmin, onSaved, isDesktop }) {
+  const savedRate = employmentInsuranceRate(settings);
+  const savedFlags = parsePaymentItemFlags(settings);
+  const [open, setOpen] = useState(false);
+  const [rate, setRate] = useState(savedRate ? String(savedRate) : '');
+  const [flags, setFlags] = useState(savedFlags);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  if (!isMasterAdmin) return null;
+
+  const toggle = (key, field) => setFlags((prev) => {
+    const cur = paymentItemFlag(key, prev);
+    return { ...prev, [key]: { ...cur, [field]: !cur[field] } };
+  });
+
+  const save = async () => {
+    setError('');
+    const v = Number(rate);
+    if (!Number.isFinite(v) || v <= 0 || v > 10) {
+      setError('料率は0より大きく10以下の数字で入れてください（一般の事業なら0.5）。');
+      return;
+    }
+    setSaving(true);
+    const res = await saveEmploymentInsuranceSettings({ rate: v, flags }, actor);
+    setSaving(false);
+    if (!res.ok) { setError(`保存できませんでした。${res.message}`); return; }
+    if (onSaved) await onSaved();
+    setOpen(false);
+  };
+
+  return (
+    <div className="rounded-xl border border-slate-200 overflow-hidden">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="w-full px-3.5 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center gap-2 flex-wrap text-left"
+      >
+        <span className="text-[12px] font-bold text-slate-600">雇用保険の設定</span>
+        <span className="text-[10.5px] font-bold text-amber-700">全スタッフ共通</span>
+        <span className="text-[11px] text-slate-400">
+          {savedRate > 0 ? `料率 ${savedRate}%` : '料率が未設定'}
+        </span>
+        <span className="ml-auto text-[11px] font-bold text-slate-500">{open ? '閉じる' : '開く'}</span>
+      </button>
+
+      {open && (
+        <div className="px-3.5 py-3 space-y-3">
+          {error && (
+            <div className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-700">{error}</div>
+          )}
+
+          <Field label="労働者負担の料率（％）">
+            <div className={`grid gap-2 ${isDesktop ? 'grid-cols-4' : 'grid-cols-2'}`}>
+              <input
+                type="number" step="0.01" min="0" max="10" value={rate}
+                onChange={(e) => setRate(e.target.value)}
+                className="w-full box-border border border-slate-200 rounded-lg px-2.5 py-2 font-mono text-[13px] text-right bg-white"
+              />
+              {EI_RATE_PRESETS.map((pre) => (
+                <button
+                  key={pre.key}
+                  onClick={() => setRate(String(pre.rate))}
+                  className={`rounded-lg border px-2 py-2 text-[11px] font-bold ${Number(rate) === pre.rate ? 'border-slate-700 text-slate-800 bg-white' : 'border-slate-200 text-slate-500 bg-white/60'}`}
+                >
+                  {pre.label}<br />{pre.rate}%
+                </button>
+              ))}
+            </div>
+          </Field>
+          <div className="text-[10.5px] text-slate-500 leading-relaxed">
+            令和8年度の労働者負担です。<b>料率は年度ごとに変わります。</b>
+            労働保険の年度更新の書類で確かめて、変わったらここを入れ替えてください。
+          </div>
+
+          <div className="text-[11.5px] font-bold text-slate-600 pt-1">支給項目ごとの扱い</div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-[11.5px]">
+              <thead className="bg-slate-50 text-slate-500">
+                <tr className="text-left">
+                  <th className="px-2.5 py-1.5 font-medium">支給項目</th>
+                  <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">雇用保険の賃金</th>
+                  <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">所得税の課税</th>
+                </tr>
+              </thead>
+              <tbody>
+                {knownItems.length === 0 ? (
+                  <tr><td colSpan={3} className="px-2.5 py-4 text-center text-slate-300">支給項目がまだありません</td></tr>
+                ) : knownItems.map((key) => {
+                  const f = paymentItemFlag(key, flags);
+                  return (
+                    <tr key={key} className="border-t border-slate-100">
+                      <td className="px-2.5 py-1.5 text-slate-700">{key}</td>
+                      {['ei', 'tax'].map((field) => (
+                        <td key={field} className="px-2 py-1.5 text-center">
+                          <button
+                            onClick={() => toggle(key, field)}
+                            className={`rounded-lg border px-2.5 py-1 text-[11px] font-bold ${f[field] ? 'border-teal-300 bg-teal-50 text-teal-700' : 'border-slate-200 bg-white text-slate-400'}`}
+                          >
+                            {f[field] ? '対象' : '対象外'}
+                          </button>
+                        </td>
+                      ))}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <div className="text-[10.5px] text-slate-500 leading-relaxed">
+            通勤手当は<b>雇用保険の賃金には含みますが、所得税では一定額まで非課税</b>です。扱いが違うので別々に持っています。
+            <b className="block pt-0.5">通勤手当の非課税の限度額は見ていません。</b>
+            限度を超える方がいる場合は、所得税の金額を手で直してください。
+            「所得税の課税」の印は、所得税を自動計算するようになってから使います（いまは記録だけです）。
+          </div>
+
+          <button
+            onClick={save}
+            disabled={saving}
+            className="w-full rounded-lg bg-slate-800 py-2 text-[12.5px] font-bold text-white disabled:bg-slate-300"
+          >
+            {saving ? '保存中…' : 'この設定を全スタッフに保存する'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
 
 // ---- 自動で入れた控除の根拠（給与計算画面） ----
 // 名前は SocialInsuranceNote のままですが、住民税もここに並べています。
 // 自動で入れた金額が何から出たのかを必ず見せます。
 // 「候補として入れて、確定は人が確認してから」という決め方のため、
 // 標準報酬月額・料率・保険料の対象月を画面で確かめられるようにしています。
+// 雇用保険料の根拠を1行で出します
+function EmploymentInsuranceLine({ ei }) {
+  if (!ei) return null;
+  if (ei.amount == null) {
+    return (
+      <div className="text-[11px] font-bold">
+        雇用保険料は料率が未設定のため0円です。下の「雇用保険の設定」で料率を入れてください。
+      </div>
+    );
+  }
+  return (
+    <div className="text-[10.5px] opacity-80">
+      雇用保険 <span className="font-mono font-bold">{formatYen(ei.amount)}</span>
+      （賃金総額 {formatYen(ei.base)} × {ei.rate}%
+      {ei.excluded.length > 0 && `／${ei.excluded.map((x) => x.label).join('・')}は対象外`}）
+    </div>
+  );
+}
+
 // 住民税の根拠を1行で出します（社会保険料の知らせの中に並べます）
 function ResidentTaxLine({ resident, employee }) {
   if (!resident) return null;
@@ -16109,7 +16368,7 @@ function ResidentTaxLine({ resident, employee }) {
   );
 }
 
-function SocialInsuranceNote({ social, standardRemuneration, insuranceRates, loading, employee, year, month, isPublished, differs = false, onApply, resident = null }) {
+function SocialInsuranceNote({ social, standardRemuneration, insuranceRates, loading, employee, year, month, isPublished, differs = false, onApply, resident = null, ei = null }) {
   if (loading) {
     return (
       <div className="rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-[11.5px] text-slate-400">
@@ -16129,6 +16388,7 @@ function SocialInsuranceNote({ social, standardRemuneration, insuranceRates, loa
         </div>
         <div className="text-amber-700">健康保険料・介護保険料・厚生年金保険料は、下の欄に手で入れてください。</div>
         <ResidentTaxLine resident={resident} employee={employee} />
+        <EmploymentInsuranceLine ei={ei} />
       </div>
     );
   }
@@ -16166,13 +16426,13 @@ function SocialInsuranceNote({ social, standardRemuneration, insuranceRates, loa
           <div className="text-[10.5px] text-amber-800">
             すでに作った明細には自動で入りません（手で直した金額を書き換えないため）。
             計算した金額に入れ直す場合は、下のボタンを押してください。
-            入れ替わるのは社会保険料3つと住民税だけで、雇用保険料・所得税や手で足した項目はそのままです。
+            入れ替わるのは社会保険料3つと住民税・雇用保険料だけで、所得税や手で足した項目はそのままです。
           </div>
           <button
             onClick={onApply}
             className="w-full rounded-lg border-2 border-amber-300 bg-white py-1.5 text-[12px] font-bold text-amber-800"
           >
-            社会保険料と住民税を計算した金額に入れ直す
+            計算した金額に入れ直す
           </button>
         </div>
       )}
@@ -16189,6 +16449,7 @@ function SocialInsuranceNote({ social, standardRemuneration, insuranceRates, loa
         ))}
       </div>
       <ResidentTaxLine resident={resident} employee={employee} />
+      <EmploymentInsuranceLine ei={ei} />
       <div className="text-[10.5px] opacity-80">
         標準報酬月額 健保 {formatYen(social.healthBase)}・厚年 {formatYen(social.pensionBase)}（{stdLabel}）
         ／ 料率 健保 {social.healthRate || '—'}%・介護 {social.nursingRate || '—'}%・厚年 {social.pensionRate || '—'}%
@@ -16208,7 +16469,7 @@ function SocialInsuranceNote({ social, standardRemuneration, insuranceRates, loa
       )}
       <div className="text-[10.5px] opacity-80">
         金額は候補です。公開する前に必ずご確認ください。欄の数字は手で直せます。
-        雇用保険料と所得税はまだ自動計算していません（手で入れてください）。
+        所得税はまだ自動計算していません（手で入れてください）。
       </div>
     </div>
   );
@@ -16252,7 +16513,7 @@ function PayrollItemsEditor({ title, items, onChange, addLabel = '項目を追�
   );
 }
 
-function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExpenseClaims = [], monthlyConfirmations = [], groupAttendanceSchedules = {}, employeeAttendanceSchedules = {}, settings = {}, session = null, onSaveDraft, onPublish, onUnpublish, isMasterAdmin = false, onUpdateWage, isDesktop }) {
+function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExpenseClaims = [], monthlyConfirmations = [], groupAttendanceSchedules = {}, employeeAttendanceSchedules = {}, settings = {}, session = null, onSaveDraft, onPublish, onUnpublish, onRefresh, isMasterAdmin = false, onUpdateWage, isDesktop }) {
   const now = new Date();
   const [employeeId, setEmployeeId] = useState(employeeAccounts[0]?.id || '');
   const [year, setYear] = useState(now.getFullYear());
@@ -16373,26 +16634,30 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
   // スタッフ・年月・下書きの有無が変わったら、支給・控除項目を初期化する
   useEffect(() => {
     if (!employee || !preview) return;
-    if (existing?.paymentItems) {
-      setPaymentItems(existing.paymentItems);
-    } else {
-      setPaymentItems([
-        { label: '基本給', amount: preview.baseAmount },
-        ...(preview.allowanceAmount > 0 ? [{ label: '通勤手当', amount: preview.allowanceAmount }] : []),
-        ...(preview.overtimeAmount > 0 ? [{ label: '残業手当', amount: preview.overtimeAmount }] : []),
-        ...(approvedCommuteTotal > 0 ? [{ label: `交通費精算（${month}月分）`, amount: approvedCommuteTotal }] : []),
-        ...employeeSalaryItems.filter((it) => it.kind === 'payment').map((it) => ({ label: it.label, amount: it.amount })),
-      ]);
-    }
+    // 支給項目を先に組み立てます。雇用保険料はこの中身から出すため、
+    // 画面の state（1回遅れて入る）ではなく、ここで作ったものを使います。
+    const nextPaymentItems = existing?.paymentItems || [
+      { label: '基本給', amount: preview.baseAmount },
+      ...(preview.allowanceAmount > 0 ? [{ label: '通勤手当', amount: preview.allowanceAmount }] : []),
+      ...(preview.overtimeAmount > 0 ? [{ label: '残業手当', amount: preview.overtimeAmount }] : []),
+      ...(approvedCommuteTotal > 0 ? [{ label: `交通費精算（${month}月分）`, amount: approvedCommuteTotal }] : []),
+      ...employeeSalaryItems.filter((it) => it.kind === 'payment').map((it) => ({ label: it.label, amount: it.amount })),
+    ];
+    setPaymentItems(nextPaymentItems);
+
     if (existing?.deductionItems) {
       setDeductionItems(existing.deductionItems);
     } else {
-      // 社会保険料は計算した額を候補として入れます。
-      // 標準報酬月額や料率が未設定のときは0のままにして、画面で知らせます。
+      // 社会保険料・住民税・雇用保険料は計算した額を候補として入れます。
+      // 料率や標準報酬月額が未設定のときは0のままにして、画面で知らせます。
+      const nextEi = computeEmploymentInsurance({ paymentItems: nextPaymentItems, settings });
       setDeductionItems([
         ...DEFAULT_DEDUCTION_LABELS.map((label) => {
           if (label === RESIDENT_TAX_LABEL) {
             return { label, amount: resident?.amount == null ? 0 : resident.amount };
+          }
+          if (label === EI_LABEL) {
+            return { label, amount: nextEi.amount == null ? 0 : nextEi.amount };
           }
           const key = AUTO_DEDUCTION_KEYS[label];
           const auto = key && social ? social[key] : null;
@@ -16408,7 +16673,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     // 届いた時点で控除の候補を入れ直せるよう、ここに入れています。
     // social は毎回あたらしい物になるので入れません（入れると繰り返し動きます）。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [employeeId, year, month, existing?.id, employeeSalaryItems, approvedCommuteTotal, standardRemuneration, insuranceRates, residentTaxRow]);
+  }, [employeeId, year, month, existing?.id, employeeSalaryItems, approvedCommuteTotal, standardRemuneration, insuranceRates, residentTaxRow, settings]);
 
   if (!employee) {
     return <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-6 py-14 text-center text-[12.5px] text-slate-300">スタッフが登録されていません</div>;
@@ -16418,6 +16683,17 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
   const deductionTotal = sumItems(deductionItems);
   const netAmount = paymentTotal - deductionTotal;
 
+  // 雇用保険料は支給項目から出すため、支給が決まったあとで計算します
+  const ei = computeEmploymentInsurance({ paymentItems, settings });
+
+  // 設定画面に並べる支給項目。いま使われているものを集めます
+  const knownPaymentItems = Array.from(new Set([
+    ...DEFAULT_PAYMENT_ITEM_HINTS,
+    ...paymentItems.map((it) => paymentItemKey(it.label)),
+    ...employeeSalaryItems.filter((it) => it.kind === 'payment').map((it) => paymentItemKey(it.label)),
+    ...payrollRecords.flatMap((p) => (p.paymentItems || []).map((it) => paymentItemKey(it.label))),
+  ].filter(Boolean)));
+
   // 自動計算した社会保険料の、その月の確定値（介護の対象外は0円）
   const socialAmounts = () => {
     const out = social
@@ -16426,8 +16702,9 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
           value: key === 'nursing' && !social.nursingTarget ? 0 : social[key],
         }))
       : [];
-    // 住民税も同じ仕組みで入れ直します
+    // 住民税・雇用保険料も同じ仕組みで入れ直します
     if (resident && resident.amount != null) out.push({ label: RESIDENT_TAX_LABEL, value: resident.amount });
+    if (ei && ei.amount != null) out.push({ label: EI_LABEL, value: ei.amount });
     return out.filter((x) => x.value != null); // 未設定のものは触らない
   };
 
@@ -16598,6 +16875,14 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
           <div className="text-[11px] text-slate-400 -mt-1">スタッフ詳細で登録された固定支給・控除項目（{employeeSalaryItems.length}件）を初期値として含めています。</div>
         )}
         <PayrollItemsEditor title="支給項目" items={paymentItems} onChange={setPaymentItems} addLabel="支給項目を追加" />
+        <EmploymentInsuranceSettings
+          settings={settings}
+          knownItems={knownPaymentItems}
+          actor={session}
+          isMasterAdmin={isMasterAdmin}
+          onSaved={onRefresh}
+          isDesktop={isDesktop}
+        />
         <SocialInsuranceNote
           social={social}
           standardRemuneration={standardRemuneration}
@@ -16610,6 +16895,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
           differs={socialDiffers}
           onApply={applySocialInsurance}
           resident={resident}
+          ei={ei}
         />
         <PayrollItemsEditor title="控除項目" items={deductionItems} onChange={setDeductionItems} addLabel="控除項目を追加" />
 
