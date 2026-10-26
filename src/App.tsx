@@ -2788,6 +2788,80 @@ async function fetchEffectiveStandardRemuneration(employeeId, year, month) {
   };
 }
 
+// ---- 住民税（特別徴収）の年度ごとの税額 ----
+async function fetchResidentTax(employeeId, fiscalYear) {
+  const { data, error } = await supabase
+    .from('employee_resident_tax')
+    .select('*')
+    .eq('employee_id', employeeId)
+    .eq('fiscal_year', fiscalYear)
+    .maybeSingle();
+  if (error) { console.error('住民税の取得に失敗しました', error); return null; }
+  if (!data) return null;
+  return {
+    id: data.id,
+    fiscalYear: data.fiscal_year,
+    annualAmount: Number(data.annual_amount) || 0,
+    juneAmount: Number(data.june_amount) || 0,
+    monthlyAmount: Number(data.monthly_amount) || 0,
+    note: data.note || '',
+  };
+}
+
+async function fetchResidentTaxList(employeeId) {
+  const { data, error } = await supabase
+    .from('employee_resident_tax')
+    .select('*')
+    .eq('employee_id', employeeId)
+    .order('fiscal_year', { ascending: false });
+  if (error) { console.error('住民税の取得に失敗しました', error); return []; }
+  return (data || []).map((d) => ({
+    id: d.id,
+    fiscalYear: d.fiscal_year,
+    annualAmount: Number(d.annual_amount) || 0,
+    juneAmount: Number(d.june_amount) || 0,
+    monthlyAmount: Number(d.monthly_amount) || 0,
+    note: d.note || '',
+  }));
+}
+
+async function saveResidentTax({ id, employeeId, fiscalYear, annualAmount, juneAmount, monthlyAmount, note }, actor = null, targetName = '') {
+  const payload = {
+    employee_id: employeeId,
+    fiscal_year: Number(fiscalYear),
+    annual_amount: Number(annualAmount),
+    june_amount: Number(juneAmount),
+    monthly_amount: Number(monthlyAmount),
+    note: note || null,
+    created_by: actor?.id || null,
+  };
+  const { error } = id
+    ? await supabase.from('employee_resident_tax').update(payload).eq('id', id)
+    : await supabase.from('employee_resident_tax').insert(payload);
+  if (error) {
+    console.error('住民税の保存に失敗しました', error);
+    return { ok: false, message: error.message || '' };
+  }
+  await logAudit(
+    actor,
+    id ? '住民税を変更' : '住民税を登録',
+    `${fiscalYear}年度／年税額 ${formatYen(Number(annualAmount))}・6月分 ${formatYen(Number(juneAmount))}・7月以降 ${formatYen(Number(monthlyAmount))}`,
+    employeeId,
+    targetName
+  );
+  return { ok: true };
+}
+
+async function deleteResidentTax(row, actor = null, targetName = '') {
+  const { error } = await supabase.from('employee_resident_tax').delete().eq('id', row.id);
+  if (error) {
+    console.error('住民税の削除に失敗しました', error);
+    return { ok: false, message: error.message || '' };
+  }
+  await logAudit(actor, '住民税を削除', `${row.fiscalYear}年度`, row.employeeId, targetName);
+  return { ok: true };
+}
+
 async function saveStandardRemuneration(employeeId, year, month, payload) {
   const { error } = await supabase.from('employee_standard_remuneration').upsert(
     {
@@ -5649,6 +5723,7 @@ function AttendanceApp() {
                 monthlyConfirmations={data.monthlyConfirmations}
                 groupAttendanceSchedules={data.groupLeaveSchedules}
                 employeeAttendanceSchedules={data.employeeAttendanceSchedules}
+                settings={data.settings}
                 onSaveDraft={savePayrollDraft}
                 onPublish={publishPayroll}
                 onUnpublish={unpublishPayroll}
@@ -15552,8 +15627,61 @@ function computeSocialInsurance({ employee, standardRemuneration, rates, year, m
   };
 }
 
+// ============================================================
+// 住民税（特別徴収）の自動控除（supabase/80_resident_tax.sql）
+// ============================================================
+// 住民税は計算するものではありません。市町村から届く
+// 「特別徴収税額の決定通知書」の額をそのまま控除します。
+// employee_resident_tax に、年度ごとの 年税額・6月分・7月以降の月額 を写して持ちます。
+//
+// 年度は6月〜翌5月（2026年度＝2026年6月分〜2027年5月分）。
+// 年税額の100円未満の端数は6月分に寄せられるため、6月だけ額が違います。
+const SETTING_RESIDENT_TAX_OFFSET = 'resident_tax_month_offset';
+
+// 給与明細の対象月から、入れる住民税の年月を出します。
+//   next … 「10月分」の明細に11月分の住民税（その月に支払う給与から引く原則）
+//   same … 「10月分」の明細に10月分の住民税（社会保険料と同じ月に揃える運用）
+// どちらかは会社の運用次第なので、設定で切り替えられるようにしています。
+function residentTaxMonthFor(year, month, settings) {
+  const offset = String(settings?.[SETTING_RESIDENT_TAX_OFFSET] || 'next') === 'same' ? 0 : 1;
+  const total = (month - 1) + offset;
+  const taxYear = year + Math.floor(total / 12);
+  const taxMonth = (((total % 12) + 12) % 12) + 1;
+  // 住民税の年度は6月始まり
+  const fiscalYear = taxMonth >= 6 ? taxYear : taxYear - 1;
+  return { taxYear, taxMonth, fiscalYear };
+}
+
+// その月に控除する住民税。普通徴収の方からは控除しません。
+// 登録が無いときは null を返し、画面で手入力を促します。
+function computeResidentTax({ employee, residentTax, year, month, settings }) {
+  const { taxYear, taxMonth, fiscalYear } = residentTaxMonthFor(year, month, settings);
+  const method = String(employee?.residentTaxCollectionMethod || '特別徴収');
+  if (method !== '特別徴収') {
+    return { amount: 0, taxYear, taxMonth, fiscalYear, method, special: false, row: null };
+  }
+  if (!residentTax) {
+    return { amount: null, taxYear, taxMonth, fiscalYear, method, special: true, row: null };
+  }
+  const amount = taxMonth === 6 ? Number(residentTax.juneAmount) : Number(residentTax.monthlyAmount);
+  return {
+    amount: Number.isFinite(amount) ? Math.round(amount) : null,
+    taxYear, taxMonth, fiscalYear, method, special: true, row: residentTax,
+  };
+}
+
+// 通知書と合っているかの検算。6月分 ＋ 月額×11 ＝ 年税額
+function residentTaxCheck(row) {
+  if (!row) return null;
+  const sum = Number(row.juneAmount) + Number(row.monthlyAmount) * 11;
+  const annual = Number(row.annualAmount);
+  return { sum, annual, ok: sum === annual, diff: sum - annual };
+}
+
 // 自動で金額を入れる控除項目。ここに無いものは手入力のままです。
 const AUTO_DEDUCTION_KEYS = { 健康保険料: 'health', 介護保険料: 'nursing', 厚生年金保険料: 'pension' };
+// 住民税は別の仕組みで出すため、金額の取り出し方が違います
+const RESIDENT_TAX_LABEL = '住民税';
 const DEFAULT_DEDUCTION_LABELS = ['健康保険料', '介護保険料', '厚生年金保険料', '雇用保険料', '所得税', '住民税'];
 const sumItems = (items) => (items || []).reduce((s, it) => s + (Number(it.amount) || 0), 0);
 
@@ -15561,7 +15689,34 @@ const sumItems = (items) => (items || []).reduce((s, it) => s + (Number(it.amoun
 // 自動で入れた金額が何から出たのかを必ず見せます。
 // 「候補として入れて、確定は人が確認してから」という決め方のため、
 // 標準報酬月額・料率・保険料の対象月を画面で確かめられるようにしています。
-function SocialInsuranceNote({ social, standardRemuneration, insuranceRates, loading, employee, year, month, isPublished, differs = false, onApply }) {
+// 住民税の根拠を1行で出します（社会保険料の知らせの中に並べます）
+function ResidentTaxLine({ resident, employee }) {
+  if (!resident) return null;
+  const when = `${resident.taxYear}年${resident.taxMonth}月分`;
+  if (!resident.special) {
+    return (
+      <div className="text-[10.5px] opacity-80">
+        住民税：普通徴収のため給与からは控除しません（{employee.name}さんはご自身で納付）。
+      </div>
+    );
+  }
+  if (resident.amount == null) {
+    return (
+      <div className="text-[11px] font-bold">
+        住民税（{when}）は未登録のため0円です。
+        スタッフの「詳細」→「税・扶養」タブで、通知書の{resident.fiscalYear}年度分を登録してください。
+      </div>
+    );
+  }
+  return (
+    <div className="text-[10.5px] opacity-80">
+      住民税 <span className="font-mono font-bold">{formatYen(resident.amount)}</span>
+      （{when}・{resident.fiscalYear}年度の通知書{resident.taxMonth === 6 ? '／6月分は端数が寄るため額が違います' : ''}）
+    </div>
+  );
+}
+
+function SocialInsuranceNote({ social, standardRemuneration, insuranceRates, loading, employee, year, month, isPublished, differs = false, onApply, resident = null }) {
   if (loading) {
     return (
       <div className="rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-[11.5px] text-slate-400">
@@ -15580,6 +15735,7 @@ function SocialInsuranceNote({ social, standardRemuneration, insuranceRates, loa
           スタッフの「詳細」→「社会保険」タブで、等級表から選んで登録してください。
         </div>
         <div className="text-amber-700">健康保険料・介護保険料・厚生年金保険料は、下の欄に手で入れてください。</div>
+        <ResidentTaxLine resident={resident} employee={employee} />
       </div>
     );
   }
@@ -15638,6 +15794,7 @@ function SocialInsuranceNote({ social, standardRemuneration, insuranceRates, loa
           </span>
         ))}
       </div>
+      <ResidentTaxLine resident={resident} employee={employee} />
       <div className="text-[10.5px] opacity-80">
         標準報酬月額 健保 {formatYen(social.healthBase)}・厚年 {formatYen(social.pensionBase)}（{stdLabel}）
         ／ 料率 健保 {social.healthRate || '—'}%・介護 {social.nursingRate || '—'}%・厚年 {social.pensionRate || '—'}%
@@ -15701,7 +15858,7 @@ function PayrollItemsEditor({ title, items, onChange, addLabel = '項目を追�
   );
 }
 
-function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExpenseClaims = [], monthlyConfirmations = [], groupAttendanceSchedules = {}, employeeAttendanceSchedules = {}, onSaveDraft, onPublish, onUnpublish, isMasterAdmin = false, onUpdateWage, isDesktop }) {
+function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExpenseClaims = [], monthlyConfirmations = [], groupAttendanceSchedules = {}, employeeAttendanceSchedules = {}, settings = {}, onSaveDraft, onPublish, onUnpublish, isMasterAdmin = false, onUpdateWage, isDesktop }) {
   const now = new Date();
   const [employeeId, setEmployeeId] = useState(employeeAccounts[0]?.id || '');
   const [year, setYear] = useState(now.getFullYear());
@@ -15720,6 +15877,8 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
   const [standardRemuneration, setStandardRemuneration] = useState(null);
   const [insuranceRates, setInsuranceRates] = useState(null);
   const [insuranceLoading, setInsuranceLoading] = useState(true);
+  // 住民税（特別徴収）。年度ごとに登録された通知書の数字を使います
+  const [residentTaxRow, setResidentTaxRow] = useState(null);
 
   const employee = employeeAccounts.find((a) => a.id === employeeId);
   const existing = payrollRecords.find((p) => p.employeeId === employeeId && p.year === year && p.month === month);
@@ -15752,13 +15911,16 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     let cancelled = false;
     setInsuranceLoading(true);
     (async () => {
-      const [std, rates] = await Promise.all([
+      const { fiscalYear } = residentTaxMonthFor(year, month, settings);
+      const [std, rates, rtax] = await Promise.all([
         fetchEffectiveStandardRemuneration(employeeId, year, month),
         fetchInsuranceRateSettings(),
+        fetchResidentTax(employeeId, fiscalYear),
       ]);
       if (cancelled) return;
       setStandardRemuneration(std);
       setInsuranceRates(rates);
+      setResidentTaxRow(rtax);
       setInsuranceLoading(false);
     })();
     return () => { cancelled = true; };
@@ -15790,6 +15952,15 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     rates: insuranceRates,
     year,
     month,
+  }) : null;
+
+  // 住民税（特別徴収）。普通徴収の方は0円、未登録なら null（手入力）
+  const resident = employee ? computeResidentTax({
+    employee,
+    residentTax: residentTaxRow,
+    year,
+    month,
+    settings,
   }) : null;
 
   const preview = employee ? computePayrollPreview({
@@ -15824,6 +15995,9 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
       // 標準報酬月額や料率が未設定のときは0のままにして、画面で知らせます。
       setDeductionItems([
         ...DEFAULT_DEDUCTION_LABELS.map((label) => {
+          if (label === RESIDENT_TAX_LABEL) {
+            return { label, amount: resident?.amount == null ? 0 : resident.amount };
+          }
           const key = AUTO_DEDUCTION_KEYS[label];
           const auto = key && social ? social[key] : null;
           return { label, amount: auto == null ? 0 : auto };
@@ -15838,7 +16012,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     // 届いた時点で控除の候補を入れ直せるよう、ここに入れています。
     // social は毎回あたらしい物になるので入れません（入れると繰り返し動きます）。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [employeeId, year, month, existing?.id, employeeSalaryItems, approvedCommuteTotal, standardRemuneration, insuranceRates]);
+  }, [employeeId, year, month, existing?.id, employeeSalaryItems, approvedCommuteTotal, standardRemuneration, insuranceRates, residentTaxRow]);
 
   if (!employee) {
     return <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-6 py-14 text-center text-[12.5px] text-slate-300">スタッフが登録されていません</div>;
@@ -15850,11 +16024,15 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
 
   // 自動計算した社会保険料の、その月の確定値（介護の対象外は0円）
   const socialAmounts = () => {
-    if (!social) return [];
-    return Object.entries(AUTO_DEDUCTION_KEYS).map(([label, key]) => ({
-      label,
-      value: key === 'nursing' && !social.nursingTarget ? 0 : social[key],
-    })).filter((x) => x.value != null); // 料率が未設定のものは触らない
+    const out = social
+      ? Object.entries(AUTO_DEDUCTION_KEYS).map(([label, key]) => ({
+          label,
+          value: key === 'nursing' && !social.nursingTarget ? 0 : social[key],
+        }))
+      : [];
+    // 住民税も同じ仕組みで入れ直します
+    if (resident && resident.amount != null) out.push({ label: RESIDENT_TAX_LABEL, value: resident.amount });
+    return out.filter((x) => x.value != null); // 未設定のものは触らない
   };
 
   // いま欄に入っている金額が、計算した金額と違うか
@@ -16035,6 +16213,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
           isPublished={isPublished}
           differs={socialDiffers}
           onApply={applySocialInsurance}
+          resident={resident}
         />
         <PayrollItemsEditor title="控除項目" items={deductionItems} onChange={setDeductionItems} addLabel="控除項目を追加" />
 
@@ -21700,6 +21879,213 @@ function PaidLeaveHistoryPanel({ balance, isDesktop }) {
   );
 }
 
+// ---- 住民税（特別徴収）の登録（スタッフ詳細→税・扶養） ----
+// 市町村から届く通知書の数字をそのまま写します。計算はしません。
+// 年度は6月〜翌5月。6月分だけ端数が寄せられて額が違います。
+function ResidentTaxPanel({ employee, actor, isMasterAdmin, collectionMethod, isDesktop }) {
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [editing, setEditing] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const reload = async () => {
+    setLoading(true);
+    setRows(await fetchResidentTaxList(employee.id));
+    setLoading(false);
+  };
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const list = await fetchResidentTaxList(employee.id);
+      if (!cancelled) { setRows(list); setLoading(false); }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [employee.id]);
+
+  // 住民税の年度は6月始まり。いまが5月以前なら前の年度です。
+  const now = new Date();
+  const currentFiscalYear = now.getMonth() + 1 >= 6 ? now.getFullYear() : now.getFullYear() - 1;
+
+  const startAdd = () => {
+    setError('');
+    setEditing({ fiscalYear: String(currentFiscalYear), annualAmount: '', juneAmount: '', monthlyAmount: '', note: '' });
+  };
+  const startEdit = (r) => {
+    setError('');
+    setEditing({
+      id: r.id, fiscalYear: String(r.fiscalYear), annualAmount: String(r.annualAmount),
+      juneAmount: String(r.juneAmount), monthlyAmount: String(r.monthlyAmount), note: r.note,
+    });
+  };
+
+  const draftCheck = editing
+    ? residentTaxCheck({
+        annualAmount: Number(editing.annualAmount) || 0,
+        juneAmount: Number(editing.juneAmount) || 0,
+        monthlyAmount: Number(editing.monthlyAmount) || 0,
+      })
+    : null;
+
+  const save = async () => {
+    const fy = Number(editing.fiscalYear);
+    const nums = [editing.annualAmount, editing.juneAmount, editing.monthlyAmount].map(Number);
+    if (!Number.isInteger(fy) || fy < 2000 || fy > 2100) { setError('年度を正しく入れてください。'); return; }
+    if (nums.some((v) => !Number.isFinite(v) || v < 0)) { setError('金額は0以上の数字で入れてください。'); return; }
+    const clash = rows.find((r) => r.fiscalYear === fy && r.id !== editing.id);
+    if (clash) { setError(`${fy}年度はすでに登録されています。その行を直してください。`); return; }
+    setSaving(true);
+    const res = await saveResidentTax(
+      { ...editing, fiscalYear: fy, annualAmount: nums[0], juneAmount: nums[1], monthlyAmount: nums[2], employeeId: employee.id },
+      actor, employee.name
+    );
+    setSaving(false);
+    if (!res.ok) { setError(`保存できませんでした。${res.message}`); return; }
+    setEditing(null);
+    await reload();
+  };
+
+  const remove = async (r) => {
+    if (!window.confirm(`${r.fiscalYear}年度の住民税を削除します。よろしいですか？`)) return;
+    setSaving(true);
+    const res = await deleteResidentTax({ ...r, employeeId: employee.id }, actor, employee.name);
+    setSaving(false);
+    if (!res.ok) { setError(`削除できませんでした。${res.message}`); return; }
+    await reload();
+  };
+
+  if (!isMasterAdmin) {
+    return (
+      <div className="rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-[11.5px] text-slate-500">
+        住民税の税額を見られるのはマスター管理者だけです。
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-xl border border-slate-200 overflow-hidden">
+      <div className="px-3.5 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center gap-2 flex-wrap">
+        <span className="text-[12px] font-bold text-slate-600">住民税の税額（通知書の数字）</span>
+        {!editing && (
+          <button onClick={startAdd} className="ml-auto rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-[11.5px] font-bold text-slate-600">
+            年度を追加する
+          </button>
+        )}
+      </div>
+
+      {collectionMethod === '普通徴収' && (
+        <div className="px-3.5 py-2 text-[11px] text-slate-500 bg-amber-50 border-b border-amber-200">
+          徴収方法が「普通徴収」のため、給与からは控除しません。ご本人が納付します。
+        </div>
+      )}
+
+      {editing && (
+        <div className="px-3.5 py-3 border-b border-slate-200 bg-amber-50/40 space-y-2.5">
+          <div className={`grid gap-2.5 ${isDesktop ? 'grid-cols-4' : 'grid-cols-2'}`}>
+            <Field label="年度（6月始まり）">
+              <input type="number" value={editing.fiscalYear}
+                onChange={(e) => setEditing((p) => ({ ...p, fiscalYear: e.target.value }))}
+                className="w-full box-border border border-slate-200 rounded-lg px-2.5 py-2 font-mono text-[13px] bg-white" />
+            </Field>
+            <Field label="年税額（円）">
+              <input type="number" min="0" value={editing.annualAmount}
+                onChange={(e) => setEditing((p) => ({ ...p, annualAmount: e.target.value }))}
+                className="w-full box-border border border-slate-200 rounded-lg px-2.5 py-2 font-mono text-[13px] text-right bg-white" />
+            </Field>
+            <Field label="6月分（円）">
+              <input type="number" min="0" value={editing.juneAmount}
+                onChange={(e) => setEditing((p) => ({ ...p, juneAmount: e.target.value }))}
+                className="w-full box-border border border-slate-200 rounded-lg px-2.5 py-2 font-mono text-[13px] text-right bg-white" />
+            </Field>
+            <Field label="7月〜翌5月（円／月）">
+              <input type="number" min="0" value={editing.monthlyAmount}
+                onChange={(e) => setEditing((p) => ({ ...p, monthlyAmount: e.target.value }))}
+                className="w-full box-border border border-slate-200 rounded-lg px-2.5 py-2 font-mono text-[13px] text-right bg-white" />
+            </Field>
+          </div>
+
+          {/* 通知書と合っているかの検算 */}
+          {draftCheck && (Number(editing.annualAmount) > 0) && (
+            <div className={`rounded-lg px-2.5 py-1.5 text-[11px] ${draftCheck.ok ? 'border border-teal-200 bg-teal-50 text-teal-800' : 'border border-rose-200 bg-rose-50 text-rose-700'}`}>
+              {draftCheck.ok
+                ? `検算：6月分 ＋ 月額×11 ＝ ${formatYen(draftCheck.sum)}　年税額と一致しています。`
+                : `検算が合いません：6月分 ＋ 月額×11 ＝ ${formatYen(draftCheck.sum)} で、年税額 ${formatYen(draftCheck.annual)} と ${formatYen(Math.abs(draftCheck.diff))} 違います。通知書をもう一度ご確認ください。`}
+            </div>
+          )}
+
+          <Field label="メモ（任意）">
+            <input value={editing.note} onChange={(e) => setEditing((p) => ({ ...p, note: e.target.value }))}
+              placeholder="例）2026年5月受領の通知書より"
+              className="w-full border border-slate-200 rounded-lg px-2.5 py-2 text-[13px] bg-white" />
+          </Field>
+          <div className="text-[10.5px] text-slate-500 leading-relaxed">
+            通知書の数字をそのまま入れてください。計算で出した額は通知書と合わないことがあり、
+            合わないと市町村への納付額がずれます。検算が合わない場合は保存できますが、必ず通知書をご確認ください。
+          </div>
+          {error && <div className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-700">{error}</div>}
+          <div className="flex gap-2">
+            <button onClick={() => { setEditing(null); setError(''); }} className="flex-1 rounded-lg border border-slate-300 bg-white py-2 text-[12.5px] font-bold text-slate-600">やめる</button>
+            <button onClick={save} disabled={saving} className="flex-1 rounded-lg bg-slate-800 py-2 text-[12.5px] font-bold text-white disabled:bg-slate-300">{saving ? '保存中…' : '保存する'}</button>
+          </div>
+        </div>
+      )}
+
+      {loading ? (
+        <div className="px-3.5 py-5 text-center text-[11.5px] text-slate-300">読み込み中…</div>
+      ) : rows.length === 0 ? (
+        <div className="px-3.5 py-5 text-center text-[11.5px] text-slate-300">まだ登録がありません</div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-[11.5px]">
+            <thead className="bg-white text-slate-500">
+              <tr className="text-left">
+                <th className="px-3 py-1.5 font-medium whitespace-nowrap">年度</th>
+                <th className="px-2 py-1.5 font-medium text-right whitespace-nowrap">年税額</th>
+                <th className="px-2 py-1.5 font-medium text-right whitespace-nowrap">6月分</th>
+                <th className="px-2 py-1.5 font-medium text-right whitespace-nowrap">7月〜翌5月</th>
+                <th className="px-2 py-1.5 font-medium whitespace-nowrap">検算</th>
+                <th className="px-2 py-1.5 font-medium text-right whitespace-nowrap"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => {
+                const chk = residentTaxCheck(r);
+                return (
+                  <tr key={r.id} className="border-t border-slate-100">
+                    <td className="px-3 py-1.5 font-mono whitespace-nowrap">
+                      {r.fiscalYear}年度
+                      <span className="ml-1 text-[10px] text-slate-400">{r.fiscalYear}/6〜{r.fiscalYear + 1}/5</span>
+                    </td>
+                    <td className="px-2 py-1.5 text-right font-mono">{formatYen(r.annualAmount)}</td>
+                    <td className="px-2 py-1.5 text-right font-mono font-bold">{formatYen(r.juneAmount)}</td>
+                    <td className="px-2 py-1.5 text-right font-mono">{formatYen(r.monthlyAmount)}</td>
+                    <td className="px-2 py-1.5 whitespace-nowrap">
+                      {chk.ok
+                        ? <span className="text-[10.5px] font-bold text-teal-700">合う</span>
+                        : <span className="text-[10.5px] font-bold text-rose-600">{formatYen(chk.diff)}ずれ</span>}
+                    </td>
+                    <td className="px-2 py-1.5 text-right whitespace-nowrap">
+                      <button onClick={() => startEdit(r)} className="text-[11px] font-bold text-slate-500 px-1">直す</button>
+                      <button onClick={() => remove(r)} className="text-[11px] font-bold text-rose-500 px-1">削除</button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div className="px-3.5 py-2 border-t border-slate-100 text-[10.5px] text-slate-400 leading-relaxed">
+        年度は6月始まりです（2026年度＝2026年6月分〜2027年5月分）。
+        年税額の100円未満の端数は6月分に寄せられるため、6月だけ額が違います。
+        この数字は給与の控除欄に自動で入ります。
+      </div>
+    </div>
+  );
+}
+
 function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSaveMyNumber, isMasterAdmin, knownGroups = [], groupAttendanceSchedules = {}, employeeAttendanceSchedule = {}, onSaveEmployeeAttendance, resignationReasons = [], settings = {}, actor = null, leaveGrants = [], leaveRequests = [], onLeaveGrantsChanged, isDesktop }) {
   const [activeTab, setActiveTab] = useState('basic');
   const containerRef = useRef(null);
@@ -22626,6 +23012,14 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                   <option value="普通徴収">普通徴収</option>
                 </select>
               </Field>
+
+              <ResidentTaxPanel
+                employee={account}
+                actor={actor}
+                isMasterAdmin={isMasterAdmin}
+                collectionMethod={form.residentTaxCollectionMethod}
+                isDesktop={isDesktop}
+              />
 
               <div className="text-[11px] font-bold text-slate-400 pt-2">税区分情報</div>
               <Field label="税額表区分">
