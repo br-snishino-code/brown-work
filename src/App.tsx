@@ -477,6 +477,10 @@ function statutoryGrantSchedule(employee, asOfKey) {
   const table = isProportionalLeaveStaffType(employee.staffType) && employee.scheduledWeeklyDays
     ? PROPORTIONAL_LEAVE_TABLE[employee.scheduledWeeklyDays]
     : null;
+  // 退職した方には、退職日より後の付与は起きません（継続勤務していないため）。
+  // 退職日当日の付与は、その日まで在籍しているので起きます。
+  const resign = /^\d{4}-\d{2}-\d{2}$/.test(String(employee.resignationDate || '')) ? employee.resignationDate : '';
+  const limitKey = resign && resign < asOfKey ? resign : asOfKey;
   const out = [];
   STATUTORY_LEAVE_SCHEDULE.forEach((tier, i) => {
     out.push({ dateKey: addMonthsKey(employee.hireDate, tier.months), days: table ? table[i] : tier.days });
@@ -485,10 +489,10 @@ function statutoryGrantSchedule(employee, asOfKey) {
   const lastDays = table ? table[table.length - 1] : last.days;
   for (let months = last.months + 12; ; months += 12) {
     const dateKey = addMonthsKey(employee.hireDate, months);
-    if (dateKey > asOfKey) break;
+    if (dateKey > limitKey) break;
     out.push({ dateKey, days: lastDays });
   }
-  return out.filter((g) => g.dateKey <= asOfKey);
+  return out.filter((g) => g.dateKey <= limitKey);
 }
 
 // 消化を古い付与から順に充てます（繰越分が先に消える）。
@@ -504,10 +508,14 @@ function allocatePaidLeave(grants, usages, asOfKey) {
     })
     .sort((a, b) => (a.dateKey < b.dateKey ? -1 : a.dateKey > b.dateKey ? 1 : 0));
   const shortages = [];
+  // 消化1件ごとに「どの付与から何日充てたか」を残します。
+  // 履歴の画面と年次有給休暇管理簿で、基準日（付与日）を示すのに使います。
+  const entries = [];
   [...usages]
     .sort((a, b) => (a.dateKey < b.dateKey ? -1 : a.dateKey > b.dateKey ? 1 : 0))
     .forEach((u) => {
       let left = Number(u.days) || 0;
+      const from = [];
       for (const g of pool) {
         if (left <= 0) break;
         if (g.dateKey > u.dateKey) continue;         // まだ付与されていない
@@ -516,19 +524,68 @@ function allocatePaidLeave(grants, usages, asOfKey) {
         if (take <= 0) continue;
         g.used = r1(g.used + take);
         left = r1(left - take);
+        from.push({ grantDateKey: g.dateKey, days: take });
       }
+      entries.push({ ...u, from, shortage: left > 0 ? left : 0 });
       if (left > 0) shortages.push({ dateKey: u.dateKey, days: left });
     });
   const live = pool.filter((g) => g.dateKey <= asOfKey && g.expiresOnKey > asOfKey);
   const granted = r1(live.reduce((s, g) => s + g.days, 0));
   const remaining = r1(live.reduce((s, g) => s + r1(g.days - g.used), 0));
-  return { pool, live, granted, remaining, usedFromLive: r1(granted - remaining), shortages };
+  return { pool, live, granted, remaining, usedFromLive: r1(granted - remaining), shortages, entries };
 }
 
 // app_settings から移行日を読みます。未設定なら空文字（＝全期間を計算に入れる）。
 function leaveMigrationDateKey(settings) {
   const v = String(settings?.[SETTING_LEAVE_MIGRATION_DATE] || '').slice(0, 10);
   return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : '';
+}
+
+// 付与・消化・時効を1本の時系列にして返します（古い順）。
+// 残日数の移り変わりも一緒に出すので、どの時点で何日あったかを追えます。
+//
+// ・grant  … 付与（基準日）
+// ・use    … 有休の取得（承認済みのみ）
+// ・expire … 時効で消えた分（使い切れなかった日数があるときだけ出ます）
+//
+// 同じ日に重なったときは 付与 → 取得 → 時効 の順に並べます。
+// 残日数を日の途中で逆転させないためです（付与された当日に使える、
+// 使える最後の日に使えば時効では消えない）。
+const LEAVE_EVENT_ORDER = { grant: 0, use: 1, expire: 2 };
+function paidLeaveHistory(balance) {
+  if (!balance) return [];
+  const rows = [];
+  (balance.pool || []).forEach((g) => {
+    rows.push({
+      type: 'grant', dateKey: g.dateKey, days: g.days,
+      kind: g.kind, note: g.note || '', lastUsableKey: g.lastUsableKey,
+    });
+    const leftOver = r1(g.days - g.used);
+    if (leftOver > 0 && g.expiresOnKey <= todayKey()) {
+      rows.push({
+        type: 'expire', dateKey: g.expiresOnKey, days: leftOver,
+        grantDateKey: g.dateKey, lastUsableKey: g.lastUsableKey,
+      });
+    }
+  });
+  (balance.entries || []).forEach((e) => {
+    rows.push({
+      type: 'use', dateKey: e.dateKey, days: e.days,
+      endDateKey: e.endDateKey, halfDay: e.halfDay, reason: e.reason,
+      from: e.from || [], shortage: e.shortage || 0, id: e.id,
+    });
+  });
+  rows.sort((a, b) => {
+    if (a.dateKey !== b.dateKey) return a.dateKey < b.dateKey ? -1 : 1;
+    return LEAVE_EVENT_ORDER[a.type] - LEAVE_EVENT_ORDER[b.type];
+  });
+  // そのときどきの残日数
+  let running = 0;
+  rows.forEach((row) => {
+    running = r1(running + (row.type === 'grant' ? row.days : -row.days));
+    row.balanceAfter = running;
+  });
+  return rows;
 }
 
 // スタッフ1人分の有休の残日数と内訳。画面はこれを使ってください。
@@ -566,7 +623,15 @@ function computePaidLeaveBalance({ employee, grantRows = [], leaveRequests = [],
   const mine = leaveRequests.filter((l) => l.employeeId === employee.id && l.type === '有休' && l.status === 'approved');
   const usages = mine
     .filter((l) => !migrationDateKey || l.startDate >= migrationDateKey)
-    .map((l) => ({ dateKey: l.startDate, days: Number(l.days) || 0 }));
+    .map((l) => ({
+      dateKey: l.startDate,
+      days: Number(l.days) || 0,
+      id: l.id,
+      endDateKey: l.endDate,
+      halfDay: !!l.halfDay,
+      reason: l.reason || '',
+      decidedAt: l.decidedAt || null,
+    }));
 
   const alloc = allocatePaidLeave([...byDate.values()], usages, asOfKey);
   const adjustment = Number(employee.leaveAdjustment) || 0;
@@ -5394,6 +5459,15 @@ function AttendanceApp() {
               <PaidLeaveSummaryTab
                 employeeAccounts={employeeAccounts}
                 leaveRequests={data.leaveRequests}
+                isDesktop={isDesktop}
+              />
+            )}
+            {!showStaffScreens && (
+              <PaidLeaveLedgerTab
+                employeeAccounts={employeeAccounts}
+                leaveGrants={data.leaveGrants}
+                leaveRequests={data.leaveRequests}
+                settings={data.settings}
                 isDesktop={isDesktop}
               />
             )}
@@ -12449,6 +12523,256 @@ function ResignationReasonSettings({ reasons = [], onRefresh, isDesktop }) {
             </tbody>
           </table>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ---- 年次有給休暇管理簿の出力（労務タブ） ----
+//
+// 労働基準法施行規則第24条の7
+//   … 年次有給休暇を与えたときは、時季・日数・基準日を労働者ごとに明らかにした
+//     書類（年次有給休暇管理簿）を作成し、当該年休を与えた期間中および
+//     その期間の満了後3年間保存しなければならない
+// 保存期間は労働基準法第109条で5年、附則第143条第1項の経過措置により当分の間3年。
+//
+// 「基準日」＝付与日のことです。この帳簿では付与日と呼び方を揃えています。
+
+// 付与ごとの対象期間（その付与日から、次の付与日の前日まで）を出します。
+// 最後の付与は1年後の前日までとします。
+function paidLeaveGrantPeriods(pool) {
+  const sorted = [...(pool || [])].sort((a, b) => (a.dateKey < b.dateKey ? -1 : 1));
+  return sorted.map((g, i) => {
+    const next = sorted[i + 1];
+    const endKey = next ? dayBeforeKey(next.dateKey) : periodEndKey(g.dateKey, 12);
+    return { ...g, periodStartKey: g.dateKey, periodEndKey: endKey };
+  });
+}
+
+function dayBeforeKey(key) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(key || ''))) return key;
+  const d = new Date(key + 'T00:00:00');
+  d.setDate(d.getDate() - 1);
+  return todayKey(d);
+}
+
+function PaidLeaveLedgerTab({ employeeAccounts, leaveGrants = [], leaveRequests = [], settings = {}, isDesktop }) {
+  const [targetId, setTargetId] = useState('all');
+  const [includeRetired, setIncludeRetired] = useState(false);
+
+  const targets = useMemo(
+    () => (employeeAccounts || []).filter((a) => a.hireDate && (includeRetired || !a.resignationDate)),
+    [employeeAccounts, includeRetired]
+  );
+  const selected = targetId === 'all' ? targets : targets.filter((a) => a.id === targetId);
+
+  const built = selected.map((account) => {
+    const balance = computePaidLeaveBalance({ employee: account, grantRows: leaveGrants, leaveRequests, settings });
+    return { account, balance, history: paidLeaveHistory(balance), periods: paidLeaveGrantPeriods(balance.pool) };
+  });
+
+  const migrationDateKey = leaveMigrationDateKey(settings);
+  const totalUses = built.reduce((s, b) => s + b.history.filter((r) => r.type === 'use').length, 0);
+
+  const exportExcel = () => {
+    const wb = XLSX.utils.book_new();
+
+    const about = [
+      ['年次有給休暇管理簿'],
+      [],
+      ['出力日', todayKey()],
+      ['対象人数', `${built.length}名`],
+      ['退職者を含むか', includeRetired ? '含む' : '含まない'],
+      [],
+      ['■ この帳簿の位置づけ'],
+      ['労働基準法施行規則第24条の7により、年次有給休暇を与えたときは、'],
+      ['時季・日数・基準日を労働者ごとに明らかにした書類の作成が義務づけられています。'],
+      ['この帳簿の「付与日」が、同条でいう「基準日」にあたります。'],
+      [],
+      ['■ 保存期間'],
+      ['労働基準法第109条では5年間ですが、同法附則第143条第1項の経過措置により、当分の間3年間です。'],
+      ['起算日は年次有給休暇を与えた期間の満了日です。'],
+      [],
+      ['■ 数字の前提（必ずお読みください）'],
+      ['・付与日数は、入職日からの勤続期間に応じた労働基準法39条の日数です。'],
+      ['　週の所定労働日数を登録しているスタッフは比例付与の日数を使っています。'],
+      ['・時効は2年です（労働基準法第115条）。付与日から2年後の応当日の前日までが有効で、'],
+      ['　応当日がない場合はその月の末日までです（民法第143条第2項）。'],
+      ['・繰り越した分から先に消化する扱いにしています。'],
+      ['・取得日数は、管理者が承認した申請のみを数えています。却下・未承認は含みません。'],
+      [],
+      ['■ この帳簿に含まれていないもの'],
+      migrationDateKey
+        ? [`・移行日（${dateLabelY(migrationDateKey)}）より前の付与と取得は含まれていません。`]
+        : ['・移行日が未設定のため、入職以来すべてを対象にしています。'],
+      migrationDateKey
+        ? ['　移行前の記録は、移行元のシステム（ジョブカン）の記録をご確認ください。']
+        : [],
+      ['・年5日の取得義務の判定は、この帳簿には入れていません。'],
+      ['　画面の「労務」タブにある「有休取得状況」でご確認ください。'],
+      ['・振替休暇・代休・特別休暇は年次有給休暇ではないため含みません。'],
+    ].filter((row) => row.length > 0);
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(about), 'この帳簿について');
+
+    // --- 一覧 ---
+    const summaryRows = [
+      [`年次有給休暇管理簿 一覧（${todayKey()}現在）`],
+      [],
+      ['氏名', '社員番号', '入職日', '直近の基準日', 'いま使える日数', '取得済み', '残日数', '引き継ぎ待ち'],
+      ...built.map(({ account, balance }) => {
+        const latest = [...balance.live].sort((a, b) => (a.dateKey < b.dateKey ? 1 : -1))[0];
+        return [
+          account.name,
+          account.staffNumber || '',
+          account.hireDate || '',
+          latest ? latest.dateKey : '',
+          balance.pendingCarryover ? '' : balance.granted,
+          balance.pendingCarryover ? '' : balance.usedFromLive,
+          balance.pendingCarryover ? '' : balance.remaining,
+          balance.pendingCarryover ? '引き継ぎ待ち' : '',
+        ];
+      }),
+    ];
+    const sumWs = XLSX.utils.aoa_to_sheet(summaryRows);
+    sumWs['!cols'] = [{ wch: 16 }, { wch: 10 }, { wch: 12 }, { wch: 13 }, { wch: 14 }, { wch: 10 }, { wch: 9 }, { wch: 13 }];
+    XLSX.utils.book_append_sheet(wb, sumWs, '一覧');
+
+    // --- 1人1シート ---
+    const used = new Set(['この帳簿について', '一覧']);
+    built.forEach(({ account, balance, history, periods }) => {
+      const uses = history.filter((r) => r.type === 'use');
+      const aoa = [
+        ['年次有給休暇管理簿'],
+        ['氏名', account.name, '', '社員番号', account.staffNumber || ''],
+        ['入職日', account.hireDate || '', '', '出力日', todayKey()],
+        ...(account.resignationDate ? [['退職日', account.resignationDate]] : []),
+        [],
+        ['■ 基準日ごとの付与と消化'],
+        ['基準日（付与日）', '付与日数', '出所', '消化', '残', '使える最後の日', '対象期間'],
+        ...periods.map((g) => [
+          g.dateKey,
+          g.days,
+          g.kind === 'statutory' ? '法定' : g.kind === 'carryover' ? '引き継ぎ' : '手動',
+          g.used,
+          r1(g.days - g.used),
+          g.lastUsableKey,
+          `${g.periodStartKey}〜${g.periodEndKey}`,
+        ]),
+        [],
+        ['■ 時季（取得した日）'],
+        ['取得日', '終了日', '日数', '単位', '充てた基準日', '理由'],
+        ...(uses.length
+          ? uses.map((u) => [
+              u.dateKey,
+              u.endDateKey || u.dateKey,
+              u.days,
+              u.halfDay ? '半休' : '全休',
+              (u.from || []).map((f) => `${f.grantDateKey}（${fmtDays(f.days)}日）`).join(' / ') || '充てられる付与なし',
+              u.reason || '',
+            ])
+          : [['取得なし', '', '', '', '', '']]),
+        [],
+        ['合計', '', uses.reduce((s, u) => s + u.days, 0), '', '', ''],
+        [],
+        ['■ いまの残日数'],
+        balance.pendingCarryover
+          ? ['引き継ぎ待ちのため未確定']
+          : ['残日数', balance.remaining, ...(balance.adjustment ? ['うち手動調整', balance.adjustment] : [])],
+      ];
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      ws['!cols'] = [{ wch: 16 }, { wch: 12 }, { wch: 10 }, { wch: 8 }, { wch: 8 }, { wch: 16 }, { wch: 26 }];
+      XLSX.utils.book_append_sheet(wb, ws, toSheetName(account.name, used));
+    });
+
+    const who = targetId === 'all' ? '全員' : (selected[0]?.name || '');
+    XLSX.writeFile(wb, `年次有給休暇管理簿_${todayKey()}_${who}.xlsx`);
+  };
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
+      <h2 className="font-bold text-[14px] text-slate-800 flex items-center gap-2">
+        <ClipboardList size={16} className="text-slate-400" />年次有給休暇管理簿の出力
+      </h2>
+      <div className="text-[11.5px] text-slate-500 leading-relaxed">
+        労働基準法施行規則第24条の7で作成が義務づけられている帳簿です（保存3年）。
+        基準日（付与日）・日数・時季（取得した日）をスタッフごとに出します。
+      </div>
+
+      <div className={`grid gap-3 ${isDesktop ? 'grid-cols-2' : 'grid-cols-1'}`}>
+        <Field label="対象スタッフ">
+          <select
+            value={targetId}
+            onChange={(e) => setTargetId(e.target.value)}
+            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white"
+          >
+            <option value="all">全員（{targets.length}名）</option>
+            {targets.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+          </select>
+        </Field>
+        <label className="flex items-center gap-2 cursor-pointer self-end pb-2">
+          <input
+            type="checkbox"
+            checked={includeRetired}
+            onChange={(e) => { setIncludeRetired(e.target.checked); setTargetId('all'); }}
+            className="h-4 w-4 accent-slate-700"
+          />
+          <span className="text-[12px] text-slate-600">退職した方も含める（保存義務の確認用）</span>
+        </label>
+      </div>
+
+      {built.length === 0 ? (
+        <div className="px-5 py-8 text-center text-[12.5px] text-slate-300">対象のスタッフがいません（入職日が未登録の方は出ません）</div>
+      ) : (
+        <div className="overflow-x-auto border border-slate-200 rounded-xl">
+          <table className="w-full text-[11.5px]">
+            <thead className="bg-slate-50 text-slate-500">
+              <tr className="text-left">
+                <th className="px-3 py-2 font-medium whitespace-nowrap">氏名</th>
+                <th className="px-2 py-2 font-medium whitespace-nowrap">直近の基準日</th>
+                <th className="px-2 py-2 font-medium text-right whitespace-nowrap">使える日数</th>
+                <th className="px-2 py-2 font-medium text-right whitespace-nowrap">取得</th>
+                <th className="px-2 py-2 font-medium text-right whitespace-nowrap">残</th>
+                <th className="px-2 py-2 font-medium text-right whitespace-nowrap">履歴</th>
+              </tr>
+            </thead>
+            <tbody>
+              {built.map(({ account, balance, history }) => {
+                const latest = [...balance.live].sort((a, b) => (a.dateKey < b.dateKey ? 1 : -1))[0];
+                return (
+                  <tr key={account.id} className="border-t border-slate-100">
+                    <td className="px-3 py-2 font-semibold text-slate-800 whitespace-nowrap">
+                      <EmployeeLink id={account.id} name={account.name} />
+                      {account.resignationDate && <span className="ml-1.5 text-[10.5px] text-slate-400">退職</span>}
+                    </td>
+                    <td className="px-2 py-2 font-mono text-slate-600 whitespace-nowrap">{latest ? dateLabelY(latest.dateKey) : '—'}</td>
+                    {balance.pendingCarryover ? (
+                      <td colSpan={3} className="px-2 py-2 text-[11px] font-bold text-amber-700">引き継ぎ待ち</td>
+                    ) : (
+                      <>
+                        <td className="px-2 py-2 text-right font-mono text-slate-600">{fmtDays(balance.granted)}</td>
+                        <td className="px-2 py-2 text-right font-mono text-slate-600">{fmtDays(balance.usedFromLive)}</td>
+                        <td className="px-2 py-2 text-right font-mono font-bold text-slate-800">{fmtDays(balance.remaining)}</td>
+                      </>
+                    )}
+                    <td className="px-2 py-2 text-right font-mono text-slate-400">{history.length}件</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <button
+        onClick={exportExcel}
+        disabled={built.length === 0}
+        className="w-full rounded-xl bg-slate-800 py-3 text-[13.5px] font-bold text-white disabled:bg-slate-200"
+      >
+        Excelで出力する（{built.length}名・取得{totalUses}件）
+      </button>
+      <div className="text-[10.5px] text-slate-400 leading-relaxed">
+        1人につき1シート出します。「この帳簿について」のシートに、数字の前提と含まれていないものを書いています。
+        {migrationDateKey && `移行日（${dateLabelY(migrationDateKey)}）より前の記録は含まれません。`}
       </div>
     </div>
   );
@@ -20782,7 +21106,7 @@ function PaidLeaveGrantsPanel({ employee, grantRows = [], leaveRequests = [], se
         ) : (
           <span className="text-[11px] text-slate-400">
             残 <span className="font-mono font-bold text-slate-700">{fmtDays(balance.remaining)}</span>日
-            （使える分 {fmtDays(balance.granted)}日・消化 {fmtDays(balance.usedFromLive)}日）
+            （いま使える付与 {fmtDays(balance.granted)}日・うち消化 {fmtDays(balance.usedFromLive)}日）
           </span>
         )}
         <button
@@ -20965,6 +21289,124 @@ function PaidLeaveGrantsPanel({ employee, grantRows = [], leaveRequests = [], se
         同じ付与日で「手動」の行を登録すると上書きできます。
         消化は使える期限が古い付与から順に充てています（繰越分が先に消えます）。
         {migrationDateKey && `移行日（${dateLabelY(migrationDateKey)}）より前の付与と消化は計算に入れていません。`}
+      </div>
+
+      <PaidLeaveHistoryPanel balance={balance} isDesktop={isDesktop} />
+    </div>
+  );
+}
+
+// ---- 付与と消化の履歴（スタッフ詳細） ----
+// 付与・取得・時効を日付順に並べ、そのときどきの残日数も出します。
+// 取得は承認済みのものだけです（却下・未承認は残日数に関わらないため）。
+const LEAVE_EVENT_LABEL = {
+  grant: { text: '付与', cls: 'text-teal-700 bg-teal-50 border-teal-200' },
+  use: { text: '取得', cls: 'text-slate-600 bg-slate-50 border-slate-200' },
+  expire: { text: '時効', cls: 'text-rose-600 bg-rose-50 border-rose-200' },
+};
+const LEAVE_HISTORY_PREVIEW = 20;
+
+function PaidLeaveHistoryPanel({ balance, isDesktop }) {
+  const [showAll, setShowAll] = useState(false);
+  const rows = paidLeaveHistory(balance);
+  if (rows.length === 0) return null;
+  // 古い順に並んでいます。件数が多いときは新しい側を残して省きます。
+  const hidden = showAll ? 0 : Math.max(0, rows.length - LEAVE_HISTORY_PREVIEW);
+  const shown = hidden > 0 ? rows.slice(hidden) : rows;
+
+  // その行の内容を1行の文にする
+  const detailOf = (r) => {
+    if (r.type === 'grant') {
+      const src = r.kind === 'statutory' ? '法定の付与' : r.kind === 'carryover' ? 'ジョブカンからの引き継ぎ' : '手動で登録';
+      return `${src}　使えるのは ${dateLabelY(r.lastUsableKey)} まで${r.note ? `　（${r.note}）` : ''}`;
+    }
+    if (r.type === 'expire') {
+      return `${dateLabelY(r.grantDateKey)}に付与された分の使い残し（${dateLabelY(r.lastUsableKey)}まで）`;
+    }
+    const span = r.endDateKey && r.endDateKey !== r.dateKey ? `${dateLabelY(r.dateKey)}〜${dateLabelY(r.endDateKey)}` : dateLabelY(r.dateKey);
+    const from = (r.from || []).map((f) => `${dateLabelY(f.grantDateKey)}の付与から${fmtDays(f.days)}日`).join('、');
+    return [
+      span + (r.halfDay ? '（半休）' : ''),
+      from || '充てられる付与なし',
+      r.shortage > 0 ? `⚠ ${fmtDays(r.shortage)}日が付与に充てられていません` : '',
+      r.reason ? `理由：${r.reason}` : '',
+    ].filter(Boolean).join('　');
+  };
+
+  return (
+    <div className="border-t border-slate-200">
+      <div className="px-3.5 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center gap-2 flex-wrap">
+        <span className="text-[12px] font-bold text-slate-600">付与と取得の履歴</span>
+        <span className="text-[11px] text-slate-400">
+          {rows.length}件　これまでの取得 <span className="font-mono font-bold text-slate-600">{fmtDays(balance.usedAllTime)}</span>日
+        </span>
+        {hidden > 0 && (
+          <button onClick={() => setShowAll(true)} className="ml-auto text-[11px] font-bold text-slate-500">
+            古い{hidden}件も見る
+          </button>
+        )}
+        {showAll && rows.length > LEAVE_HISTORY_PREVIEW && (
+          <button onClick={() => setShowAll(false)} className="ml-auto text-[11px] font-bold text-slate-500">
+            新しい{LEAVE_HISTORY_PREVIEW}件だけにする
+          </button>
+        )}
+      </div>
+
+      {isDesktop ? (
+        <div className="overflow-x-auto">
+          <table className="w-full text-[11.5px]">
+            <thead className="bg-white text-slate-500">
+              <tr className="text-left">
+                <th className="px-3 py-1.5 font-medium whitespace-nowrap">日付</th>
+                <th className="px-2 py-1.5 font-medium whitespace-nowrap">できごと</th>
+                <th className="px-2 py-1.5 font-medium text-right whitespace-nowrap">日数</th>
+                <th className="px-2 py-1.5 font-medium text-right whitespace-nowrap">残</th>
+                <th className="px-3 py-1.5 font-medium">内容</th>
+              </tr>
+            </thead>
+            <tbody>
+              {shown.map((r, i) => (
+                <tr key={`${r.type}-${r.dateKey}-${r.id || i}`} className="border-t border-slate-100">
+                  <td className="px-3 py-1.5 font-mono whitespace-nowrap">{dateLabelY(r.dateKey)}</td>
+                  <td className="px-2 py-1.5 whitespace-nowrap">
+                    <span className={`inline-block rounded border px-1.5 py-0.5 text-[10.5px] font-bold ${LEAVE_EVENT_LABEL[r.type].cls}`}>
+                      {LEAVE_EVENT_LABEL[r.type].text}
+                    </span>
+                  </td>
+                  <td className={`px-2 py-1.5 text-right font-mono font-bold ${r.type === 'grant' ? 'text-teal-700' : r.type === 'expire' ? 'text-rose-600' : 'text-slate-700'}`}>
+                    {r.type === 'grant' ? '+' : '−'}{fmtDays(r.days)}
+                  </td>
+                  <td className="px-2 py-1.5 text-right font-mono text-slate-500">{fmtDays(r.balanceAfter)}</td>
+                  <td className="px-3 py-1.5 text-slate-500">{detailOf(r)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="divide-y divide-slate-100">
+          {shown.map((r, i) => (
+            <div key={`${r.type}-${r.dateKey}-${r.id || i}`} className="px-3.5 py-2 space-y-0.5">
+              <div className="flex items-center gap-2">
+                <span className={`inline-block rounded border px-1.5 py-0.5 text-[10.5px] font-bold ${LEAVE_EVENT_LABEL[r.type].cls}`}>
+                  {LEAVE_EVENT_LABEL[r.type].text}
+                </span>
+                <span className="font-mono text-[11.5px] text-slate-600">{dateLabelY(r.dateKey)}</span>
+                <span className={`ml-auto font-mono text-[13px] font-bold ${r.type === 'grant' ? 'text-teal-700' : r.type === 'expire' ? 'text-rose-600' : 'text-slate-700'}`}>
+                  {r.type === 'grant' ? '+' : '−'}{fmtDays(r.days)}日
+                </span>
+                <span className="font-mono text-[11px] text-slate-400">残{fmtDays(r.balanceAfter)}</span>
+              </div>
+              <div className="text-[11px] text-slate-500 leading-relaxed">{detailOf(r)}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="px-3.5 py-2 text-[10.5px] text-slate-400 leading-relaxed">
+        取得は承認済みのものだけを出しています。「残」はその時点で使えた日数です。
+        上の「うち消化」は、いま使える付与から引かれた分だけなので、時効で消えた付与から取った分は入っていません。
+        手動調整（{fmtDays(balance.adjustment)}日）はこの履歴には含めていません。
       </div>
     </div>
   );
