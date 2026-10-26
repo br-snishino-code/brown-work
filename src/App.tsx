@@ -2788,6 +2788,31 @@ async function fetchEffectiveStandardRemuneration(employeeId, year, month) {
   };
 }
 
+// 住民税の控除月の取り方を保存する（全社共通の設定・マスター管理者のみ）。
+// app_settings の書き込みは27番でマスター管理者に限っています。
+async function saveResidentTaxOffset(value, actor = null) {
+  const next = value === 'same' ? 'same' : 'next';
+  const { error } = await supabase.from('app_settings').upsert(
+    {
+      key: SETTING_RESIDENT_TAX_OFFSET,
+      value: next,
+      updated_by: actor?.id || null,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: 'key' }
+  );
+  if (error) {
+    console.error('住民税の控除月の設定の保存に失敗しました', error);
+    return { ok: false, message: error.message || '' };
+  }
+  await logAudit(
+    actor,
+    '住民税の控除月の設定を変更',
+    next === 'same' ? '明細の月と同じ月の住民税を引く' : '明細の月の翌月分の住民税を引く'
+  );
+  return { ok: true };
+}
+
 // ---- 住民税（特別徴収）の年度ごとの税額 ----
 async function fetchResidentTax(employeeId, fiscalYear) {
   const { data, error } = await supabase
@@ -21688,7 +21713,6 @@ function PaidLeaveGrantsPanel({ employee, grantRows = [], leaveRequests = [], se
             引き継ぎのときは<b>もとの付与日</b>を入れてください。時効（付与日から2年）の判定に使うため、
             移行日を入れると期限がずれます。繰越分と当年度分が分かれている場合は、2件に分けて登録してください。
           </div>
-          {error && <div className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-700">{error}</div>}
           <div className="flex gap-2">
             <button onClick={() => { setEditing(null); setError(''); }} className="flex-1 rounded-lg border border-slate-300 bg-white py-2 text-[12.5px] font-bold text-slate-600">やめる</button>
             <button onClick={save} disabled={saving} className="flex-1 rounded-lg bg-slate-800 py-2 text-[12.5px] font-bold text-white disabled:bg-slate-300">{saving ? '保存中…' : '保存する'}</button>
@@ -21901,12 +21925,15 @@ function PaidLeaveHistoryPanel({ balance, isDesktop }) {
 // ---- 住民税（特別徴収）の登録（スタッフ詳細→税・扶養） ----
 // 市町村から届く通知書の数字をそのまま写します。計算はしません。
 // 年度は6月〜翌5月。6月分だけ端数が寄せられて額が違います。
-function ResidentTaxPanel({ employee, actor, isMasterAdmin, collectionMethod, isDesktop }) {
+function ResidentTaxPanel({ employee, actor, isMasterAdmin, collectionMethod, settings = {}, onSettingsChanged, isDesktop }) {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  // 控除月の取り方（全社共通）。保存するまで画面だけ先に切り替えます。
+  const [offset, setOffset] = useState(String(settings?.[SETTING_RESIDENT_TAX_OFFSET] || 'next') === 'same' ? 'same' : 'next');
+  const [offsetSaving, setOffsetSaving] = useState(false);
 
   const reload = async () => {
     setLoading(true);
@@ -21962,6 +21989,7 @@ function ResidentTaxPanel({ employee, actor, isMasterAdmin, collectionMethod, is
     setSaving(false);
     if (!res.ok) { setError(`保存できませんでした。${res.message}`); return; }
     setEditing(null);
+    setError('');
     await reload();
   };
 
@@ -21992,6 +22020,15 @@ function ResidentTaxPanel({ employee, actor, isMasterAdmin, collectionMethod, is
           </button>
         )}
       </div>
+
+      {/* エラーはここに出します。以前は編集フォームの中にしか無く、
+          フォームを開いていないとき（控除月の保存・削除の失敗）が無言になっていました。 */}
+      {error && (
+        <div className="px-3.5 py-2 border-b border-rose-200 bg-rose-50 text-[11.5px] text-rose-700 flex items-start gap-2">
+          <span className="flex-1">{error}</span>
+          <button onClick={() => setError('')} className="text-[11px] font-bold text-rose-500 shrink-0">閉じる</button>
+        </div>
+      )}
 
       {collectionMethod === '普通徴収' && (
         <div className="px-3.5 py-2 text-[11px] text-slate-500 bg-amber-50 border-b border-amber-200">
@@ -22126,6 +22163,51 @@ function ResidentTaxPanel({ employee, actor, isMasterAdmin, collectionMethod, is
           </table>
         </div>
       )}
+
+      {/* 控除月の取り方（全社共通の設定） */}
+      <div className="px-3.5 py-3 border-t border-slate-200 bg-slate-50 space-y-2">
+        <div className="flex items-baseline gap-2 flex-wrap">
+          <span className="text-[11.5px] font-bold text-slate-600">どの月の住民税を引くか</span>
+          <span className="text-[10.5px] font-bold text-amber-700">全スタッフ共通の設定です</span>
+        </div>
+        <div className={`grid gap-2 ${isDesktop ? 'grid-cols-2' : 'grid-cols-1'}`}>
+          {[
+            { key: 'next', title: '明細の月の翌月分', desc: '「10月分」の明細に11月分の住民税。特別徴収は「その月に支払う給与から引く」のが原則で、翌月25日払いならこちらです。' },
+            { key: 'same', title: '明細の月と同じ月', desc: '「10月分」の明細に10月分の住民税。社会保険料と同じ月に揃える運用の場合はこちらです。' },
+          ].map((o) => (
+            <button
+              key={o.key}
+              onClick={() => setOffset(o.key)}
+              className={`text-left rounded-lg border-2 px-2.5 py-2 ${offset === o.key ? 'border-slate-700 bg-white' : 'border-slate-200 bg-white/60'}`}
+            >
+              <div className={`text-[12px] font-bold ${offset === o.key ? 'text-slate-800' : 'text-slate-500'}`}>
+                {offset === o.key ? '● ' : '○ '}{o.title}
+              </div>
+              <div className="text-[10.5px] text-slate-500 leading-relaxed pt-0.5">{o.desc}</div>
+            </button>
+          ))}
+        </div>
+        <div className="text-[10.5px] text-slate-500 leading-relaxed">
+          どちらになるかは会社の運用次第です。<b>ジョブカンの給与明細と見比べて、住民税の月がずれていたら切り替えてください。</b>
+          給与計算の画面に、入れた住民税が何月分かを出しています。
+        </div>
+        {offset !== (String(settings?.[SETTING_RESIDENT_TAX_OFFSET] || 'next') === 'same' ? 'same' : 'next') && (
+          <button
+            onClick={async () => {
+              setOffsetSaving(true);
+              const res = await saveResidentTaxOffset(offset, actor);
+              setOffsetSaving(false);
+              if (!res.ok) { setError(`設定を保存できませんでした。${res.message}`); return; }
+              setError('');
+              if (onSettingsChanged) await onSettingsChanged();
+            }}
+            disabled={offsetSaving}
+            className="w-full rounded-lg bg-slate-800 py-2 text-[12.5px] font-bold text-white disabled:bg-slate-300"
+          >
+            {offsetSaving ? '保存中…' : 'この設定を全スタッフに保存する'}
+          </button>
+        )}
+      </div>
 
       <div className="px-3.5 py-2 border-t border-slate-100 text-[10.5px] text-slate-400 leading-relaxed">
         年度は6月始まりです（2026年度＝2026年6月分〜2027年5月分）。
@@ -23068,6 +23150,8 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                 actor={actor}
                 isMasterAdmin={isMasterAdmin}
                 collectionMethod={form.residentTaxCollectionMethod}
+                settings={settings}
+                onSettingsChanged={onLeaveGrantsChanged}
                 isDesktop={isDesktop}
               />
 
