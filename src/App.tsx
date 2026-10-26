@@ -423,11 +423,13 @@ const r1 = (n) => Math.round(n * 10) / 10;
 const fmtDays = (n) => (Number.isInteger(n) ? String(n) : Number(n).toFixed(1));
 
 // 日付に月を足す。足した先に同じ日が無いときは、その月の末日に寄せます。
-// 例）8月31日 + 6ヶ月 → 2月28日（うるう年は29日）
+// 有休の「付与日」を出すのに使います。
 //
-// ⚠ 29〜31日入社の方の付与日は、この寄せ方で決まります。
-//   民法の期間計算を厳密にとると翌月1日とする解釈もあります。
-//   対象の方がいる場合は運用に合わせて確認してください。
+// 付与日は「入職日の6ヶ月後の応当日。応当日が無い月はその月の末日」です。
+//   1/31入社 → 7/31付与
+//   3/31入社 → 9/30付与（9月に31日が無い）
+//   8/29・8/30・8/31入社 → 2/28付与（うるう年は2/29）
+// 時効の満了日は数え方が違うので periodEndKey を使ってください。
 function addMonthsKey(key, months) {
   const [y, m, d] = String(key).split('-').map(Number);
   if (!y || !m || !d) return key;
@@ -438,12 +440,32 @@ function addMonthsKey(key, months) {
   return `${ny}-${pad(nm + 1)}-${pad(Math.min(d, lastDay))}`;
 }
 
-// 「使える最後の日」。expiresOnKey はその日から使えなくなる日なので、1日前を返します。
-// 例）2025-10-01付与 → expiresOnKey は 2027-10-01 → 使えるのは 2027-09-30 まで
-function leaveExpiryLastDayKey(expiresOnKey) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(expiresOnKey || ''))) return expiresOnKey;
-  const d = new Date(expiresOnKey + 'T00:00:00');
-  d.setDate(d.getDate() - 1);
+// 期間の満了日（民法143条2項）。
+//   ・起算日から n ヶ月後に応当する日があれば、その前日に満了する
+//   ・応当する日がなければ、その月の末日に満了する
+// 有休の時効（付与日から2年）の「使える最後の日」はこれで出します。
+// 例）2025-10-01付与 → 応当日2027-10-01 → その前日 2027-09-30 まで
+//     2024-02-29付与 → 2026年に2/29が無い → 2026-02-28 まで
+//       （単純に「応当日の前日」とすると2/27になり、1日早く消えてしまいます）
+function periodEndKey(startKey, months) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(startKey || ''))) return startKey;
+  const [y, m, d] = String(startKey).split('-').map(Number);
+  const total = (m - 1) + months;
+  const ny = y + Math.floor(total / 12);
+  const nm = ((total % 12) + 12) % 12;
+  const lastDay = new Date(ny, nm + 1, 0).getDate();
+  // 応当日がない月は、その月の末日に満了（民法143条2項ただし書き）
+  if (d > lastDay) return `${ny}-${pad(nm + 1)}-${pad(lastDay)}`;
+  const end = new Date(ny, nm, d);
+  end.setDate(end.getDate() - 1);
+  return todayKey(end);
+}
+
+// 満了日の翌日（この日から使えなくなる）
+function dayAfterKey(key) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(key || ''))) return key;
+  const d = new Date(key + 'T00:00:00');
+  d.setDate(d.getDate() + 1);
   return todayKey(d);
 }
 
@@ -474,7 +496,12 @@ function statutoryGrantSchedule(employee, asOfKey) {
 // （残日数をマイナスにして隠さず、データの不整合として見せるため）。
 function allocatePaidLeave(grants, usages, asOfKey) {
   const pool = grants
-    .map((g) => ({ ...g, expiresOnKey: addMonthsKey(g.dateKey, LEAVE_EXPIRY_YEARS * 12), used: 0 }))
+    .map((g) => {
+      // lastUsableKey ＝ 使える最後の日（画面に出すのはこちら）
+      // expiresOnKey  ＝ その翌日。「この日以降は使えない」の判定に使う
+      const lastUsableKey = periodEndKey(g.dateKey, LEAVE_EXPIRY_YEARS * 12);
+      return { ...g, lastUsableKey, expiresOnKey: dayAfterKey(lastUsableKey), used: 0 };
+    })
     .sort((a, b) => (a.dateKey < b.dateKey ? -1 : a.dateKey > b.dateKey ? 1 : 0));
   const shortages = [];
   [...usages]
@@ -8797,7 +8824,7 @@ function LeaveView({ leaveRequests, leaveTotal, leaveUsed, balance = null, hireD
             <div className="text-[11px] font-bold text-amber-900">使える期限が近い有休があります</div>
             {expiringSoon.map((g) => (
               <div key={g.dateKey} className="text-[11px] text-amber-800">
-                {fmtDays(r1(g.days - g.used))}日を {dateLabelY(leaveExpiryLastDayKey(g.expiresOnKey))} まで
+                {fmtDays(r1(g.days - g.used))}日を {dateLabelY(g.lastUsableKey)} まで
               </div>
             ))}
             <div className="text-[10.5px] text-amber-700 pt-0.5">期限を過ぎた分は使えなくなります。</div>
@@ -8818,7 +8845,7 @@ function LeaveView({ leaveRequests, leaveTotal, leaveUsed, balance = null, hireD
                     {fmtDays(r1(g.days - g.used))}日
                   </span>
                   <span className="text-slate-400">
-                    （{dateLabelY(g.dateKey)}付与 → {dateLabelY(leaveExpiryLastDayKey(g.expiresOnKey))}まで）
+                    （{dateLabelY(g.dateKey)}付与 → {dateLabelY(g.lastUsableKey)}まで）
                   </span>
                 </div>
               ))}
@@ -20860,7 +20887,7 @@ function PaidLeaveGrantsPanel({ employee, grantRows = [], leaveRequests = [], se
                       {fmtDays(left)}
                     </td>
                     <td className="px-3 py-1.5 font-mono whitespace-nowrap">
-                      {dateLabelY(leaveExpiryLastDayKey(g.expiresOnKey))}
+                      {dateLabelY(g.lastUsableKey)}
                       {expired && <span className="ml-1 text-[10.5px] font-bold">時効</span>}
                       {notYet && <span className="ml-1 text-[10.5px] font-bold text-slate-400">付与前</span>}
                     </td>

@@ -49,7 +49,9 @@ create table if not exists public.employee_leave_grants (
   id uuid primary key default gen_random_uuid(),
   employee_id uuid not null references public.employees(id) on delete cascade,
 
-  -- 付与日。時効日はこの日から2年後（その前日まで有効）として画面側で計算します。
+  -- 付与日。時効（この日から2年）の満了日は画面側で計算します。
+  -- 計算は民法143条2項にあわせています：2年後の応当日の前日まで有効。
+  -- 応当日が無い場合（2月29日付与など）は、その月の末日まで有効。
   -- 繰越分を引き継ぐときは「もとの付与日」を入れてください。
   -- そうしないと時効の判定がずれます。
   grant_date date not null,
