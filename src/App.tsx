@@ -15670,6 +15670,22 @@ function computeResidentTax({ employee, residentTax, year, month, settings }) {
   };
 }
 
+// 年税額を12か月に割る（地方税法20条の4の2第6項・第8項）。
+//   ・年税額 ÷ 12 の100円未満を切り捨てた額が、7月〜翌5月の月額
+//   ・切り捨てた分はまとめて6月分に寄せる
+// 市町村もこの計算で通知書を作るため、通常は通知書と一致します。
+// ただし通知書が正ですので、1円でも違えば通知書の数字に直してください。
+//
+// ⚠ 例外：税額が均等割相当額以下のときは6月に全額を徴収し、7月以降は0円になります
+//   （地方税法321条の5第1項ただし書）。均等割の額は市町村・年度で変わるため
+//   自動では判定していません。その場合は手で直してください。
+function splitResidentTax(annual) {
+  const a = Math.floor(Number(annual) || 0);
+  if (!Number.isFinite(a) || a <= 0) return { juneAmount: 0, monthlyAmount: 0 };
+  const monthlyAmount = Math.floor(a / 12 / 100) * 100;
+  return { juneAmount: a - monthlyAmount * 11, monthlyAmount };
+}
+
 // 通知書と合っているかの検算。6月分 ＋ 月額×11 ＝ 年税額
 function residentTaxCheck(row) {
   if (!row) return null;
@@ -21990,7 +22006,19 @@ function ResidentTaxPanel({ employee, actor, isMasterAdmin, collectionMethod, is
             </Field>
             <Field label="年税額（円）">
               <input type="number" min="0" value={editing.annualAmount}
-                onChange={(e) => setEditing((p) => ({ ...p, annualAmount: e.target.value }))}
+                onChange={(e) => setEditing((p) => {
+                  // 6月分と7月以降がまだ空のときだけ、年税額から自動で割ります。
+                  // すでに入っている（通知書から直した）値は書き換えません。
+                  const next = { ...p, annualAmount: e.target.value };
+                  if (p.juneAmount === '' && p.monthlyAmount === '') {
+                    const split = splitResidentTax(e.target.value);
+                    if (split.monthlyAmount > 0 || split.juneAmount > 0) {
+                      next.juneAmount = String(split.juneAmount);
+                      next.monthlyAmount = String(split.monthlyAmount);
+                    }
+                  }
+                  return next;
+                })}
                 className="w-full box-border border border-slate-200 rounded-lg px-2.5 py-2 font-mono text-[13px] text-right bg-white" />
             </Field>
             <Field label="6月分（円）">
@@ -22019,10 +22047,29 @@ function ResidentTaxPanel({ employee, actor, isMasterAdmin, collectionMethod, is
               placeholder="例）2026年5月受領の通知書より"
               className="w-full border border-slate-200 rounded-lg px-2.5 py-2 text-[13px] bg-white" />
           </Field>
+          <button
+            onClick={() => {
+              const split = splitResidentTax(editing.annualAmount);
+              setEditing((p) => ({ ...p, juneAmount: String(split.juneAmount), monthlyAmount: String(split.monthlyAmount) }));
+            }}
+            className="w-full rounded-lg border-2 border-amber-200 bg-white py-1.5 text-[12px] font-bold text-amber-700"
+          >
+            年税額から6月分と7月以降を計算し直す
+          </button>
           <div className="text-[10.5px] text-slate-500 leading-relaxed">
-            通知書の数字をそのまま入れてください。計算で出した額は通知書と合わないことがあり、
-            合わないと市町村への納付額がずれます。検算が合わない場合は保存できますが、必ず通知書をご確認ください。
+            年税額を入れると、6月分と7月以降を自動で割ります
+            （年税額÷12の100円未満を切り捨てて月額とし、残りを6月分に寄せます）。
+            市町村も同じ計算で通知書を作るため、通常は一致します。
+            <b>ただし通知書が正です。1円でも違えば通知書の数字に直してください。</b>
           </div>
+          {Number(editing.annualAmount) > 0 && Number(editing.annualAmount) <= 20000 && (
+            <div className="rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-[11px] text-amber-900">
+              <b>税額が小さいため、6月に全額・7月以降0円になっている可能性があります。</b>
+              均等割相当額以下のときはそうなる決まりですが（地方税法321条の5第1項ただし書）、
+              均等割の額は市町村や年度で変わるため自動では判定していません。通知書をご確認のうえ、
+              そうなっていれば6月分に年税額、7月以降に0を入れてください。
+            </div>
+          )}
           {error && <div className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-700">{error}</div>}
           <div className="flex gap-2">
             <button onClick={() => { setEditing(null); setError(''); }} className="flex-1 rounded-lg border border-slate-300 bg-white py-2 text-[12.5px] font-bold text-slate-600">やめる</button>
