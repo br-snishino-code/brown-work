@@ -326,19 +326,28 @@ function buildInviteMail({ name, email, tempPassword, requireProfileSetup = true
 }
 
 // スタッフ種別（雇用形態）の選択肢
+// スタッフ種別（雇用形態）。
+// 「社員」は「正社員」に改め、SV・RSV・代表取締役は外しました
+// （SV・RSV・代表取締役は雇用形態ではなく役職のため、役職の欄に入れてください）。
+// 以前の値で登録されている方は supabase/84_staff_type_rename.sql でまとめて
+// 「正社員」に変えています。
 const STAFF_TYPES = [
-  '社員',
+  '正社員',
   'スポット',
-  'SV',
-  'RSV',
   '外部',
   '総務部',
-  '代表取締役',
   '契約社員（週5）',
   '契約社員（スポット）',
   '如意棒（社員）',
   '如意棒（スポット）',
 ];
+
+// 一覧に無い値（昔の種別など）が登録されている場合でも選択欄に出します。
+// 出さないと選択欄が空に見え、気づかないまま別の値で保存される恐れがあります。
+function staffTypeOptions(current) {
+  const v = String(current || '').trim();
+  return v && !STAFF_TYPES.includes(v) ? [...STAFF_TYPES, v] : STAFF_TYPES;
+}
 // 有休の比例付与（週の所定労働日数に応じた付与）を使うスタッフ種別
 const PROPORTIONAL_LEAVE_STAFF_TYPES = ['スポット', '如意棒（スポット）', '契約社員（スポット）'];
 const isProportionalLeaveStaffType = (staffType) => PROPORTIONAL_LEAVE_STAFF_TYPES.includes(staffType);
@@ -1659,7 +1668,7 @@ const rowToAccount = (row) => ({
   monthlySalary: row.monthly_salary != null ? Number(row.monthly_salary) : 0,
   birthDate: row.birth_date || '',
   gender: row.gender || '',
-  staffType: row.staff_type || '社員',
+  staffType: row.staff_type || '正社員',
   mainGroup: row.main_group || '',
   subGroup: row.sub_group || '',
   commuteAllowance: row.commute_allowance != null ? Number(row.commute_allowance) : 0,
@@ -16553,7 +16562,7 @@ const WEEKEND_BONUS_HALF = 5000;    // 欠勤1日
 // 有給として扱う休暇の種類（出勤と同じ扱いにする）
 const WEEKEND_BONUS_PAID_LEAVE_TYPE = '有休';
 // 対象になる雇用形態（＝正社員）
-const WEEKEND_BONUS_STAFF_TYPES = ['社員', '如意棒（社員）'];
+const WEEKEND_BONUS_STAFF_TYPES = ['正社員', '如意棒（社員）'];
 
 // その月の日付を並べる（'YYYY-MM-DD' の配列）
 function monthDateKeys(year, month) {
@@ -22344,7 +22353,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
                     {retired && <span className="ml-1.5 text-[10px] font-bold text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">退職済み</span>}
                     {acc.furigana && <div className="text-[10.5px] font-normal text-slate-400">{acc.furigana}</div>}
                   </td>
-                  <td className="px-3 py-2.5 text-slate-600 whitespace-nowrap">{acc.mainGroup || acc.staffType || '社員'}</td>
+                  <td className="px-3 py-2.5 text-slate-600 whitespace-nowrap">{acc.mainGroup || acc.staffType || '正社員'}</td>
                   <td className={`px-3 py-2.5 font-bold whitespace-nowrap ${state ? state.cls : 'text-slate-300'}`}>{state ? state.label : '—'}</td>
                   <td className="px-3 py-2.5 font-mono text-slate-600 whitespace-nowrap">{info ? minutesToHHMM(info.monthWorkedMin) : '—'}</td>
                   <td className={`px-3 py-2.5 font-mono whitespace-nowrap ${info?.leaveShort ? 'text-rose-600 font-bold' : 'text-slate-600'}`}>
@@ -22404,7 +22413,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
                     </div>
                     {acc.furigana && <div className="text-[10.5px] text-slate-400">{acc.furigana}</div>}
                     <div className="text-[11.5px] text-slate-500 mt-0.5">
-                      {acc.mainGroup || acc.staffType || '社員'}
+                      {acc.mainGroup || acc.staffType || '正社員'}
                       {info && <span className="ml-2 font-mono">今月 {minutesToHHMM(info.monthWorkedMin)}</span>}
                       {info && <span className={`ml-2 font-mono ${info.leaveShort ? 'text-rose-600 font-bold' : ''}`}>有休 {info.leavePending ? '集計中' : `${fmtDays(info.leaveRemaining)}日`}</span>}
                     </div>
@@ -24115,7 +24124,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
     emergencyContactAddress: account.emergencyContactAddress || '',
     birthDate: account.birthDate || '',
     gender: account.gender || '',
-    staffType: account.staffType || '社員',
+    staffType: account.staffType || '正社員',
     mainGroup: account.mainGroup || '',
     subGroup: account.subGroup || '',
     commuteAllowance: String(account.commuteAllowance || 0),
@@ -24299,7 +24308,9 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                 </Field>
                 <Field label="スタッフ種別">
                   <select value={form.staffType} onChange={set('staffType')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white">
-                    {STAFF_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+                    {staffTypeOptions(form.staffType).map((t) => (
+                      <option key={t} value={t}>{STAFF_TYPES.includes(t) ? t : `${t}（一覧にない値）`}</option>
+                    ))}
                     {form.staffType && !STAFF_TYPES.includes(form.staffType) && (
                       <option value={form.staffType}>{form.staffType}（旧区分）</option>
                     )}
