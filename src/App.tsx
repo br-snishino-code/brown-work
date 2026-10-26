@@ -2764,6 +2764,30 @@ async function fetchStandardRemuneration(employeeId, year, month) {
   };
 }
 
+// その月に適用される標準報酬月額。対象月以前で一番新しい登録を使います。
+// 標準報酬月額は定時決定で1年間そのままなので、月ごとに登録させると
+// 1人あたり年12件になってしまいます。1回登録すれば、変えるまで効き続けます。
+async function fetchEffectiveStandardRemuneration(employeeId, year, month) {
+  const { data, error } = await supabase
+    .from('employee_standard_remuneration')
+    .select('*')
+    .eq('employee_id', employeeId)
+    // 「その年の対象月まで」または「前の年すべて」
+    .or(`year.lt.${year},and(year.eq.${year},month.lte.${month})`)
+    .order('year', { ascending: false })
+    .order('month', { ascending: false })
+    .limit(1);
+  if (error) { console.error('標準報酬月額の取得に失敗しました', error); return null; }
+  const row = (data || [])[0];
+  if (!row) return null;
+  return {
+    year: row.year,
+    month: row.month,
+    healthInsuranceAmount: row.health_insurance_amount != null ? Number(row.health_insurance_amount) : null,
+    pensionAmount: row.pension_amount != null ? Number(row.pension_amount) : null,
+  };
+}
+
 async function saveStandardRemuneration(employeeId, year, month, payload) {
   const { error } = await supabase.from('employee_standard_remuneration').upsert(
     {
@@ -15456,8 +15480,173 @@ function Row({ label, value }) {
   );
 }
 
+// ============================================================
+// 社会保険料の自動計算（健康保険・介護保険・厚生年金）
+// ============================================================
+// 決めたこと（2026年10月に確認）：
+//   ・計算は 標準報酬月額 × 料率 ÷ 2（労使折半）
+//   ・端数は、給与から控除する場合の原則にあわせて
+//     「50銭以下は切り捨て、50銭を超えたら1円に切り上げ」
+//     （労使の特約があればそちらが優先。特約は設けていない前提）
+//   ・翌月控除。当月末締め・翌月25日払いのため、
+//     「10月分」の給与明細に入るのは10月分の保険料
+//   ・自動で入るのは「候補」。確定は人が確認してから
+//
+// 料率は insurance_rate_settings（スタッフ詳細→社会保険→保険料率設定）で管理します。
+// 健康保険料率は協会けんぽの都道府県支部ごとに異なるため、必ず設定してください。
+// 介護保険料率・厚生年金保険料率は全国一律です。
+//
+// ⚠ 雇用保険料・所得税・住民税はまだ自動計算していません（手入力のままです）。
+
+// 給与から控除する社会保険料の端数処理
+function roundInsurancePremium(yen) {
+  if (!Number.isFinite(yen) || yen <= 0) return 0;
+  const whole = Math.floor(yen);
+  // ちょうど50銭は切り捨て。50銭を超えたときだけ切り上げる
+  return yen - whole > 0.5 ? whole + 1 : whole;
+}
+
+// 年齢がその歳に達する日。年齢は誕生日の前日に上がります（年齢計算ニ関スル法律）。
+// 例）4月1日生まれの方は3月31日に歳をとるため、1つ前の月の扱いになります。
+function ageReachedDateKey(birthDateKey, age) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(birthDateKey || ''))) return '';
+  // 応当日がない場合（2月29日生まれなど）は、その月の末日を応当日とします
+  return dayBeforeKey(addMonthsKey(birthDateKey, age * 12));
+}
+
+// 介護保険料（第2号被保険者）の対象月か。
+//   開始：40歳に達する日が属する月から
+//   終了：65歳に達する日が属する月の前月まで
+function isNursingInsuranceMonth(birthDateKey, year, month) {
+  const from = ageReachedDateKey(birthDateKey, 40);
+  const until = ageReachedDateKey(birthDateKey, 65);
+  if (!from || !until) return false;
+  const target = `${year}-${pad(month)}`;
+  const fromMonth = from.slice(0, 7);
+  const untilMonth = until.slice(0, 7); // この月は対象外（前月まで）
+  return target >= fromMonth && target < untilMonth;
+}
+
+// スタッフ1人・1か月分の社会保険料（本人負担分）。
+// standardRemuneration が無いときは null を返し、画面で手入力を促します。
+function computeSocialInsurance({ employee, standardRemuneration, rates, year, month }) {
+  if (!standardRemuneration) return null;
+  const healthBase = Number(standardRemuneration.healthInsuranceAmount) || 0;
+  const pensionBase = Number(standardRemuneration.pensionAmount) || 0;
+  const healthRate = Number(rates?.healthInsuranceRate) || 0;
+  const nursingRate = Number(rates?.nursingInsuranceRate) || 0;
+  const pensionRate = Number(rates?.pensionInsuranceRate) || 0;
+  const nursingTarget = isNursingInsuranceMonth(employee?.birthDate, year, month);
+  return {
+    health: healthRate > 0 && healthBase > 0 ? roundInsurancePremium((healthBase * healthRate) / 100 / 2) : null,
+    nursing: nursingTarget && nursingRate > 0 && healthBase > 0
+      ? roundInsurancePremium((healthBase * nursingRate) / 100 / 2)
+      : (nursingTarget ? null : 0),
+    pension: pensionRate > 0 && pensionBase > 0 ? roundInsurancePremium((pensionBase * pensionRate) / 100 / 2) : null,
+    nursingTarget,
+    healthBase,
+    pensionBase,
+    healthRate,
+    nursingRate,
+    pensionRate,
+  };
+}
+
+// 自動で金額を入れる控除項目。ここに無いものは手入力のままです。
+const AUTO_DEDUCTION_KEYS = { 健康保険料: 'health', 介護保険料: 'nursing', 厚生年金保険料: 'pension' };
 const DEFAULT_DEDUCTION_LABELS = ['健康保険料', '介護保険料', '厚生年金保険料', '雇用保険料', '所得税', '住民税'];
 const sumItems = (items) => (items || []).reduce((s, it) => s + (Number(it.amount) || 0), 0);
+
+// ---- 社会保険料の計算の根拠（給与計算画面） ----
+// 自動で入れた金額が何から出たのかを必ず見せます。
+// 「候補として入れて、確定は人が確認してから」という決め方のため、
+// 標準報酬月額・料率・保険料の対象月を画面で確かめられるようにしています。
+function SocialInsuranceNote({ social, standardRemuneration, insuranceRates, loading, employee, year, month, isPublished }) {
+  if (loading) {
+    return (
+      <div className="rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-[11.5px] text-slate-400">
+        社会保険料を計算しています…
+      </div>
+    );
+  }
+
+  // 標準報酬月額が無いと、どれも計算できません
+  if (!standardRemuneration || !social) {
+    return (
+      <div className="rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-[11.5px] leading-relaxed text-amber-800 space-y-1">
+        <div className="font-bold">社会保険料を自動計算できません（標準報酬月額が未登録）</div>
+        <div>
+          {employee.name}さんの標準報酬月額が登録されていません。
+          スタッフの「詳細」→「社会保険」タブで、等級表から選んで登録してください。
+        </div>
+        <div className="text-amber-700">健康保険料・介護保険料・厚生年金保険料は、下の欄に手で入れてください。</div>
+      </div>
+    );
+  }
+
+  // 料率が未設定のものだけ「未設定」になります（null で返ってきます）
+  const items = [
+    { key: 'health', label: '健康保険', value: social.health, rateName: '健康保険料率' },
+    {
+      key: 'nursing', label: '介護保険',
+      value: social.nursingTarget ? social.nursing : 0,
+      skip: !social.nursingTarget, rateName: '介護保険料率',
+    },
+    { key: 'pension', label: '厚生年金', value: social.pension, rateName: '厚生年金保険料率' },
+  ];
+  const unset = items.filter((it) => !it.skip && it.value == null);
+  const stdLabel = standardRemuneration.year === year && standardRemuneration.month === month
+    ? 'この月に登録'
+    : `${standardRemuneration.year}年${standardRemuneration.month}月の登録を引き継ぎ`;
+  const tone = isPublished
+    ? 'border-slate-200 bg-slate-50 text-slate-500'
+    : unset.length > 0
+      ? 'border-amber-200 bg-amber-50 text-amber-900'
+      : 'border-teal-200 bg-teal-50 text-teal-900';
+
+  return (
+    <div className={`rounded-xl border px-3.5 py-2.5 text-[11.5px] leading-relaxed space-y-1 ${tone}`}>
+      <div className="font-bold">
+        {unset.length > 0
+          ? `社会保険料の一部を自動で入れました（${year}年${month}月分の保険料）`
+          : `社会保険料を自動で入れました（${year}年${month}月分の保険料）`}
+      </div>
+      <div className="flex flex-wrap gap-x-4 gap-y-0.5">
+        {items.map((it) => (
+          <span key={it.key}>
+            {it.label}{' '}
+            {it.skip
+              ? <span className="font-mono">対象外</span>
+              : it.value == null
+                ? <span className="font-mono font-bold">未設定</span>
+                : <span className="font-mono font-bold">{formatYen(it.value)}</span>}
+          </span>
+        ))}
+      </div>
+      <div className="text-[10.5px] opacity-80">
+        標準報酬月額 健保 {formatYen(social.healthBase)}・厚年 {formatYen(social.pensionBase)}（{stdLabel}）
+        ／ 料率 健保 {social.healthRate || '—'}%・介護 {social.nursingRate || '—'}%・厚年 {social.pensionRate || '—'}%
+        ／ 本人負担は折半（端数は50銭以下切り捨て・50銭超切り上げ）
+      </div>
+      {unset.length > 0 && (
+        <div className="font-bold">
+          {unset.map((it) => it.rateName).join('・')}が未設定のため、
+          {unset.map((it) => it.label).join('・')}は0円のままです。
+          スタッフの「詳細」→「社会保険」タブの「保険料率設定」に入れるか、下の欄に手で入れてください。
+        </div>
+      )}
+      {!social.nursingTarget && (
+        <div className="text-[10.5px] opacity-80">
+          介護保険料は40歳に達する月から64歳までが対象のため、この月は0円です。
+        </div>
+      )}
+      <div className="text-[10.5px] opacity-80">
+        金額は候補です。公開する前に必ずご確認ください。欄の数字は手で直せます。
+        雇用保険料・所得税・住民税はまだ自動計算していません。
+      </div>
+    </div>
+  );
+}
 
 function PayrollItemsEditor({ title, items, onChange, addLabel = '項目を追加' }) {
   const update = (i, field, value) => {
@@ -15512,6 +15701,10 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
   const [paidLeaveHours, setPaidLeaveHours] = useState('0');
   const [employeeSalaryItems, setEmployeeSalaryItems] = useState([]);
   const [employeeCommuteRoutes, setEmployeeCommuteRoutes] = useState([]);
+  // 社会保険料の自動計算に使う、標準報酬月額と保険料率
+  const [standardRemuneration, setStandardRemuneration] = useState(null);
+  const [insuranceRates, setInsuranceRates] = useState(null);
+  const [insuranceLoading, setInsuranceLoading] = useState(true);
 
   const employee = employeeAccounts.find((a) => a.id === employeeId);
   const existing = payrollRecords.find((p) => p.employeeId === employeeId && p.year === year && p.month === month);
@@ -15537,6 +15730,25 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     })();
   }, [employeeId]);
 
+  // 標準報酬月額と保険料率。対象月が変わると適用される標準報酬も変わるため、
+  // 年・月も見ています（対象月以前で一番新しい登録を使います）。
+  useEffect(() => {
+    if (!employeeId) return;
+    let cancelled = false;
+    setInsuranceLoading(true);
+    (async () => {
+      const [std, rates] = await Promise.all([
+        fetchEffectiveStandardRemuneration(employeeId, year, month),
+        fetchInsuranceRateSettings(),
+      ]);
+      if (cancelled) return;
+      setStandardRemuneration(std);
+      setInsuranceRates(rates);
+      setInsuranceLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [employeeId, year, month]);
+
   const commuteRouteTotal = employeeCommuteRoutes.reduce((sum, r) => sum + computeRouteMonthlyAmount(r), 0);
 
   // 承認済みの交通費精算（対象月が一致するもの）の合計。給与の支給項目に自動で入れる
@@ -15556,6 +15768,15 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
   const attendanceDays = employee ? getPrescribedAttendanceDays(employee, year, month, groupAttendanceSchedules, employeeAttendanceSchedules) : null;
   // どちらの設定が使われているかを画面に出す（取り違えを防ぐため）
   const attendanceSource = employee ? prescribedAttendanceSource(employee, year, month, groupAttendanceSchedules, employeeAttendanceSchedules) : null;
+  // 社会保険料（本人負担分）の候補。翌月控除のため、この明細の対象月＝保険料の対象月です。
+  const social = employee ? computeSocialInsurance({
+    employee,
+    standardRemuneration,
+    rates: insuranceRates,
+    year,
+    month,
+  }) : null;
+
   const preview = employee ? computePayrollPreview({
     wageType,
     hourlyWage,
@@ -15584,16 +15805,25 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     if (existing?.deductionItems) {
       setDeductionItems(existing.deductionItems);
     } else {
+      // 社会保険料は計算した額を候補として入れます。
+      // 標準報酬月額や料率が未設定のときは0のままにして、画面で知らせます。
       setDeductionItems([
-        ...DEFAULT_DEDUCTION_LABELS.map((label) => ({ label, amount: 0 })),
+        ...DEFAULT_DEDUCTION_LABELS.map((label) => {
+          const key = AUTO_DEDUCTION_KEYS[label];
+          const auto = key && social ? social[key] : null;
+          return { label, amount: auto == null ? 0 : auto };
+        }),
         ...employeeSalaryItems.filter((it) => it.kind === 'deduction').map((it) => ({ label: it.label, amount: it.amount })),
       ]);
     }
     setAbsentDays(String(existing?.attendanceExtra?.absentDays ?? 0));
     setPaidLeaveDays(String(existing?.attendanceExtra?.paidLeaveDays ?? 0));
     setPaidLeaveHours(String(existing?.attendanceExtra?.paidLeaveHours ?? 0));
+    // standardRemuneration と insuranceRates は後から届くため、
+    // 届いた時点で控除の候補を入れ直せるよう、ここに入れています。
+    // social は毎回あたらしい物になるので入れません（入れると繰り返し動きます）。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [employeeId, year, month, existing?.id, employeeSalaryItems, approvedCommuteTotal]);
+  }, [employeeId, year, month, existing?.id, employeeSalaryItems, approvedCommuteTotal, standardRemuneration, insuranceRates]);
 
   if (!employee) {
     return <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-6 py-14 text-center text-[12.5px] text-slate-300">スタッフが登録されていません</div>;
@@ -15748,6 +15978,16 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
           <div className="text-[11px] text-slate-400 -mt-1">スタッフ詳細で登録された固定支給・控除項目（{employeeSalaryItems.length}件）を初期値として含めています。</div>
         )}
         <PayrollItemsEditor title="支給項目" items={paymentItems} onChange={setPaymentItems} addLabel="支給項目を追加" />
+        <SocialInsuranceNote
+          social={social}
+          standardRemuneration={standardRemuneration}
+          insuranceRates={insuranceRates}
+          loading={insuranceLoading}
+          employee={employee}
+          year={year}
+          month={month}
+          isPublished={isPublished}
+        />
         <PayrollItemsEditor title="控除項目" items={deductionItems} onChange={setDeductionItems} addLabel="控除項目を追加" />
 
         <div className="grid grid-cols-2 gap-3">
