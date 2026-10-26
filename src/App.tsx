@@ -2917,6 +2917,89 @@ async function deleteResidentTax(row, actor = null, targetName = '') {
   return { ok: true };
 }
 
+// ---- 扶養親族等の数（所得税の自動計算用・supabase/83_withholding_dependents.sql） ----
+// 年の途中で変わるため (年, 月) ごとに持ち、給与計算では
+// 「その月以前で一番新しい登録」を使います（標準報酬月額と同じ考え方）。
+async function fetchEffectiveWithholdingDependents(employeeId, year, month) {
+  const { data, error } = await supabase
+    .from('employee_withholding_dependents')
+    .select('*')
+    .eq('employee_id', employeeId)
+    // 「その年の対象月まで」または「前の年すべて」
+    .or(`year.lt.${year},and(year.eq.${year},month.lte.${month})`)
+    .order('year', { ascending: false })
+    .order('month', { ascending: false })
+    .limit(1);
+  if (error) { console.error('扶養親族等の数の取得に失敗しました', error); return null; }
+  const row = (data || [])[0];
+  if (!row) return null;
+  return {
+    id: row.id,
+    year: row.year,
+    month: row.month,
+    dependents: Number(row.dependents) || 0,
+    note: row.note || '',
+  };
+}
+
+async function fetchWithholdingDependentsList(employeeId) {
+  try {
+    const res = await supabase
+      .from('employee_withholding_dependents')
+      .select('*')
+      .eq('employee_id', employeeId)
+      .order('year', { ascending: false })
+      .order('month', { ascending: false });
+    if (res.error) { console.error('扶養親族等の数の取得に失敗しました', res.error); return []; }
+    return (res.data || []).map((d) => ({
+      id: d.id,
+      year: d.year,
+      month: d.month,
+      dependents: Number(d.dependents) || 0,
+      note: d.note || '',
+    }));
+  } catch (e) {
+    console.error('扶養親族等の数の取得に失敗しました', e);
+    return [];
+  }
+}
+
+async function saveWithholdingDependents({ id, employeeId, year, month, dependents, note }, actor = null, targetName = '') {
+  const payload = {
+    employee_id: employeeId,
+    year: Number(year),
+    month: Number(month),
+    dependents: Number(dependents),
+    note: note || null,
+    created_by: actor?.id || null,
+  };
+  const { error } = id
+    ? await supabase.from('employee_withholding_dependents').update(payload).eq('id', id)
+    : await supabase.from('employee_withholding_dependents').insert(payload);
+  if (error) {
+    console.error('扶養親族等の数の保存に失敗しました', error);
+    return { ok: false, message: error.message || '' };
+  }
+  await logAudit(
+    actor,
+    id ? '扶養親族等の数を変更' : '扶養親族等の数を登録',
+    `${year}年${month}月分から ${dependents}人`,
+    employeeId,
+    targetName
+  );
+  return { ok: true };
+}
+
+async function deleteWithholdingDependents(row, actor = null, targetName = '') {
+  const { error } = await supabase.from('employee_withholding_dependents').delete().eq('id', row.id);
+  if (error) {
+    console.error('扶養親族等の数の削除に失敗しました', error);
+    return { ok: false, message: error.message || '' };
+  }
+  await logAudit(actor, '扶養親族等の数を削除', `${row.year}年${row.month}月分`, row.employeeId, targetName);
+  return { ok: true };
+}
+
 async function saveStandardRemuneration(employeeId, year, month, payload) {
   const { error } = await supabase.from('employee_standard_remuneration').upsert(
     {
@@ -13562,7 +13645,7 @@ const HELP_ADMIN = [
   {
     category: '給与',
     items: [
-      { q: '給与計算の流れを教えてください', a: 'まず「勤怠」→「月次確定」で、その月の勤怠を最終承認まで進めます。次に「給与」タブで対象月を選ぶと、勤怠記録から労働時間と残業時間が自動集計されます。承認済みの交通費精算も支給項目に自動で入ります。支給項目・控除項目を確認して下書き保存し、内容が確定したら「公開」します。社会保険料・所得税・住民税などの控除額は自動計算されません。項目名だけが並ぶので、金額はご自身で入力してください。公開するとスタッフ側の画面に明細が表示されます。勤怠が最終承認されるまで公開はできません。' },
+      { q: '給与計算の流れを教えてください', a: 'まず「勤怠」→「月次確定」で、その月の勤怠を最終承認まで進めます。次に「給与」タブで対象月を選ぶと、勤怠記録から労働時間と残業時間が自動集計されます。承認済みの交通費精算も支給項目に自動で入ります。支給項目・控除項目を確認して下書き保存し、内容が確定したら「公開」します。健康保険料・介護保険料・厚生年金保険料・雇用保険料・住民税・所得税は自動で金額が入ります（候補として入るだけなので、公開前に必ずご確認ください）。標準報酬月額・保険料率・住民税の通知書・扶養親族等の数が未登録の項目は0円のままになるので、画面の知らせに従って登録するか手で入れてください。公開するとスタッフ側の画面に明細が表示されます。勤怠が最終承認されるまで公開はできません。' },
       { q: '月次勤怠の確定とは', a: '交通費は「交通費申請」、勤怠は「月次勤怠申請」で、それぞれ「保存する」で途中まで残しておけます（順番は問いません）。内容がそろったら「月次勤怠申請」の「勤怠と交通費をまとめて申請する」で一度に提出します。スタッフが前月分の勤怠を確認して確定申請し、管理者が内容を確認して承認、最後にマスター管理者が最終承認する流れです。マスター管理者が最初に確認した場合は、その承認だけで確定します。管理者ご本人の申請は、マスター管理者の承認のみで確定します。最終承認が済むと、その月の給与明細を公開できるようになります。「勤怠」→「月次確定」で処理します。確定後に修正が必要になった場合は、マスター管理者が「確定を取り消す」で差し戻しに戻せます。取り消すとスタッフへ通知され、まだ公開していない給与明細は公開できなくなります。すでに公開した明細はスタッフの画面に残るため、必要な場合は給与画面で個別に対応してください。' },
       { q: '支給・控除の項目を追加するには', a: 'スタッフの「詳細」→「給与・口座」タブで、スタッフごとの固定的な支給項目・控除項目を登録できます。登録した項目は、その月の給与を新しく作るときに候補として自動で入ります。すでに下書き保存した明細には反映されないため、その場合は手で追加してください。' },
       { q: '標準報酬月額の設定はどこですか', a: 'スタッフの「詳細」→「社会保険」タブで設定します。等級表から標準報酬月額を選べます。「保険料を自動計算」を押すと、同じ画面の保険料欄に概算が入ります（料率÷2の単純計算です）。この金額は記録用で、給与明細の控除欄には自動では入りません。保険料率は同じ画面の「保険料率設定」で管理します。' },
@@ -15626,6 +15709,23 @@ function BonusAdminTab({ employeeAccounts, bonusRecords = [], tableReady = true,
             </div>
             {itemRows('paymentItems', '支給')}
             {itemRows('deductionItems', '控除')}
+            {/* 賞与の控除は自動計算していません。給与と計算方法が違うためです。
+                給与の所得税は「電算機計算の特例」で出していますが、この特例は
+                通常の賞与には使えません（前月に給与がない方への賞与、
+                前月の給与の10倍を超える賞与のときだけ使えます）。 */}
+            <div className="rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-[11.5px] leading-relaxed text-amber-900 space-y-1">
+              <div className="font-bold">賞与の控除額は自動計算していません</div>
+              <div>
+                金額はすべて手で入れてください。給与の画面とは計算方法が違うためです。
+              </div>
+              <div className="text-[10.5px] opacity-90">
+                ・社会保険料は、標準報酬月額ではなく<b>標準賞与額</b>（1,000円未満を切り捨てた賞与額）から出します。
+                上限もあります（健康保険は年度累計573万円、厚生年金は1回150万円）。<br />
+                ・所得税は<b>「賞与に対する源泉徴収税額の算出率の表」</b>で出します。
+                給与で使っている計算方法（電算機計算の特例）は、通常の賞与には使えません。<br />
+                ・住民税は賞与からは控除しません（特別徴収は毎月の給与から引きます）。
+              </div>
+            </div>
             <Field label="備考（明細に印刷されます）">
               <textarea
                 value={form.notes}
@@ -15968,8 +16068,8 @@ function Row({ label, value }) {
 // 健康保険料率は協会けんぽの都道府県支部ごとに異なるため、必ず設定してください。
 // 介護保険料率・厚生年金保険料率は全国一律です。
 //
-// ⚠ 雇用保険料と所得税はまだ自動計算していません（手入力のままです）。
-//   住民税は別の仕組みで入れています（computeResidentTax）。
+// 住民税・雇用保険料・所得税は、それぞれ別の仕組みで入れています
+// （computeResidentTax / computeEmploymentInsurance / computeIncomeTax）。
 
 // 給与から控除する社会保険料の端数処理
 function roundInsurancePremium(yen) {
@@ -16176,6 +16276,208 @@ function computeEmploymentInsurance({ paymentItems, settings }) {
   };
 }
 
+// ============================================================
+// 所得税（源泉徴収）の自動計算
+// ============================================================
+// 「月額表の甲欄を適用する給与等に対する税額の電算機計算の特例」
+// （財務省告示）の算式で出しています。月額表を引く方法と結果はほぼ同じで、
+// 1円単位で求められるため、給与計算の仕組みではこちらが使われます。
+//
+// 手順：
+//   A（社会保険料等控除後の給与等の金額）
+//     ＝ 課税対象の支給額の合計 − その月に控除する社会保険料等
+//   B（課税給与所得金額）
+//     ＝ A − 給与所得控除（第1表）− 配偶者・扶養控除（第2表）− 基礎控除（第3表）
+//   税額 ＝ B に第4表の算式を当てはめる
+//
+// 端数（告示の定めどおり）：
+//   ・給与所得控除の額は1円未満を切り上げ
+//   ・税額は10円未満を四捨五入
+//   ・ほかの途中計算に端数の定めはありません（整数になるため出ません）
+//
+// 障害者・寡婦・ひとり親・勤労学生について：
+//   この特例に別の控除額はありません。該当するごとに
+//   「源泉控除対象親族が1人いるものとする」と定められています。
+//   そのため、月額表と同じ「扶養親族等の数」で数えれば一致します。
+//   （配偶者分 31,667円 ＋ 親族分 31,667円×人数 ＝ 31,667円×扶養親族等の数）
+//
+// ⚠ この特例が使えるのは次の場合だけです。ほかは自動計算せず手入力のままにします。
+//   ・月額表の甲欄（＝扶養控除等申告書を出している方）
+//   ・非居住者でない方
+//   ・通常の給与（通常の賞与には使えません。賞与は別の表で計算します）
+//   ・令和8年分（2026年）以降に支払う給与
+//
+// ⚠ 表は年分で変わります。令和8年分と令和9年分では給与所得控除と
+//   基礎控除の額が違うため、支給年で表を選んでいます。
+const INCOME_TAX_LABEL = '所得税';
+
+// 「社会保険料等」として A から引く控除項目。
+// ⚠ 厚生年金基金・小規模企業共済等の掛金もここに含めるべき項目ですが、
+//   項目名が決まっていないため自動では拾っていません。
+//   該当する方がいる場合は、所得税の金額を手で直してください。
+const SOCIAL_INSURANCE_DEDUCTION_LABELS = ['健康保険料', '介護保険料', '厚生年金保険料', '雇用保険料'];
+
+// 正の整数どうしの切り上げ割り算。
+// Math.ceil(a * 0.3) は 0.3 が2進数で表せないため誤差で1円ずれます。
+// （例：100000 * 0.3 が 30000.000000000004 になり、切り上げで30001円になる）
+const ceilDiv = (num, den) => Math.floor((num + den - 1) / den);
+
+// 年分ごとの別表。支給年で選びます。
+//   from … この年分以降に適用（告示の「令和9年分以降」に合わせています）
+// 出典：国税庁「月額表の甲欄を適用する給与等に対する税額の電算機計算の特例について」
+//   令和8年分 https://www.nta.go.jp/publication/pamph/gensen/zeigakuhyo2026/data/denshi_01.pdf
+//   令和9年分 https://www.nta.go.jp/publication/pamph/gensen/zeigakuhyo2027/data/denshi_01.pdf
+const INCOME_TAX_TABLES = [
+  {
+    from: 2026,
+    label: '令和8年分',
+    // 第1表 給与所得控除の額（1円未満切り上げ）
+    salary: [
+      { upTo: 158333, fixed: 54167 },
+      { upTo: 299999, num: 3, den: 10, add: 6667 },
+      { upTo: 549999, num: 2, den: 10, add: 36667 },
+      { upTo: 708330, num: 1, den: 10, add: 91667 },
+      { upTo: Infinity, fixed: 162500 },
+    ],
+    // 第3表 基礎控除の額
+    basic: [
+      { upTo: 2120833, fixed: 48334 },
+      { upTo: 2162499, fixed: 40000 },
+      { upTo: 2204166, fixed: 26667 },
+      { upTo: 2245833, fixed: 13334 },
+      { upTo: Infinity, fixed: 0 },
+    ],
+  },
+  {
+    from: 2027,
+    label: '令和9年分',
+    salary: [
+      { upTo: 169444, fixed: 57500 },
+      { upTo: 299999, num: 3, den: 10, add: 6667 },
+      { upTo: 549999, num: 2, den: 10, add: 36667 },
+      { upTo: 708330, num: 1, den: 10, add: 91667 },
+      { upTo: Infinity, fixed: 162500 },
+    ],
+    basic: [
+      { upTo: 2120833, fixed: 51667 },
+      { upTo: 2162499, fixed: 40000 },
+      { upTo: 2204166, fixed: 26667 },
+      { upTo: 2245833, fixed: 13334 },
+      { upTo: Infinity, fixed: 0 },
+    ],
+  },
+];
+
+// 第2表 配偶者（特別）控除・扶養控除の額（1人あたり）
+const INCOME_TAX_DEPENDENT_UNIT = 31667;
+
+// 第4表 税額の算式。率は10万分率の整数で持ち、誤差を出さないようにしています。
+//   rate 5105 ＝ 5.105%
+const INCOME_TAX_RATE_BANDS = [
+  { upTo: 162500, rate: 5105, sub: 0 },
+  { upTo: 275000, rate: 10210, sub: 8296 },
+  { upTo: 579166, rate: 20420, sub: 36374 },
+  { upTo: 750000, rate: 23483, sub: 54113 },
+  { upTo: 1500000, rate: 33693, sub: 130688 },
+  { upTo: 3333333, rate: 40840, sub: 237893 },
+  { upTo: Infinity, rate: 45945, sub: 408061 },
+];
+
+// 給与をいつ支払うか。住民税の控除月と同じ設定から出しています
+// （「対象月の給与はいつ支払われるか」という同じ事実を指すため）。
+// 所得税は支払った時に差し引くものなので、使う表はこの支給年で決まります。
+function payrollPaymentMonthFor(year, month, settings) {
+  const { taxYear, taxMonth } = residentTaxMonthFor(year, month, settings);
+  return { paymentYear: taxYear, paymentMonth: taxMonth };
+}
+
+// 支給年に当てはまる別表。見つからなければ null（＝手入力のまま）。
+function incomeTaxTableFor(paymentYear) {
+  let found = null;
+  INCOME_TAX_TABLES.forEach((t) => {
+    if (paymentYear >= t.from && (!found || t.from > found.from)) found = t;
+  });
+  return found;
+}
+
+// 第1表・第3表の区分から額を出します（A は整数円）
+function incomeTaxBandAmount(bands, a) {
+  const band = bands.find((b) => a <= b.upTo);
+  if (!band) return 0;
+  if (band.fixed != null) return band.fixed;
+  // 1円未満切り上げ。a * num は整数なので誤差は出ません
+  return ceilDiv(a * band.num, band.den) + band.add;
+}
+
+// 課税給与所得金額 B から税額を出します（10円未満四捨五入）
+function incomeTaxFromB(b) {
+  if (!(b > 0)) return 0;
+  const band = INCOME_TAX_RATE_BANDS.find((x) => b <= x.upTo);
+  // 税額を10万倍した整数で持ち、最後に10円単位へ丸めます
+  const scaled = b * band.rate - band.sub * 100000;
+  if (scaled <= 0) return 0;
+  return Math.round(scaled / 1000000) * 10;
+}
+
+// スタッフ1人・1か月分の所得税。
+// 自動計算できないときは amount を null にして、reason に理由を入れます。
+// （0円は「計算した結果0円」で、null とは別の意味です）
+function computeIncomeTax({ employee, paymentItems, deductionItems, dependents, settings, year, month }) {
+  const { paymentYear, paymentMonth } = payrollPaymentMonthFor(year, month, settings);
+  const table = incomeTaxTableFor(paymentYear);
+  const flags = parsePaymentItemFlags(settings);
+
+  const payments = (paymentItems || []).map((it) => ({
+    label: it.label || '',
+    amount: Number(it.amount) || 0,
+    taxable: paymentItemFlag(it.label, flags).tax,
+  }));
+  const taxablePayment = payments.filter((x) => x.taxable).reduce((s, x) => s + x.amount, 0);
+  const excludedItems = payments.filter((x) => !x.taxable);
+
+  const socialParts = SOCIAL_INSURANCE_DEDUCTION_LABELS.map((label) => {
+    const row = (deductionItems || []).find((it) => String(it.label).trim() === label);
+    return { label, amount: row ? Number(row.amount) || 0 : 0 };
+  });
+  const socialTotal = socialParts.reduce((s, x) => s + x.amount, 0);
+
+  const base = {
+    amount: null, reason: '', paymentYear, paymentMonth,
+    tableLabel: table ? table.label : '',
+    taxablePayment, excludedItems, socialTotal, socialParts,
+    a: null, salaryDeduction: null, dependentDeduction: null, basicDeduction: null, b: null,
+    dependents: dependents == null ? null : Number(dependents),
+  };
+
+  // 甲欄・居住者のみ
+  const tableType = String(employee?.taxTableType || '甲欄');
+  if (tableType !== '甲欄') return { ...base, reason: 'otsu' };
+  if (employee?.isNonResident) return { ...base, reason: 'nonresident' };
+  // 令和8年分より前の支給には使えません
+  if (!table) return { ...base, reason: 'noTable' };
+  // 扶養親族等の数は申告書を見ないと決まらないため、推測しません
+  if (dependents == null) return { ...base, reason: 'noDependents' };
+
+  const a = taxablePayment - socialTotal;
+  // 1円未満の端数があると、告示の端数規定どおりに計算できません
+  if (!Number.isInteger(a)) return { ...base, a, reason: 'fraction' };
+  if (a <= 0) {
+    return { ...base, a, salaryDeduction: 0, dependentDeduction: 0, basicDeduction: 0, b: 0, amount: 0 };
+  }
+
+  const salaryDeduction = incomeTaxBandAmount(table.salary, a);
+  const basicDeduction = incomeTaxBandAmount(table.basic, a);
+  const dependentDeduction = INCOME_TAX_DEPENDENT_UNIT * Number(dependents);
+  const b = a - salaryDeduction - dependentDeduction - basicDeduction;
+
+  return {
+    ...base,
+    a, salaryDeduction, basicDeduction, dependentDeduction,
+    b: Math.max(b, 0),
+    amount: incomeTaxFromB(b),
+  };
+}
+
 // 自動で金額を入れる控除項目。ここに無いものは手入力のままです。
 const AUTO_DEDUCTION_KEYS = { 健康保険料: 'health', 介護保険料: 'nursing', 厚生年金保険料: 'pension' };
 // 住民税は別の仕組みで出すため、金額の取り出し方が違います
@@ -16185,6 +16487,18 @@ const EI_LABEL = '雇用保険料';
 const DEFAULT_PAYMENT_ITEM_HINTS = ['基本給', '通勤手当', '残業手当', '交通費精算'];
 const DEFAULT_DEDUCTION_LABELS = ['健康保険料', '介護保険料', '厚生年金保険料', '雇用保険料', '所得税', '住民税'];
 const sumItems = (items) => (items || []).reduce((s, it) => s + (Number(it.amount) || 0), 0);
+
+// 控除の一覧に、決まった金額を当てはめた新しい一覧を返します。
+// 同じ名前の項目があれば入れ替え、無ければ足します。元の一覧は変えません。
+function applyDeductionAmounts(items, amounts) {
+  const next = [...(items || [])];
+  (amounts || []).forEach(({ label, value }) => {
+    const i = next.findIndex((it) => String(it.label).trim() === label);
+    if (i >= 0) next[i] = { ...next[i], amount: value };
+    else next.push({ label, amount: value });
+  });
+  return next;
+}
 
 // ---- 雇用保険の設定（給与計算画面・全社共通） ----
 // 料率と、支給項目ごとの「雇用保険の対象か」「所得税の課税対象か」を決めます。
@@ -16301,7 +16615,7 @@ function EmploymentInsuranceSettings({ settings, knownItems, actor, isMasterAdmi
             通勤手当は<b>雇用保険の賃金には含みますが、所得税では一定額まで非課税</b>です。扱いが違うので別々に持っています。
             <b className="block pt-0.5">通勤手当の非課税の限度額は見ていません。</b>
             限度を超える方がいる場合は、所得税の金額を手で直してください。
-            「所得税の課税」の印は、所得税を自動計算するようになってから使います（いまは記録だけです）。
+            「所得税の課税」の印は、所得税の自動計算で課税対象の支給額を合計するときに使います。
           </div>
 
           <button
@@ -16368,7 +16682,40 @@ function ResidentTaxLine({ resident, employee }) {
   );
 }
 
-function SocialInsuranceNote({ social, standardRemuneration, insuranceRates, loading, employee, year, month, isPublished, differs = false, onApply, resident = null, ei = null }) {
+// 所得税の根拠を出します。金額だけでなく A・各控除・B を見せて、
+// ジョブカンの明細や源泉徴収税額表と突き合わせられるようにしています。
+function IncomeTaxLine({ tax, employee }) {
+  if (!tax) return null;
+  if (tax.amount == null) {
+    const why = {
+      otsu: '税額表区分が乙欄のため自動計算できません（この計算方法は甲欄専用です）。',
+      nonresident: '非居住者のため自動計算できません。',
+      noTable: `${tax.paymentYear}年に支払う給与の税額表を持っていません（令和8年分＝2026年の支払いから対応しています）。`,
+      noDependents: '扶養親族等の数が未登録のため自動計算できません。スタッフの「詳細」→「税・扶養」タブで登録してください（扶養がいない場合も0で登録が必要です）。',
+      fraction: '支給額または社会保険料に1円未満の端数があるため自動計算できません。',
+    }[tax.reason] || '自動計算できません。';
+    return (
+      <div className="text-[11px] font-bold">
+        所得税は0円のままです。{why}手で入れてください。
+      </div>
+    );
+  }
+  return (
+    <div className="text-[10.5px] opacity-80">
+      所得税 <span className="font-mono font-bold">{formatYen(tax.amount)}</span>
+      （{tax.tableLabel}の表・{tax.paymentYear}年{tax.paymentMonth}月の支払い／
+      課税支給 {formatYen(tax.taxablePayment)} − 社保等 {formatYen(tax.socialTotal)} ＝ {formatYen(tax.a)}
+      ／給与所得控除 {formatYen(tax.salaryDeduction)}・基礎控除 {formatYen(tax.basicDeduction)}
+      ・扶養{tax.dependents}人 {formatYen(tax.dependentDeduction)}
+      ／課税給与所得 {formatYen(tax.b)}）
+      {tax.excludedItems.length > 0 && (
+        <span>／{tax.excludedItems.map((x) => x.label).join('・')}は非課税として除いています</span>
+      )}
+    </div>
+  );
+}
+
+function SocialInsuranceNote({ social, standardRemuneration, insuranceRates, loading, employee, year, month, isPublished, differs = false, onApply, resident = null, ei = null, tax = null }) {
   if (loading) {
     return (
       <div className="rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-[11.5px] text-slate-400">
@@ -16389,6 +16736,15 @@ function SocialInsuranceNote({ social, standardRemuneration, insuranceRates, loa
         <div className="text-amber-700">健康保険料・介護保険料・厚生年金保険料は、下の欄に手で入れてください。</div>
         <ResidentTaxLine resident={resident} employee={employee} />
         <EmploymentInsuranceLine ei={ei} />
+        {/* 所得税は社会保険料を引いたあとの額から出すため、
+            保険料が未確定のうちは金額も仮です。そのことを添えています。 */}
+        <IncomeTaxLine tax={tax} employee={employee} />
+        {tax && tax.amount != null && (
+          <div className="text-[10.5px] text-amber-700">
+            所得税は社会保険料を差し引いたあとの額から計算します。
+            保険料を手で入れたあと、下の「計算した金額に入れ直す」で所得税も入れ直してください。
+          </div>
+        )}
       </div>
     );
   }
@@ -16426,7 +16782,7 @@ function SocialInsuranceNote({ social, standardRemuneration, insuranceRates, loa
           <div className="text-[10.5px] text-amber-800">
             すでに作った明細には自動で入りません（手で直した金額を書き換えないため）。
             計算した金額に入れ直す場合は、下のボタンを押してください。
-            入れ替わるのは社会保険料3つと住民税・雇用保険料だけで、所得税や手で足した項目はそのままです。
+            入れ替わるのは社会保険料3つと住民税・雇用保険料・所得税だけで、手で足した項目はそのままです。
           </div>
           <button
             onClick={onApply}
@@ -16450,6 +16806,7 @@ function SocialInsuranceNote({ social, standardRemuneration, insuranceRates, loa
       </div>
       <ResidentTaxLine resident={resident} employee={employee} />
       <EmploymentInsuranceLine ei={ei} />
+      <IncomeTaxLine tax={tax} employee={employee} />
       <div className="text-[10.5px] opacity-80">
         標準報酬月額 健保 {formatYen(social.healthBase)}・厚年 {formatYen(social.pensionBase)}（{stdLabel}）
         ／ 料率 健保 {social.healthRate || '—'}%・介護 {social.nursingRate || '—'}%・厚年 {social.pensionRate || '—'}%
@@ -16469,7 +16826,8 @@ function SocialInsuranceNote({ social, standardRemuneration, insuranceRates, loa
       )}
       <div className="text-[10.5px] opacity-80">
         金額は候補です。公開する前に必ずご確認ください。欄の数字は手で直せます。
-        所得税はまだ自動計算していません（手で入れてください）。
+        所得税は社会保険料を差し引いたあとの額から出すため、保険料を手で直したときは
+        「計算した金額に入れ直す」で所得税も入れ直してください。
       </div>
     </div>
   );
@@ -16534,6 +16892,8 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
   const [insuranceLoading, setInsuranceLoading] = useState(true);
   // 住民税（特別徴収）。年度ごとに登録された通知書の数字を使います
   const [residentTaxRow, setResidentTaxRow] = useState(null);
+  // 扶養親族等の数（所得税用）。対象月以前で一番新しい登録。未登録なら null
+  const [withholdingDependents, setWithholdingDependents] = useState(null);
   // 一覧から開いた明細（中身を見る・印刷する）
   const [openSlip, setOpenSlip] = useState(null);
 
@@ -16569,15 +16929,17 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     setInsuranceLoading(true);
     (async () => {
       const { fiscalYear } = residentTaxMonthFor(year, month, settings);
-      const [std, rates, rtax] = await Promise.all([
+      const [std, rates, rtax, dep] = await Promise.all([
         fetchEffectiveStandardRemuneration(employeeId, year, month),
         fetchInsuranceRateSettings(),
         fetchResidentTax(employeeId, fiscalYear),
+        fetchEffectiveWithholdingDependents(employeeId, year, month),
       ]);
       if (cancelled) return;
       setStandardRemuneration(std);
       setInsuranceRates(rates);
       setResidentTaxRow(rtax);
+      setWithholdingDependents(dep);
       setInsuranceLoading(false);
     })();
     return () => { cancelled = true; };
@@ -16651,18 +17013,34 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
       // 社会保険料・住民税・雇用保険料は計算した額を候補として入れます。
       // 料率や標準報酬月額が未設定のときは0のままにして、画面で知らせます。
       const nextEi = computeEmploymentInsurance({ paymentItems: nextPaymentItems, settings });
+      const baseDeductions = DEFAULT_DEDUCTION_LABELS.map((label) => {
+        if (label === RESIDENT_TAX_LABEL) {
+          return { label, amount: resident?.amount == null ? 0 : resident.amount };
+        }
+        if (label === EI_LABEL) {
+          return { label, amount: nextEi.amount == null ? 0 : nextEi.amount };
+        }
+        const key = AUTO_DEDUCTION_KEYS[label];
+        const auto = key && social ? social[key] : null;
+        return { label, amount: auto == null ? 0 : auto };
+      });
+      // 所得税は「社会保険料等を差し引いたあとの額」から出すため、
+      // 控除の一覧を組み立てたあとで計算します。
+      const nextTax = computeIncomeTax({
+        employee,
+        paymentItems: nextPaymentItems,
+        deductionItems: baseDeductions,
+        dependents: withholdingDependents ? withholdingDependents.dependents : null,
+        settings,
+        year,
+        month,
+      });
       setDeductionItems([
-        ...DEFAULT_DEDUCTION_LABELS.map((label) => {
-          if (label === RESIDENT_TAX_LABEL) {
-            return { label, amount: resident?.amount == null ? 0 : resident.amount };
-          }
-          if (label === EI_LABEL) {
-            return { label, amount: nextEi.amount == null ? 0 : nextEi.amount };
-          }
-          const key = AUTO_DEDUCTION_KEYS[label];
-          const auto = key && social ? social[key] : null;
-          return { label, amount: auto == null ? 0 : auto };
-        }),
+        ...baseDeductions.map((it) => (
+          it.label === INCOME_TAX_LABEL && nextTax.amount != null
+            ? { ...it, amount: nextTax.amount }
+            : it
+        )),
         ...employeeSalaryItems.filter((it) => it.kind === 'deduction').map((it) => ({ label: it.label, amount: it.amount })),
       ]);
     }
@@ -16673,7 +17051,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     // 届いた時点で控除の候補を入れ直せるよう、ここに入れています。
     // social は毎回あたらしい物になるので入れません（入れると繰り返し動きます）。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [employeeId, year, month, existing?.id, employeeSalaryItems, approvedCommuteTotal, standardRemuneration, insuranceRates, residentTaxRow, settings]);
+  }, [employeeId, year, month, existing?.id, employeeSalaryItems, approvedCommuteTotal, standardRemuneration, insuranceRates, residentTaxRow, withholdingDependents, settings]);
 
   if (!employee) {
     return <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-6 py-14 text-center text-[12.5px] text-slate-300">スタッフが登録されていません</div>;
@@ -16685,6 +17063,18 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
 
   // 雇用保険料は支給項目から出すため、支給が決まったあとで計算します
   const ei = computeEmploymentInsurance({ paymentItems, settings });
+
+  // 所得税。いま控除欄に入っている社会保険料等から出します
+  // （保険料を手で直したら、それに合わせた額が出ます）。
+  const tax = computeIncomeTax({
+    employee,
+    paymentItems,
+    deductionItems,
+    dependents: withholdingDependents ? withholdingDependents.dependents : null,
+    settings,
+    year,
+    month,
+  });
 
   // 設定画面に並べる支給項目。いま使われているものを集めます
   const knownPaymentItems = Array.from(new Set([
@@ -16705,7 +17095,21 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     // 住民税・雇用保険料も同じ仕組みで入れ直します
     if (resident && resident.amount != null) out.push({ label: RESIDENT_TAX_LABEL, value: resident.amount });
     if (ei && ei.amount != null) out.push({ label: EI_LABEL, value: ei.amount });
-    return out.filter((x) => x.value != null); // 未設定のものは触らない
+    const fixed = out.filter((x) => x.value != null); // 未設定のものは触らない
+    // 所得税は、上の金額を当てはめたあとの控除から出します。
+    // 入れ替え前の（古い）保険料で計算すると、入れ直した直後の額がずれます。
+    const applied = applyDeductionAmounts(deductionItems, fixed);
+    const nextTax = computeIncomeTax({
+      employee,
+      paymentItems,
+      deductionItems: applied,
+      dependents: withholdingDependents ? withholdingDependents.dependents : null,
+      settings,
+      year,
+      month,
+    });
+    if (nextTax.amount != null) fixed.push({ label: INCOME_TAX_LABEL, value: nextTax.amount });
+    return fixed;
   };
 
   // いま欄に入っている金額が、計算した金額と違うか
@@ -16714,20 +17118,13 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     return !cur || Number(cur.amount) !== value;
   });
 
-  // 社会保険料の欄だけを計算した金額に入れ直す。ほかの控除項目には触りません。
+  // 社会保険料・住民税・雇用保険料・所得税の欄を計算した金額に入れ直す。
+  // ほかの控除項目には触りません。
   // すでに作った下書きは自動では入らないため、ここから入れ直します。
   const applySocialInsurance = () => {
     const amounts = socialAmounts();
     if (amounts.length === 0) return;
-    setDeductionItems((prev) => {
-      const next = [...prev];
-      amounts.forEach(({ label, value }) => {
-        const i = next.findIndex((it) => String(it.label).trim() === label);
-        if (i >= 0) next[i] = { ...next[i], amount: value };
-        else next.push({ label, amount: value });
-      });
-      return next;
-    });
+    setDeductionItems((prev) => applyDeductionAmounts(prev, amounts));
   };
 
   const saveWageSettings = async () => {
@@ -16896,6 +17293,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
           onApply={applySocialInsurance}
           resident={resident}
           ei={ei}
+          tax={tax}
         />
         <PayrollItemsEditor title="控除項目" items={deductionItems} onChange={setDeductionItems} addLabel="控除項目を追加" />
 
@@ -22894,6 +23292,279 @@ function ResidentTaxPanel({ employee, actor, isMasterAdmin, collectionMethod, se
   );
 }
 
+// ---- 扶養親族等の数の登録（スタッフ詳細→税・扶養） ----
+// 所得税（源泉徴収）の自動計算に使います。
+// 年の途中で変わる（出生・就職・扶養から外れる）ため、(年, 月) ごとに持ちます。
+// 給与計算では「その月以前で一番新しい登録」を使います。
+//
+// 数え方は扶養控除等申告書を見ないと決まらないため、自動では出しません。
+// 内訳からの足し算だけ手伝い、最後の数は人が決めます。
+function WithholdingDependentsPanel({ employee, actor, isMasterAdmin, taxTableType, isNonResident, isDesktop }) {
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [editing, setEditing] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  // 内訳の足し算の手伝い（保存はしません。数を決めるためだけに使います）
+  const [breakdownOpen, setBreakdownOpen] = useState(false);
+  const [bd, setBd] = useState({
+    spouse: false, relatives: '0',
+    selfDisabled: false, selfWidow: false, selfStudent: false,
+    disabledRelatives: '0', coResidentSpecial: '0',
+  });
+
+  const reload = async () => {
+    setLoading(true);
+    try {
+      setRows(await fetchWithholdingDependentsList(employee.id));
+    } finally {
+      setLoading(false);
+    }
+  };
+  useEffect(() => {
+    let cancelled = false;
+    // 返ってこないときに「読み込み中…」で固まらないよう、時間切れを置いています
+    const timer = setTimeout(() => {
+      if (cancelled) return;
+      setLoading(false);
+      setError('読み込みに時間がかかっています。通信の状態を確かめて、画面を開き直してください。');
+    }, LOAD_TIMEOUT_MS);
+    (async () => {
+      try {
+        const list = await fetchWithholdingDependentsList(employee.id);
+        if (!cancelled) setRows(list);
+      } finally {
+        if (!cancelled) { clearTimeout(timer); setLoading(false); }
+      }
+    })();
+    return () => { cancelled = true; clearTimeout(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [employee.id]);
+
+  const now = new Date();
+  const nz = (v) => Math.max(0, Math.floor(Number(v) || 0));
+  // 同居特別障害者は2人分として数えます
+  const breakdownTotal =
+    (bd.spouse ? 1 : 0) + nz(bd.relatives)
+    + (bd.selfDisabled ? 1 : 0) + (bd.selfWidow ? 1 : 0) + (bd.selfStudent ? 1 : 0)
+    + nz(bd.disabledRelatives) + nz(bd.coResidentSpecial) * 2;
+
+  const startAdd = () => {
+    setError('');
+    setEditing({ year: String(now.getFullYear()), month: String(now.getMonth() + 1), dependents: '', note: '' });
+  };
+  const startEdit = (r) => {
+    setError('');
+    setEditing({ id: r.id, year: String(r.year), month: String(r.month), dependents: String(r.dependents), note: r.note });
+  };
+
+  const save = async () => {
+    const y = Number(editing.year);
+    const m = Number(editing.month);
+    const d = Number(editing.dependents);
+    if (!Number.isInteger(y) || y < 2000 || y > 2100) { setError('年を正しく入れてください。'); return; }
+    if (!Number.isInteger(m) || m < 1 || m > 12) { setError('月は1〜12で入れてください。'); return; }
+    if (!Number.isInteger(d) || d < 0 || d > 20) { setError('扶養親族等の数は0〜20の整数で入れてください。'); return; }
+    const clash = rows.find((r) => r.year === y && r.month === m && r.id !== editing.id);
+    if (clash) { setError(`${y}年${m}月分はすでに登録されています。その行を直してください。`); return; }
+    setSaving(true);
+    const res = await saveWithholdingDependents(
+      { ...editing, year: y, month: m, dependents: d, employeeId: employee.id }, actor, employee.name
+    );
+    setSaving(false);
+    if (!res.ok) { setError(`保存できませんでした。${res.message}`); return; }
+    setEditing(null);
+    setError('');
+    await reload();
+  };
+
+  const remove = async (r) => {
+    if (!window.confirm(`${r.year}年${r.month}月分からの登録（${r.dependents}人）を削除します。よろしいですか？`)) return;
+    setSaving(true);
+    const res = await deleteWithholdingDependents({ ...r, employeeId: employee.id }, actor, employee.name);
+    setSaving(false);
+    if (!res.ok) { setError(`削除できませんでした。${res.message}`); return; }
+    await reload();
+  };
+
+  if (!isMasterAdmin) {
+    return (
+      <div className="rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-[11.5px] text-slate-500">
+        扶養親族等の数を見られるのはマスター管理者だけです。
+      </div>
+    );
+  }
+
+  const kou = String(taxTableType || '甲欄') === '甲欄' && !isNonResident;
+  const numCls = 'w-full box-border border border-slate-200 rounded-lg px-2.5 py-2 font-mono text-[13px] text-right bg-white';
+
+  return (
+    <div className="rounded-xl border border-slate-200 overflow-hidden">
+      <div className="px-3.5 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center gap-2 flex-wrap">
+        <span className="text-[12px] font-bold text-slate-600">扶養親族等の数（所得税の計算用）</span>
+        {!editing && (
+          <button onClick={startAdd} className="ml-auto rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-[11.5px] font-bold text-slate-600">
+            年月を追加する
+          </button>
+        )}
+      </div>
+
+      {/* エラーはフォームの外にも出します（削除の失敗が無言にならないように） */}
+      {error && (
+        <div className="px-3.5 py-2 border-b border-rose-200 bg-rose-50 text-[11.5px] text-rose-700 flex items-start gap-2">
+          <span className="flex-1">{error}</span>
+          <button onClick={() => setError('')} className="text-[11px] font-bold text-rose-500 shrink-0">閉じる</button>
+        </div>
+      )}
+
+      {!kou && (
+        <div className="px-3.5 py-2 text-[11px] text-slate-600 bg-amber-50 border-b border-amber-200">
+          {isNonResident ? '非居住者' : '税額表区分が乙欄'}のため、所得税は自動計算しません。
+          給与計算の画面で手で入れてください。
+        </div>
+      )}
+
+      {editing && (
+        <div className="px-3.5 py-3 border-b border-slate-200 bg-amber-50/40 space-y-2.5">
+          <div className={`grid gap-2.5 ${isDesktop ? 'grid-cols-3' : 'grid-cols-3'}`}>
+            <Field label="適用開始 年">
+              <input type="number" value={editing.year}
+                onChange={(e) => setEditing((p) => ({ ...p, year: e.target.value }))} className={numCls} />
+            </Field>
+            <Field label="月">
+              <input type="number" min="1" max="12" value={editing.month}
+                onChange={(e) => setEditing((p) => ({ ...p, month: e.target.value }))} className={numCls} />
+            </Field>
+            <Field label="扶養親族等の数（人）">
+              <input type="number" min="0" max="20" value={editing.dependents}
+                onChange={(e) => setEditing((p) => ({ ...p, dependents: e.target.value }))} className={numCls} />
+            </Field>
+          </div>
+          <div className="text-[10.5px] text-slate-500 leading-relaxed">
+            入れた年月<b>以降</b>、次の登録が出るまでこの数が使われます。
+            扶養がいない方も <b>0</b> で登録してください（登録が無いと所得税を自動計算しません）。
+          </div>
+
+          {/* 内訳からの足し算。数え間違いが税額に直結するため、手伝いを置いています */}
+          <button
+            onClick={() => setBreakdownOpen((v) => !v)}
+            className="w-full rounded-lg border border-slate-300 bg-white py-1.5 text-[11.5px] font-bold text-slate-600"
+          >
+            {breakdownOpen ? '内訳から数える（閉じる）' : '内訳から数える'}
+          </button>
+          {breakdownOpen && (
+            <div className="rounded-lg border border-slate-200 bg-white px-2.5 py-2.5 space-y-2">
+              <label className="flex items-center gap-2 text-[12px] text-slate-700">
+                <input type="checkbox" checked={bd.spouse} onChange={(e) => setBd((p) => ({ ...p, spouse: e.target.checked }))} />
+                源泉控除対象配偶者がいる（＋1）
+              </label>
+              <div className={`grid gap-2 ${isDesktop ? 'grid-cols-3' : 'grid-cols-1'}`}>
+                <Field label="源泉控除対象扶養親族（人）">
+                  <input type="number" min="0" value={bd.relatives}
+                    onChange={(e) => setBd((p) => ({ ...p, relatives: e.target.value }))} className={numCls} />
+                </Field>
+                {/* この2つは重ねて数えません。同居特別障害者の方は右の欄にだけ入れてください
+                    （両方に入れると二重に数えて税額がずれます）。 */}
+                <Field label="障害者の扶養親族等（人・＋1）">
+                  <input type="number" min="0" value={bd.disabledRelatives}
+                    onChange={(e) => setBd((p) => ({ ...p, disabledRelatives: e.target.value }))} className={numCls} />
+                </Field>
+                <Field label="同居特別障害者（人・＋2）">
+                  <input type="number" min="0" value={bd.coResidentSpecial}
+                    onChange={(e) => setBd((p) => ({ ...p, coResidentSpecial: e.target.value }))} className={numCls} />
+                </Field>
+              </div>
+              <div className="text-[11px] font-bold text-slate-500">ご本人が該当する場合（それぞれ＋1）</div>
+              <div className="flex flex-wrap gap-x-4 gap-y-1">
+                <label className="flex items-center gap-2 text-[12px] text-slate-700">
+                  <input type="checkbox" checked={bd.selfDisabled} onChange={(e) => setBd((p) => ({ ...p, selfDisabled: e.target.checked }))} />
+                  障害者
+                </label>
+                <label className="flex items-center gap-2 text-[12px] text-slate-700">
+                  <input type="checkbox" checked={bd.selfWidow} onChange={(e) => setBd((p) => ({ ...p, selfWidow: e.target.checked }))} />
+                  寡婦・ひとり親
+                </label>
+                <label className="flex items-center gap-2 text-[12px] text-slate-700">
+                  <input type="checkbox" checked={bd.selfStudent} onChange={(e) => setBd((p) => ({ ...p, selfStudent: e.target.checked }))} />
+                  勤労学生
+                </label>
+              </div>
+              <div className="rounded-lg border border-teal-200 bg-teal-50 px-2.5 py-1.5 text-[11.5px] text-teal-900">
+                内訳の合計：<b className="font-mono">{breakdownTotal}人</b>
+              </div>
+              <button
+                onClick={() => setEditing((p) => ({ ...p, dependents: String(breakdownTotal) }))}
+                className="w-full rounded-lg border-2 border-amber-200 bg-white py-1.5 text-[12px] font-bold text-amber-700"
+              >
+                この数を上の欄に入れる
+              </button>
+              <div className="text-[10.5px] text-slate-500 leading-relaxed">
+                障害者・寡婦・ひとり親・勤労学生に別の控除額はなく、
+                該当するごとに源泉控除対象親族が1人いるものとして数えます。
+                <b>「障害者の扶養親族等」と「同居特別障害者」は重ねて数えません。</b>
+                同居特別障害者の方は右の欄にだけ入れてください（両方に入れると二重になります）。
+                <b>この足し算は手伝いです。必ず扶養控除等申告書と見比べてください。</b>
+                内訳そのものは保存されません。
+              </div>
+            </div>
+          )}
+
+          <Field label="メモ（任意）">
+            <input value={editing.note} onChange={(e) => setEditing((p) => ({ ...p, note: e.target.value }))}
+              placeholder="例）2026年分の扶養控除等申告書より"
+              className="w-full border border-slate-200 rounded-lg px-2.5 py-2 text-[13px] bg-white" />
+          </Field>
+          <div className="flex gap-2">
+            <button onClick={() => { setEditing(null); setError(''); }} className="flex-1 rounded-lg border border-slate-300 bg-white py-2 text-[12.5px] font-bold text-slate-600">やめる</button>
+            <button onClick={save} disabled={saving} className="flex-1 rounded-lg bg-slate-800 py-2 text-[12.5px] font-bold text-white disabled:bg-slate-300">{saving ? '保存中…' : '保存する'}</button>
+          </div>
+        </div>
+      )}
+
+      {loading ? (
+        <div className="px-3.5 py-5 text-center text-[11.5px] text-slate-300">読み込み中…</div>
+      ) : rows.length === 0 ? (
+        <div className="px-3.5 py-5 text-center text-[11.5px] text-slate-300">まだ登録がありません</div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-[11.5px]">
+            <thead className="bg-white text-slate-500">
+              <tr className="text-left">
+                <th className="px-3 py-1.5 font-medium whitespace-nowrap">適用開始</th>
+                <th className="px-2 py-1.5 font-medium text-right whitespace-nowrap">扶養親族等の数</th>
+                <th className="px-2 py-1.5 font-medium whitespace-nowrap">控除額（月）</th>
+                <th className="px-2 py-1.5 font-medium whitespace-nowrap">メモ</th>
+                <th className="px-2 py-1.5 font-medium text-right whitespace-nowrap"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.id} className="border-t border-slate-100">
+                  <td className="px-3 py-1.5 font-mono whitespace-nowrap">{r.year}/{r.month} 〜</td>
+                  <td className="px-2 py-1.5 text-right font-mono font-bold">{r.dependents}人</td>
+                  <td className="px-2 py-1.5 font-mono text-slate-500 whitespace-nowrap">
+                    {formatYen(INCOME_TAX_DEPENDENT_UNIT * r.dependents)}
+                  </td>
+                  <td className="px-2 py-1.5 text-slate-500">{r.note || '—'}</td>
+                  <td className="px-2 py-1.5 text-right whitespace-nowrap">
+                    <button onClick={() => startEdit(r)} className="text-[11px] font-bold text-slate-500 px-1">直す</button>
+                    <button onClick={() => remove(r)} className="text-[11px] font-bold text-rose-500 px-1">削除</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div className="px-3.5 py-2 border-t border-slate-100 text-[10.5px] text-slate-400 leading-relaxed">
+        源泉控除対象配偶者・源泉控除対象扶養親族・障害者等の加算を合計した数です（1人あたり {formatYen(INCOME_TAX_DEPENDENT_UNIT)} が控除されます）。
+        年末調整の扶養人数とは別の数です。この数は給与の所得税に自動で反映されます。
+      </div>
+    </div>
+  );
+}
+
 function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSaveMyNumber, isMasterAdmin, knownGroups = [], groupAttendanceSchedules = {}, employeeAttendanceSchedule = {}, onSaveEmployeeAttendance, resignationReasons = [], settings = {}, actor = null, leaveGrants = [], leaveRequests = [], onLeaveGrantsChanged, isDesktop }) {
   const [activeTab, setActiveTab] = useState('basic');
   const containerRef = useRef(null);
@@ -23856,6 +24527,16 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
               </div>
               <label className="flex items-center gap-2 text-[12.5px] text-slate-600"><input type="checkbox" checked={form.isNonResident} onChange={setCheck('isNonResident')} />非居住者</label>
               <label className="flex items-center gap-2 text-[12.5px] text-slate-600"><input type="checkbox" checked={form.isWorkingStudent} onChange={setCheck('isWorkingStudent')} />勤労学生</label>
+
+              <div className="text-[11px] font-bold text-slate-400 pt-2">所得税</div>
+              <WithholdingDependentsPanel
+                employee={account}
+                actor={actor}
+                isMasterAdmin={isMasterAdmin}
+                taxTableType={form.taxTableType}
+                isNonResident={form.isNonResident}
+                isDesktop={isDesktop}
+              />
           </div>
           </>
           )}
