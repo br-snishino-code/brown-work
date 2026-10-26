@@ -14923,13 +14923,14 @@ function RecentActionsCard({ logs = [], onOpenAll }) {
   );
 }
 
-function AdminDashboardTab({ missingCount, correctionCount, leaveCount, gpsAlertCount, contractAlertCount, offShiftAlerts = [], shiftNoClockInCount = 0, clockInApprovalCount = 0, employeeCount, todayPresentCount = 0, monthOvertimeMin = 0, paidLeaveShortages = [], announcements = [], notifications = [], onNavigate, onNavigateTop, onOpenNotification, isDesktop, todayStatus = null, monthClosing = null, auditLogs = [] }) {
+function AdminDashboardTab({ missingCount, correctionCount, leaveCount, gpsAlertCount, contractAlertCount, offShiftAlerts = [], shiftNoClockInCount = 0, clockInApprovalCount = 0, employeeCount, todayPresentCount = 0, monthOvertimeMin = 0, paidLeaveShortages = [], announcements = [], notifications = [], onNavigate, onNavigateTop, onOpenNotification, isDesktop, isMasterAdmin = false, todayStatus = null, monthClosing = null, auditLogs = [] }) {
+  // スタッフ一覧（accounts）はマスター管理者のみ。管理者には導線を出しません
   const alertRows = [
     { label: '打刻漏れ・打刻間違い', count: missingCount, tab: 'requests', icon: <AlertTriangle size={14} /> },
     { label: '位置情報が5回以上連続で未記録', count: gpsAlertCount, tab: 'attendance', icon: <MapPin size={14} /> },
     { label: 'シフト外の出勤（直近30日）', count: offShiftAlerts.length, tab: 'attendance', icon: <CalendarDays size={14} /> },
     { label: '出勤予定なのに打刻がない日', count: shiftNoClockInCount, tab: 'shift', icon: <ListChecks size={14} /> },
-    { label: '契約更新が必要なスタッフがいます', count: contractAlertCount, tab: 'accounts', icon: <FileText size={14} /> },
+    ...(isMasterAdmin ? [{ label: '契約更新が必要なスタッフがいます', count: contractAlertCount, tab: 'accounts', icon: <FileText size={14} /> }] : []),
     { label: '有休の年5日取得が不足しています', count: paidLeaveShortages.length, tab: 'leave', icon: <Palmtree size={14} /> },
   ];
   const unapprovedRows = [
@@ -14939,7 +14940,7 @@ function AdminDashboardTab({ missingCount, correctionCount, leaveCount, gpsAlert
   ];
   const quickLinks = [
     { label: '勤怠一覧', tab: 'attendance', icon: <Clock size={17} /> },
-    { label: 'スタッフ管理', tab: 'accounts', icon: <Users size={17} /> },
+    ...(isMasterAdmin ? [{ label: 'スタッフ管理', tab: 'accounts', icon: <Users size={17} /> }] : []),
     { label: '休暇申請', tab: 'leave', icon: <Palmtree size={17} /> },
     { label: '実績の確認', tab: 'perfreview', icon: <ClipboardList size={17} /> },
   ];
@@ -17920,7 +17921,10 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
     {
       key: 'staff-group',
       label: 'スタッフ管理',
-      tabs: isMasterAdmin ? ['accounts', 'groupleave', 'perfreview', 'eoincentive', 'groupformats', 'auditlog', 'adminperms', 'resignreasons'] : ['accounts', 'groupleave', 'perfreview', 'eoincentive', 'auditlog'],
+      // スタッフ一覧（accounts）はマスター管理者のみ。
+      // 登録情報（住所・口座・給与など）に行ける入口のため、管理者には出しません。
+      // 勤怠の確認は「勤怠一覧」でスタッフを絞り込めるので、管理者もこれまでどおりできます。
+      tabs: isMasterAdmin ? ['accounts', 'groupleave', 'perfreview', 'eoincentive', 'groupformats', 'auditlog', 'adminperms', 'resignreasons'] : ['groupleave', 'perfreview', 'eoincentive', 'auditlog'],
       items: isMasterAdmin
         ? [
             { tab: 'accounts', label: 'スタッフ一覧・登録', sub: '入退職日・有休管理' },
@@ -17933,7 +17937,6 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
             { tab: 'resignreasons', label: '退職理由の設定', sub: '選択肢の追加・編集' },
           ]
         : [
-            { tab: 'accounts', label: 'スタッフ一覧・登録', sub: '入退職日・有休管理' },
             { tab: 'groupleave', label: '出勤規定日数設定', sub: 'グループ別・月別日数' },
             { tab: 'perfreview', label: '実績の確認', sub: '全業務の閲覧・修正' },
             { tab: 'eoincentive', label: 'インセンティブ集計', sub: '業務別・支給額の算出' },
@@ -17954,7 +17957,7 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
     { tab: 'monthlyconfirm', label: '月次確定', badge: monthlyConfirmCount },
     { tab: 'shift', label: 'シフト', badge: shiftPendingCount },
     { tab: 'leave', label: '休暇申請', badge: leaveCount },
-    { tab: 'accounts', label: 'スタッフ一覧' },
+    ...(isMasterAdmin ? [{ tab: 'accounts', label: 'スタッフ一覧' }] : []),
   ];
   const primaryTabs = primaryItems.map((i) => i.tab);
   const otherItems = categories
@@ -18131,6 +18134,13 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
     if (onConsumeRequestedAdminTab) onConsumeRequestedAdminTab();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [requestedAdminTab]);
+
+  // マスター管理者だけの画面に管理者が取り残されないようにする。
+  // メニューからは消してありますが、ほかの画面からの移動や、
+  // 権限が変わったあとに居座る場合に備えて戻します。
+  useEffect(() => {
+    if (!isMasterAdmin && tab === 'accounts') setTab('dashboard');
+  }, [isMasterAdmin, tab]);
 
   // シフト希望：受付中の月の未提出件数
   const openShiftPeriodAdmin = (data.shiftPeriods || []).find((p) => p.isOpen) || null;
@@ -18333,8 +18343,10 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [onNavigateTop]);
 
+  // 名前を押してスタッフ詳細を開けるのはマスター管理者だけ。
+  // 管理者のときは null を渡すと、EmployeeLink がただの文字になります。
   return (
-    <EmployeeLinkContext.Provider value={openEmployee}>
+    <EmployeeLinkContext.Provider value={isMasterAdmin ? openEmployee : null}>
     <div className="space-y-5">
       {/* スマホでもPCと同じ並び・同じ件数表示にする */}
       <AdminTopNav
@@ -18411,6 +18423,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
 
       {tab === 'dashboard' && (
         <AdminDashboardTab
+          isMasterAdmin={isMasterAdmin}
           missingCount={missing.length}
           correctionCount={pending.length}
           leaveCount={leavePending.length}
@@ -18439,7 +18452,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
         <AttendanceAdminTab data={data} employeeAccounts={employeeAccounts} gpsAlerts={gpsAlerts} offShiftAlerts={offShiftAlerts} focus={attendanceFocus} onConsumeFocus={() => setAttendanceFocus(null)} onAdminUpdateAttendance={onAdminUpdateAttendance} onAdminUpdateAttendanceBatch={onAdminUpdateAttendanceBatch} onDeleteAttendance={onDeleteAttendance} isMasterAdmin={session?.role === 'master_admin'} isDesktop={isDesktop} />
       )}
 
-      {tab === 'accounts' && (
+      {tab === 'accounts' && isMasterAdmin && (
         <AccountManagement
           employeeAccounts={employeeAccounts}
           onAddAccount={onAddAccount}
