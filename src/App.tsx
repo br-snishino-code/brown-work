@@ -537,6 +537,7 @@ function computePaidLeaveBalance({ employee, grantRows = [], leaveRequests = [],
   const empty = {
     pool: [], live: [], granted: 0, remaining: 0, usedFromLive: 0,
     shortages: [], adjustment: 0, usedAllTime: 0, expiringSoon: [],
+    pendingCarryover: false,
   };
   if (!employee?.hireDate) return empty;
   const migrationDateKey = leaveMigrationDateKey(settings);
@@ -544,14 +545,23 @@ function computePaidLeaveBalance({ employee, grantRows = [], leaveRequests = [],
   // 付与を付与日でまとめる。表の行は同じ付与日の法定付与を上書きします
   // （入職日から導いた日数が実態と違うときに直せるようにしてあります）。
   const byDate = new Map();
-  statutoryGrantSchedule(employee, asOfKey)
+  const statutory = statutoryGrantSchedule(employee, asOfKey);
+  statutory
     .filter((g) => !migrationDateKey || g.dateKey >= migrationDateKey)
     .forEach((g) => byDate.set(g.dateKey, { ...g, kind: 'statutory' }));
-  grantRows
-    .filter((r) => r.employeeId === employee.id)
-    .forEach((r) => byDate.set(r.grantDate, {
-      dateKey: r.grantDate, days: Number(r.days) || 0, kind: r.kind, note: r.note || '', id: r.id,
-    }));
+  const ownRows = grantRows.filter((r) => r.employeeId === employee.id);
+  ownRows.forEach((r) => byDate.set(r.grantDate, {
+    dateKey: r.grantDate, days: Number(r.days) || 0, kind: r.kind, note: r.note || '', id: r.id,
+  }));
+
+  // 移行日より前にしか付与が無く、引き継ぎもまだ登録されていない状態。
+  // このとき残日数は「0日」ではなく「まだ分からない」が正しいため、
+  // 画面では引き継ぎ待ちとして出し、有休の申請も止めません。
+  // 0日と出して申請を止めると、前の仕組みと同じように有休が使えなくなります。
+  const pendingCarryover = !!migrationDateKey
+    && ownRows.length === 0
+    && statutory.some((g) => g.dateKey < migrationDateKey)
+    && byDate.size === 0;
 
   const mine = leaveRequests.filter((l) => l.employeeId === employee.id && l.type === '有休' && l.status === 'approved');
   const usages = mine
@@ -565,6 +575,7 @@ function computePaidLeaveBalance({ employee, grantRows = [], leaveRequests = [],
     ...alloc,
     adjustment,
     migrationDateKey,
+    pendingCarryover,
     usedAllTime: r1(mine.reduce((s, l) => s + (Number(l.days) || 0), 0)),
     // 時効が近く、まだ残っている付与
     expiringSoon: alloc.live.filter((g) => g.expiresOnKey <= soonKey && r1(g.days - g.used) > 0),
@@ -5697,6 +5708,7 @@ function AttendanceApp() {
       {leaveModalOpen && (
         <LeaveRequestModal
           leaveRemaining={myLeaveBalance.remaining}
+          balancePending={myLeaveBalance.pendingCarryover}
           onClose={() => setLeaveModalOpen(false)}
           onSubmit={submitLeaveRequest}
         />
@@ -8789,6 +8801,9 @@ function LeaveView({ leaveRequests, leaveTotal, leaveUsed, balance = null, hireD
   // 付与の明細。古い付与（＝繰越分）から順に並びます。
   const liveGrants = balance?.live || [];
   const expiringSoon = balance?.expiringSoon || [];
+  // 引き継ぎがまだ登録されていないあいだは、残日数が分かりません。
+  // 0日と出すと使い切ったように見えるため、日数は出さずに待ちであることを伝えます。
+  const pending = !!balance?.pendingCarryover;
 
   const balanceCard = (
     <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
@@ -8798,10 +8813,14 @@ function LeaveView({ leaveRequests, leaveTotal, leaveUsed, balance = null, hireD
         </div>
         <div className="flex-1">
           <div className="text-[11px] text-slate-400 font-medium">有休残日数</div>
-          <div className="flex items-baseline gap-1">
-            <span className="font-mono text-[22px] font-bold text-slate-800">{remaining}</span>
-            <span className="text-[12px] text-slate-400">/ {leaveTotal}日</span>
-          </div>
+          {pending ? (
+            <div className="text-[14px] font-bold text-amber-700">集計中</div>
+          ) : (
+            <div className="flex items-baseline gap-1">
+              <span className="font-mono text-[22px] font-bold text-slate-800">{remaining}</span>
+              <span className="text-[12px] text-slate-400">/ {leaveTotal}日</span>
+            </div>
+          )}
         </div>
         <button
           onClick={onOpenLeaveModal}
@@ -8811,12 +8830,21 @@ function LeaveView({ leaveRequests, leaveTotal, leaveUsed, balance = null, hireD
         </button>
       </div>
       <div className="px-5 pb-4">
-        <div className="h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">
-          <div className="h-full bg-amber-600 rounded-full" style={{ width: `${pct}%` }} />
-        </div>
-        <div className="text-[10.5px] text-slate-400 mt-1.5">
-          いま使える有休のうち消化済み：{fmtDays(leaveUsed)}日　／　{tenureLabel(hireDate)}（法定基準で自動計算）
-        </div>
+        {pending ? (
+          <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-[11.5px] leading-relaxed text-amber-800">
+            これまでの有休を新しい仕組みへ移している最中です。残日数が出るまで少しお待ちください。
+            <span className="block pt-0.5">このあいだも有休の申請はできます。日数は管理者が確認します。</span>
+          </div>
+        ) : (
+          <>
+            <div className="h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">
+              <div className="h-full bg-amber-600 rounded-full" style={{ width: `${pct}%` }} />
+            </div>
+            <div className="text-[10.5px] text-slate-400 mt-1.5">
+              いま使える有休のうち消化済み：{fmtDays(leaveUsed)}日　／　{tenureLabel(hireDate)}（法定基準で自動計算）
+            </div>
+          </>
+        )}
 
         {/* 時効が近く、まだ残っている分の注意 */}
         {expiringSoon.length > 0 && (
@@ -8923,7 +8951,7 @@ function LeaveStatusBadge({ status }) {
   return <span className={`text-[10.5px] font-bold px-2 py-1 rounded-full shrink-0 ${s.cls}`}>{s.label}</span>;
 }
 
-function LeaveRequestModal({ leaveRemaining, onClose, onSubmit }) {
+function LeaveRequestModal({ leaveRemaining, balancePending = false, onClose, onSubmit }) {
   const [type, setType] = useState('有休');
   const [startDate, setStartDate] = useState(todayKey());
   const [endDate, setEndDate] = useState(todayKey());
@@ -8931,7 +8959,9 @@ function LeaveRequestModal({ leaveRemaining, onClose, onSubmit }) {
   const [reason, setReason] = useState('');
   const isSingleDay = startDate === endDate;
   const days = halfDay && isSingleDay ? 0.5 : daysBetweenInclusive(startDate, endDate);
-  const exceedsBalance = type === '有休' && days > leaveRemaining;
+  // 引き継ぎ待ちのあいだは残日数が分からないため、超過の判定をしません。
+  // ここで止めると、引き継ぎが登録されるまで有休を申請できなくなります。
+  const exceedsBalance = type === '有休' && !balancePending && days > leaveRemaining;
   // 送信中は押せないようにする（連打で同じ申請が何件も入るのを防ぐ）
   const [sending, setSending] = useState(false);
   const canSubmit = reason.trim().length > 0 && startDate && endDate && new Date(endDate) >= new Date(startDate) && !exceedsBalance && !sending;
@@ -9016,6 +9046,11 @@ function LeaveRequestModal({ leaveRemaining, onClose, onSubmit }) {
             <span className="text-slate-500">申請日数</span>
             <span className="font-mono font-bold text-slate-800">{days}日間</span>
           </div>
+          {type === '有休' && balancePending && (
+            <div className="text-[11.5px] text-amber-700 font-medium">
+              残日数は引き継ぎの登録待ちです。申請はできますが、日数は管理者が確認します。
+            </div>
+          )}
           {exceedsBalance && (
             <div className="text-[11.5px] text-rose-600 font-medium">有休残日数（{leaveRemaining}日）を超えています</div>
           )}
@@ -16008,6 +16043,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
       todayState: r?.clockOut ? 'done' : r?.clockIn ? 'working' : 'absent',
       monthWorkedMin: computeMonthlySummary(recs).workedMin,
       leaveRemaining: leaveBalance.remaining,
+      leavePending: leaveBalance.pendingCarryover,
       leaveShort: paidLeaveShortages.some((s) => s.employeeId === acc.id),
       pendingCount: kinds.length,
       pendingKinds: Object.entries(kindCounts).map(([kind, count]) => ({ kind, count })),
@@ -20064,7 +20100,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
                   <td className={`px-3 py-2.5 font-bold whitespace-nowrap ${state ? state.cls : 'text-slate-300'}`}>{state ? state.label : '—'}</td>
                   <td className="px-3 py-2.5 font-mono text-slate-600 whitespace-nowrap">{info ? minutesToHHMM(info.monthWorkedMin) : '—'}</td>
                   <td className={`px-3 py-2.5 font-mono whitespace-nowrap ${info?.leaveShort ? 'text-rose-600 font-bold' : 'text-slate-600'}`}>
-                    {info ? `${fmtDays(info.leaveRemaining)}日` : '—'}
+                    {!info ? '—' : info.leavePending ? <span className="text-amber-700 font-bold">集計中</span> : `${fmtDays(info.leaveRemaining)}日`}
                   </td>
                   <td className="px-3 py-2.5">
                     {info && info.pendingKinds.length > 0 ? (
@@ -20122,7 +20158,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
                     <div className="text-[11.5px] text-slate-500 mt-0.5">
                       {acc.mainGroup || acc.staffType || '社員'}
                       {info && <span className="ml-2 font-mono">今月 {minutesToHHMM(info.monthWorkedMin)}</span>}
-                      {info && <span className={`ml-2 font-mono ${info.leaveShort ? 'text-rose-600 font-bold' : ''}`}>有休 {fmtDays(info.leaveRemaining)}日</span>}
+                      {info && <span className={`ml-2 font-mono ${info.leaveShort ? 'text-rose-600 font-bold' : ''}`}>有休 {info.leavePending ? '集計中' : `${fmtDays(info.leaveRemaining)}日`}</span>}
                     </div>
                     {info && info.pendingKinds.length > 0 && (
                       <div className="mt-1 flex flex-wrap gap-1">
@@ -20741,10 +20777,14 @@ function PaidLeaveGrantsPanel({ employee, grantRows = [], leaveRequests = [], se
     <div className="rounded-xl border border-slate-200 overflow-hidden">
       <div className="px-3.5 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center gap-2 flex-wrap">
         <span className="text-[12px] font-bold text-slate-600">有休の付与</span>
-        <span className="text-[11px] text-slate-400">
-          残 <span className="font-mono font-bold text-slate-700">{fmtDays(balance.remaining)}</span>日
-          （使える分 {fmtDays(balance.granted)}日・消化 {fmtDays(balance.usedFromLive)}日）
-        </span>
+        {balance.pendingCarryover ? (
+          <span className="text-[11px] font-bold text-amber-700">引き継ぎ待ち（残日数は未確定）</span>
+        ) : (
+          <span className="text-[11px] text-slate-400">
+            残 <span className="font-mono font-bold text-slate-700">{fmtDays(balance.remaining)}</span>日
+            （使える分 {fmtDays(balance.granted)}日・消化 {fmtDays(balance.usedFromLive)}日）
+          </span>
+        )}
         <button
           onClick={startAdd}
           className="ml-auto rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-[11.5px] font-bold text-slate-600"
@@ -20759,6 +20799,19 @@ function PaidLeaveGrantsPanel({ employee, grantRows = [], leaveRequests = [], se
           <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[11px] text-amber-800">
             移行日が未設定です。入職以来すべての付与と消化を計算に入れています。
             ジョブカンから引き継ぐ場合は、先に移行日を設定してください（supabase/79_paid_leave_grants.sql）。
+          </div>
+        )}
+        {balance.pendingCarryover && (
+          <div className="rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-2 text-[11px] text-amber-900 space-y-0.5">
+            <div className="font-bold">引き継ぎがまだ登録されていません</div>
+            <div>
+              この方の付与はすべて移行日（{dateLabelY(migrationDateKey)}）より前のため、計算に入っていません。
+              下の「付与を登録する」から、ジョブカンの残日数を<b>もとの付与日</b>で入れてください。
+            </div>
+            <div>
+              登録するまで、ご本人の画面では残日数の代わりに「集計中」と出ます。
+              有休の申請は止めていません（日数の確認は承認時にお願いします）。
+            </div>
           </div>
         )}
         {hasCarryover && balance.adjustment !== 0 && (
