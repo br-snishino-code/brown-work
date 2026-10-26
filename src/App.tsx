@@ -2964,6 +2964,28 @@ async function fetchWithholdingDependentsList(employeeId) {
   }
 }
 
+// ---- 確定シフトの変更履歴（土日祝皆勤手当の判定に使う） ----
+// 画面全体では直近500件しか読んでいないため、取りこぼすことがあります。
+// 対象のスタッフ・月だけをここで取り直します。
+async function fetchShiftChanges(employeeId, year, month) {
+  const from = `${year}-${pad(month)}-01`;
+  const to = `${year}-${pad(month)}-${pad(new Date(year, month, 0).getDate())}`;
+  try {
+    const res = await supabase
+      .from('shift_assignment_changes')
+      .select('*')
+      .eq('employee_id', employeeId)
+      .gte('date', from)
+      .lte('date', to)
+      .order('changed_at', { ascending: true });
+    if (res.error) { console.error('シフトの変更履歴の取得に失敗しました', res.error); return []; }
+    return (res.data || []).map(rowToShiftChange);
+  } catch (e) {
+    console.error('シフトの変更履歴の取得に失敗しました', e);
+    return [];
+  }
+}
+
 async function saveWithholdingDependents({ id, employeeId, year, month, dependents, note }, actor = null, targetName = '') {
   const payload = {
     employee_id: employeeId,
@@ -16576,7 +16598,7 @@ function approvedLeaveOn(leaveRequests, employeeId, dateKey) {
 // （0円は「計算した結果0円」で、null とは別の意味です）
 function computeWeekendHolidayBonus({
   employee, year, month, assignments, records, leaveRequests,
-  prescribedDays, absentOverride = null,
+  shiftChanges = [], prescribedDays, absentOverride = null,
 }) {
   const employeeId = employee?.id;
   const keys = monthDateKeys(year, month);
@@ -16587,7 +16609,7 @@ function computeWeekendHolidayBonus({
 
   const base = {
     amount: null, reason: '',
-    weekendDays: [], targetDays: [], missingShiftCount: 0,
+    weekendDays: [], targetDays: [], missingShiftCount: 0, changedFromWorkCount: 0,
     absentCount: 0, usedAbsent: 0, overridden: false,
     baseAmount: 0, workedDays: 0, prescribedDays: prescribedDays ?? null, prorated: false,
   };
@@ -16602,27 +16624,40 @@ function computeWeekendHolidayBonus({
   //   「休みだから対象外」なのか「取り込み漏れ」なのか
   // が分からず、日が抜けているように見えてしまいます。
   const byDate = new Map(monthAssignments.map((a) => [a.date, a]));
+  // もともと出勤だった日。当日に欠勤になってシフトを休みに直した場合も
+  // 出勤日に含めます（そうしないと欠勤が数えられず、手当が出てしまいます）。
+  // 時期は問いません。前もっての調整で休みになった日も含みます。
+  const wasWork = new Set(
+    (shiftChanges || [])
+      .filter((c) => c.employeeId === employeeId && c.beforeKind === 'work')
+      .map((c) => c.date)
+  );
   const weekendDays = keys.filter(isWeekendOrHoliday).map((key) => {
     const a = byDate.get(key);
     const leave = approvedLeaveOn(leaveRequests, employeeId, key);
     const holidayName = getHolidayName(key) || '';
-    // シフトの行が無い日。取り込み漏れの可能性があるので、休みとは分けます
-    if (!a) return { key, state: 'noshift', target: false, holidayName, leaveType: '' };
-    if (a.kind !== 'work' && a.kind !== 'paid') {
-      return { key, state: 'off', target: false, holidayName, leaveType: '' };
+    const nowWork = Boolean(a) && (a.kind === 'work' || a.kind === 'paid');
+    const changedFromWork = wasWork.has(key) && !nowWork;
+
+    if (!nowWork && !changedFromWork) {
+      // シフトの行が無い日。取り込み漏れの可能性があるので、休みとは分けます
+      const state = a ? 'off' : 'noshift';
+      return { key, state, target: false, holidayName, leaveType: '', changedFromWork: false };
     }
+
     const worked = Boolean(computeMetrics(dayRecords[key]));
     let state = 'absent';
     if (worked) state = 'worked';
-    else if (a.kind === 'paid' || (leave && leave.type === WEEKEND_BONUS_PAID_LEAVE_TYPE)) state = 'paid';
+    else if ((a && a.kind === 'paid') || (leave && leave.type === WEEKEND_BONUS_PAID_LEAVE_TYPE)) state = 'paid';
     else if (leave) state = 'leave';   // 振休・代休・特別休暇。欠勤には数えません
     return {
-      key, state, target: true, holidayName,
-      leaveType: leave ? leave.type : (a.kind === 'paid' ? '有休' : ''),
+      key, state, target: true, holidayName, changedFromWork,
+      leaveType: leave ? leave.type : (a && a.kind === 'paid' ? '有休' : ''),
     };
   });
   const targetDays = weekendDays.filter((d) => d.target);
   const missingShiftCount = weekendDays.filter((d) => d.state === 'noshift').length;
+  const changedFromWorkCount = weekendDays.filter((d) => d.changedFromWork).length;
 
   const absentCount = targetDays.filter((d) => d.state === 'absent').length;
   const usedAbsent = absentOverride == null ? absentCount : Math.max(0, Math.floor(Number(absentOverride) || 0));
@@ -16632,13 +16667,14 @@ function computeWeekendHolidayBonus({
   if (targetDays.length === 0) {
     return {
       ...base, amount: 0, reason: 'noTarget',
-      weekendDays, targetDays, missingShiftCount, absentCount, usedAbsent, overridden,
+      weekendDays, targetDays, missingShiftCount, changedFromWorkCount,
+      absentCount, usedAbsent, overridden,
     };
   }
 
   const baseAmount = usedAbsent === 0 ? WEEKEND_BONUS_FULL : usedAbsent === 1 ? WEEKEND_BONUS_HALF : 0;
   const common = {
-    ...base, weekendDays, targetDays, missingShiftCount,
+    ...base, weekendDays, targetDays, missingShiftCount, changedFromWorkCount,
     absentCount, usedAbsent, overridden, baseAmount,
   };
 
@@ -16957,8 +16993,16 @@ function WeekendBonusNote({ bonus, employee, override, onOverride, current, onAp
               }`}
             >
               {dayLabel(d)} {d.state === 'leave' ? (d.leaveType || '休暇') : stateLabel[d.state]}
+              {d.changedFromWork && '※'}
             </span>
           ))}
+        </div>
+      )}
+
+      {bonus.changedFromWorkCount > 0 && (
+        <div className="text-[10.5px] opacity-80">
+          ※ もともとシフトが出勤だった日です（その後、休みに変わっています）。
+          賃金規程の「出勤日とされた」日として、{bonus.changedFromWorkCount}日を対象日に含めています。
         </div>
       )}
 
@@ -16971,7 +17015,8 @@ function WeekendBonusNote({ bonus, employee, override, onOverride, current, onAp
 
       <div className="text-[10.5px] opacity-80">
         その月の土日祝 {bonus.weekendDays.length}日のうち、出勤日とされたのは {bonus.targetDays.length}日
-        （残りはシフトが休みのため対象外）／自動で数えた欠勤 {bonus.absentCount}日
+        {bonus.weekendDays.length > bonus.targetDays.length && '（残りはシフトが休みのため対象外）'}
+        ／自動で数えた欠勤 {bonus.absentCount}日
         {bonus.overridden && <b>／画面で {bonus.usedAbsent}日 に直しています</b>}
         {' '}→ 基準額 {formatYen(bonus.baseAmount)}
         {bonus.prorated
@@ -17200,6 +17245,8 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
   const [residentTaxRow, setResidentTaxRow] = useState(null);
   // 扶養親族等の数（所得税用）。対象月以前で一番新しい登録。未登録なら null
   const [withholdingDependents, setWithholdingDependents] = useState(null);
+  // 確定シフトの変更履歴（土日祝皆勤手当で「もともと出勤だった日」を見るため）
+  const [shiftChanges, setShiftChanges] = useState([]);
   // 一覧から開いた明細（中身を見る・印刷する）
   const [openSlip, setOpenSlip] = useState(null);
 
@@ -17235,17 +17282,19 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     setInsuranceLoading(true);
     (async () => {
       const { fiscalYear } = residentTaxMonthFor(year, month, settings);
-      const [std, rates, rtax, dep] = await Promise.all([
+      const [std, rates, rtax, dep, changes] = await Promise.all([
         fetchEffectiveStandardRemuneration(employeeId, year, month),
         fetchInsuranceRateSettings(),
         fetchResidentTax(employeeId, fiscalYear),
         fetchEffectiveWithholdingDependents(employeeId, year, month),
+        fetchShiftChanges(employeeId, year, month),
       ]);
       if (cancelled) return;
       setStandardRemuneration(std);
       setInsuranceRates(rates);
       setResidentTaxRow(rtax);
       setWithholdingDependents(dep);
+      setShiftChanges(changes);
       setInsuranceLoading(false);
     })();
     return () => { cancelled = true; };
@@ -17310,6 +17359,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     assignments: shiftAssignments,
     records: records[employeeId] || {},
     leaveRequests,
+    shiftChanges,
     prescribedDays: attendanceDays,
     absentOverride: weekendAbsentOverride === '' ? null : weekendAbsentOverride,
   }) : null;
@@ -17381,7 +17431,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     // 届いた時点で控除の候補を入れ直せるよう、ここに入れています。
     // social は毎回あたらしい物になるので入れません（入れると繰り返し動きます）。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [employeeId, year, month, existing?.id, employeeSalaryItems, approvedCommuteTotal, standardRemuneration, insuranceRates, residentTaxRow, withholdingDependents, settings]);
+  }, [employeeId, year, month, existing?.id, employeeSalaryItems, approvedCommuteTotal, standardRemuneration, insuranceRates, residentTaxRow, withholdingDependents, shiftChanges, settings]);
 
   if (!employee) {
     return <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-6 py-14 text-center text-[12.5px] text-slate-300">スタッフが登録されていません</div>;
