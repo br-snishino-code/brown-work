@@ -15571,7 +15571,8 @@ function Row({ label, value }) {
 // 健康保険料率は協会けんぽの都道府県支部ごとに異なるため、必ず設定してください。
 // 介護保険料率・厚生年金保険料率は全国一律です。
 //
-// ⚠ 雇用保険料・所得税・住民税はまだ自動計算していません（手入力のままです）。
+// ⚠ 雇用保険料と所得税はまだ自動計算していません（手入力のままです）。
+//   住民税は別の仕組みで入れています（computeResidentTax）。
 
 // 給与から控除する社会保険料の端数処理
 function roundInsurancePremium(yen) {
@@ -15701,7 +15702,8 @@ const RESIDENT_TAX_LABEL = '住民税';
 const DEFAULT_DEDUCTION_LABELS = ['健康保険料', '介護保険料', '厚生年金保険料', '雇用保険料', '所得税', '住民税'];
 const sumItems = (items) => (items || []).reduce((s, it) => s + (Number(it.amount) || 0), 0);
 
-// ---- 社会保険料の計算の根拠（給与計算画面） ----
+// ---- 自動で入れた控除の根拠（給与計算画面） ----
+// 名前は SocialInsuranceNote のままですが、住民税もここに並べています。
 // 自動で入れた金額が何から出たのかを必ず見せます。
 // 「候補として入れて、確定は人が確認してから」という決め方のため、
 // 標準報酬月額・料率・保険料の対象月を画面で確かめられるようにしています。
@@ -15780,21 +15782,22 @@ function SocialInsuranceNote({ social, standardRemuneration, insuranceRates, loa
     <div className={`rounded-xl border px-3.5 py-2.5 text-[11.5px] leading-relaxed space-y-1 ${tone}`}>
       <div className="font-bold">
         {unset.length > 0
-          ? `社会保険料の一部を自動で入れました（${year}年${month}月分の保険料）`
-          : `社会保険料を自動で入れました（${year}年${month}月分の保険料）`}
+          ? `控除の一部を自動で入れました（保険料は${year}年${month}月分）`
+          : `控除を自動で入れました（保険料は${year}年${month}月分）`}
       </div>
       {differs && !isPublished && onApply && (
         <div className="rounded-lg border border-amber-300 bg-white/70 px-2.5 py-2 space-y-1.5">
           <div className="text-[11px] font-bold text-amber-900">下の控除欄の金額が、計算した金額と違います</div>
           <div className="text-[10.5px] text-amber-800">
             すでに作った明細には自動で入りません（手で直した金額を書き換えないため）。
-            計算した金額に入れ直す場合は、下のボタンを押してください。ほかの控除項目はそのままです。
+            計算した金額に入れ直す場合は、下のボタンを押してください。
+            入れ替わるのは社会保険料3つと住民税だけで、雇用保険料・所得税や手で足した項目はそのままです。
           </div>
           <button
             onClick={onApply}
             className="w-full rounded-lg border-2 border-amber-300 bg-white py-1.5 text-[12px] font-bold text-amber-800"
           >
-            社会保険料を計算した金額に入れ直す
+            社会保険料と住民税を計算した金額に入れ直す
           </button>
         </div>
       )}
@@ -15830,7 +15833,7 @@ function SocialInsuranceNote({ social, standardRemuneration, insuranceRates, loa
       )}
       <div className="text-[10.5px] opacity-80">
         金額は候補です。公開する前に必ずご確認ください。欄の数字は手で直せます。
-        雇用保険料・所得税・住民税はまだ自動計算していません。
+        雇用保険料と所得税はまだ自動計算していません（手で入れてください）。
       </div>
     </div>
   );
