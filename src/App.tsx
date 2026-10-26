@@ -16483,8 +16483,32 @@ const AUTO_DEDUCTION_KEYS = { 健康保険料: 'health', 介護保険料: 'nursi
 // 住民税は別の仕組みで出すため、金額の取り出し方が違います
 const RESIDENT_TAX_LABEL = '住民税';
 const EI_LABEL = '雇用保険料';
+// 御社で使っている手当。スタッフ詳細の「毎月の固定支給項目」で選べるようにし、
+// 名前を揃えます。手で打つと「資格手当」と「資格 手当」のように表記がぶれ、
+// 雇用保険・所得税の設定が項目ごとに分かれてしまうためです。
+//
+// 支給対象は人によって違うため、ここに並べるだけでは誰にも付きません。
+// スタッフごとに選んで金額を入れてはじめて支給されます。
+//
+// ⚠ 残業単価（割増賃金の基礎）には、いまのところ手当を入れていません。
+//   資格手当・皆勤手当・役割手当などは本来は基礎に入れる必要があります
+//   （割増賃金の基礎から外せる手当は労基法37条5項・労基則21条の7つだけ）。
+//   computePayrollPreview を参照。改修は保留中です。
+const PAYMENT_ALLOWANCE_PRESETS = [
+  '資格手当',
+  '土日祝皆勤手当',
+  'クローザー手当',
+  '販売手当',
+  '役割手当',
+  'インセンティブ',
+  '住宅手当',
+];
+
 // 設定画面に最初から並べておく支給項目（実際に使われていなくても出す）
-const DEFAULT_PAYMENT_ITEM_HINTS = ['基本給', '通勤手当', '残業手当', '交通費精算'];
+const DEFAULT_PAYMENT_ITEM_HINTS = [
+  '基本給', '通勤手当', '残業手当', '交通費精算',
+  ...PAYMENT_ALLOWANCE_PRESETS,
+];
 const DEFAULT_DEDUCTION_LABELS = ['健康保険料', '介護保険料', '厚生年金保険料', '雇用保険料', '所得税', '住民税'];
 const sumItems = (items) => (items || []).reduce((s, it) => s + (Number(it.amount) || 0), 0);
 
@@ -23663,7 +23687,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [account.id, remunerationYear, remunerationMonth]);
 
-  const addSalaryItem = (kind) => setSalaryItems((prev) => [...prev, { label: '', amount: 0, kind }]);
+  const addSalaryItem = (kind, label = '') => setSalaryItems((prev) => [...prev, { label, amount: 0, kind }]);
   const updateSalaryItem = (i, field, value) => setSalaryItems((prev) => prev.map((it, idx) => (idx === i ? { ...it, [field]: value } : it)));
   const removeSalaryItem = (i) => setSalaryItems((prev) => prev.filter((_, idx) => idx !== i));
   const saveSalaryItemsNow = async () => {
@@ -24287,13 +24311,40 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                   const i = salaryItems.indexOf(it);
                   return (
                     <div key={i} className="flex items-center gap-2">
-                      <input value={it.label} onChange={(e) => updateSalaryItem(i, 'label', e.target.value)} placeholder="項目名（例：資格手当）" className="flex-1 border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px]" />
+                      {/* 候補から選べるようにして、表記のぶれを防ぎます（自由に打つこともできます） */}
+                      <input list="payment-allowance-presets" value={it.label} onChange={(e) => updateSalaryItem(i, 'label', e.target.value)} placeholder="項目名（例：資格手当）" className="flex-1 border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px]" />
                       <input type="number" value={it.amount} onChange={(e) => updateSalaryItem(i, 'amount', e.target.value)} className="w-28 border border-slate-200 rounded-lg px-2.5 py-1.5 font-mono text-[12.5px] text-right" />
                       <button onClick={() => removeSalaryItem(i)} className="text-slate-300 hover:text-rose-500 shrink-0"><Trash2 size={14} /></button>
                     </div>
                   );
                 })}
               </div>
+              <datalist id="payment-allowance-presets">
+                {PAYMENT_ALLOWANCE_PRESETS.map((label) => <option key={label} value={label} />)}
+              </datalist>
+
+              {/* よく使う手当。押すと名前の入った行が足されます。
+                  すでに入れている手当は出しません（同じ項目が二重にならないように）。 */}
+              {(() => {
+                const used = new Set(
+                  salaryItems.filter((it) => it.kind === 'payment').map((it) => String(it.label || '').trim())
+                );
+                const rest = PAYMENT_ALLOWANCE_PRESETS.filter((label) => !used.has(label));
+                if (rest.length === 0) return null;
+                return (
+                  <div className="flex flex-wrap gap-1.5 pt-0.5">
+                    {rest.map((label) => (
+                      <button
+                        key={label}
+                        onClick={() => addSalaryItem('payment', label)}
+                        className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-bold text-slate-600"
+                      >
+                        ＋{label}
+                      </button>
+                    ))}
+                  </div>
+                );
+              })()}
               <button onClick={() => addSalaryItem('payment')} className="text-[11px] font-bold text-amber-600 flex items-center gap-1"><Plus size={12} />支給項目を追加</button>
 
               <div className="text-[11px] font-bold text-slate-400 pt-3">毎月の固定控除項目</div>
@@ -24318,7 +24369,11 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                   {salaryItemsResult.text}
                 </div>
               )}
-              <div className="text-[10.5px] text-slate-400">ここで登録した項目は、「給与」タブでそのスタッフの給与を新規作成する際に、毎回自動で候補として追加されます。</div>
+              <div className="text-[10.5px] text-slate-400 leading-relaxed">
+                ここで登録した項目は、「給与」タブでそのスタッフの給与を新規作成する際に、毎回自動で候補として追加されます。
+                登録していないスタッフには出ません。<b>毎月同じ額になる手当だけ</b>ここに入れてください。
+                月によって額が変わる手当（歩合・皆勤など）は、給与計算の画面で毎月入れてください。
+              </div>
 
               {/* 標準報酬月額（月別履歴） */}
               <div className="text-[11px] font-bold text-slate-400 pt-4 flex items-center justify-between">
