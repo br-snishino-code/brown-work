@@ -2834,12 +2834,19 @@ async function fetchResidentTax(employeeId, fiscalYear) {
 }
 
 async function fetchResidentTaxList(employeeId) {
-  const { data, error } = await supabase
-    .from('employee_resident_tax')
-    .select('*')
-    .eq('employee_id', employeeId)
-    .order('fiscal_year', { ascending: false });
-  if (error) { console.error('住民税の取得に失敗しました', error); return []; }
+  let data = null;
+  try {
+    const res = await supabase
+      .from('employee_resident_tax')
+      .select('*')
+      .eq('employee_id', employeeId)
+      .order('fiscal_year', { ascending: false });
+    if (res.error) { console.error('住民税の取得に失敗しました', res.error); return []; }
+    data = res.data;
+  } catch (e) {
+    console.error('住民税の取得に失敗しました', e);
+    return [];
+  }
   return (data || []).map((d) => ({
     id: d.id,
     fiscalYear: d.fiscal_year,
@@ -5749,6 +5756,7 @@ function AttendanceApp() {
                 groupAttendanceSchedules={data.groupLeaveSchedules}
                 employeeAttendanceSchedules={data.employeeAttendanceSchedules}
                 settings={data.settings}
+                session={session}
                 onSaveDraft={savePayrollDraft}
                 onPublish={publishPayroll}
                 onUnpublish={unpublishPayroll}
@@ -5762,6 +5770,7 @@ function AttendanceApp() {
                 employeeAccounts={employeeAccounts}
                 bonusRecords={data.bonusRecords || []}
                 tableReady={data.bonusTableReady !== false}
+                session={session}
                 onSave={saveBonus}
                 onPublish={publishBonus}
                 onUnpublish={unpublishBonus}
@@ -15084,6 +15093,245 @@ function printPayslip(p, employeeName) {
   setTimeout(() => win.print(), 300);
 }
 
+// ============================================================
+// 予約公開（supabase/81_publish_schedules.sql）
+// ============================================================
+// 対象月（賞与は回）ごとに公開日時を1つ決めておくと、
+// Edge Function publish-scheduled が定時に見にきて公開し、
+// 本人へアプリ内のお知らせとメールを送ります。
+//
+// ⚠ この画面だけでは動きません。Edge Function のデプロイと、
+//   Supabase の Cron の設定が必要です（関数のファイル先頭に手順）。
+//   設定前に予約しても、時刻をすぎたまま公開されずに残ります。
+
+// 通信に失敗したときは投げずに null を返します。
+// 投げると、呼び出し側の「読み込み中」が解けないまま固まります。
+async function fetchPublishSchedule(kind, year, period) {
+  let data = null;
+  try {
+    const res = await supabase
+      .from('publish_schedules')
+      .select('*')
+      .eq('kind', kind).eq('year', year).eq('period', period)
+      .maybeSingle();
+    if (res.error) { console.error('予約公開の取得に失敗しました', res.error); return null; }
+    data = res.data;
+  } catch (e) {
+    console.error('予約公開の取得に失敗しました', e);
+    return null;
+  }
+  if (!data) return null;
+  return {
+    id: data.id, kind: data.kind, year: data.year, period: data.period,
+    publishAt: data.publish_at, status: data.status, doneAt: data.done_at,
+    publishedCount: data.published_count, notifiedCount: data.notified_count,
+    mailSentCount: data.mail_sent_count, lastError: data.last_error || '',
+  };
+}
+
+async function savePublishSchedule({ id, kind, year, period, publishAt }, actor = null) {
+  const payload = {
+    kind, year, period,
+    publish_at: publishAt,
+    status: 'scheduled',
+    // 予約し直したときは、前の実行の記録を消します
+    done_at: null, published_count: null, notified_count: null, mail_sent_count: null, last_error: null,
+    created_by: actor?.id || null,
+  };
+  const { error } = id
+    ? await supabase.from('publish_schedules').update(payload).eq('id', id)
+    : await supabase.from('publish_schedules').insert(payload);
+  if (error) {
+    console.error('予約公開の保存に失敗しました', error);
+    return { ok: false, message: error.message || '' };
+  }
+  const label = kind === 'bonus' ? `${year}年 第${period}回の賞与明細` : `${year}年${period}月分の給与明細`;
+  await logAudit(actor, '予約公開を設定', `${label}／${new Date(publishAt).toLocaleString('ja-JP')}`);
+  return { ok: true };
+}
+
+async function cancelPublishSchedule(row, actor = null) {
+  const { error } = await supabase
+    .from('publish_schedules')
+    .update({ status: 'canceled' })
+    .eq('id', row.id);
+  if (error) {
+    console.error('予約公開の取り消しに失敗しました', error);
+    return { ok: false, message: error.message || '' };
+  }
+  const label = row.kind === 'bonus' ? `${row.year}年 第${row.period}回の賞与明細` : `${row.year}年${row.period}月分の給与明細`;
+  await logAudit(actor, '予約公開を取り消し', label);
+  return { ok: true };
+}
+
+// 「いまから見て先の時刻か」。過ぎた時刻を予約しても意味がないため、画面で止めます。
+function isFutureDateTime(value) {
+  const t = new Date(value).getTime();
+  return Number.isFinite(t) && t > Date.now();
+}
+
+// datetime-local の値（ローカル時刻）を ISO に。逆も用意します。
+function localInputToIso(v) {
+  const t = new Date(v);
+  return Number.isNaN(t.getTime()) ? null : t.toISOString();
+}
+function isoToLocalInput(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+// ---- 予約公開の設定（給与・賞与の両方で使う） ----
+function PublishSchedulePanel({ kind, year, period, draftCount, actor, isMasterAdmin, isDesktop }) {
+  const [row, setRow] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [input, setInput] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const label = kind === 'bonus' ? `${year}年 第${period}回` : `${year}年${period}月分`;
+
+  // 取得に失敗しても「読み込み中」のままにしないこと。
+  // 固まると予約の操作が一切できなくなります。
+  const load = async () => {
+    setLoading(true);
+    try {
+      const r = await fetchPublishSchedule(kind, year, period);
+      setRow(r);
+      setInput(r && r.status === 'scheduled' ? isoToLocalInput(r.publishAt) : '');
+    } finally {
+      setLoading(false);
+    }
+  };
+  useEffect(() => {
+    let cancelled = false;
+    // 通信が「失敗」ではなく「返ってこない」ときは finally も動きません。
+    // その場合に読み込み中のまま固まらないよう、時間切れを置いています。
+    const timer = setTimeout(() => {
+      if (cancelled) return;
+      setLoading(false);
+      setError('読み込みに時間がかかっています。通信の状態を確かめて、画面を開き直してください。');
+    }, LOAD_TIMEOUT_MS);
+    (async () => {
+      try {
+        const r = await fetchPublishSchedule(kind, year, period);
+        if (cancelled) return;
+        setRow(r);
+        setInput(r && r.status === 'scheduled' ? isoToLocalInput(r.publishAt) : '');
+      } finally {
+        if (!cancelled) { clearTimeout(timer); setLoading(false); }
+      }
+    })();
+    return () => { cancelled = true; clearTimeout(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kind, year, period]);
+
+  if (!isMasterAdmin) return null;
+
+  const save = async () => {
+    setError('');
+    const iso = localInputToIso(input);
+    if (!iso) { setError('公開する日時を入れてください。'); return; }
+    if (!isFutureDateTime(input)) { setError('過ぎた日時は予約できません。先の日時を入れてください。'); return; }
+    setSaving(true);
+    const res = await savePublishSchedule({ id: row?.id, kind, year, period, publishAt: iso }, actor);
+    setSaving(false);
+    if (!res.ok) { setError(`保存できませんでした。${res.message}`); return; }
+    await load();
+  };
+
+  const cancel = async () => {
+    if (!row) return;
+    if (!window.confirm(`${label}の予約公開を取り消します。よろしいですか？`)) return;
+    setSaving(true);
+    const res = await cancelPublishSchedule(row, actor);
+    setSaving(false);
+    if (!res.ok) { setError(`取り消せませんでした。${res.message}`); return; }
+    await load();
+  };
+
+  const scheduled = row && row.status === 'scheduled';
+  const done = row && row.status === 'done';
+
+  return (
+    <div className="rounded-xl border border-slate-200 overflow-hidden">
+      <div className="px-3.5 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center gap-2 flex-wrap">
+        <span className="text-[12px] font-bold text-slate-600">予約公開（{label}）</span>
+        {scheduled && (
+          <span className="text-[11px] font-bold text-teal-700">
+            {new Date(row.publishAt).toLocaleString('ja-JP', { dateStyle: 'medium', timeStyle: 'short' })}に公開
+          </span>
+        )}
+        {done && <span className="text-[11px] font-bold text-slate-500">公開済み</span>}
+      </div>
+
+      {error && (
+        <div className="px-3.5 py-2 border-b border-rose-200 bg-rose-50 text-[11.5px] text-rose-700 flex items-start gap-2">
+          <span className="flex-1">{error}</span>
+          <button onClick={() => setError('')} className="text-[11px] font-bold text-rose-500 shrink-0">閉じる</button>
+        </div>
+      )}
+
+      {loading ? (
+        <div className="px-3.5 py-4 text-center text-[11.5px] text-slate-300">読み込み中…</div>
+      ) : (
+        <div className="px-3.5 py-3 space-y-2.5">
+          {done ? (
+            <div className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 text-[11.5px] text-slate-600 leading-relaxed">
+              {row.doneAt && `${new Date(row.doneAt).toLocaleString('ja-JP')}に実行しました。`}
+              公開 {row.publishedCount ?? 0}件／お知らせ {row.notifiedCount ?? 0}件／メール {row.mailSentCount ?? 0}件。
+              {row.lastError && <span className="block text-rose-600 pt-0.5">うまくいかなかったもの：{row.lastError}</span>}
+            </div>
+          ) : (
+            <>
+              <div className={`grid gap-2.5 ${isDesktop ? 'grid-cols-2' : 'grid-cols-1'}`}>
+                <Field label="公開する日時">
+                  <input
+                    type="datetime-local"
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    style={DATE_INPUT_STYLE}
+                    className="w-full box-border border border-slate-200 rounded-lg px-2.5 py-2 font-mono text-[13px] bg-white"
+                  />
+                </Field>
+                <div className="flex items-end gap-2 pb-0.5">
+                  <button
+                    onClick={save}
+                    disabled={saving}
+                    className="flex-1 rounded-lg bg-slate-800 py-2 text-[12.5px] font-bold text-white disabled:bg-slate-300"
+                  >
+                    {saving ? '保存中…' : scheduled ? '予約をやり直す' : '予約する'}
+                  </button>
+                  {scheduled && (
+                    <button
+                      onClick={cancel}
+                      disabled={saving}
+                      className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-[12.5px] font-bold text-slate-600"
+                    >
+                      取り消す
+                    </button>
+                  )}
+                </div>
+              </div>
+              <div className="text-[10.5px] text-slate-500 leading-relaxed">
+                その時刻になると、{label}の<b>下書きをまとめて公開</b>し、本人へお知らせとメールを送ります。
+                {draftCount != null && `いまの下書きは${draftCount}件です。`}
+                公開までは本人の画面に出ません。きっかりその時刻ではなく、<b>15分ほどの幅</b>があります。
+              </div>
+              <div className="text-[10.5px] text-amber-700 leading-relaxed">
+                この予約が動くには、Supabase側で定時実行の設定が必要です。
+                設定前に予約しても公開されないままになります。
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ---- 給与明細の中身（管理者が一覧から開く） ----
 // スタッフ側の画面と同じ内容を出し、印刷・PDF保存もできるようにします。
 // 管理者には下書きも見えるため、公開済みかどうかを目立つ形で出しています。
@@ -15177,7 +15425,7 @@ function PayslipDetailModal({ record, employeeName, onClose }) {
 const BONUS_DEFAULT_PAYMENTS = ['賞与'];
 const BONUS_DEFAULT_DEDUCTIONS = ['健康保険料', '厚生年金保険料', '雇用保険料', '所得税'];
 
-function BonusAdminTab({ employeeAccounts, bonusRecords = [], tableReady = true, onSave, onPublish, onUnpublish, isMasterAdmin = false, onDelete, isDesktop }) {
+function BonusAdminTab({ employeeAccounts, bonusRecords = [], tableReady = true, session = null, onSave, onPublish, onUnpublish, isMasterAdmin = false, onDelete, isDesktop }) {
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
   const [seq, setSeq] = useState(now.getMonth() + 1 >= 10 || now.getMonth() + 1 <= 3 ? 2 : 1);
@@ -15439,6 +15687,17 @@ function BonusAdminTab({ employeeAccounts, bonusRecords = [], tableReady = true,
             </button>
           </div>
         )}
+        <div className="px-5 py-3 border-b border-slate-100">
+          <PublishSchedulePanel
+            kind="bonus"
+            year={year}
+            period={seq}
+            draftCount={drafts.length}
+            actor={session}
+            isMasterAdmin={isMasterAdmin}
+            isDesktop={isDesktop}
+          />
+        </div>
         <div className="divide-y divide-slate-100">
           {staff.length === 0 ? (
             <div className="px-5 py-8 text-center text-[12.5px] text-slate-300">在籍中のスタッフがいません</div>
@@ -15752,6 +16011,8 @@ function computeSocialInsurance({ employee, standardRemuneration, rates, year, m
 // 年度は6月〜翌5月（2026年度＝2026年6月分〜2027年5月分）。
 // 年税額の100円未満の端数は6月分に寄せられるため、6月だけ額が違います。
 const SETTING_RESIDENT_TAX_OFFSET = 'resident_tax_month_offset';
+// 読み込みが返ってこないときに、画面を開けたままにする時間切れ
+const LOAD_TIMEOUT_MS = 10000;
 
 // 給与明細の対象月から、入れる住民税の年月を出します。
 //   next … 「10月分」の明細に11月分の住民税（その月に支払う給与から引く原則）
@@ -15991,7 +16252,7 @@ function PayrollItemsEditor({ title, items, onChange, addLabel = '項目を追�
   );
 }
 
-function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExpenseClaims = [], monthlyConfirmations = [], groupAttendanceSchedules = {}, employeeAttendanceSchedules = {}, settings = {}, onSaveDraft, onPublish, onUnpublish, isMasterAdmin = false, onUpdateWage, isDesktop }) {
+function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExpenseClaims = [], monthlyConfirmations = [], groupAttendanceSchedules = {}, employeeAttendanceSchedules = {}, settings = {}, session = null, onSaveDraft, onPublish, onUnpublish, isMasterAdmin = false, onUpdateWage, isDesktop }) {
   const now = new Date();
   const [employeeId, setEmployeeId] = useState(employeeAccounts[0]?.id || '');
   const [year, setYear] = useState(now.getFullYear());
@@ -16417,6 +16678,16 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
           onClose={() => setOpenSlip(null)}
         />
       )}
+
+      <PublishSchedulePanel
+        kind="payroll"
+        year={year}
+        period={month}
+        draftCount={payrollRecords.filter((p) => p.year === year && p.month === month && p.status !== 'published').length}
+        actor={session}
+        isMasterAdmin={isMasterAdmin}
+        isDesktop={isDesktop}
+      />
 
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
         <div className="px-5 py-3.5 border-b border-slate-100 font-bold text-[13.5px]">作成済み給与明細（直近20件）</div>
@@ -22040,18 +22311,32 @@ function ResidentTaxPanel({ employee, actor, isMasterAdmin, collectionMethod, se
   const [offset, setOffset] = useState(String(settings?.[SETTING_RESIDENT_TAX_OFFSET] || 'next') === 'same' ? 'same' : 'next');
   const [offsetSaving, setOffsetSaving] = useState(false);
 
+  // 取得に失敗しても「読み込み中」のままにしないこと
   const reload = async () => {
     setLoading(true);
-    setRows(await fetchResidentTaxList(employee.id));
-    setLoading(false);
+    try {
+      setRows(await fetchResidentTaxList(employee.id));
+    } finally {
+      setLoading(false);
+    }
   };
   useEffect(() => {
     let cancelled = false;
+    // 返ってこないときに固まらないよう、時間切れを置いています
+    const timer = setTimeout(() => {
+      if (cancelled) return;
+      setLoading(false);
+      setError('読み込みに時間がかかっています。通信の状態を確かめて、画面を開き直してください。');
+    }, LOAD_TIMEOUT_MS);
     (async () => {
-      const list = await fetchResidentTaxList(employee.id);
-      if (!cancelled) { setRows(list); setLoading(false); }
+      try {
+        const list = await fetchResidentTaxList(employee.id);
+        if (!cancelled) setRows(list);
+      } finally {
+        if (!cancelled) { clearTimeout(timer); setLoading(false); }
+      }
     })();
-    return () => { cancelled = true; };
+    return () => { cancelled = true; clearTimeout(timer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [employee.id]);
 
