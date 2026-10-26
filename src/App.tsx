@@ -15084,6 +15084,95 @@ function printPayslip(p, employeeName) {
   setTimeout(() => win.print(), 300);
 }
 
+// ---- 給与明細の中身（管理者が一覧から開く） ----
+// スタッフ側の画面と同じ内容を出し、印刷・PDF保存もできるようにします。
+// 管理者には下書きも見えるため、公開済みかどうかを目立つ形で出しています。
+function PayslipDetailModal({ record, employeeName, onClose }) {
+  if (!record) return null;
+  const p = record;
+  const paymentItems = p.paymentItems || [
+    { label: '基本給', amount: p.baseAmount },
+    ...(p.overtimeAmount ? [{ label: '残業手当', amount: p.overtimeAmount }] : []),
+  ];
+  const deductionItems = p.deductionItems || [];
+  const published = p.status === 'published';
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-50 p-0 sm:p-4">
+      <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg max-h-[92vh] overflow-y-auto">
+        <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center gap-2 flex-wrap">
+          <div className="w-9 h-9 rounded-xl bg-slate-100 flex items-center justify-center shrink-0">
+            <Wallet size={16} className="text-slate-500" />
+          </div>
+          <div>
+            <h3 className="font-bold text-[15px]">{employeeName}さんの給与明細</h3>
+            <div className="text-[11.5px] text-slate-400">{p.year}年{p.month}月分</div>
+          </div>
+          <span className={`ml-auto text-[10.5px] font-bold px-2 py-1 rounded-full ${published ? 'bg-emerald-50 text-emerald-600' : 'bg-amber-50 text-amber-700'}`}>
+            {published ? '公開済み' : '下書き（本人には見えません）'}
+          </span>
+        </div>
+
+        <div className="px-5 py-4 space-y-2">
+          <Row label="区分" value={p.wageType === 'hourly' ? `時給 ${formatYen(p.wageRate)}` : `月給 ${formatYen(p.wageRate)}`} />
+          <Row label="実働時間" value={minutesToHHMM(p.workedMinutes)} />
+          <Row label="残業時間" value={minutesToHHMM(p.overtimeMinutes)} />
+
+          <div className="text-[11px] font-bold text-slate-400 pt-2">支給</div>
+          {paymentItems.map((it, i) => <Row key={i} label={it.label || '項目'} value={formatYen(Number(it.amount) || 0)} />)}
+          <div className="flex items-center justify-between pt-1 border-t border-slate-100">
+            <span className="text-[12px] font-bold text-slate-600">支給合計</span>
+            <span className="font-mono font-bold text-slate-800">{formatYen(sumItems(paymentItems))}</span>
+          </div>
+
+          {deductionItems.length > 0 && (
+            <>
+              <div className="text-[11px] font-bold text-slate-400 pt-2">控除</div>
+              {deductionItems.map((it, i) => <Row key={i} label={it.label || '項目'} value={formatYen(Number(it.amount) || 0)} />)}
+              <div className="flex items-center justify-between pt-1 border-t border-slate-100">
+                <span className="text-[12px] font-bold text-slate-600">控除合計</span>
+                <span className="font-mono font-bold text-slate-800">{formatYen(sumItems(deductionItems))}</span>
+              </div>
+            </>
+          )}
+
+          <div className="flex items-center justify-between pt-2 mt-2 border-t border-slate-100">
+            <span className="text-[12.5px] font-bold text-slate-700">差引支給額</span>
+            <span className="font-mono text-[18px] font-bold text-slate-900">{formatYen(p.totalAmount)}</span>
+          </div>
+
+          {p.notes && (
+            <div className="rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-[11.5px] text-slate-600 leading-relaxed">
+              {p.notes}
+            </div>
+          )}
+
+          {!published && (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-[11.5px] text-amber-800 leading-relaxed">
+              この明細はまだ下書きです。本人の画面には出ていません。
+              金額を直すときは、上の給与計算でこのスタッフと年月を選んでください。
+            </div>
+          )}
+
+          <EditHistoryPanel history={p.editHistory} />
+
+          <div className="flex gap-2 pt-1">
+            <button onClick={onClose} className="flex-1 rounded-xl border border-slate-300 py-2.5 text-[13px] font-bold text-slate-600">
+              閉じる
+            </button>
+            <button
+              onClick={() => printPayslip(p, employeeName)}
+              className="flex-1 rounded-xl bg-slate-800 py-2.5 text-[13px] font-bold text-white flex items-center justify-center gap-1.5"
+            >
+              <Download size={14} /> 印刷・PDF保存
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // 管理者側：賞与明細の作成と公開
 const BONUS_DEFAULT_PAYMENTS = ['賞与'];
 const BONUS_DEFAULT_DEDUCTIONS = ['健康保険料', '厚生年金保険料', '雇用保険料', '所得税'];
@@ -15923,6 +16012,8 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
   const [insuranceLoading, setInsuranceLoading] = useState(true);
   // 住民税（特別徴収）。年度ごとに登録された通知書の数字を使います
   const [residentTaxRow, setResidentTaxRow] = useState(null);
+  // 一覧から開いた明細（中身を見る・印刷する）
+  const [openSlip, setOpenSlip] = useState(null);
 
   const employee = employeeAccounts.find((a) => a.id === employeeId);
   const existing = payrollRecords.find((p) => p.employeeId === employeeId && p.year === year && p.month === month);
@@ -16319,6 +16410,14 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
         {existing && <EditHistoryPanel history={existing.editHistory} />}
       </div>
 
+      {openSlip && (
+        <PayslipDetailModal
+          record={openSlip}
+          employeeName={openSlip.employeeName || employeeAccounts.find((a) => a.id === openSlip.employeeId)?.name || ''}
+          onClose={() => setOpenSlip(null)}
+        />
+      )}
+
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
         <div className="px-5 py-3.5 border-b border-slate-100 font-bold text-[13.5px]">作成済み給与明細（直近20件）</div>
         {recent.length === 0 ? (
@@ -16326,13 +16425,19 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
         ) : (
           <div className="divide-y divide-slate-100">
             {recent.map((p) => (
-              <div key={p.id} className="px-5 py-3 flex items-center justify-between text-[12.5px]">
-                <span><EmployeeLink id={p.employeeId} name={p.employeeName} /> — {p.year}年{p.month}月分</span>
-                <span className="flex items-center gap-2">
+              <div key={p.id} className="px-5 py-3 flex items-center justify-between gap-2 text-[12.5px]">
+                <span className="min-w-0"><EmployeeLink id={p.employeeId} name={p.employeeName} /> — {p.year}年{p.month}月分</span>
+                <span className="flex items-center gap-2 shrink-0">
                   <span className="font-mono font-bold text-slate-700">{formatYen(p.totalAmount)}</span>
                   <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full ${p.status === 'published' ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-100 text-slate-400'}`}>
                     {p.status === 'published' ? '公開済み' : '下書き'}
                   </span>
+                  <button
+                    onClick={() => setOpenSlip(p)}
+                    className="rounded-lg border border-slate-300 px-2.5 py-1 text-[11.5px] font-bold text-slate-600"
+                  >
+                    明細を見る
+                  </button>
                 </span>
               </div>
             ))}
