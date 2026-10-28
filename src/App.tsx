@@ -771,7 +771,7 @@ function fiscalMonths(fiscalYear) {
 // シフト希望などと同じく「グループごとの既定 ＋ 個人の例外」で決める。
 //   ① その方個人にその月の登録があれば、それを使う（グループより優先）
 //   ② なければ、所属グループのその月の登録を使う
-//   ③ どちらも無ければ null（日割りを行わない）
+//   ③ どちらも無ければ null（欠勤控除・土日祝皆勤手当の日割りを計算できない）
 //
 // 以前は「グループがあればグループのみ、無ければ個人別」という
 // どちらか一方の作りで、グループに所属していると個人の登録は無視されていた。
@@ -7504,7 +7504,7 @@ function defaultRequestDays(targetMonth) {
 function ShiftRequestSection({ session, period, request, onSubmit, formatKey = 'symbol', groupAttendanceSchedules = {}, employeeAttendanceSchedules = {} }) {
   const targetMonth = period?.targetMonth || '';
   const days = useMemo(() => shiftMonthDays(targetMonth), [targetMonth]);
-  // その月の出勤規定日数（給与の日割りに使う日数）。
+  // その月の出勤規定日数（欠勤控除の単価と、土日祝皆勤手当の日割りに使う日数）。
   // 所属グループに登録があればその日数、グループ未設定なら個人別の登録を見る。
   // 登録が無い月は null。78番でスタッフ本人も自分の分を読めるようにしてある。
   const prescribedDays = useMemo(() => {
@@ -16699,7 +16699,7 @@ const BUILTIN_PAYROLL_ITEMS = [
   // showZero … 金額が0円のときに、スタッフが見る給与明細と印刷に出すか。
   //   基本給だけ既定で出します（0円でも行が無いと明細が壊れて見えるため）。
   //   ほかの項目は既定で隠し、出したいものだけ画面でオンにします。
-  { label: '基本給', kind: 'payment', showZero: true, rounding: 'ceil', desc: '時給制：時給 ×（実働時間 − 残業時間）／月給制：月給（出勤規定日数があれば実出勤日数で日割り）' },
+  { label: '基本給', kind: 'payment', showZero: true, rounding: 'ceil', desc: '時給制：時給 ×（実働時間 − 残業時間）／月給制：月給そのまま（休んだぶんは欠勤控除で引きます。入社月・退職月も満額）' },
   { label: '通勤手当', kind: 'payment', rounding: 'round', desc: '通勤経路の月額換算の合計（給与作成時にコピー）' },
   { label: '残業手当', kind: 'payment', rounding: 'ceil', desc: '【割増基礎単価】×【残業時間】× 1.25' },
   { label: '交通費精算', kind: 'payment', rounding: 'ceil', desc: '承認済みの交通費精算の合計' },
@@ -17256,6 +17256,38 @@ async function savePayrollItemSettings({ items, flags }, actor = null) {
 //   資格手当・役割手当などは本来は基礎に入れる必要があります。改修は保留中です。
 const SETTING_MONTHLY_STANDARD_HOURS = 'monthly_standard_hours';
 
+// 出勤規定日数の登録から、その年度の年間所定労働日数を集めます。
+// 1年ぶん（12か月）そろっていないと正しい年間日数になりません。
+// filled に登録済みの月数を返すので、足りないときは画面で知らせます。
+function annualPrescribedDays(groupAttendanceSchedules, groupName, fiscalYear) {
+  const months = fiscalMonths(fiscalYear);
+  let total = 0;
+  let filled = 0;
+  const missing = [];
+  months.forEach(({ year, month }) => {
+    const v = groupAttendanceSchedules?.[groupName]?.[year]?.[month];
+    if (v != null && v !== '' && Number.isFinite(Number(v))) {
+      total += Number(v);
+      filled += 1;
+    } else {
+      missing.push(`${month}月`);
+    }
+  });
+  return { total, filled, monthCount: months.length, missing };
+}
+
+// 月平均所定労働時間 ＝ 年間所定労働日数 × 1日の所定労働時間 ÷ 12。
+// 小数第1位までにします（171.4 のような形。それ以下は切り捨て）。
+// 切り捨てにしているのは、分母が小さいほど残業単価が上がり、
+// 払う側に不利＝働く人に不利にならない向きだからです。
+function monthlyStandardHoursFromDays(annualDays, dailyHours) {
+  const d = Number(annualDays);
+  const h = Number(dailyHours);
+  if (!Number.isFinite(d) || d <= 0 || !Number.isFinite(h) || h <= 0) return null;
+  const exact = (d * h) / 12;
+  return Math.floor(exact * 10) / 10;
+}
+
 function monthlyStandardHoursOf(settings) {
   const v = Number(settings?.[SETTING_MONTHLY_STANDARD_HOURS]);
   return Number.isFinite(v) && v > 0 ? v : MONTHLY_STANDARD_HOURS;
@@ -17764,7 +17796,7 @@ function DeemedOvertimeNote({ deemed, preview, employee }) {
 //
 // できないこと：自動計算の項目（基本給・残業手当・社会保険料・所得税など）の
 //             計算式を変えること。式はコードの中にあり、改修が必要です。
-function PayrollItemSettings({ settings, employeeAccounts = [], actor, isMasterAdmin, onSaved, isDesktop }) {
+function PayrollItemSettings({ settings, employeeAccounts = [], groupAttendanceSchedules = {}, actor, isMasterAdmin, onSaved, isDesktop }) {
   const [open, setOpen] = useState(false);
   const [view, setView] = useState('list');      // 'list'（一覧）/ 'reorder'（並べ替え）/ 'rates'（単価設定）
   const [kind, setKind] = useState('payment');   // 'payment'（支給）/ 'deduction'（控除）
@@ -17774,6 +17806,10 @@ function PayrollItemSettings({ settings, employeeAccounts = [], actor, isMasterA
   const [flags, setFlags] = useState(() => parsePaymentItemFlags(settings));
   const [rate, setRate] = useState('');
   const [hours, setHours] = useState('');
+  // 月平均所定労働時間の試算（出勤規定日数から出す）
+  const now = new Date();
+  const [calcYear, setCalcYear] = useState(() => fiscalYearOf(now.getFullYear(), now.getMonth() + 1));
+  const [dailyHours, setDailyHours] = useState('8');
   const [editing, setEditing] = useState(null);  // 編集中の項目名（null なら編集していない）
   const [adding, setAdding] = useState(null);    // 追加中の項目 { label, source, amount }
   const [saving, setSaving] = useState(false);
@@ -18090,6 +18126,102 @@ function PayrollItemSettings({ settings, employeeAccounts = [], actor, isMasterA
                 御社は1か月単位の変形労働時間制のため、この出し方でよいかも含めて確認が必要です（確認事項の一覧に入れています）。
               </div>
 
+              {/* 出勤規定日数からの試算。
+                  「365日 − 年間休日日数」は「年間の所定労働日数」と同じなので、
+                  すでに登録されている出勤規定日数の12か月分を足せば出せます。 */}
+              <div className="rounded-xl border border-slate-200 bg-white px-3 py-3 space-y-2.5">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-[11.5px] font-bold text-slate-600">出勤規定日数から計算する</span>
+                  <span className="text-[10.5px] text-slate-400">年間所定労働日数 × 1日の所定労働時間 ÷ 12</span>
+                </div>
+                <div className={`grid gap-2 ${isDesktop ? 'grid-cols-2' : 'grid-cols-1'}`}>
+                  <Field label="年度（4月〜翌3月）">
+                    <select
+                      value={calcYear}
+                      onChange={(e) => setCalcYear(Number(e.target.value))}
+                      className="w-full box-border border border-slate-200 rounded-lg px-2.5 py-2 text-[12.5px] bg-white"
+                    >
+                      {[calcYear - 2, calcYear - 1, calcYear, calcYear + 1].map((y) => (
+                        <option key={y} value={y}>{y}年度（{y}年4月〜{y + 1}年3月）</option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="1日の所定労働時間（時間）">
+                    <input
+                      type="number" step="0.25" min="1" max="24" value={dailyHours}
+                      onChange={(e) => setDailyHours(e.target.value)}
+                      className="w-full box-border border border-slate-200 rounded-lg px-2.5 py-2 font-mono text-[13px] text-right bg-white"
+                    />
+                  </Field>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-[11.5px] min-w-[520px]">
+                    <thead className="bg-slate-50 text-slate-500">
+                      <tr className="text-left">
+                        <th className="px-2.5 py-1.5 font-medium">グループ</th>
+                        <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">登録</th>
+                        <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">年間所定労働日数</th>
+                        <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">月平均所定労働時間</th>
+                        <th className="px-2 py-1.5 font-medium text-center w-24"> </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(() => {
+                        // 出勤規定日数はメイングループ単位で登録されています
+                        const names = Array.from(new Set(
+                          (employeeAccounts || [])
+                            .filter((a) => a && !a.resignationDate && a.mainGroup)
+                            .map((a) => a.mainGroup)
+                        )).sort((a, b) => a.localeCompare(b, 'ja'));
+                        if (names.length === 0) {
+                          return <tr><td colSpan={5} className="px-2.5 py-5 text-center text-slate-300">グループが登録されていません</td></tr>;
+                        }
+                        return names.map((name) => {
+                          const a = annualPrescribedDays(groupAttendanceSchedules, name, calcYear);
+                          const full = a.filled === a.monthCount;
+                          const h = full ? monthlyStandardHoursFromDays(a.total, dailyHours) : null;
+                          return (
+                            <tr key={name} className="border-t border-slate-100">
+                              <td className="px-2.5 py-1.5 font-bold text-slate-700 whitespace-nowrap">{name}</td>
+                              <td className={`px-2 py-1.5 text-center whitespace-nowrap ${full ? 'text-slate-400' : 'text-amber-700 font-bold'}`}>
+                                {a.filled}／{a.monthCount}か月
+                              </td>
+                              <td className="px-2 py-1.5 text-center font-mono text-slate-700 whitespace-nowrap">
+                                {full ? `${a.total}日` : '—'}
+                              </td>
+                              <td className="px-2 py-1.5 text-center font-mono font-bold text-slate-800 whitespace-nowrap">
+                                {h != null ? `${h}時間` : '—'}
+                              </td>
+                              <td className="px-2 py-1.5 text-center">
+                                {h != null ? (
+                                  <button
+                                    onClick={() => { setHours(String(h)); setDone(''); setError(''); }}
+                                    className="rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-[11px] font-bold text-slate-700 whitespace-nowrap"
+                                  >
+                                    この値を使う
+                                  </button>
+                                ) : (
+                                  <span className="text-[10.5px] text-amber-700">{a.missing.slice(0, 4).join('・')}{a.missing.length > 4 ? 'ほか' : ''}が未登録</span>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        });
+                      })()}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="text-[10.5px] text-slate-500 leading-relaxed">
+                  「出勤規定日数設定」に登録されている、その年度12か月分の日数を足したものです。
+                  <b className="block pt-0.5">「この値を使う」を押しても、まだ保存されません。</b>
+                  上の欄に入るだけなので、確かめてから下の「単価設定を保存する」を押してください。
+                  端数は小数第1位までに切り捨てています（分母が小さいほど残業単価が上がるため、働く方に不利にならない向きです）。
+                  <b className="block pt-0.5">この数字は社労士の確認を受けてから使ってください。</b>
+                  出勤規定日数が実際の所定労働日数と合っているか、
+                  1か月単位の変形労働時間制でこの出し方でよいかは、ここでは確かめられません。
+                </div>
+              </div>
+
               <Field label="雇用保険料率（労働者負担・％）">
                 <div className={`grid gap-2 ${isDesktop ? 'grid-cols-4' : 'grid-cols-2'}`}>
                   <input
@@ -18114,9 +18246,10 @@ function PayrollItemSettings({ settings, employeeAccounts = [], actor, isMasterA
               </div>
 
               <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-[10.5px] text-amber-800 leading-relaxed">
-                <b className="block">欠勤控除単価・遅刻早退控除単価はまだありません。</b>
-                欠勤控除・遅刻早退控除そのものを作っていないため、単価だけ設定しても使われません。
-                いまは給与計算の画面で金額を手で入れてください。
+                <b className="block">欠勤控除単価・遅刻早退控除単価は、ここでは設定しません。</b>
+                どちらも計算で出しています。
+                欠勤控除単価＝基本給 ÷ その月の出勤規定日数、
+                遅刻早退控除単価＝基本給 ÷ 上の月平均所定労働時間。いずれも1円未満は切り捨てです。
                 <b className="block pt-0.5">割増基礎単価に手当が入っていません。</b>
                 いまは月給（時給）だけから出しています。資格手当・役割手当などは本来は基礎に入れる必要があります
                 （基礎から外せる手当は労基法37条5項・労基則21条の7つだけです）。改修は保留中です。
@@ -19143,6 +19276,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
           <PayrollItemSettings
             settings={settings}
             employeeAccounts={employeeAccounts}
+            groupAttendanceSchedules={groupAttendanceSchedules}
             actor={session}
             isMasterAdmin={isMasterAdmin}
             onSaved={onRefresh}
@@ -19218,9 +19352,15 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
         )}
         {wageType === 'monthly' && attendanceDays == null && (
           <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-[11.5px] text-amber-800">
+            <b className="block">{month}月の出勤規定日数が未登録です。</b>
             {employee.mainGroup
-              ? `「${employee.mainGroup}」の${month}月の出勤規定日数も、${employee.name}さん個人の設定も未登録のため、月給を満額（日割りなし）で計算しています。グループの日数は「出勤規定日数設定」タブから、この方だけの日数はスタッフ詳細の「グループ」タブから設定できます。`
-              : `${employee.name}さんの出勤規定日数が未設定のため、月給を満額（日割りなし）で計算しています。スタッフ詳細の「グループ」タブから設定してください。`}
+              ? `「${employee.mainGroup}」の設定も、${employee.name}さん個人の設定もありません。`
+              : `${employee.name}さんの設定がありません。`}
+            欠勤控除の1日あたりの単価（基本給 ÷ 出勤規定日数）と、土日祝皆勤手当の日割りが出せません。
+            {employee.mainGroup
+              ? 'グループの日数は「出勤規定日数設定」タブから、この方だけの日数はスタッフ詳細の「グループ」タブから設定できます。'
+              : 'スタッフ詳細の「グループ」タブから設定してください。'}
+            <span className="block pt-0.5">基本給は月給そのままなので、未登録でも金額は変わりません。</span>
           </div>
         )}
 
@@ -23019,7 +23159,7 @@ function GroupLeaveScheduleTab({ employeeAccounts, groupLeaveSchedules, onSave, 
   return (
     <div className="space-y-5">
       <div className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 text-[11.5px] text-blue-800">
-        メイングループごと・年度ごとに、月ごとの「出勤規定日数」（所定労働日数）を設定できます。年度は4月から翌年3月までです。ここで設定した日数は、そのグループに所属するスタッフの月給日割り計算（給与タブ）に使われます。グループを設定していないスタッフは、スタッフアカウント編集画面の「グループ」タブで個人別に出勤規定日数を入力してください。
+        メイングループごと・年度ごとに、月ごとの「出勤規定日数」（所定労働日数）を設定できます。年度は4月から翌年3月までです。ここで設定した日数は、欠勤控除の1日あたりの単価（基本給 ÷ 出勤規定日数）と、土日祝皆勤手当の日割りに使われます。12か月分そろっていれば、給与タブの「単価設定」から月平均所定労働時間を計算することもできます。グループを設定していないスタッフは、スタッフアカウント編集画面の「グループ」タブで個人別に出勤規定日数を入力してください。
       </div>
 
       <div className={isDesktop ? 'grid grid-cols-[240px_1fr] gap-5 items-start' : 'space-y-4'}>
@@ -23062,7 +23202,7 @@ function GroupLeaveScheduleTab({ employeeAccounts, groupLeaveSchedules, onSave, 
             </div>
             {filled === 0 && (
               <div className="mx-5 mt-4 rounded-lg bg-amber-50 border border-amber-200 px-4 py-2.5 text-[11.5px] text-amber-800">
-                {fiscalYear}年度はまだ登録されていません。登録が無い月は給与の日割り計算を行いません。
+                {fiscalYear}年度はまだ登録されていません。登録が無い月は、欠勤控除と土日祝皆勤手当の日割りを計算できません。
                 {prevYearHasData && <>　<button onClick={copyFromPreviousYear} className="font-bold underline">{fiscalYear - 1}年度からコピーする</button></>}
               </div>
             )}
@@ -26082,7 +26222,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                 </Field>
               </div>
               <div className="text-[10.5px] text-slate-400 -mt-2">
-                メイングループを選択すると、そのグループに設定された「出勤規定日数」（給与タブ →出勤規定日数設定 で管理）が月給の日割り計算に使われます。一覧に無いグループ名は、先に給与タブの「出勤規定日数設定」で新規追加してください。
+                メイングループを選択すると、そのグループに設定された「出勤規定日数」（給与タブ →出勤規定日数設定 で管理）が、欠勤控除の単価と土日祝皆勤手当の日割りに使われます。一覧に無いグループ名は、先に給与タブの「出勤規定日数設定」で新規追加してください。
               </div>
 
               {/* 申請の対象かどうか。グループの設定に対する、この方だけの例外。
@@ -26181,9 +26321,9 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                     {form.mainGroup
                       ? <>ここに入力した月は、<b>上のグループの日数より優先されます</b>。グループと同じでよい月は空欄のままにしてください。</>
                       : <>グループ未設定のため、月ごとの出勤規定日数をここで入力してください。</>}
-                    {' '}給与計算（月給制）で日割りの基準として使われます。
+                    {' '}欠勤控除の1日あたりの単価と、土日祝皆勤手当の日割りに使われます。
                     年度は{attendanceFiscalYear}年4月〜{attendanceFiscalYear + 1}年3月です。
-                    {form.mainGroup ? 'ここもグループも未登録の月は' : '登録が無い月は'}日割りを行いません。
+                    {form.mainGroup ? 'ここもグループも未登録の月は' : '登録が無い月は'}その2つを計算できません。
                   </div>
                   <div className="grid grid-cols-3 sm:grid-cols-4 gap-3">
                     {fiscalMonths(attendanceFiscalYear).map(({ year, month }) => (
