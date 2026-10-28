@@ -6056,6 +6056,7 @@ function AttendanceApp() {
                 onMarkAllNotificationsRead={async (ids) => { await markNotificationsRead(ids); await refreshData(); }}
                 schedulePatterns={schedulePatterns}
                 patternInheritedFrom={patternInheritedFrom}
+                fallbackWorkHours={myWorkHours}
                 activePatternNo={activePatternNo}
                 onSetActivePattern={setActivePatternNo}
                 onSavePatterns={savePatterns}
@@ -8278,7 +8279,7 @@ function OffShiftConfirmModal({ shift, onClose, onContinue }) {
   );
 }
 
-function EmployeeView({ now, todayRecord, todayShift = null, onClockIn, onClockOut, geoStatus, historyDates, records, corrections, onOpenCorrection, notifications, onMarkNotificationRead, onMarkAllNotificationsRead, schedulePatterns = [], patternInheritedFrom = null, activePatternNo, onSetActivePattern, onSavePatterns, needsCommuteClaimReminder, commuteClaimTargetMonth, onGoToCommuteClaim, isDesktop }) {
+function EmployeeView({ now, todayRecord, todayShift = null, onClockIn, onClockOut, geoStatus, historyDates, records, corrections, onOpenCorrection, notifications, onMarkNotificationRead, onMarkAllNotificationsRead, schedulePatterns = [], patternInheritedFrom = null, fallbackWorkHours = WORK_HOURS_FALLBACK, activePatternNo, onSetActivePattern, onSavePatterns, needsCommuteClaimReminder, commuteClaimTargetMonth, onGoToCommuteClaim, isDesktop }) {
   const status = computeDayStatus(todayRecord);
   const canClockIn = !todayRecord?.clockIn;
   const canClockOut = todayRecord?.clockIn && !todayRecord?.clockOut;
@@ -8328,11 +8329,16 @@ function EmployeeView({ now, todayRecord, todayShift = null, onClockIn, onClockO
       : undefined;
   const primaryDisabled = doneToday || (canClockIn && hasBlockingMissing);
 
-  const patternSection = (schedulePatterns.length > 0 || canClockIn) && (
+  // 規定勤怠時間はいつでも出します。以前は「登録があるか、これから出勤打刻をする」
+  // ときだけ出していましたが、そうすると1件も登録していない方が出勤打刻をしたあとに
+  // カードごと消えてしまい、登録しようにも画面から見つけられませんでした。
+  // 未登録のままだと所定の始業が既定値になり、遅刻が付いてしまいます。
+  const patternSection = (
     <SchedulePatternCard
       now={now}
       patterns={schedulePatterns}
       inheritedFrom={patternInheritedFrom}
+      fallbackWorkHours={fallbackWorkHours}
       activePatternNo={activePatternNo}
       onSetActivePattern={onSetActivePattern}
       onSavePatterns={onSavePatterns}
@@ -8724,7 +8730,7 @@ function Metric({ label, value, warn = false, danger = false }) {
   return <div><div className="text-[9.5px] font-bold text-slate-400">{label}</div><div className={`mt-1 font-mono text-[13px] font-bold ${danger ? 'text-rose-600' : warn ? 'text-amber-600' : 'text-slate-800'}`}>{value}</div></div>;
 }
 
-function SchedulePatternCard({ now, patterns, inheritedFrom = null, activePatternNo, onSetActivePattern, onSavePatterns, locked }) {
+function SchedulePatternCard({ now, patterns, inheritedFrom = null, fallbackWorkHours = WORK_HOURS_FALLBACK, activePatternNo, onSetActivePattern, onSavePatterns, locked }) {
   const [editing, setEditing] = useState(patterns.length === 0);
   const [form, setForm] = useState(() => {
     const base = [1, 2, 3].map((no) => {
@@ -8771,6 +8777,20 @@ function SchedulePatternCard({ now, patterns, inheritedFrom = null, activePatter
         <div className="px-5 py-2.5 bg-sky-50 border-b border-sky-100 text-[11px] text-sky-800 leading-relaxed">
           <b className="block">{inheritedFrom.year}年{inheritedFrom.month}月の設定をそのまま使っています。</b>
           今月の勤務時間が変わる場合は「編集」から直してください。
+        </div>
+      )}
+
+      {/* 1件も登録が無いとき。何も出さないと、遅刻の基準が何になっているのか
+          分からないまま打刻することになるため、使われている時刻を必ず見せます。
+          登録が無いと編集の画面が先に開くので、その上に出します。 */}
+      {patterns.length === 0 && (
+        <div className="px-5 py-2.5 bg-amber-50 border-b border-amber-100 text-[11px] text-amber-900 leading-relaxed">
+          <b className="block">
+            まだ登録がありません。いまは {fallbackWorkHours.start}〜{fallbackWorkHours.end} を所定の時間として打刻しています。
+          </b>
+          実際の勤務時間がこれと違う場合、その差が<b>遅刻・早退</b>として記録されます。
+          下の欄に実際の始業・終業を入れて保存してください。
+          <span className="block pt-0.5">保存すると、次の出勤打刻から使われます。</span>
         </div>
       )}
 
