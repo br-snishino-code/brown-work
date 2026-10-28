@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef, useContext, createContext } from 'react';
 import { createPortal } from 'react-dom';
 import * as XLSX from 'xlsx';
-import { Clock, MapPin, CheckCircle2, XCircle, AlertTriangle, LogIn, LogOut, FileEdit, Users, Bell, Calendar, Mail, LogOut as LogoutIcon, UserPlus, Lock, User, Monitor, Smartphone, Palmtree, Plus, Pencil, CalendarDays, ListChecks, ClipboardList, MessageSquare, Coffee, BarChart3, Home, Download, ChevronRight, LayoutGrid, Wallet, Briefcase, UserCog, Construction, Megaphone, Paperclip, FileText, Pin, Trash2, Key, ShieldCheck, ShieldAlert, HelpCircle, ChevronDown, ChevronLeft, Settings, X } from 'lucide-react';
+import { Clock, MapPin, CheckCircle2, XCircle, AlertTriangle, LogIn, LogOut, FileEdit, Users, Bell, Calendar, Mail, LogOut as LogoutIcon, UserPlus, Lock, User, Monitor, Smartphone, Palmtree, Plus, Pencil, CalendarDays, ListChecks, ClipboardList, MessageSquare, Coffee, BarChart3, Home, Download, ChevronRight, LayoutGrid, Wallet, Briefcase, UserCog, Construction, Megaphone, Paperclip, FileText, Pin, Trash2, Key, ShieldCheck, ShieldAlert, HelpCircle, ChevronDown, ChevronLeft, Settings, RefreshCw, X } from 'lucide-react';
 import { supabase, CLOUD_ENABLED, INITIAL_URL, usernameToEmail } from './supabaseClient';
 
 // ---- constants ----
@@ -18433,6 +18433,137 @@ function PartialMonthNote({ employee, year, month, wageType, isPublished }) {
   );
 }
 
+// ---- 明細を作り直したときの差分 ----
+// 何がいくら変わるのかを並べます。確かめてから入れ替えてもらうためです。
+// 戻り値の kind：
+//   'added'   … 作り直すと新しく入る項目
+//   'removed' … 作り直すと消える項目（いまの明細にだけある）
+//   'changed' … 金額が変わる項目
+// 金額が同じ項目は返しません（見るところを減らすため）。
+function diffPayrollItems(current = [], next = []) {
+  const curMap = new Map();
+  (current || []).forEach((x) => {
+    if (x && x.label != null) curMap.set(String(x.label), Math.round(Number(x.amount) || 0));
+  });
+  const nextMap = new Map();
+  (next || []).forEach((x) => {
+    if (x && x.label != null) nextMap.set(String(x.label), Math.round(Number(x.amount) || 0));
+  });
+  const rows = [];
+  // 作り直したあとの並び順で見ます
+  nextMap.forEach((amount, label) => {
+    if (!curMap.has(label)) { rows.push({ label, kind: 'added', before: null, after: amount }); return; }
+    const before = curMap.get(label);
+    if (before !== amount) rows.push({ label, kind: 'changed', before, after: amount });
+  });
+  curMap.forEach((amount, label) => {
+    if (!nextMap.has(label)) rows.push({ label, kind: 'removed', before: amount, after: null });
+  });
+  return rows;
+}
+
+// 差分をまとめた形にします。画面の見出しに使います。
+function summarizePayrollRebuild({ currentPayment, currentDeduction, nextPayment, nextDeduction }) {
+  const payment = diffPayrollItems(currentPayment, nextPayment);
+  const deduction = diffPayrollItems(currentDeduction, nextDeduction);
+  const sum = (items) => (items || []).reduce((a, x) => a + Math.round(Number(x.amount) || 0), 0);
+  const beforeNet = sum(currentPayment) - sum(currentDeduction);
+  const afterNet = sum(nextPayment) - sum(nextDeduction);
+  return {
+    payment, deduction,
+    count: payment.length + deduction.length,
+    beforeNet, afterNet, netDiff: afterNet - beforeNet,
+  };
+}
+
+// ---- 「いまの設定で作り直す」の確認 ----
+// 押したらすぐ入れ替えるのではなく、何がいくら変わるかを見せてから入れ替えます。
+// 手で直した金額も上書きされるため、そのことも必ず出します。
+function PayrollRebuildModal({ summary, employeeName, year, month, onClose, onApply }) {
+  if (!summary) return null;
+  const sign = (n) => `${n > 0 ? '＋' : n < 0 ? '−' : '±'}${formatYen(Math.abs(n))}`;
+  const kindLabel = { added: '新しく入る', removed: '消える', changed: '変わる' };
+  const kindClass = { added: 'text-emerald-700', removed: 'text-rose-600', changed: 'text-amber-700' };
+
+  const table = (title, rows) => (
+    rows.length === 0 ? null : (
+      <div className="space-y-1">
+        <div className="text-[11.5px] font-bold text-slate-600">{title}</div>
+        <div className="rounded-lg border border-slate-200 overflow-hidden">
+          {rows.map((r) => (
+            <div key={`${title}-${r.label}`} className="flex items-center gap-2 px-2.5 py-1.5 border-b border-slate-100 last:border-0 text-[11.5px]">
+              <span className={`shrink-0 w-[72px] font-bold ${kindClass[r.kind]}`}>{kindLabel[r.kind]}</span>
+              <span className="flex-1 min-w-0 truncate">{r.label}</span>
+              <span className="font-mono text-slate-400 whitespace-nowrap">
+                {r.before == null ? '—' : formatYen(r.before)}
+              </span>
+              <span className="text-slate-300">→</span>
+              <span className="font-mono font-bold text-slate-800 whitespace-nowrap">
+                {r.after == null ? '—' : formatYen(r.after)}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    )
+  );
+
+  return createPortal(
+    <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-40 p-0 sm:p-4">
+      <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg max-h-[90vh] overflow-y-auto">
+        <div className="px-5 pt-5 pb-3 border-b border-slate-100">
+          <h3 className="font-bold text-[15px]">いまの設定で作り直す</h3>
+          <div className="text-[11.5px] text-slate-400 pt-0.5">{employeeName}さん・{year}年{month}月分</div>
+        </div>
+
+        <div className="px-5 py-4 space-y-3">
+          {summary.count === 0 ? (
+            <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 text-[12px] text-slate-600">
+              変わるところはありません。いまの明細は、すでにいまの勤怠と設定どおりの金額です。
+            </div>
+          ) : (
+            <>
+              <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-[11.5px] text-amber-900 leading-relaxed">
+                <b className="block">手で直した金額も上書きされます。</b>
+                作り直すと、下の{summary.count}か所がいまの勤怠と設定で計算し直されます。
+                画面で金額を手入力していた項目も、計算した金額に戻ります。
+              </div>
+              {table('支給項目', summary.payment)}
+              {table('控除項目', summary.deduction)}
+              <div className="rounded-lg bg-slate-900 px-3.5 py-3 flex items-center justify-between">
+                <span className="text-[12px] font-bold text-white">差引支給額</span>
+                <span className="text-right">
+                  <span className="block font-mono text-[11.5px] text-slate-400">{formatYen(summary.beforeNet)}</span>
+                  <span className="block font-mono text-[16px] font-bold text-white">
+                    {formatYen(summary.afterNet)}
+                    <span className="text-[11.5px] font-bold text-amber-300 pl-1.5">{sign(summary.netDiff)}</span>
+                  </span>
+                </span>
+              </div>
+            </>
+          )}
+          <div className="text-[10.5px] text-slate-500 leading-relaxed">
+            作り直しても、この時点では画面が変わるだけです。
+            <b>保存されるのは「この内容で給与明細を作成」を押したとき</b>です。
+          </div>
+        </div>
+
+        <div className="px-5 pb-5 flex gap-2">
+          {summary.count > 0 && (
+            <button onClick={onApply} className="flex-1 py-2.5 rounded-lg bg-slate-800 text-white text-[13px] font-bold">
+              この内容で作り直す
+            </button>
+          )}
+          <button onClick={onClose} className={`${summary.count > 0 ? '' : 'flex-1 '}rounded-lg border border-slate-200 px-4 py-2.5 text-[13px] font-medium text-slate-500`}>
+            {summary.count > 0 ? 'やめる' : '閉じる'}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
 // ---- 式が計算できなかった項目の知らせ（給与計算の画面） ----
 // 黙って0円にすると気づけないため、必ず画面に出します。
 function FormulaErrorNote({ paymentItems = [], deductionItems = [], isPublished }) {
@@ -20421,6 +20552,8 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
   const [hourlyWage, setHourlyWage] = useState('0');
   const [monthlySalary, setMonthlySalary] = useState('0');
   const [dailyWage, setDailyWage] = useState('0');
+  // 「いまの設定で作り直す」の確認。開いているときだけ中身が入ります
+  const [rebuild, setRebuild] = useState(null);
   const [paymentItems, setPaymentItems] = useState([]);
   const [deductionItems, setDeductionItems] = useState([]);
   const [absentDays, setAbsentDays] = useState('0');
@@ -20626,9 +20759,11 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     rounding: payrollRoundingFor(settings, 'payment', WEEKEND_BONUS_LABEL),
   }) : null;
 
-  // スタッフ・年月・下書きの有無が変わったら、支給・控除項目を初期化する
-  useEffect(() => {
-    if (!employee || !preview) return;
+  // いまの勤怠と設定から、支給・控除項目を組み立てます。
+  // 画面を開いたときと、「いまの設定で作り直す」を押したときの両方で使います。
+  // 組み立てるだけで、画面にも保存先にも入れません（呼んだ側が決めます）。
+  const buildDraftItems = (absentDaysValue) => {
+    if (!employee || !preview) return null;
 
     // 支給・控除項目一覧（給与タブの設定）に合わせます。
     //   ・「使わない」にした項目は、新しく作る明細の候補に出しません
@@ -20645,7 +20780,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     const formulaVars = formulaVariableValues({
       preview, monthly, employee,
       attendanceDays,
-      absentDays: Number(existing?.attendanceExtra?.absentDays ?? 0),
+      absentDays: Number(absentDaysValue) || 0,
       monthlyStandardHours: monthlyStandardHoursOf(settings),
       wageType,
     });
@@ -20665,7 +20800,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     const draftAbsence = computeAbsenceDeduction({
       baseAmount: preview.baseAmount,
       prescribedDays: attendanceDays,
-      absentDays: Number(existing?.attendanceExtra?.absentDays ?? 0),
+      absentDays: Number(absentDaysValue) || 0,
       rounding: payrollRoundingFor(settings, 'payment', ABSENCE_DEDUCTION_LABEL),
       mode: formulas.absenceUnit,
       monthlyAvgDays: formulas.monthlyAvgDays,
@@ -20696,59 +20831,67 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
           : { label: it.label, amount: it.amount }
       )),
     ];
-    const nextPaymentItems = existing?.paymentItems
-      || applyFormulaItems(
-           applyPayrollItemSettings(draftPayment, allPayment, paymentOrder),
-           allPayment,
-           formulaVars,
-           settings,
-         );
-    setPaymentItems(nextPaymentItems);
+    const nextPaymentItems = applyFormulaItems(
+      applyPayrollItemSettings(draftPayment, allPayment, paymentOrder),
+      allPayment,
+      formulaVars,
+      settings,
+    );
 
-    if (existing?.deductionItems) {
-      setDeductionItems(existing.deductionItems);
-    } else {
-      // 社会保険料・住民税・雇用保険料は計算した額を候補として入れます。
-      // 料率や標準報酬月額が未設定のときは0のままにして、画面で知らせます。
-      const nextEi = computeEmploymentInsurance({ paymentItems: nextPaymentItems, settings });
-      // 自動計算の控除項目。一覧で「使う」にしたものだけを、一覧の順に並べます。
-      const autoDeductionLabels = allDeduction
-        .filter((x) => x.enabled && x.source === 'auto')
-        .map((x) => x.label);
-      const baseDeductions = autoDeductionLabels.map((label) => {
-        if (label === RESIDENT_TAX_LABEL) {
-          return { label, amount: resident?.amount == null ? 0 : resident.amount };
-        }
-        if (label === EI_LABEL) {
-          return { label, amount: nextEi.amount == null ? 0 : nextEi.amount };
-        }
-        const key = AUTO_DEDUCTION_KEYS[label];
-        const auto = key && social ? social[key] : null;
-        return { label, amount: auto == null ? 0 : auto };
-      });
-      // 所得税は「社会保険料等を差し引いたあとの額」から出すため、
-      // 控除の一覧を組み立てたあとで計算します。
-      const nextTax = computeIncomeTax({
-        employee,
-        paymentItems: nextPaymentItems,
-        deductionItems: baseDeductions,
-        dependents: withholdingDependents ? withholdingDependents.dependents : null,
-        settings,
-        year,
-        month,
-      });
-      const draftDeduction = [
-        ...baseDeductions.map((it) => (
-          it.label === INCOME_TAX_LABEL && nextTax.amount != null
-            ? { ...it, amount: nextTax.amount }
-            : it
-        )),
-        ...employeeSalaryItems
-          .filter((it) => it.kind === 'deduction')
-          .map((it) => ({ label: it.label, amount: it.amount })),
-      ];
-      setDeductionItems(applyPayrollItemSettings(draftDeduction, allDeduction, deductionOrder));
-    }
+    // 社会保険料・住民税・雇用保険料は計算した額を候補として入れます。
+    // 料率や標準報酬月額が未設定のときは0のままにして、画面で知らせます。
+    const nextEi = computeEmploymentInsurance({ paymentItems: nextPaymentItems, settings });
+    // 自動計算の控除項目。一覧で「使う」にしたものだけを、一覧の順に並べます。
+    const autoDeductionLabels = allDeduction
+      .filter((x) => x.enabled && x.source === 'auto')
+      .map((x) => x.label);
+    const baseDeductions = autoDeductionLabels.map((label) => {
+      if (label === RESIDENT_TAX_LABEL) {
+        return { label, amount: resident?.amount == null ? 0 : resident.amount };
+      }
+      if (label === EI_LABEL) {
+        return { label, amount: nextEi.amount == null ? 0 : nextEi.amount };
+      }
+      const key = AUTO_DEDUCTION_KEYS[label];
+      const auto = key && social ? social[key] : null;
+      return { label, amount: auto == null ? 0 : auto };
+    });
+    // 所得税は「社会保険料等を差し引いたあとの額」から出すため、
+    // 控除の一覧を組み立てたあとで計算します。
+    const nextTax = computeIncomeTax({
+      employee,
+      paymentItems: nextPaymentItems,
+      deductionItems: baseDeductions,
+      dependents: withholdingDependents ? withholdingDependents.dependents : null,
+      settings,
+      year,
+      month,
+    });
+    const draftDeduction = [
+      ...baseDeductions.map((it) => (
+        it.label === INCOME_TAX_LABEL && nextTax.amount != null
+          ? { ...it, amount: nextTax.amount }
+          : it
+      )),
+      ...employeeSalaryItems
+        .filter((it) => it.kind === 'deduction')
+        .map((it) => ({ label: it.label, amount: it.amount })),
+    ];
+    return {
+      paymentItems: nextPaymentItems,
+      deductionItems: applyPayrollItemSettings(draftDeduction, allDeduction, deductionOrder),
+    };
+  };
+
+  // スタッフ・年月・下書きの有無が変わったら、支給・控除項目を初期化する。
+  // すでに明細がある月は、保存されている中身をそのまま出します
+  //（勝手に作り直すと、手で直した金額が消えてしまうため）。
+  // 作り直したいときは「いまの設定で作り直す」を押してもらいます。
+  useEffect(() => {
+    const built = buildDraftItems(Number(existing?.attendanceExtra?.absentDays ?? 0));
+    if (!built) return;
+    setPaymentItems(existing?.paymentItems || built.paymentItems);
+    setDeductionItems(existing?.deductionItems || built.deductionItems);
     setAbsentDays(String(existing?.attendanceExtra?.absentDays ?? 0));
     setPaidLeaveDays(String(existing?.attendanceExtra?.paidLeaveDays ?? 0));
     setPaidLeaveHours(String(existing?.attendanceExtra?.paidLeaveHours ?? 0));
@@ -20834,6 +20977,29 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
       monthlySalary: wageType === 'monthly' ? Number(monthlySalary) : employee.monthlySalary,
       dailyWage: wageType === 'daily' ? Number(dailyWage) : employee.dailyWage,
     });
+  };
+
+  // いまの勤怠と設定で組み立て直して、何が変わるかを確かめます。
+  // この時点では画面を書き換えません（確認してから入れ替えます）。
+  const openRebuild = () => {
+    const built = buildDraftItems(Number(absentDays) || 0);
+    if (!built) return;
+    setRebuild({
+      built,
+      summary: summarizePayrollRebuild({
+        currentPayment: paymentItems,
+        currentDeduction: deductionItems,
+        nextPayment: built.paymentItems,
+        nextDeduction: built.deductionItems,
+      }),
+    });
+  };
+
+  const applyRebuild = () => {
+    if (!rebuild) return;
+    setPaymentItems(rebuild.built.paymentItems);
+    setDeductionItems(rebuild.built.deductionItems);
+    setRebuild(null);
   };
 
   const generate = async () => {
@@ -21114,6 +21280,25 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
             )}
           </div>
         ) : (
+          <div className="space-y-2">
+            {/* すでに明細がある月は、保存されている中身をそのまま出しています。
+                勤怠を直したり設定を変えたりしても、この画面の金額は変わりません。
+                いまの勤怠と設定で計算し直したいときに押してもらいます。 */}
+            {isMasterAdmin && existing && (
+              <button
+                onClick={openRebuild}
+                className="w-full py-2.5 rounded-lg border-2 border-slate-300 bg-white text-[12.5px] font-bold text-slate-600 flex items-center justify-center gap-1.5"
+              >
+                <RefreshCw size={13} className="text-slate-400" />
+                いまの設定で作り直す
+              </button>
+            )}
+            {isMasterAdmin && existing && (
+              <div className="text-[10.5px] text-slate-400 leading-relaxed">
+                この明細は作ったときの金額のままです。勤怠を直した・給与の設定を変えたあとは、
+                上のボタンで計算し直してください。
+              </div>
+            )}
           <div className="flex gap-2">
             {/* 作成・再計算は賃金を使うため、マスター管理者だけに出す */}
             {isMasterAdmin && (
@@ -21132,10 +21317,22 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
               </button>
             )}
           </div>
+          </div>
         )}
 
         {existing && <EditHistoryPanel history={existing.editHistory} />}
       </div>
+
+      {rebuild && (
+        <PayrollRebuildModal
+          summary={rebuild.summary}
+          employeeName={employee.name}
+          year={year}
+          month={month}
+          onClose={() => setRebuild(null)}
+          onApply={applyRebuild}
+        />
+      )}
 
       {openSlip && (
         <PayslipDetailModal
