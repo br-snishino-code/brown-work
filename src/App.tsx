@@ -16860,9 +16860,10 @@ const PAYROLL_ITEM_SOURCES = {
   employee: '従業員ごとに金額を設定',
   fixed: '固定額（全スタッフ共通）',
   manual: '給与計算の画面で毎月入力',
+  formula: '式で計算（自動）',
 };
 // 自分で足せる項目の決め方（auto は Brown Work の計算と結びついているため選べません）
-const PAYROLL_ITEM_SOURCE_CHOICES = ['employee', 'fixed', 'manual'];
+const PAYROLL_ITEM_SOURCE_CHOICES = ['employee', 'fixed', 'manual', 'formula'];
 
 // 組み込み項目。Brown Work が計算に使っている名前そのものなので、
 // 名前と決め方は変えられません（変えると計算が項目を見つけられなくなります）。
@@ -16951,6 +16952,7 @@ function parsePayrollItems(settings) {
     out.push({
       label, kind, source,
       amount: source === 'fixed' ? Math.max(0, Math.round(Number(row?.amount) || 0)) : 0,
+      formula: source === 'formula' ? String(row?.formula || '') : '',
       enabled: row?.enabled !== false, showZero: row?.showZero === true,
       rounding: PAYROLL_ROUNDINGS[row?.rounding] ? row.rounding : (kind === 'deduction' ? 'floor' : 'ceil'),
       statutory: false, builtin: false, desc: '',
@@ -17318,6 +17320,279 @@ function parseDeemedOvertimeGroups(settings) {
     if (Number.isFinite(h) && h > 0 && h <= 200) out[key] = h;
   });
   return out;
+}
+
+// ============================================================
+// 自動計算の項目（自由式）
+// ============================================================
+// 「役職手当 ＝ 【基本給】× 10%」のような式を画面から書けるようにします。
+//
+// ⚠ eval や new Function は使いません。
+//   式は自分で読み取って計算します。賃金の計算に使うものなので、
+//   画面から入れた文字列をそのまま実行させるわけにはいきません。
+//
+// 使える書き方：
+//   数     123 / 1.5 / 10%（10% は 0.1 として扱います）
+//   変数   【基本給】のように【】で囲みます
+//   演算   + - * / × ÷ と ( )
+//   関数   min(a, b) max(a, b) round(a) floor(a) ceil(a)
+
+// 式の中で使える変数。給与計算の画面の数字がそのまま入ります。
+const FORMULA_VARIABLE_HELP = {
+  '基本給': '時給制は時給×実働、日給制は日額×実出勤日数、月給制は月給そのもの',
+  '時給': 'スタッフ詳細の時給（時給制以外は0）',
+  '日額': 'スタッフ詳細の日額（日給制以外は0）',
+  '月給': 'スタッフ詳細の月給（月給制以外は0）',
+  '割増基礎単価': '残業手当・深夜手当のもとになる1時間あたりの単価',
+  '実働時間': '休憩を除いた実働の時間数（小数。90分なら1.5）',
+  '残業時間': '残業の時間数（小数）',
+  '深夜時間': '22時から翌5時までの時間数（小数）',
+  '遅刻早退時間': '遅刻・早退の時間数（小数。日ごとに15分単位で切り捨てた合計）',
+  '実出勤日数': '打刻のあった日数',
+  '出勤規定日数': 'その月の出勤規定日数（未設定なら0）',
+  '欠勤日数': '給与計算の画面に入れた欠勤日数',
+  '月平均所定労働時間': '給与の設定で登録した時間数',
+};
+const FORMULA_VARIABLES = Object.keys(FORMULA_VARIABLE_HELP);
+
+const FORMULA_FUNCTIONS = {
+  min: { argc: 2, apply: (a, b) => Math.min(a, b), help: '小さいほう。上限を付けるときに使います' },
+  max: { argc: 2, apply: (a, b) => Math.max(a, b), help: '大きいほう。下限を付けるときに使います' },
+  round: { argc: 1, apply: (a) => Math.round(a), help: '四捨五入' },
+  floor: { argc: 1, apply: (a) => Math.floor(a), help: '切り捨て' },
+  ceil: { argc: 1, apply: (a) => Math.ceil(a), help: '切り上げ' },
+};
+
+// 式を細かい部品に分けます。読めない文字があればその位置を返します。
+function tokenizeFormula(src) {
+  const text = String(src || '');
+  const tokens = [];
+  let i = 0;
+  const isSpace = (c) => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '　';
+  const isDigit = (c) => c >= '0' && c <= '9';
+  const isAlpha = (c) => (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+
+  while (i < text.length) {
+    const c = text[i];
+    if (isSpace(c)) { i += 1; continue; }
+
+    if (isDigit(c) || (c === '.' && isDigit(text[i + 1]))) {
+      let j = i;
+      while (j < text.length && (isDigit(text[j]) || text[j] === '.')) j += 1;
+      const raw = text.slice(i, j);
+      if ((raw.match(/\./g) || []).length > 1) {
+        return { ok: false, error: `数の書き方が正しくありません（${raw}）`, at: i };
+      }
+      let value = Number(raw);
+      if (!Number.isFinite(value)) return { ok: false, error: `数として読めません（${raw}）`, at: i };
+      if (text[j] === '%' || text[j] === '％') { value = value / 100; j += 1; }
+      tokens.push({ type: 'number', value });
+      i = j;
+      continue;
+    }
+
+    if (c === '【') {
+      const end = text.indexOf('】', i + 1);
+      if (end < 0) return { ok: false, error: '【 に対応する 】 がありません', at: i };
+      const name = text.slice(i + 1, end).trim();
+      if (!name) return { ok: false, error: '【】の中が空です', at: i };
+      tokens.push({ type: 'variable', name });
+      i = end + 1;
+      continue;
+    }
+
+    if (isAlpha(c)) {
+      let j = i;
+      while (j < text.length && isAlpha(text[j])) j += 1;
+      const name = text.slice(i, j).toLowerCase();
+      if (!FORMULA_FUNCTIONS[name]) {
+        return { ok: false, error: `知らない関数です（${text.slice(i, j)}）。使えるのは ${Object.keys(FORMULA_FUNCTIONS).join('・')} です`, at: i };
+      }
+      tokens.push({ type: 'func', name });
+      i = j;
+      continue;
+    }
+
+    // 全角の記号も受け付けます（スマホから入れやすくするため）
+    const ops = { '+': '+', '－': '-', '-': '-', '＋': '+', '*': '*', '×': '*', '＊': '*', '/': '/', '÷': '/', '／': '/' };
+    if (ops[c]) { tokens.push({ type: 'op', value: ops[c] }); i += 1; continue; }
+    if (c === '(' || c === '（') { tokens.push({ type: 'lparen' }); i += 1; continue; }
+    if (c === ')' || c === '）') { tokens.push({ type: 'rparen' }); i += 1; continue; }
+    if (c === ',' || c === '、' || c === '，') { tokens.push({ type: 'comma' }); i += 1; continue; }
+
+    return { ok: false, error: `式に使えない文字です（${c}）`, at: i };
+  }
+  return { ok: true, tokens };
+}
+
+// 部品を木の形に組み立てます（再帰下降）。
+//   式   := 項 (('+'|'-') 項)*
+//   項   := 符号 (('*'|'/') 符号)*
+//   符号 := ('-'|'+')? 値
+//   値   := 数 | 変数 | 関数(式, …) | ( 式 )
+function parseFormulaTokens(tokens) {
+  let pos = 0;
+  const peek = () => tokens[pos];
+  const next = () => tokens[pos++];
+
+  let failure = null;
+  const fail = (message) => { if (!failure) failure = message; return { type: 'number', value: 0 }; };
+
+  const parseExpr = () => {
+    let left = parseTerm();
+    while (peek() && peek().type === 'op' && (peek().value === '+' || peek().value === '-')) {
+      const op = next().value;
+      left = { type: 'binary', op, left, right: parseTerm() };
+    }
+    return left;
+  };
+  const parseTerm = () => {
+    let left = parseUnary();
+    while (peek() && peek().type === 'op' && (peek().value === '*' || peek().value === '/')) {
+      const op = next().value;
+      left = { type: 'binary', op, left, right: parseUnary() };
+    }
+    return left;
+  };
+  const parseUnary = () => {
+    if (peek() && peek().type === 'op' && (peek().value === '-' || peek().value === '+')) {
+      const op = next().value;
+      const operand = parseUnary();
+      return op === '-' ? { type: 'negate', operand } : operand;
+    }
+    return parsePrimary();
+  };
+  const parsePrimary = () => {
+    const t = peek();
+    if (!t) return fail('式が途中で終わっています');
+    if (t.type === 'number') { next(); return { type: 'number', value: t.value }; }
+    if (t.type === 'variable') { next(); return { type: 'variable', name: t.name }; }
+    if (t.type === 'lparen') {
+      next();
+      const inner = parseExpr();
+      if (!peek() || peek().type !== 'rparen') return fail('( に対応する ) がありません');
+      next();
+      return inner;
+    }
+    if (t.type === 'func') {
+      next();
+      const spec = FORMULA_FUNCTIONS[t.name];
+      if (!peek() || peek().type !== 'lparen') return fail(`${t.name} のあとに ( がありません`);
+      next();
+      const args = [parseExpr()];
+      while (peek() && peek().type === 'comma') { next(); args.push(parseExpr()); }
+      if (!peek() || peek().type !== 'rparen') return fail(`${t.name}( に対応する ) がありません`);
+      next();
+      if (args.length !== spec.argc) {
+        return fail(`${t.name} は ${spec.argc} つの値が要ります（${args.length}つ書かれています）`);
+      }
+      return { type: 'call', name: t.name, args };
+    }
+    if (t.type === 'rparen') return fail('( がないのに ) があります');
+    if (t.type === 'comma') return fail(', の使い方が正しくありません');
+    if (t.type === 'op') return fail(`${t.value} の前に数がありません`);
+    return fail('式を読み取れません');
+  };
+
+  const ast = parseExpr();
+  if (failure) return { ok: false, error: failure };
+  if (pos < tokens.length) return { ok: false, error: '式の後ろに余分なものがあります' };
+  return { ok: true, ast };
+}
+
+// 木の中で使っている変数の名前を集めます（画面で知らせるため）。
+function formulaVariablesUsed(ast) {
+  const out = [];
+  const walk = (n) => {
+    if (!n) return;
+    if (n.type === 'variable') { if (!out.includes(n.name)) out.push(n.name); return; }
+    if (n.type === 'binary') { walk(n.left); walk(n.right); return; }
+    if (n.type === 'negate') { walk(n.operand); return; }
+    if (n.type === 'call') { n.args.forEach(walk); }
+  };
+  walk(ast);
+  return out;
+}
+
+// 式を読み取って、使えるかどうかを確かめます。
+// allowedVariables … 使ってよい変数の名前。渡さなければ組み込みの一覧を使います。
+function compileFormula(src, allowedVariables = FORMULA_VARIABLES) {
+  const text = String(src || '').trim();
+  if (!text) return { ok: false, error: '式が空です' };
+  const t = tokenizeFormula(text);
+  if (!t.ok) return { ok: false, error: t.error, at: t.at };
+  if (t.tokens.length === 0) return { ok: false, error: '式が空です' };
+  const p = parseFormulaTokens(t.tokens);
+  if (!p.ok) return { ok: false, error: p.error };
+  const used = formulaVariablesUsed(p.ast);
+  const unknown = used.filter((n) => !allowedVariables.includes(n));
+  if (unknown.length > 0) {
+    return { ok: false, error: `知らない項目です（${unknown.map((x) => `【${x}】`).join('・')}）`, unknown };
+  }
+  return { ok: true, ast: p.ast, variables: used };
+}
+
+// 木を計算します。値が入っていない変数は0として扱います。
+function evalFormulaAst(ast, vars = {}) {
+  const run = (n) => {
+    if (!n) return 0;
+    if (n.type === 'number') return n.value;
+    if (n.type === 'variable') {
+      const v = Number(vars[n.name]);
+      return Number.isFinite(v) ? v : 0;
+    }
+    if (n.type === 'negate') return -run(n.operand);
+    if (n.type === 'call') {
+      const spec = FORMULA_FUNCTIONS[n.name];
+      if (!spec) throw new Error(`知らない関数です（${n.name}）`);
+      return spec.apply(...n.args.map(run));
+    }
+    const a = run(n.left);
+    const b = run(n.right);
+    if (n.op === '+') return a + b;
+    if (n.op === '-') return a - b;
+    if (n.op === '*') return a * b;
+    if (n.op === '/') {
+      if (b === 0) throw new Error('0 で割ろうとしています');
+      return a / b;
+    }
+    throw new Error(`知らない計算です（${n.op}）`);
+  };
+  const value = run(ast);
+  if (!Number.isFinite(value)) throw new Error('計算の結果が数になりません');
+  return value;
+}
+
+// 式を書いてから計算するまでを1つにしたもの。画面の試算でも使います。
+// 戻り値：{ ok, value, error }
+function runFormula(src, vars = {}, allowedVariables = FORMULA_VARIABLES) {
+  const c = compileFormula(src, allowedVariables);
+  if (!c.ok) return { ok: false, error: c.error };
+  try {
+    return { ok: true, value: evalFormulaAst(c.ast, vars) };
+  } catch (e) {
+    return { ok: false, error: e?.message || '計算できません' };
+  }
+}
+
+// 給与計算の画面の数字を、式で使える形に並べます。
+function formulaVariableValues({ preview, monthly, employee, attendanceDays, absentDays, monthlyStandardHours, wageType }) {
+  const h = (min) => Math.max(0, Number(min) || 0) / 60;
+  return {
+    '基本給': Number(preview?.baseAmount) || 0,
+    '時給': wageType === 'hourly' ? (Number(employee?.hourlyWage) || 0) : 0,
+    '日額': wageType === 'daily' ? (Number(employee?.dailyWage) || 0) : 0,
+    '月給': wageType === 'monthly' ? (Number(employee?.monthlySalary) || 0) : 0,
+    '割増基礎単価': Number(preview?.wageRateHourly) || 0,
+    '実働時間': h(monthly?.workedMin),
+    '残業時間': h(monthly?.overtimeMin),
+    '深夜時間': h(monthly?.nightMin),
+    '遅刻早退時間': h(monthly?.unworkedMin),
+    '実出勤日数': Math.max(0, Number(monthly?.days) || 0),
+    '出勤規定日数': Math.max(0, Number(attendanceDays) || 0),
+    '欠勤日数': Math.max(0, Number(absentDays) || 0),
+    '月平均所定労働時間': Math.max(0, Number(monthlyStandardHours) || 0),
+  };
 }
 
 // ---- 割増基礎単価に入れる項目 ----
@@ -17691,6 +17966,25 @@ function visiblePayslipItems(items, settings, kind) {
 //
 // list は payrollItemsForEmployee(..., { includeDisabled: true }) で取った
 // その方のグループの一覧です。
+// 「式で計算」にした項目の金額を、式の結果で置き換えます。
+// 式が書けていない・計算できないときは0円にして、理由を控えておきます
+//（画面で知らせるため。黙って0円にすると気づけません）。
+function applyFormulaItems(items, list, vars, settings) {
+  const byLabel = new Map();
+  (list || []).forEach((x) => {
+    if (x?.source === 'formula' && x.enabled !== false) byLabel.set(x.label, x);
+  });
+  if (byLabel.size === 0) return items || [];
+  return (items || []).map((it) => {
+    const spec = byLabel.get(paymentItemKey(it.label));
+    if (!spec) return it;
+    const r = runFormula(spec.formula, vars);
+    if (!r.ok) return { ...it, amount: 0, formulaError: r.error };
+    const rounding = payrollRoundingFor(settings, spec.kind, spec.label);
+    return { ...it, amount: roundYenBy(r.value, rounding || 'ceil'), formulaError: '' };
+  });
+}
+
 function applyPayrollItemSettings(draft, list, orderMap) {
   const off = new Set((list || []).filter((x) => !x.enabled).map((x) => x.label));
   const out = (draft || []).filter((it) => !off.has(paymentItemKey(it.label)));
@@ -17712,6 +18006,7 @@ async function savePayrollItemSettings({ items, flags }, actor = null) {
     const slim = items.map((x) => ({
       label: x.label, kind: x.kind, source: x.source,
       ...(x.source === 'fixed' ? { amount: Math.max(0, Math.round(Number(x.amount) || 0)) } : {}),
+      ...(x.source === 'formula' ? { formula: String(x.formula || '').trim() } : {}),
       enabled: x.enabled !== false,
       showZero: x.showZero === true,
       ...(x.statutory ? {} : { rounding: PAYROLL_ROUNDINGS[x.rounding] ? x.rounding : 'ceil' }),
@@ -18134,6 +18429,123 @@ function PartialMonthNote({ employee, year, month, wageType, isPublished }) {
         。日割りの算式（暦日で割るか、所定労働日で割るか）は賃金規程で決まります。
         決まったら自動計算を作れますので、お知らせください。
       </div>
+    </div>
+  );
+}
+
+// ---- 式が計算できなかった項目の知らせ（給与計算の画面） ----
+// 黙って0円にすると気づけないため、必ず画面に出します。
+function FormulaErrorNote({ paymentItems = [], deductionItems = [], isPublished }) {
+  const broken = [...paymentItems, ...deductionItems].filter((x) => x && x.formulaError);
+  if (broken.length === 0) return null;
+  const tone = isPublished ? 'border-slate-200 bg-slate-50 text-slate-500' : 'border-rose-200 bg-rose-50 text-rose-800';
+  return (
+    <div className={`rounded-xl border px-3.5 py-2.5 text-[11.5px] leading-relaxed ${tone}`}>
+      <b className="block">式で計算できなかった項目があります（0円で入っています）。</b>
+      {broken.map((x) => (
+        <div key={x.label} className="pt-0.5">
+          「{x.label}」… {x.formulaError}
+        </div>
+      ))}
+      <div className="text-[10.5px] pt-1 opacity-80">
+        「給与の設定」→「支給・控除項目一覧」でこの項目を開くと、式を直せます。
+      </div>
+    </div>
+  );
+}
+
+// ---- 式の入力欄（支給・控除項目一覧の中） ----
+// 書いたそばから読み取って、間違いと試算の結果を出します。
+// 試算はその場の数字で動かすだけで、保存とは関係ありません。
+function FormulaEditor({ value, onChange }) {
+  const [showVars, setShowVars] = useState(false);
+  // 試算に使う数字。実際の給与計算とは別の、確かめるためだけの値です。
+  const sample = {
+    '基本給': 300000, '時給': 1200, '日額': 12000, '月給': 300000,
+    '割増基礎単価': 2000, '実働時間': 160, '残業時間': 10, '深夜時間': 2,
+    '遅刻早退時間': 0.5, '実出勤日数': 20, '出勤規定日数': 22,
+    '欠勤日数': 0, '月平均所定労働時間': 160,
+  };
+  const text = String(value || '');
+  const checked = text.trim() ? compileFormula(text) : null;
+  const tried = checked?.ok ? runFormula(text, sample) : null;
+
+  const insert = (name) => onChange(`${text}${text && !text.endsWith(' ') ? ' ' : ''}【${name}】`);
+
+  return (
+    <div className="space-y-2">
+      <Field label="式">
+        <textarea
+          value={text}
+          onChange={(e) => onChange(e.target.value)}
+          rows={2}
+          placeholder="例：【基本給】* 10%"
+          className="w-full box-border border border-slate-200 rounded-lg px-2.5 py-2 font-mono text-[12.5px] bg-white"
+        />
+      </Field>
+
+      {checked && !checked.ok && (
+        <div className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-700">
+          {checked.error}
+        </div>
+      )}
+      {checked?.ok && tried && (
+        tried.ok ? (
+          <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-2 text-[11px] text-emerald-800 leading-relaxed">
+            <b className="block">試算：{formatYen(Math.round(tried.value))}</b>
+            下の数字で計算した結果です（確かめるためだけの数字で、実際の給与とは関係ありません）。
+            <div className="text-[10.5px] pt-0.5 opacity-80 font-mono">
+              {(checked.variables || []).length > 0
+                ? checked.variables.map((n) => `${n}=${sample[n]}`).join('／')
+                : '変数を使っていません'}
+            </div>
+          </div>
+        ) : (
+          <div className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-700">
+            {tried.error}
+          </div>
+        )
+      )}
+
+      <button
+        onClick={() => setShowVars((v) => !v)}
+        className="text-[11px] font-bold text-amber-600"
+      >
+        {showVars ? '使える項目を閉じる' : '使える項目を見る'}
+      </button>
+
+      {showVars && (
+        <div className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 space-y-2">
+          <div className="text-[10.5px] text-slate-500 leading-relaxed">
+            名前を押すと式に足せます。数字・<span className="font-mono">+ - × ÷ ( )</span>・
+            <span className="font-mono">10%</span> のような割合が使えます。
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {FORMULA_VARIABLES.map((n) => (
+              <button
+                key={n}
+                onClick={() => insert(n)}
+                title={FORMULA_VARIABLE_HELP[n]}
+                className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[10.5px] font-bold text-slate-600"
+              >
+                {n}
+              </button>
+            ))}
+          </div>
+          <div className="text-[10.5px] text-slate-500 leading-relaxed pt-1 border-t border-slate-200">
+            <b className="block pt-1">関数</b>
+            {Object.entries(FORMULA_FUNCTIONS).map(([name, f]) => (
+              <div key={name}><span className="font-mono">{name}</span>　{f.help}</div>
+            ))}
+          </div>
+          <div className="text-[10.5px] text-slate-500 leading-relaxed pt-1 border-t border-slate-200">
+            <b className="block pt-1">書き方の例</b>
+            <div className="font-mono">【基本給】* 10%</div>
+            <div className="font-mono">min(【基本給】* 5%, 20000)</div>
+            <div className="font-mono">round(30000 *【実出勤日数】/【出勤規定日数】)</div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -18941,10 +19353,17 @@ function PayrollItemSettings({ settings, employeeAccounts = [], groupAttendanceS
       setError('項目名に丸かっこは使えません。「交通費精算（10月分）」のように月を入れる使い方と区別できなくなるためです。');
       return;
     }
+    // 式で計算する項目は、保存する前に式が読めるか確かめます。
+    // 読めない式のまま保存すると、給与明細を作るときに黙って0円になってしまいます。
+    if (adding.source === 'formula') {
+      const c = compileFormula(adding.formula || '');
+      if (!c.ok) { setError(`式を直してください。${c.error}`); return; }
+    }
     setError('');
     const row = {
       label, kind, source: adding.source,
       amount: adding.source === 'fixed' ? Math.max(0, Math.round(Number(adding.amount) || 0)) : 0,
+      formula: adding.source === 'formula' ? String(adding.formula || '').trim() : '',
       enabled: true, builtin: false, desc: '',
     };
     // 同じ区分の最後に足します
@@ -18961,6 +19380,18 @@ function PayrollItemSettings({ settings, employeeAccounts = [], groupAttendanceS
   const save = async () => {
     setError('');
     setDone('');
+    // 式で計算する項目は、読めない式のまま保存させません。
+    // 保存できてしまうと、給与明細を作るときに黙って0円になります。
+    if (!inGroup) {
+      const broken = items
+        .filter((x) => x.source === 'formula' && x.enabled !== false)
+        .map((x) => ({ label: x.label, check: compileFormula(x.formula || '') }))
+        .filter((x) => !x.check.ok);
+      if (broken.length > 0) {
+        setError(`式を直してください。${broken.map((x) => `「${x.label}」${x.check.error}`).join('／')}`);
+        return;
+      }
+    }
     setSaving(true);
     const res = inGroup
       ? await savePayrollItemGroups(groups, actor)
@@ -18998,6 +19429,10 @@ function PayrollItemSettings({ settings, employeeAccounts = [], groupAttendanceS
   const amountText = (x) => {
     if (x.source === 'auto') return x.desc;
     if (x.source === 'fixed') return formatYen(x.amount);
+    if (x.source === 'formula') {
+      const c = compileFormula(x.formula || '');
+      return c.ok ? `式：${x.formula}` : `式が正しくありません（${c.error}）`;
+    }
     return PAYROLL_ITEM_SOURCES[x.source] || '';
   };
 
@@ -19310,10 +19745,17 @@ function PayrollItemSettings({ settings, employeeAccounts = [], groupAttendanceS
                   />
                 </Field>
               )}
+              {adding.source === 'formula' && (
+                <FormulaEditor
+                  value={adding.formula || ''}
+                  onChange={(v) => setAdding((p) => ({ ...p, formula: v }))}
+                />
+              )}
               <div className="text-[10.5px] text-slate-500 leading-relaxed">
                 {adding.source === 'employee' && 'スタッフ詳細の「毎月の固定支給・控除項目」で、この項目名を候補として選べるようになります。金額を入れた方にだけ付きます。'}
                 {adding.source === 'fixed' && '有効にすると、給与明細を新しく作るときに全スタッフへこの金額で入ります。グループごとに金額を変えたいときは、上でグループを選んでから金額を直してください。'}
                 {adding.source === 'manual' && '給与明細を作るときに、この項目名を選んで金額を入れる形になります。自動では入りません。'}
+                {adding.source === 'formula' && '給与明細を作るときに、式の結果が自動で入ります。1円未満の端数は、一覧の「1円未満」の設定どおりに処理します。'}
               </div>
               <div className="flex gap-2">
                 <button onClick={commitAdd} className="flex-1 rounded-lg bg-slate-800 py-2 text-[12px] font-bold text-white">一覧に足す</button>
@@ -19463,6 +19905,14 @@ function PayrollItemSettings({ settings, employeeAccounts = [], groupAttendanceS
                                     className="w-full box-border border border-slate-200 rounded-lg px-2.5 py-1.5 font-mono text-[12px] text-right bg-white"
                                   />
                                 </Field>
+                              )}
+                              {x.source === 'formula' && (
+                                <div className={isDesktop ? 'col-span-2' : ''}>
+                                  <FormulaEditor
+                                    value={x.formula || ''}
+                                    onChange={(v) => patch(x.label, { formula: v })}
+                                  />
+                                </div>
                               )}
                               <div className="flex items-end">
                                 <button
@@ -20191,6 +20641,15 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     const paymentOrder = payrollItemOrderMap(settings, 'payment');
     const deductionOrder = payrollItemOrderMap(settings, 'deduction');
 
+    // 式で計算する項目に渡す数字
+    const formulaVars = formulaVariableValues({
+      preview, monthly, employee,
+      attendanceDays,
+      absentDays: Number(existing?.attendanceExtra?.absentDays ?? 0),
+      monthlyStandardHours: monthlyStandardHoursOf(settings),
+      wageType,
+    });
+
     const draftLate = computeLateEarlyDeduction({
       baseAmount: preview.baseAmount,
       monthlyStandardHours: monthlyStandardHoursOf(settings),
@@ -20238,7 +20697,12 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
       )),
     ];
     const nextPaymentItems = existing?.paymentItems
-      || applyPayrollItemSettings(draftPayment, allPayment, paymentOrder);
+      || applyFormulaItems(
+           applyPayrollItemSettings(draftPayment, allPayment, paymentOrder),
+           allPayment,
+           formulaVars,
+           settings,
+         );
     setPaymentItems(nextPaymentItems);
 
     if (existing?.deductionItems) {
@@ -20544,6 +21008,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
             <input type="number" step="0.5" value={paidLeaveHours} onChange={(e) => setPaidLeaveHours(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px] bg-white" />
           </Field>
         </div>
+        <FormulaErrorNote paymentItems={paymentItems} deductionItems={deductionItems} isPublished={isPublished} />
         <NightAndLateNote preview={preview} lateDeduction={lateDeduction} isPublished={isPublished} premiumBaseParts={premiumBase.parts} />
         <AbsenceDeductionNote
           deduction={absenceDeduction}
