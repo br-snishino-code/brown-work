@@ -15125,7 +15125,11 @@ function AdminDashboardTab({ missingCount, correctionCount, leaveCount, gpsAlert
 }
 
 // ---- 給与計算 ----
-const MONTHLY_STANDARD_HOURS = 160; // 月給制の残業単価を出すための簡易換算（週40h×概ね4週）
+// 月給制の残業単価（割増基礎単価）を出すときの分母。
+// 本来は年間の所定労働日数から出す「月平均所定労働時間」で、会社ごとに違います。
+// 給与タブの「単価設定」で変えられます。設定が無いときはこの160時間を使います
+// （週40h×概ね4週の簡易換算）。正しい値は社労士に確認してください。
+const MONTHLY_STANDARD_HOURS = 160;
 const OVERTIME_MULTIPLIER = 1.25;
 
 // ============================================================
@@ -15174,15 +15178,17 @@ function roundUnworkedMinutes(minutes) {
   return hours * 60 + Math.floor(rest / UNWORKED_ROUND_UNIT_MIN) * UNWORKED_ROUND_UNIT_MIN;
 }
 
-function computePayrollPreview({ wageType, hourlyWage, monthlySalary, workedMinutes, overtimeMinutes, commuteAllowance = 0, attendanceDays = null, actualDays = 0 }) {
+function computePayrollPreview({ wageType, hourlyWage, monthlySalary, workedMinutes, overtimeMinutes, commuteAllowance = 0, attendanceDays = null, actualDays = 0, monthlyStandardHours = MONTHLY_STANDARD_HOURS }) {
   const regularMinutes = Math.max(0, workedMinutes - overtimeMinutes);
   let baseAmount = 0;
   let overtimeAmount = 0;
   let wageRate = 0;
+  let wageRateHourly = 0;
   let prorated = false;
   // 支給項目の金額は1円未満を切り上げ（賃金規程）
   if (wageType === 'hourly') {
     wageRate = Number(hourlyWage) || 0;
+    wageRateHourly = wageRate;
     baseAmount = ceilYen((regularMinutes / 60) * wageRate);
     overtimeAmount = ceilYen((overtimeMinutes / 60) * wageRate * OVERTIME_MULTIPLIER);
   } else {
@@ -15195,11 +15201,14 @@ function computePayrollPreview({ wageType, hourlyWage, monthlySalary, workedMinu
     } else {
       baseAmount = ceilYen(wageRate);
     }
-    const hourlyEquivalent = wageRate / MONTHLY_STANDARD_HOURS;
-    overtimeAmount = ceilYen((overtimeMinutes / 60) * hourlyEquivalent * OVERTIME_MULTIPLIER);
+    // 月平均所定労働時間は画面で設定できます（未設定なら MONTHLY_STANDARD_HOURS）
+    const hours = Number(monthlyStandardHours) > 0 ? Number(monthlyStandardHours) : MONTHLY_STANDARD_HOURS;
+    wageRateHourly = wageRate / hours;
+    overtimeAmount = ceilYen((overtimeMinutes / 60) * wageRateHourly * OVERTIME_MULTIPLIER);
   }
   const allowanceAmount = Math.round(Number(commuteAllowance) || 0);
-  return { wageRate, regularMinutes, baseAmount, overtimeAmount, allowanceAmount, totalAmount: baseAmount + overtimeAmount + allowanceAmount, prorated };
+  // wageRateHourly … 割増基礎単価（1時間あたり）。画面に根拠を出すために返します
+  return { wageRate, wageRateHourly, regularMinutes, baseAmount, overtimeAmount, allowanceAmount, totalAmount: baseAmount + overtimeAmount + allowanceAmount, prorated };
 }
 
 const formatYen = (n) => `¥${Math.round(n || 0).toLocaleString('ja-JP')}`;
@@ -16562,13 +16571,207 @@ const PAYMENT_ALLOWANCE_PRESETS = [
   '住宅手当',
 ];
 
-// 設定画面に最初から並べておく支給項目（実際に使われていなくても出す）
-const DEFAULT_PAYMENT_ITEM_HINTS = [
-  '基本給', '通勤手当', '残業手当', '交通費精算',
-  ...PAYMENT_ALLOWANCE_PRESETS,
-];
-const DEFAULT_DEDUCTION_LABELS = ['健康保険料', '介護保険料', '厚生年金保険料', '雇用保険料', '所得税', '住民税'];
+// 控除項目は「支給・控除項目一覧」（BUILTIN_PAYROLL_ITEMS）から出します。
+// 設定で「使う」にしたものだけが、給与明細を新しく作るときの候補になります。
 const sumItems = (items) => (items || []).reduce((s, it) => s + (Number(it.amount) || 0), 0);
+
+// ============================================================
+// 支給・控除項目一覧（全社共通の設定）
+// ============================================================
+// 給与明細に出る項目を1か所にまとめます。これまでは
+//   ・自動で計算する項目    … コードに直接書いていた
+//   ・手当などの固定項目    … スタッフ詳細で1人ずつ登録
+//   ・雇用保険／所得税の扱い … 給与タブの「雇用保険の設定」
+// と3か所に分かれていて、全体でどの項目があるのかが見えませんでした。
+//
+// ここで決められるのは次の4つです：
+//   ・項目を足す／消す（自分で足した項目のみ）
+//   ・使う／使わない（使わない項目は候補にも明細の初期値にも出ません）
+//   ・並び順（給与明細に出る順番）
+//   ・雇用保険の賃金に含めるか／所得税の課税対象か
+//
+// ⚠ 金額の計算式そのものは、この画面からは変えられません。
+//   自動計算の項目（基本給・残業手当・社会保険料・所得税など）の式は
+//   コードの中にあります。式を変えるときは改修が必要です。
+const SETTING_PAYROLL_ITEMS = 'payroll_items';   // 支給・控除項目一覧（JSON）
+
+// 金額の決め方。
+//   auto     … Brown Work が自動で計算する（式は変えられない）
+//   employee … スタッフ詳細の「毎月の固定支給・控除項目」で1人ずつ登録する
+//   fixed    … 全スタッフ共通の固定額
+//   manual   … 給与計算の画面で毎月入れる
+const PAYROLL_ITEM_SOURCES = {
+  auto: '自動計算',
+  employee: '従業員ごとに金額を設定',
+  fixed: '固定額（全スタッフ共通）',
+  manual: '給与計算の画面で毎月入力',
+};
+// 自分で足せる項目の決め方（auto は Brown Work の計算と結びついているため選べません）
+const PAYROLL_ITEM_SOURCE_CHOICES = ['employee', 'fixed', 'manual'];
+
+// 組み込み項目。Brown Work が計算に使っている名前そのものなので、
+// 名前と決め方は変えられません（変えると計算が項目を見つけられなくなります）。
+// desc には、いま実際にコードが行っている計算を書いています。
+const BUILTIN_PAYROLL_ITEMS = [
+  { label: '基本給', kind: 'payment', desc: '時給制：時給 ×（実働時間 − 残業時間）／月給制：月給（出勤規定日数があれば実出勤日数で日割り）' },
+  { label: '通勤手当', kind: 'payment', desc: '通勤経路の月額換算の合計（給与作成時にコピー）' },
+  { label: '残業手当', kind: 'payment', desc: '【割増基礎単価】×【残業時間】× 1.25' },
+  { label: '交通費精算', kind: 'payment', desc: '承認済みの交通費精算の合計' },
+  { label: '土日祝皆勤手当', kind: 'payment', desc: '土日祝の欠勤0日 10,000円／1日 5,000円／2日以上 0円（勤務実績が規定日数に満たないときは日割り）' },
+  { label: '健康保険料', kind: 'deduction', desc: '標準報酬月額 ×【健康保険料率】÷ 2' },
+  { label: '介護保険料', kind: 'deduction', desc: '標準報酬月額 ×【介護保険料率】÷ 2（40歳から64歳の月のみ）' },
+  { label: '厚生年金保険料', kind: 'deduction', desc: '標準報酬月額 ×【厚生年金保険料率】÷ 2' },
+  { label: '雇用保険料', kind: 'deduction', desc: '雇用保険の賃金に含める支給額の合計 ×【雇用保険料率】' },
+  { label: '所得税', kind: 'deduction', desc: '「給与所得の源泉徴収税額表」に当てはめて算出（電算機計算の特例）' },
+  { label: '住民税', kind: 'deduction', desc: '住民税の通知書に登録した月額' },
+];
+const BUILTIN_PAYROLL_LABELS = new Set(BUILTIN_PAYROLL_ITEMS.map((x) => x.label));
+
+// 保存が1件も無いときに並べる既定の一覧。
+// 組み込み項目のあとに、御社で使っている手当を「従業員ごとに金額を設定」で並べます。
+function defaultPayrollItems() {
+  const builtins = BUILTIN_PAYROLL_ITEMS.map((x) => ({
+    label: x.label, kind: x.kind, source: 'auto', amount: 0, enabled: true, builtin: true, desc: x.desc,
+  }));
+  const allowances = PAYMENT_ALLOWANCE_PRESETS
+    // 土日祝皆勤手当は組み込みで自動計算するため、手当側では出しません
+    .filter((label) => !BUILTIN_PAYROLL_LABELS.has(label))
+    .map((label) => ({ label, kind: 'payment', source: 'employee', amount: 0, enabled: true, builtin: false, desc: '' }));
+  // 支給→控除の順に並べ替えて、画面のタブと同じ並びにします
+  const all = [...builtins, ...allowances];
+  return [...all.filter((x) => x.kind === 'payment'), ...all.filter((x) => x.kind === 'deduction')];
+}
+
+// 保存された一覧を読み込みます。
+// 組み込み項目は、保存に無くても必ず足します（あとから組み込み項目を増やしても、
+// 古い保存のせいで画面から消えてしまわないようにするためです）。
+// 名前と決め方は組み込みの定義で上書きします（保存側が壊れていても計算が狂わないように）。
+function parsePayrollItems(settings) {
+  let saved = null;
+  try {
+    const v = JSON.parse(settings?.[SETTING_PAYROLL_ITEMS] || 'null');
+    if (Array.isArray(v)) saved = v;
+  } catch (_) { saved = null; }
+  if (!saved) return defaultPayrollItems();
+
+  const out = [];
+  const seen = new Set();
+  saved.forEach((row) => {
+    const label = String(row?.label || '').trim();
+    if (!label || seen.has(label)) return;
+    seen.add(label);
+    const builtin = BUILTIN_PAYROLL_ITEMS.find((x) => x.label === label);
+    if (builtin) {
+      out.push({
+        label, kind: builtin.kind, source: 'auto', amount: 0,
+        enabled: row?.enabled !== false, builtin: true, desc: builtin.desc,
+      });
+      return;
+    }
+    const kind = row?.kind === 'deduction' ? 'deduction' : 'payment';
+    const source = PAYROLL_ITEM_SOURCE_CHOICES.includes(row?.source) ? row.source : 'employee';
+    out.push({
+      label, kind, source,
+      amount: source === 'fixed' ? Math.max(0, Math.round(Number(row?.amount) || 0)) : 0,
+      enabled: row?.enabled !== false, builtin: false, desc: '',
+    });
+  });
+  // 保存に無い組み込み項目を、同じ区分の最後に足します
+  BUILTIN_PAYROLL_ITEMS.forEach((x) => {
+    if (seen.has(x.label)) return;
+    const at = out.map((o) => o.kind).lastIndexOf(x.kind);
+    const row = { label: x.label, kind: x.kind, source: 'auto', amount: 0, enabled: true, builtin: true, desc: x.desc };
+    if (at < 0) out.push(row); else out.splice(at + 1, 0, row);
+  });
+  return out;
+}
+
+// 画面や計算で使う形。kind で絞り、使う項目だけを並び順どおりに返します。
+function payrollItemsOf(settings, kind, { includeDisabled = false } = {}) {
+  return parsePayrollItems(settings)
+    .filter((x) => x.kind === kind && (includeDisabled || x.enabled));
+}
+
+// 項目の並び順。給与明細の支給・控除をこの順に並べるのに使います。
+// 一覧に無い項目（過去の明細に残っている名前など）は最後に回します。
+function payrollItemOrderMap(settings, kind) {
+  const map = new Map();
+  payrollItemsOf(settings, kind, { includeDisabled: true }).forEach((x, i) => map.set(x.label, i));
+  return map;
+}
+
+// 「交通費精算（10月分）」のように末尾が月で変わる名前も、一覧の「交通費精算」に合わせます。
+function sortByPayrollItemOrder(items, orderMap) {
+  const rank = (it) => {
+    const key = paymentItemKey(it?.label);
+    const i = orderMap.get(key);
+    return i === undefined ? Number.MAX_SAFE_INTEGER : i;
+  };
+  // 同じ順位のものは元の並びのまま（map で添字を持たせてから並べ替えます）
+  return (items || [])
+    .map((it, i) => ({ it, i }))
+    .sort((a, b) => (rank(a.it) - rank(b.it)) || (a.i - b.i))
+    .map((x) => x.it);
+}
+
+// 支給・控除項目一覧と、支給項目ごとの扱いを保存する（全社共通・マスター管理者のみ）。
+// app_settings の書き込みは27番でマスター管理者に限っています。
+async function savePayrollItemSettings({ items, flags }, actor = null) {
+  const rows = [];
+  if (items != null) {
+    // 画面だけで使う builtin / desc は保存しません（組み込みの定義から毎回入れ直すため）
+    const slim = items.map((x) => ({
+      label: x.label, kind: x.kind, source: x.source,
+      ...(x.source === 'fixed' ? { amount: Math.max(0, Math.round(Number(x.amount) || 0)) } : {}),
+      enabled: x.enabled !== false,
+    }));
+    rows.push({ key: SETTING_PAYROLL_ITEMS, value: JSON.stringify(slim), updated_by: actor?.id || null, updated_at: new Date().toISOString() });
+  }
+  if (flags != null) {
+    rows.push({ key: SETTING_PAYMENT_ITEM_FLAGS, value: JSON.stringify(flags), updated_by: actor?.id || null, updated_at: new Date().toISOString() });
+  }
+  if (rows.length === 0) return { ok: true };
+  const { error } = await supabase.from('app_settings').upsert(rows, { onConflict: 'key' });
+  if (error) {
+    console.error('支給・控除項目一覧の保存に失敗しました', error);
+    return { ok: false, message: error.message || '' };
+  }
+  await logAudit(actor, '支給・控除項目一覧を変更', items != null ? `${items.length}件` : '支給項目の扱い');
+  return { ok: true };
+}
+
+// ============================================================
+// 単価設定（割増基礎単価）
+// ============================================================
+// 月給制の残業単価は「月給 ÷ 月平均所定労働時間」で出します。
+// これまで160時間で固定していましたが、月平均所定労働時間は
+// 年間の所定労働日数から出すもので、会社ごとに違います。
+//
+// ⚠ 正しい値は社労士に確認してください（確認事項の一覧に入れています）。
+//   設定していないあいだは、これまでどおり160時間で計算します。
+//
+// ⚠ 残業単価の基礎に手当が入っていません。
+//   割増賃金の基礎から外せる手当は労基法37条5項・労基則21条の7つだけです。
+//   資格手当・役割手当などは本来は基礎に入れる必要があります。改修は保留中です。
+const SETTING_MONTHLY_STANDARD_HOURS = 'monthly_standard_hours';
+
+function monthlyStandardHoursOf(settings) {
+  const v = Number(settings?.[SETTING_MONTHLY_STANDARD_HOURS]);
+  return Number.isFinite(v) && v > 0 ? v : MONTHLY_STANDARD_HOURS;
+}
+
+async function saveMonthlyStandardHours(hours, actor = null) {
+  const { error } = await supabase.from('app_settings').upsert(
+    { key: SETTING_MONTHLY_STANDARD_HOURS, value: String(hours), updated_by: actor?.id || null, updated_at: new Date().toISOString() },
+    { onConflict: 'key' }
+  );
+  if (error) {
+    console.error('月平均所定労働時間の保存に失敗しました', error);
+    return { ok: false, message: error.message || '' };
+  }
+  await logAudit(actor, '月平均所定労働時間を変更', `${hours}時間`);
+  return { ok: true };
+}
 
 // ============================================================
 // 土日祝皆勤手当の自動計算
@@ -16743,39 +16946,162 @@ function applyDeductionAmounts(items, amounts) {
   return next;
 }
 
-// ---- 雇用保険の設定（給与計算画面・全社共通） ----
-// 料率と、支給項目ごとの「雇用保険の対象か」「所得税の課税対象か」を決めます。
-// 項目は、いま使われているものを集めて並べます（決め打ちではありません）。
-function EmploymentInsuranceSettings({ settings, knownItems, actor, isMasterAdmin, onSaved, isDesktop }) {
-  const savedRate = employmentInsuranceRate(settings);
-  const savedFlags = parsePaymentItemFlags(settings);
+// ---- 支給・控除項目一覧（給与計算画面・全社共通） ----
+// 給与明細に出る項目を1か所で見られるようにしたものです。
+//
+// できること：項目を足す／消す、使う／使わない、並べ替え、
+//             雇用保険の賃金に含めるか・所得税の課税対象か、単価と料率の設定。
+// できないこと：自動計算の項目（基本給・残業手当・社会保険料・所得税など）の
+//             計算式を変えること。式はコードの中にあり、改修が必要です。
+function PayrollItemSettings({ settings, actor, isMasterAdmin, onSaved, isDesktop }) {
   const [open, setOpen] = useState(false);
-  const [rate, setRate] = useState(savedRate ? String(savedRate) : '');
-  const [flags, setFlags] = useState(savedFlags);
+  const [view, setView] = useState('list');      // 'list'（一覧）/ 'reorder'（並べ替え）/ 'rates'（単価設定）
+  const [kind, setKind] = useState('payment');   // 'payment'（支給）/ 'deduction'（控除）
+  const [items, setItems] = useState(() => parsePayrollItems(settings));
+  const [flags, setFlags] = useState(() => parsePaymentItemFlags(settings));
+  const [rate, setRate] = useState('');
+  const [hours, setHours] = useState('');
+  const [editing, setEditing] = useState(null);  // 編集中の項目名（null なら編集していない）
+  const [adding, setAdding] = useState(null);    // 追加中の項目 { label, source, amount }
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [done, setDone] = useState('');
+
+  // 保存されている内容が変わったら、画面の内容を入れ直します
+  const savedItemsJson = settings?.[SETTING_PAYROLL_ITEMS] || '';
+  const savedFlagsJson = settings?.[SETTING_PAYMENT_ITEM_FLAGS] || '';
+  const savedRate = employmentInsuranceRate(settings);
+  const savedHours = monthlyStandardHoursOf(settings);
+  const hoursConfigured = Number(settings?.[SETTING_MONTHLY_STANDARD_HOURS]) > 0;
+  useEffect(() => {
+    setItems(parsePayrollItems(settings));
+    setFlags(parsePaymentItemFlags(settings));
+    setRate(savedRate > 0 ? String(savedRate) : '');
+    setHours(String(savedHours));
+    setEditing(null);
+    setAdding(null);
+    // settings は毎回あたらしい物になるため、中身の文字列を見ています
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savedItemsJson, savedFlagsJson, savedRate, savedHours]);
 
   if (!isMasterAdmin) return null;
 
-  const toggle = (key, field) => setFlags((prev) => {
-    const cur = paymentItemFlag(key, prev);
-    return { ...prev, [key]: { ...cur, [field]: !cur[field] } };
+  const shown = items.filter((x) => x.kind === kind);
+  const kindLabel = kind === 'payment' ? '支給' : '控除';
+
+  const patch = (label, next) => setItems((prev) => prev.map((x) => (x.label === label ? { ...x, ...next } : x)));
+  const remove = (label) => {
+    setItems((prev) => prev.filter((x) => x.label !== label));
+    setEditing(null);
+  };
+  const toggleFlag = (label, field) => setFlags((prev) => {
+    const cur = paymentItemFlag(label, prev);
+    return { ...prev, [paymentItemKey(label)]: { ...cur, [field]: !cur[field] } };
   });
+
+  // 同じ区分の中だけで入れ替えます（支給が控除に混ざらないように）
+  const move = (label, dir) => setItems((prev) => {
+    const sameKind = prev.filter((x) => x.kind === kind);
+    const at = sameKind.findIndex((x) => x.label === label);
+    const to = at + dir;
+    if (at < 0 || to < 0 || to >= sameKind.length) return prev;
+    const reordered = [...sameKind];
+    [reordered[at], reordered[to]] = [reordered[to], reordered[at]];
+    // 元の配列の、この区分の位置に順番どおり戻します
+    let i = 0;
+    return prev.map((x) => (x.kind === kind ? reordered[i++] : x));
+  });
+
+  const startAdd = () => {
+    setError('');
+    setEditing(null);
+    setAdding({ label: '', source: 'employee', amount: '' });
+  };
+
+  const commitAdd = () => {
+    const label = String(adding?.label || '').trim();
+    if (!label) { setError('項目名を入れてください。'); return; }
+    if (items.some((x) => x.label === label)) { setError(`「${label}」はすでにあります。別の名前にしてください。`); return; }
+    if (label.includes('（') || label.includes('）')) {
+      setError('項目名に丸かっこは使えません。「交通費精算（10月分）」のように月を入れる使い方と区別できなくなるためです。');
+      return;
+    }
+    setError('');
+    const row = {
+      label, kind, source: adding.source,
+      amount: adding.source === 'fixed' ? Math.max(0, Math.round(Number(adding.amount) || 0)) : 0,
+      enabled: true, builtin: false, desc: '',
+    };
+    // 同じ区分の最後に足します
+    setItems((prev) => {
+      const at = prev.map((x) => x.kind).lastIndexOf(kind);
+      if (at < 0) return [...prev, row];
+      const next = [...prev];
+      next.splice(at + 1, 0, row);
+      return next;
+    });
+    setAdding(null);
+  };
 
   const save = async () => {
     setError('');
-    const v = Number(rate);
-    if (!Number.isFinite(v) || v <= 0 || v > 10) {
-      setError('料率は0より大きく10以下の数字で入れてください（一般の事業なら0.5）。');
+    setDone('');
+    setSaving(true);
+    const res = await savePayrollItemSettings({ items, flags }, actor);
+    setSaving(false);
+    if (!res.ok) { setError(`保存できませんでした。${res.message}`); return; }
+    setDone('支給・控除項目一覧を保存しました。');
+    if (onSaved) await onSaved();
+  };
+
+  const saveRates = async () => {
+    setError('');
+    setDone('');
+    const h = Number(hours);
+    if (!Number.isFinite(h) || h <= 0 || h > 300) {
+      setError('月平均所定労働時間は0より大きく300以下の数字で入れてください。');
+      return;
+    }
+    const r = Number(rate);
+    if (rate !== '' && (!Number.isFinite(r) || r <= 0 || r > 10)) {
+      setError('雇用保険料率は0より大きく10以下の数字で入れてください（一般の事業なら0.5）。');
       return;
     }
     setSaving(true);
-    const res = await saveEmploymentInsuranceSettings({ rate: v, flags }, actor);
+    const a = await saveMonthlyStandardHours(h, actor);
+    const b = rate === '' ? { ok: true } : await saveEmploymentInsuranceSettings({ rate: r }, actor);
     setSaving(false);
-    if (!res.ok) { setError(`保存できませんでした。${res.message}`); return; }
+    if (!a.ok) { setError(`月平均所定労働時間を保存できませんでした。${a.message}`); return; }
+    if (!b.ok) { setError(`雇用保険料率を保存できませんでした。${b.message}`); return; }
+    setDone('単価設定を保存しました。');
     if (onSaved) await onSaved();
-    setOpen(false);
   };
+
+  // 「金額」の欄に出す文章。どう決まる金額なのかが分かるようにします。
+  const amountText = (x) => {
+    if (x.source === 'auto') return x.desc;
+    if (x.source === 'fixed') return formatYen(x.amount);
+    return PAYROLL_ITEM_SOURCES[x.source] || '';
+  };
+
+  const tabBtn = (k, label) => (
+    <button
+      key={k}
+      onClick={() => { setKind(k); setEditing(null); setAdding(null); }}
+      className={`rounded-full border px-4 py-1.5 text-[12px] font-bold ${kind === k ? 'border-slate-700 bg-white text-slate-800' : 'border-slate-200 bg-white/60 text-slate-400'}`}
+    >
+      {label}
+    </button>
+  );
+
+  const toolBtn = (v, label, icon) => (
+    <button
+      onClick={() => { setView(view === v ? 'list' : v); setEditing(null); setAdding(null); setError(''); }}
+      className={`flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-[11.5px] font-bold ${view === v ? 'border-slate-700 bg-slate-800 text-white' : 'border-slate-200 bg-white text-slate-600'}`}
+    >
+      {icon}{label}
+    </button>
+  );
 
   return (
     <div className="rounded-xl border border-slate-200 overflow-hidden">
@@ -16783,10 +17109,10 @@ function EmploymentInsuranceSettings({ settings, knownItems, actor, isMasterAdmi
         onClick={() => setOpen((v) => !v)}
         className="w-full px-3.5 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center gap-2 flex-wrap text-left"
       >
-        <span className="text-[12px] font-bold text-slate-600">雇用保険の設定</span>
+        <span className="text-[12px] font-bold text-slate-600">支給・控除項目一覧</span>
         <span className="text-[10.5px] font-bold text-amber-700">全スタッフ共通</span>
         <span className="text-[11px] text-slate-400">
-          {savedRate > 0 ? `料率 ${savedRate}%` : '料率が未設定'}
+          支給 {items.filter((x) => x.kind === 'payment' && x.enabled).length}件／控除 {items.filter((x) => x.kind === 'deduction' && x.enabled).length}件
         </span>
         <span className="ml-auto text-[11px] font-bold text-slate-500">{open ? '閉じる' : '開く'}</span>
       </button>
@@ -16796,69 +17122,265 @@ function EmploymentInsuranceSettings({ settings, knownItems, actor, isMasterAdmi
           {error && (
             <div className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-700">{error}</div>
           )}
+          {done && (
+            <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-[11px] text-emerald-700">{done}</div>
+          )}
 
-          <Field label="労働者負担の料率（％）">
-            <div className={`grid gap-2 ${isDesktop ? 'grid-cols-4' : 'grid-cols-2'}`}>
-              <input
-                type="number" step="0.01" min="0" max="10" value={rate}
-                onChange={(e) => setRate(e.target.value)}
-                className="w-full box-border border border-slate-200 rounded-lg px-2.5 py-2 font-mono text-[13px] text-right bg-white"
-              />
-              {EI_RATE_PRESETS.map((pre) => (
-                <button
-                  key={pre.key}
-                  onClick={() => setRate(String(pre.rate))}
-                  className={`rounded-lg border px-2 py-2 text-[11px] font-bold ${Number(rate) === pre.rate ? 'border-slate-700 text-slate-800 bg-white' : 'border-slate-200 text-slate-500 bg-white/60'}`}
-                >
-                  {pre.label}<br />{pre.rate}%
-                </button>
-              ))}
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="flex gap-1.5">
+              {tabBtn('payment', '支給')}
+              {tabBtn('deduction', '控除')}
             </div>
-          </Field>
-          <div className="text-[10.5px] text-slate-500 leading-relaxed">
-            令和8年度の労働者負担です。<b>料率は年度ごとに変わります。</b>
-            労働保険の年度更新の書類で確かめて、変わったらここを入れ替えてください。
+            <div className="ml-auto flex gap-1.5 flex-wrap">
+              <button
+                onClick={startAdd}
+                className="flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-[11.5px] font-bold text-slate-600"
+              >
+                <Plus size={12} />項目を追加
+              </button>
+              {toolBtn('reorder', '項目並べ替え', <ListChecks size={12} />)}
+              {toolBtn('rates', '単価設定', <Settings size={12} />)}
+            </div>
           </div>
 
-          <div className="text-[11.5px] font-bold text-slate-600 pt-1">支給項目ごとの扱い</div>
+          {/* ---- 単価設定 ---- */}
+          {view === 'rates' && (
+            <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 space-y-3">
+              <div className="text-[11.5px] font-bold text-slate-600">単価設定</div>
+
+              <Field label="月平均所定労働時間（時間）">
+                <div className={`grid gap-2 ${isDesktop ? 'grid-cols-3' : 'grid-cols-1'}`}>
+                  <input
+                    type="number" step="0.1" min="1" max="300" value={hours}
+                    onChange={(e) => setHours(e.target.value)}
+                    className="w-full box-border border border-slate-200 rounded-lg px-2.5 py-2 font-mono text-[13px] text-right bg-white"
+                  />
+                  <div className="col-span-2 text-[10.5px] text-slate-500 leading-relaxed self-center">
+                    月給制の<b>割増基礎単価</b>＝ 月給 ÷ この時間。
+                    残業手当はこの単価 × 残業時間 × 1.25 で出しています。
+                  </div>
+                </div>
+              </Field>
+              <div className="text-[10.5px] text-slate-500 leading-relaxed">
+                {hoursConfigured
+                  ? <>いまは <b>{savedHours}時間</b> で計算しています。</>
+                  : <><b>まだ設定していません。</b>いまは仮の {MONTHLY_STANDARD_HOURS}時間（週40時間×約4週）で計算しています。</>}
+                <b className="block pt-0.5">正しい値は社労士に確認してください。</b>
+                月平均所定労働時間は「（365日 − 年間休日日数）× 1日の所定労働時間 ÷ 12」で出すもので、会社ごとに違います。
+                御社は1か月単位の変形労働時間制のため、この出し方でよいかも含めて確認が必要です（確認事項の一覧に入れています）。
+              </div>
+
+              <Field label="雇用保険料率（労働者負担・％）">
+                <div className={`grid gap-2 ${isDesktop ? 'grid-cols-4' : 'grid-cols-2'}`}>
+                  <input
+                    type="number" step="0.01" min="0" max="10" value={rate}
+                    onChange={(e) => setRate(e.target.value)}
+                    className="w-full box-border border border-slate-200 rounded-lg px-2.5 py-2 font-mono text-[13px] text-right bg-white"
+                  />
+                  {EI_RATE_PRESETS.map((pre) => (
+                    <button
+                      key={pre.key}
+                      onClick={() => setRate(String(pre.rate))}
+                      className={`rounded-lg border px-2 py-2 text-[11px] font-bold ${Number(rate) === pre.rate ? 'border-slate-700 text-slate-800 bg-white' : 'border-slate-200 text-slate-500 bg-white/60'}`}
+                    >
+                      {pre.label}<br />{pre.rate}%
+                    </button>
+                  ))}
+                </div>
+              </Field>
+              <div className="text-[10.5px] text-slate-500 leading-relaxed">
+                令和8年度の労働者負担です。<b>料率は年度ごとに変わります。</b>
+                労働保険の年度更新の書類で確かめて、変わったらここを入れ替えてください。
+              </div>
+
+              <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-[10.5px] text-amber-800 leading-relaxed">
+                <b className="block">欠勤控除単価・遅刻早退控除単価はまだありません。</b>
+                欠勤控除・遅刻早退控除そのものを作っていないため、単価だけ設定しても使われません。
+                いまは給与計算の画面で金額を手で入れてください。
+                <b className="block pt-0.5">割増基礎単価に手当が入っていません。</b>
+                いまは月給（時給）だけから出しています。資格手当・役割手当などは本来は基礎に入れる必要があります
+                （基礎から外せる手当は労基法37条5項・労基則21条の7つだけです）。改修は保留中です。
+              </div>
+
+              <button
+                onClick={saveRates}
+                disabled={saving}
+                className="w-full rounded-lg bg-slate-800 py-2 text-[12.5px] font-bold text-white disabled:bg-slate-300"
+              >
+                {saving ? '保存中…' : '単価設定を保存する'}
+              </button>
+            </div>
+          )}
+
+          {/* ---- 項目を追加 ---- */}
+          {adding && (
+            <div className="rounded-xl border border-slate-300 bg-white px-3 py-3 space-y-2.5">
+              <div className="text-[11.5px] font-bold text-slate-600">{kindLabel}項目を追加</div>
+              <div className={`grid gap-2 ${isDesktop ? 'grid-cols-2' : 'grid-cols-1'}`}>
+                <Field label="項目名">
+                  <input
+                    value={adding.label}
+                    onChange={(e) => setAdding((p) => ({ ...p, label: e.target.value }))}
+                    placeholder={kind === 'payment' ? '例：研修手当' : '例：社宅費'}
+                    className="w-full box-border border border-slate-200 rounded-lg px-2.5 py-2 text-[12.5px] bg-white"
+                  />
+                </Field>
+                <Field label="金額の決め方">
+                  <select
+                    value={adding.source}
+                    onChange={(e) => setAdding((p) => ({ ...p, source: e.target.value }))}
+                    className="w-full box-border border border-slate-200 rounded-lg px-2.5 py-2 text-[12.5px] bg-white"
+                  >
+                    {PAYROLL_ITEM_SOURCE_CHOICES.map((s) => <option key={s} value={s}>{PAYROLL_ITEM_SOURCES[s]}</option>)}
+                  </select>
+                </Field>
+              </div>
+              {adding.source === 'fixed' && (
+                <Field label="固定額（円）">
+                  <input
+                    type="number" min="0" value={adding.amount}
+                    onChange={(e) => setAdding((p) => ({ ...p, amount: e.target.value }))}
+                    className="w-full box-border border border-slate-200 rounded-lg px-2.5 py-2 font-mono text-[12.5px] text-right bg-white"
+                  />
+                </Field>
+              )}
+              <div className="text-[10.5px] text-slate-500 leading-relaxed">
+                {adding.source === 'employee' && 'スタッフ詳細の「毎月の固定支給・控除項目」で、この項目名を候補として選べるようになります。金額を入れた方にだけ付きます。'}
+                {adding.source === 'fixed' && '有効にすると、給与明細を新しく作るときに全スタッフへこの金額で入ります。下書きの段階で画面に出るので、作成時に確かめてください。'}
+                {adding.source === 'manual' && '給与明細を作るときに、この項目名を選んで金額を入れる形になります。自動では入りません。'}
+              </div>
+              <div className="flex gap-2">
+                <button onClick={commitAdd} className="flex-1 rounded-lg bg-slate-800 py-2 text-[12px] font-bold text-white">一覧に足す</button>
+                <button onClick={() => { setAdding(null); setError(''); }} className="rounded-lg border border-slate-200 px-4 py-2 text-[12px] font-bold text-slate-500">やめる</button>
+              </div>
+            </div>
+          )}
+
+          {/* ---- 一覧 ---- */}
+          {/* スマホでは金額の欄がつぶれて1文字ずつ折り返すため、
+              表に最低の幅を持たせて横スクロールにしています。 */}
           <div className="overflow-x-auto">
-            <table className="w-full text-[11.5px]">
+            <table className={`w-full text-[11.5px] ${kind === 'payment' ? 'min-w-[680px]' : 'min-w-[460px]'}`}>
               <thead className="bg-slate-50 text-slate-500">
                 <tr className="text-left">
-                  <th className="px-2.5 py-1.5 font-medium">支給項目</th>
-                  <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">雇用保険の賃金</th>
-                  <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">所得税の課税</th>
+                  {view === 'reorder' && <th className="px-2 py-1.5 font-medium w-16 text-center">並び</th>}
+                  <th className="px-2.5 py-1.5 font-medium whitespace-nowrap">項目名</th>
+                  <th className="px-2.5 py-1.5 font-medium min-w-[200px]">金額</th>
+                  {kind === 'payment' && <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">雇用保険の賃金</th>}
+                  {kind === 'payment' && <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">所得税の課税</th>}
+                  <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">使う</th>
+                  <th className="px-2 py-1.5 font-medium text-center w-10"> </th>
                 </tr>
               </thead>
               <tbody>
-                {knownItems.length === 0 ? (
-                  <tr><td colSpan={3} className="px-2.5 py-4 text-center text-slate-300">支給項目がまだありません</td></tr>
-                ) : knownItems.map((key) => {
-                  const f = paymentItemFlag(key, flags);
+                {shown.length === 0 ? (
+                  <tr><td colSpan={7} className="px-2.5 py-6 text-center text-slate-300">{kindLabel}項目がありません</td></tr>
+                ) : shown.map((x, i) => {
+                  const f = paymentItemFlag(x.label, flags);
+                  const dim = x.enabled ? '' : 'text-slate-300';
                   return (
-                    <tr key={key} className="border-t border-slate-100">
-                      <td className="px-2.5 py-1.5 text-slate-700">{key}</td>
-                      {['ei', 'tax'].map((field) => (
-                        <td key={field} className="px-2 py-1.5 text-center">
+                    <React.Fragment key={x.label}>
+                      <tr className={`border-t border-slate-100 ${x.enabled ? '' : 'bg-slate-50/60'}`}>
+                        {view === 'reorder' && (
+                          <td className="px-2 py-1.5 text-center whitespace-nowrap">
+                            <button onClick={() => move(x.label, -1)} disabled={i === 0} className="px-1 text-[13px] font-bold text-slate-500 disabled:text-slate-200">↑</button>
+                            <button onClick={() => move(x.label, 1)} disabled={i === shown.length - 1} className="px-1 text-[13px] font-bold text-slate-500 disabled:text-slate-200">↓</button>
+                          </td>
+                        )}
+                        <td className={`px-2.5 py-1.5 font-bold whitespace-nowrap ${x.enabled ? 'text-slate-700' : 'text-slate-300'}`}>
+                          {x.label}
+                          {x.builtin && <span className={`ml-1.5 text-[9.5px] font-bold ${x.enabled ? 'text-teal-600' : 'text-slate-300'}`}>自動</span>}
+                        </td>
+                        <td className={`px-2.5 py-1.5 leading-snug ${dim || 'text-slate-500'}`}>{amountText(x)}</td>
+                        {kind === 'payment' && ['ei', 'tax'].map((field) => (
+                          <td key={field} className="px-2 py-1.5 text-center">
+                            <button
+                              onClick={() => toggleFlag(x.label, field)}
+                              className={`rounded-lg border px-2.5 py-1 text-[11px] font-bold ${f[field] ? 'border-teal-300 bg-teal-50 text-teal-700' : 'border-slate-200 bg-white text-slate-400'}`}
+                            >
+                              {f[field] ? '対象' : '対象外'}
+                            </button>
+                          </td>
+                        ))}
+                        <td className="px-2 py-1.5 text-center">
                           <button
-                            onClick={() => toggle(key, field)}
-                            className={`rounded-lg border px-2.5 py-1 text-[11px] font-bold ${f[field] ? 'border-teal-300 bg-teal-50 text-teal-700' : 'border-slate-200 bg-white text-slate-400'}`}
+                            onClick={() => patch(x.label, { enabled: !x.enabled })}
+                            className={`rounded-lg border px-2.5 py-1 text-[11px] font-bold whitespace-nowrap ${x.enabled ? 'border-slate-700 bg-slate-800 text-white' : 'border-slate-200 bg-white text-slate-400'}`}
                           >
-                            {f[field] ? '対象' : '対象外'}
+                            {x.enabled ? '使う' : '使わない'}
                           </button>
                         </td>
-                      ))}
-                    </tr>
+                        <td className="px-2 py-1.5 text-center">
+                          {x.builtin ? (
+                            <span className="text-slate-200">—</span>
+                          ) : (
+                            <button
+                              onClick={() => setEditing(editing === x.label ? null : x.label)}
+                              className="text-slate-400 hover:text-slate-700"
+                              title="この項目を編集する"
+                            >
+                              <Pencil size={13} />
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                      {editing === x.label && (
+                        <tr className="border-t border-slate-100 bg-slate-50">
+                          <td colSpan={7} className="px-2.5 py-2.5">
+                            <div className={`grid gap-2 ${isDesktop ? 'grid-cols-3' : 'grid-cols-1'}`}>
+                              <Field label="金額の決め方">
+                                <select
+                                  value={x.source}
+                                  onChange={(e) => patch(x.label, { source: e.target.value })}
+                                  className="w-full box-border border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12px] bg-white"
+                                >
+                                  {PAYROLL_ITEM_SOURCE_CHOICES.map((s) => <option key={s} value={s}>{PAYROLL_ITEM_SOURCES[s]}</option>)}
+                                </select>
+                              </Field>
+                              {x.source === 'fixed' && (
+                                <Field label="固定額（円）">
+                                  <input
+                                    type="number" min="0" value={x.amount}
+                                    onChange={(e) => patch(x.label, { amount: Math.max(0, Math.round(Number(e.target.value) || 0)) })}
+                                    className="w-full box-border border border-slate-200 rounded-lg px-2.5 py-1.5 font-mono text-[12px] text-right bg-white"
+                                  />
+                                </Field>
+                              )}
+                              <div className="flex items-end">
+                                <button
+                                  onClick={() => remove(x.label)}
+                                  className="flex items-center gap-1 rounded-lg border border-rose-200 bg-white px-3 py-1.5 text-[11.5px] font-bold text-rose-600"
+                                >
+                                  <Trash2 size={12} />この項目を一覧から消す
+                                </button>
+                              </div>
+                            </div>
+                            <div className="text-[10.5px] text-slate-500 pt-1.5 leading-relaxed">
+                              項目名は変えられません。変えると、これまでの給与明細に入っている「{x.label}」と別の項目になってしまうためです。
+                              名前を変えたいときは、この項目を消して新しく足してください。
+                              一覧から消しても、<b>すでに作った給与明細の金額は消えません。</b>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
                   );
                 })}
               </tbody>
             </table>
           </div>
+
           <div className="text-[10.5px] text-slate-500 leading-relaxed">
-            通勤手当は<b>雇用保険の賃金には含みますが、所得税では一定額まで非課税</b>です。扱いが違うので別々に持っています。
-            <b className="block pt-0.5">通勤手当の非課税の限度額は見ていません。</b>
-            限度を超える方がいる場合は、所得税の金額を手で直してください。
-            「所得税の課税」の印は、所得税の自動計算で課税対象の支給額を合計するときに使います。
+            <b>「自動」の項目は、Brown Work が金額を計算します。</b>計算式はこの画面からは変えられません。
+            {kind === 'payment' && (
+              <>
+                <b className="block pt-0.5">通勤手当は、雇用保険の賃金には含みますが、所得税では一定額まで非課税です。</b>
+                扱いが違うので別々に持っています。通勤手当の非課税の限度額は見ていないため、限度を超える方がいる場合は所得税の金額を手で直してください。
+              </>
+            )}
+            <b className="block pt-0.5">「使わない」にすると、</b>
+            スタッフ詳細の候補にも、給与明細を新しく作るときの初期値にも出なくなります。
+            すでに作った給与明細の金額はそのまま残ります。
           </div>
 
           <button
@@ -16866,7 +17388,7 @@ function EmploymentInsuranceSettings({ settings, knownItems, actor, isMasterAdmi
             disabled={saving}
             className="w-full rounded-lg bg-slate-800 py-2 text-[12.5px] font-bold text-white disabled:bg-slate-300"
           >
-            {saving ? '保存中…' : 'この設定を全スタッフに保存する'}
+            {saving ? '保存中…' : 'この一覧を全スタッフに保存する'}
           </button>
         </div>
       )}
@@ -17361,6 +17883,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     commuteAllowance: commuteRouteTotal > 0 ? commuteRouteTotal : (employee.commuteAllowance || 0),
     attendanceDays,
     actualDays: monthly.days,
+    monthlyStandardHours: monthlyStandardHoursOf(settings),
   }) : null;
 
   // 土日祝皆勤手当。スタッフ詳細の固定支給項目に登録されている方だけが対象です。
@@ -17380,9 +17903,24 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
   // スタッフ・年月・下書きの有無が変わったら、支給・控除項目を初期化する
   useEffect(() => {
     if (!employee || !preview) return;
+
+    // 支給・控除項目一覧（給与タブの設定）に合わせます。
+    //   ・「使わない」にした項目は、新しく作る明細の候補に出しません
+    //   ・並び順も一覧に合わせます
+    //   ・一覧に無い名前（昔の明細に残っている項目など）はそのまま残します
+    const allPayment = parsePayrollItems(settings).filter((x) => x.kind === 'payment');
+    const allDeduction = parsePayrollItems(settings).filter((x) => x.kind === 'deduction');
+    const disabled = (list) => new Set(list.filter((x) => !x.enabled).map((x) => x.label));
+    const offPayment = disabled(allPayment);
+    const offDeduction = disabled(allDeduction);
+    const paymentOrder = payrollItemOrderMap(settings, 'payment');
+    const deductionOrder = payrollItemOrderMap(settings, 'deduction');
+    // 全スタッフ共通の固定額の項目（一覧で「固定額」にしたもの）
+    const fixedOf = (list) => list.filter((x) => x.enabled && x.source === 'fixed');
+
     // 支給項目を先に組み立てます。雇用保険料はこの中身から出すため、
     // 画面の state（1回遅れて入る）ではなく、ここで作ったものを使います。
-    const nextPaymentItems = existing?.paymentItems || [
+    const draftPayment = [
       { label: '基本給', amount: preview.baseAmount },
       ...(preview.allowanceAmount > 0 ? [{ label: '通勤手当', amount: preview.allowanceAmount }] : []),
       ...(preview.overtimeAmount > 0 ? [{ label: '残業手当', amount: preview.overtimeAmount }] : []),
@@ -17394,7 +17932,14 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
           ? { label: it.label, amount: weekendBonus?.amount == null ? 0 : weekendBonus.amount }
           : { label: it.label, amount: it.amount }
       )),
-    ];
+    ].filter((it) => !offPayment.has(paymentItemKey(it.label)));
+    // 固定額の項目を足します（すでに同じ名前が入っているときは足しません）
+    const usedPayment = new Set(draftPayment.map((it) => paymentItemKey(it.label)));
+    fixedOf(allPayment).forEach((x) => {
+      if (usedPayment.has(x.label)) return;
+      draftPayment.push({ label: x.label, amount: x.amount });
+    });
+    const nextPaymentItems = existing?.paymentItems || sortByPayrollItemOrder(draftPayment, paymentOrder);
     setPaymentItems(nextPaymentItems);
 
     if (existing?.deductionItems) {
@@ -17403,7 +17948,11 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
       // 社会保険料・住民税・雇用保険料は計算した額を候補として入れます。
       // 料率や標準報酬月額が未設定のときは0のままにして、画面で知らせます。
       const nextEi = computeEmploymentInsurance({ paymentItems: nextPaymentItems, settings });
-      const baseDeductions = DEFAULT_DEDUCTION_LABELS.map((label) => {
+      // 自動計算の控除項目。一覧で「使う」にしたものだけを、一覧の順に並べます。
+      const autoDeductionLabels = allDeduction
+        .filter((x) => x.enabled && x.source === 'auto')
+        .map((x) => x.label);
+      const baseDeductions = autoDeductionLabels.map((label) => {
         if (label === RESIDENT_TAX_LABEL) {
           return { label, amount: resident?.amount == null ? 0 : resident.amount };
         }
@@ -17425,14 +17974,23 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
         year,
         month,
       });
-      setDeductionItems([
+      const draftDeduction = [
         ...baseDeductions.map((it) => (
           it.label === INCOME_TAX_LABEL && nextTax.amount != null
             ? { ...it, amount: nextTax.amount }
             : it
         )),
-        ...employeeSalaryItems.filter((it) => it.kind === 'deduction').map((it) => ({ label: it.label, amount: it.amount })),
-      ]);
+        ...employeeSalaryItems
+          .filter((it) => it.kind === 'deduction' && !offDeduction.has(paymentItemKey(it.label)))
+          .map((it) => ({ label: it.label, amount: it.amount })),
+      ];
+      // 固定額の控除項目を足します（すでに同じ名前が入っているときは足しません）
+      const usedDeduction = new Set(draftDeduction.map((it) => paymentItemKey(it.label)));
+      fixedOf(allDeduction).forEach((x) => {
+        if (usedDeduction.has(x.label)) return;
+        draftDeduction.push({ label: x.label, amount: x.amount });
+      });
+      setDeductionItems(sortByPayrollItemOrder(draftDeduction, deductionOrder));
     }
     setAbsentDays(String(existing?.attendanceExtra?.absentDays ?? 0));
     setPaidLeaveDays(String(existing?.attendanceExtra?.paidLeaveDays ?? 0));
@@ -17468,14 +18026,6 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     year,
     month,
   });
-
-  // 設定画面に並べる支給項目。いま使われているものを集めます
-  const knownPaymentItems = Array.from(new Set([
-    ...DEFAULT_PAYMENT_ITEM_HINTS,
-    ...paymentItems.map((it) => paymentItemKey(it.label)),
-    ...employeeSalaryItems.filter((it) => it.kind === 'payment').map((it) => paymentItemKey(it.label)),
-    ...payrollRecords.flatMap((p) => (p.paymentItems || []).map((it) => paymentItemKey(it.label))),
-  ].filter(Boolean)));
 
   // 自動計算した社会保険料の、その月の確定値（介護の対象外は0円）
   const socialAmounts = () => {
@@ -17564,6 +18114,21 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
 
   return (
     <div className="space-y-5">
+      {/* 支給・控除項目一覧（全社共通の設定）。開くまでは1行なので、
+          給与計算の邪魔にならないよう一番上に置いています。 */}
+      {isMasterAdmin && (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-3">
+          <h2 className="font-bold text-[14px] text-slate-800 flex items-center gap-2"><Settings size={16} className="text-slate-400" />給与の設定</h2>
+          <PayrollItemSettings
+            settings={settings}
+            actor={session}
+            isMasterAdmin={isMasterAdmin}
+            onSaved={onRefresh}
+            isDesktop={isDesktop}
+          />
+        </div>
+      )}
+
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
         <h2 className="font-bold text-[14px] text-slate-800 flex items-center gap-2"><Wallet size={16} className="text-slate-400" />給与計算</h2>
         <div className={`grid gap-3 ${isDesktop ? 'grid-cols-3' : 'grid-cols-1'}`}>
@@ -17682,14 +18247,6 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
           isPublished={isPublished}
         />
         <PayrollItemsEditor title="支給項目" items={paymentItems} onChange={setPaymentItems} addLabel="支給項目を追加" />
-        <EmploymentInsuranceSettings
-          settings={settings}
-          knownItems={knownPaymentItems}
-          actor={session}
-          isMasterAdmin={isMasterAdmin}
-          onSaved={onRefresh}
-          isDesktop={isDesktop}
-        />
         <SocialInsuranceNote
           social={social}
           standardRemuneration={standardRemuneration}
@@ -24024,6 +24581,12 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
   };
 
   // ---- 給与設定（固定支給・控除項目／通勤経路／標準報酬月額）----
+  // 項目名の候補は、給与タブの「支給・控除項目一覧」で
+  // 「従業員ごとに金額を設定」にした項目から出します。
+  // 候補から選ぶことで「資格手当」と「資格 手当」のような表記のぶれを防ぎます。
+  const salaryItemPresets = (kind) => payrollItemsOf(settings, kind)
+    .filter((x) => x.source === 'employee')
+    .map((x) => x.label);
   const [salaryItems, setSalaryItems] = useState([]);
   const [commuteRoutes, setCommuteRoutes] = useState([]);
   const [savingSalaryItems, setSavingSalaryItems] = useState(false);
@@ -24720,7 +25283,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                 })}
               </div>
               <datalist id="payment-allowance-presets">
-                {PAYMENT_ALLOWANCE_PRESETS.map((label) => <option key={label} value={label} />)}
+                {salaryItemPresets('payment').map((label) => <option key={label} value={label} />)}
               </datalist>
 
               {/* よく使う手当。押すと名前の入った行が足されます。
@@ -24729,7 +25292,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                 const used = new Set(
                   salaryItems.filter((it) => it.kind === 'payment').map((it) => String(it.label || '').trim())
                 );
-                const rest = PAYMENT_ALLOWANCE_PRESETS.filter((label) => !used.has(label));
+                const rest = salaryItemPresets('payment').filter((label) => !used.has(label));
                 if (rest.length === 0) return null;
                 return (
                   <div className="flex flex-wrap gap-1.5 pt-0.5">
@@ -24753,13 +25316,36 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                   const i = salaryItems.indexOf(it);
                   return (
                     <div key={i} className="flex items-center gap-2">
-                      <input value={it.label} onChange={(e) => updateSalaryItem(i, 'label', e.target.value)} placeholder="項目名（例：社宅費控除）" className="flex-1 border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px]" />
+                      <input list="deduction-item-presets" value={it.label} onChange={(e) => updateSalaryItem(i, 'label', e.target.value)} placeholder="項目名（例：社宅費控除）" className="flex-1 border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px]" />
                       <input type="number" value={it.amount} onChange={(e) => updateSalaryItem(i, 'amount', e.target.value)} className="w-28 border border-slate-200 rounded-lg px-2.5 py-1.5 font-mono text-[12.5px] text-right" />
                       <button onClick={() => removeSalaryItem(i)} className="text-slate-300 hover:text-rose-500 shrink-0"><Trash2 size={14} /></button>
                     </div>
                   );
                 })}
               </div>
+              <datalist id="deduction-item-presets">
+                {salaryItemPresets('deduction').map((label) => <option key={label} value={label} />)}
+              </datalist>
+              {(() => {
+                const used = new Set(
+                  salaryItems.filter((it) => it.kind === 'deduction').map((it) => String(it.label || '').trim())
+                );
+                const rest = salaryItemPresets('deduction').filter((label) => !used.has(label));
+                if (rest.length === 0) return null;
+                return (
+                  <div className="flex flex-wrap gap-1.5 pt-0.5">
+                    {rest.map((label) => (
+                      <button
+                        key={label}
+                        onClick={() => addSalaryItem('deduction', label)}
+                        className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-bold text-slate-600"
+                      >
+                        ＋{label}
+                      </button>
+                    ))}
+                  </div>
+                );
+              })()}
               <div className="flex items-center justify-between">
                 <button onClick={() => addSalaryItem('deduction')} className="text-[11px] font-bold text-amber-600 flex items-center gap-1"><Plus size={12} />控除項目を追加</button>
                 <button onClick={saveSalaryItemsNow} disabled={savingSalaryItems} className="text-[11px] font-bold text-white bg-slate-800 disabled:bg-slate-300 rounded-lg px-3 py-1.5">{savingSalaryItems ? '保存中…' : '固定項目を保存'}</button>
@@ -24772,6 +25358,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
               <div className="text-[10.5px] text-slate-400 leading-relaxed">
                 ここで登録した項目は、「給与」タブでそのスタッフの給与を新規作成する際に、毎回自動で候補として追加されます。
                 登録していないスタッフには出ません。<b>毎月同じ額になる手当だけ</b>ここに入れてください。
+                項目名の候補は、給与タブの「給与の設定 → 支給・控除項目一覧」で決めています。
                 月によって額が変わる手当（歩合・皆勤など）は、給与計算の画面で毎月入れてください。
               </div>
 
