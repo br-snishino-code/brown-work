@@ -16882,7 +16882,7 @@ const BUILTIN_PAYROLL_ITEMS = [
   { label: '残業手当', kind: 'payment', rounding: 'ceil', desc: '【割増基礎単価】×【残業時間】×【割増率】。割増率は「給与の設定」→「計算のきまり」で変えられます（既定1.25）。' },
   { label: '交通費精算', kind: 'payment', rounding: 'ceil', desc: '承認済みの交通費精算の合計' },
   { label: '深夜手当', kind: 'payment', rounding: 'ceil', desc: '【割増基礎単価】×【深夜時間】×【割増率】。割増率は「給与の設定」→「計算のきまり」で変えられます（既定0.25）。深夜は22時から翌5時まで。働いた時間ぶんの賃金は基本給・残業手当に入っているため、上に乗る割増だけを足します。' },
-  { label: '遅刻早退控除', kind: 'payment', rounding: 'floor', desc: '遅刻早退控除単価（1円未満切り捨て）×【遅刻早退時間】。単価の出し方は「給与の設定」→「計算のきまり」で選べます。時間は日ごとに15分単位で切り捨てた合計。賃金そのものが減るものなので、支給項目にマイナスの金額で入ります。' },
+  { label: '遅刻早退控除', kind: 'payment', rounding: 'floor', desc: '遅刻早退控除単価（1円未満切り捨て）×【遅刻早退時間】。単価の出し方は「給与の設定」→「計算のきまり」で選べます。時給制の方には当てません（基本給が実働時間で出るため、遅刻したぶんはすでに引かれています）。時間は日ごとに15分単位で切り捨てた合計。賃金そのものが減るものなので、支給項目にマイナスの金額で入ります。' },
   { label: '欠勤控除', kind: 'payment', rounding: 'floor', desc: '欠勤控除単価（基本給 ÷ 当月の出勤規定日数・1円未満切り捨て）×【欠勤日数】。賃金そのものが減るものなので、支給項目にマイナスの金額で入ります。' },
   { label: '土日祝皆勤手当', kind: 'payment', rounding: 'ceil', desc: '土日祝の欠勤0日 10,000円／1日 5,000円／2日以上 0円（勤務実績が規定日数に満たないときは日割り）' },
   { label: '健康保険料', kind: 'deduction', statutory: true, desc: '標準報酬月額 ×【健康保険料率】÷ 2' },
@@ -17178,6 +17178,25 @@ function computeLateEarlyDeduction({ baseAmount, monthlyStandardHours, hoursConf
   const hours = Number(monthlyStandardHours) > 0 ? Number(monthlyStandardHours) : MONTHLY_STANDARD_HOURS;
   const minutes = Math.max(0, Math.round(Number(unworkedMinutes) || 0));
   const common = { baseAmount: base, monthlyStandardHours: hours, unworkedMinutes: minutes, hoursConfigured: !!hoursConfigured, wageType };
+
+  // 時給制には当てません。
+  //
+  // 時給制の基本給は「時給 ×（実働時間 − 残業時間）」です。実働時間は
+  // 「退勤 − 出勤 − 休憩」なので、遅刻すると出勤が遅くなり、実働時間が
+  // その分だけ短くなります。つまり遅刻したぶんは基本給の時点ですでに
+  // 引かれています。そこに遅刻早退控除を重ねると、同じ時間を2回引くことに
+  // なり、労働基準法第24条（賃金全額払い）に反します。
+  //
+  // 例：時給1,200円・所定8時間×20日の方が毎日1時間遅刻した場合
+  //   所定どおりなら     1,200 × 160時間 = 192,000円
+  //   実際の基本給       1,200 × 140時間 = 168,000円 ← 遅刻20時間ぶんは引かれている
+  //   そこに控除を重ねると              −21,000円 ← 同じ20時間をもう一度
+  //
+  // 月給制は基本給が月給そのままで遅刻しても減らないため、控除が要ります。
+  // 日給制も「日額 × 実出勤日数」で遅刻しても基本給が減らないため、要ります。
+  if (wageType === 'hourly') {
+    return { ...common, unit: null, amount: null, reason: 'hourlyNotApplicable' };
+  }
 
   if (wageType === 'daily') {
     const day = Math.max(0, Number(dailyWage) || 0);
@@ -18273,7 +18292,12 @@ function NightAndLateNote({ preview, lateDeduction, isPublished, premiumBasePart
   const night = preview.nightMinutes > 0;
   const late = lateDeduction && lateDeduction.amount != null && lateDeduction.unworkedMinutes > 0;
   const premium = (preview.premiumBaseAllowance || 0) > 0;
-  if (!night && !late && !premium) return null;
+  // 時給制で遅刻があるのに控除が付かない月。黙っていると入れ忘れに見えるため、
+  // なぜ付けないのかを出します。
+  const hourlySkipped = lateDeduction
+    && lateDeduction.reason === 'hourlyNotApplicable'
+    && lateDeduction.unworkedMinutes > 0;
+  if (!night && !late && !premium && !hourlySkipped) return null;
   const hm = (min) => {
     const m = Math.max(0, Math.round(Number(min) || 0));
     return `${Math.floor(m / 60)}時間${m % 60}分`;
@@ -18308,6 +18332,17 @@ function NightAndLateNote({ preview, lateDeduction, isPublished, premiumBasePart
             <b>休憩が深夜帯にかかっても差し引けません。</b>休憩（固定60分）を何時に取ったかを記録していないためです。
             深夜に休憩を取った方がいる場合は、金額を手で直してください。
             日をまたぐ勤務にも対応していません。
+          </div>
+        </div>
+      )}
+      {hourlySkipped && (
+        <div className={(night || premium) ? 'pt-1.5 border-t border-current/15' : ''}>
+          <div className="font-bold">遅刻早退 {hm(lateDeduction.unworkedMinutes)}（控除はしません）</div>
+          時給制の基本給は「時給 ×（実働時間 − 残業時間）」で出すため、
+          遅刻・早退したぶんは<b>すでに基本給から引かれています</b>。
+          ここでさらに遅刻早退控除を引くと、同じ時間を2回引くことになります。
+          <div className="text-[10.5px] pt-0.5 opacity-80">
+            月給制・日給制の方は基本給が遅刻で減らないため、遅刻早退控除を引きます。
           </div>
         </div>
       )}
@@ -18994,6 +19029,9 @@ function PayrollFormulaSettings({ settings, actor, isMasterAdmin, onSaved }) {
             <div className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 text-[10.5px] text-slate-600 leading-relaxed">
               日給制の方は、ここの設定にかかわらず「日額 ÷ 1日の所定労働時間」で出します
               （労働基準法施行規則第19条）。
+              <b className="block pt-0.5">時給制の方には遅刻早退控除を当てません。</b>
+              基本給が「時給 ×（実働時間 − 残業時間）」で出るため、遅刻したぶんは
+              すでに基本給から引かれています。重ねて引くと同じ時間を2回引くことになります。
             </div>
           </div>
 
