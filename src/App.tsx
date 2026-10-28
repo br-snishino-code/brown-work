@@ -16884,7 +16884,6 @@ const BUILTIN_PAYROLL_ITEMS = [
   { label: '深夜手当', kind: 'payment', rounding: 'ceil', desc: '【割増基礎単価】×【深夜時間】×【割増率】。割増率は「給与の設定」→「計算のきまり」で変えられます（既定0.25）。深夜は22時から翌5時まで。働いた時間ぶんの賃金は基本給・残業手当に入っているため、上に乗る割増だけを足します。' },
   { label: '遅刻早退控除', kind: 'payment', rounding: 'floor', desc: '遅刻早退控除単価（1円未満切り捨て）×【遅刻早退時間】。単価の出し方は「給与の設定」→「計算のきまり」で選べます。時給制の方には当てません（基本給が実働時間で出るため、遅刻したぶんはすでに引かれています）。時間は日ごとに15分単位で切り捨てた合計。賃金そのものが減るものなので、支給項目にマイナスの金額で入ります。' },
   { label: '欠勤控除', kind: 'payment', rounding: 'floor', desc: '欠勤控除単価（基本給 ÷ 当月の出勤規定日数・1円未満切り捨て）×【欠勤日数】。賃金そのものが減るものなので、支給項目にマイナスの金額で入ります。' },
-  { label: '土日祝皆勤手当', kind: 'payment', rounding: 'ceil', desc: '土日祝の欠勤0日 10,000円／1日 5,000円／2日以上 0円（勤務実績が規定日数に満たないときは日割り）' },
   { label: '健康保険料', kind: 'deduction', statutory: true, desc: '標準報酬月額 ×【健康保険料率】÷ 2' },
   { label: '介護保険料', kind: 'deduction', statutory: true, desc: '標準報酬月額 ×【介護保険料率】÷ 2（40歳から64歳の月のみ）' },
   { label: '厚生年金保険料', kind: 'deduction', statutory: true, desc: '標準報酬月額 ×【厚生年金保険料率】÷ 2' },
@@ -16906,9 +16905,14 @@ function defaultPayrollItems() {
     builtin: true, desc: x.desc,
   }));
   const allowances = PAYMENT_ALLOWANCE_PRESETS
-    // 土日祝皆勤手当は組み込みで自動計算するため、手当側では出しません
     .filter((label) => !BUILTIN_PAYROLL_LABELS.has(label))
-    .map((label) => ({ label, kind: 'payment', source: 'employee', amount: 0, enabled: true, showZero: false, rounding: 'ceil', statutory: false, builtin: false, desc: '' }));
+    .map((label) => (
+      // 土日祝皆勤手当だけは式で計算します。日の判定（土日祝・有休・在籍期間）は
+      // コードが行い、その日数を式に渡して金額を出します。
+      label === WEEKEND_BONUS_LABEL
+        ? { label, kind: 'payment', source: 'formula', formula: WEEKEND_BONUS_DEFAULT_FORMULA, amount: 0, enabled: false, showZero: false, rounding: 'ceil', statutory: false, builtin: false, desc: '' }
+        : { label, kind: 'payment', source: 'employee', amount: 0, enabled: true, showZero: false, rounding: 'ceil', statutory: false, builtin: false, desc: '' }
+    ));
   // 支給→控除の順に並べ替えて、画面のタブと同じ並びにします
   const all = [...builtins, ...allowances];
   return [...all.filter((x) => x.kind === 'payment'), ...all.filter((x) => x.kind === 'deduction')];
@@ -16948,6 +16952,22 @@ function parsePayrollItems(settings) {
       return;
     }
     const kind = row?.kind === 'deduction' ? 'deduction' : 'payment';
+    // 土日祝皆勤手当は、以前は組み込みの自動計算（source: 'auto'）でした。
+    // 式で計算する形に変えたので、古い保存を読んだときはここで読み替えます。
+    // 対象者の絞り込みがコード（雇用形態）からグループ設定に変わったため、
+    // そのまま有効にすると対象でない方にも付いてしまいます。
+    // 安全側に倒して「使わない」で読み込み、グループごとに選び直してもらいます。
+    if (label === WEEKEND_BONUS_LABEL && row?.source === 'auto') {
+      out.push({
+        label, kind: 'payment', source: 'formula',
+        formula: String(row?.formula || '') || WEEKEND_BONUS_DEFAULT_FORMULA,
+        amount: 0, enabled: false,
+        showZero: row?.showZero === true,
+        rounding: PAYROLL_ROUNDINGS[row?.rounding] ? row.rounding : 'ceil',
+        statutory: false, builtin: false, desc: '',
+      });
+      return;
+    }
     const source = PAYROLL_ITEM_SOURCE_CHOICES.includes(row?.source) ? row.source : 'employee';
     out.push({
       label, kind, source,
@@ -17371,6 +17391,9 @@ const FORMULA_VARIABLE_HELP = {
   '出勤規定日数': 'その月の出勤規定日数（未設定なら0）',
   '欠勤日数': '給与計算の画面に入れた欠勤日数',
   '月平均所定労働時間': '給与の設定で登録した時間数',
+  '土日祝の欠勤日数': 'その月の土日祝のうち欠勤した日数（有休・振休・代休・特休は数えません）',
+  '土日祝の対象日数': 'その月の土日祝のうち在籍していた日数（入社前・退職後は除きます）',
+  '勤務実績日数': '出勤した日または有給を取った日の日数（重複なし）',
 };
 const FORMULA_VARIABLES = Object.keys(FORMULA_VARIABLE_HELP);
 
@@ -17595,9 +17618,14 @@ function runFormula(src, vars = {}, allowedVariables = FORMULA_VARIABLES) {
 }
 
 // 給与計算の画面の数字を、式で使える形に並べます。
-function formulaVariableValues({ preview, monthly, employee, attendanceDays, absentDays, monthlyStandardHours, wageType }) {
+function formulaVariableValues({ preview, monthly, employee, attendanceDays, absentDays, monthlyStandardHours, wageType, weekend = null }) {
   const h = (min) => Math.max(0, Number(min) || 0) / 60;
   return {
+    // 土日祝の出欠。どの日が対象でどの日が欠勤かはコードが判定し、
+    // その結果の日数だけを式に渡します（判定は算数ではないため）。
+    '土日祝の欠勤日数': Math.max(0, Number(weekend?.usedAbsent) || 0),
+    '土日祝の対象日数': Math.max(0, Number(weekend?.targetDays?.length) || 0),
+    '勤務実績日数': Math.max(0, Number(weekend?.workedDays) || 0),
     '基本給': Number(preview?.baseAmount) || 0,
     '時給': wageType === 'hourly' ? (Number(employee?.hourlyWage) || 0) : 0,
     '日額': wageType === 'daily' ? (Number(employee?.dailyWage) || 0) : 0,
@@ -18111,7 +18139,7 @@ async function saveMonthlyStandardHours(hours, actor = null) {
 }
 
 // ============================================================
-// 土日祝皆勤手当の自動計算
+// 土日祝の出欠の数え方（土日祝皆勤手当のもとになる日数）
 // ============================================================
 // 賃金規程（御社から提供された条文）：
 //   「土日祝皆勤手当は、一賃金計算期間において、出勤日とされた土曜日、日曜日
@@ -18120,8 +18148,13 @@ async function saveMonthlyStandardHours(hours, actor = null) {
 //     当該月の勤務実績が規定日数に満たない場合は、前項の支給額を基準として、
 //     当該月の規定日数に応じた日割計算により支給するものとする。」
 //
+// この金額の部分は WEEKEND_BONUS_DEFAULT_FORMULA の式で出します。
+// ここでは、式に渡す日数（土日祝の欠勤日数・対象日数・勤務実績日数）を数えるだけです。
+//
 // 前提（御社に確認）：
-//   ・対象は正社員のみ
+//   ・対象は正社員のみ（給与規定グループで「使う／使わない」を選んで絞ります。
+//     以前はここに雇用形態を直接書いていましたが、式で計算する項目に移したため、
+//     ほかの手当と同じくグループの設定で決める形にしました）
 //   ・正社員は土日祝を必須出勤日としている。
 //     そのため条文の「出勤日とされた土曜日、日曜日および国民の祝日」は
 //     その月の土日祝すべてに当たる。シフトは見ない。
@@ -18145,12 +18178,18 @@ async function saveMonthlyStandardHours(hours, actor = null) {
 //   「土日祝は必須出勤日」と確認が取れたため、シフトは見ていません。
 //   シフトが休みの土日祝も、出勤も有給もなければ欠勤になります。
 const WEEKEND_BONUS_LABEL = '土日祝皆勤手当';
-const WEEKEND_BONUS_FULL = 10000;   // 欠勤0日
-const WEEKEND_BONUS_HALF = 5000;    // 欠勤1日
 // 有給として扱う休暇の種類（出勤と同じ扱いにする）
 const WEEKEND_BONUS_PAID_LEAVE_TYPE = '有休';
-// 対象になる雇用形態（＝正社員）
-const WEEKEND_BONUS_STAFF_TYPES = ['正社員', '如意棒（社員）'];
+
+// この手当の金額は、支給・控除項目一覧の「式で計算」で決めます。
+// 以前は 1万円・5千円・対象の雇用形態をコードに直接書いていましたが、
+// 賃金規程が変わるたびにコードを直す形になっていたため、式に移しました。
+//
+// 下の式が、これまでの計算とまったく同じ結果になります
+//   欠勤0日→1万円 ／ 1日→5千円 ／ 2日以上→0円、勤務実績が規定日数に満たなければ日割り
+// 対象者（正社員のみ）は、給与規定グループで「使う／使わない」を選んで絞ります。
+const WEEKEND_BONUS_DEFAULT_FORMULA =
+  'max(0, 10000 -【土日祝の欠勤日数】* 5000) * min(1,【勤務実績日数】/【出勤規定日数】)';
 
 // その月の日付を並べる（'YYYY-MM-DD' の配列）
 function monthDateKeys(year, month) {
@@ -18177,29 +18216,20 @@ function approvedLeaveOn(leaveRequests, employeeId, dateKey) {
   ) || null;
 }
 
-// スタッフ1人・1か月分の土日祝皆勤手当。
-// 自動計算できないときは amount を null にして、reason に理由を入れます。
-// （0円は「計算した結果0円」で、null とは別の意味です）
-function computeWeekendHolidayBonus({
-  employee, year, month, records, leaveRequests,
-  prescribedDays, absentOverride = null, rounding = 'ceil',
+// スタッフ1人・1か月分の土日祝の出欠を数えます。金額は出しません
+//（金額は支給・控除項目一覧の「式で計算」が出します）。
+// 返すもの：
+//   weekendDays … その月の土日祝を1日ずつ（状態つき。画面の内訳に使います）
+//   targetDays  … そのうち在籍していた日
+//   absentCount … 土日祝の欠勤日数（有休・振休・代休・特休は数えません）
+//   usedAbsent  … 画面で手入力した欠勤日数があればそちら
+//   workedDays  … その月に出勤した日または有給を取った日の日数（重複なし）
+function computeWeekendAttendance({
+  employee, year, month, records, leaveRequests, absentOverride = null,
 }) {
   const employeeId = employee?.id;
   const keys = monthDateKeys(year, month);
   const dayRecords = records || {};
-
-  const base = {
-    amount: null, reason: '',
-    weekendDays: [], targetDays: [],
-    absentCount: 0, usedAbsent: 0, overridden: false,
-    baseAmount: 0, workedDays: 0, prescribedDays: prescribedDays ?? null, prorated: false,
-    staffType: employee?.staffType || '',
-  };
-
-  // 対象は正社員だけです
-  if (!WEEKEND_BONUS_STAFF_TYPES.includes(String(employee?.staffType || ''))) {
-    return { ...base, amount: 0, reason: 'notRegular' };
-  }
 
   // ---- その月の土日祝を全部並べ、1日ずつ状態をつける ----
   // 正社員は土日祝が必須出勤日のため、シフトは見ません。
@@ -18228,24 +18258,6 @@ function computeWeekendHolidayBonus({
   const usedAbsent = absentOverride == null ? absentCount : Math.max(0, Math.floor(Number(absentOverride) || 0));
   const overridden = absentOverride != null && usedAbsent !== absentCount;
 
-  // 在籍していた土日祝が0日の月は支給しません（入社前・退職後など）
-  if (targetDays.length === 0) {
-    return {
-      ...base, amount: 0, reason: 'noTarget',
-      weekendDays, targetDays, absentCount, usedAbsent, overridden,
-    };
-  }
-
-  const baseAmount = usedAbsent === 0 ? WEEKEND_BONUS_FULL : usedAbsent === 1 ? WEEKEND_BONUS_HALF : 0;
-  const common = {
-    ...base, weekendDays, targetDays,
-    absentCount, usedAbsent, overridden, baseAmount,
-  };
-
-  // 欠勤2日以上は0円。日割をかけても0円なので、規定日数が無くても出せます。
-  if (baseAmount === 0) return { ...common, amount: 0 };
-
-  // ---- 日割 ----
   // 勤務実績＝その月に「出勤した日」または「有給を取った日」の日数（重複なし）。
   // 半休で出勤もしている日は1日として数えます（二重に数えないため）。
   const workedDays = keys.reduce((n, key) => {
@@ -18255,20 +18267,9 @@ function computeWeekendHolidayBonus({
     return n;
   }, 0);
 
-  const pd = Number(prescribedDays);
-  // 規定日数が未登録だと、日割が要るのかどうかを判断できません
-  if (!Number.isFinite(pd) || pd <= 0) {
-    return { ...common, amount: null, reason: 'noPrescribed', workedDays };
-  }
-  if (workedDays >= pd) return { ...common, amount: baseAmount, workedDays };
-
-  // 日割りの1円未満。整数の割り算で行います（小数の誤差で1円ずれないように）。
-  // 丸め方は支給・控除項目一覧の「1円未満」の設定に従います（既定は切り上げ）。
   return {
-    ...common,
-    amount: roundDivBy(baseAmount * workedDays, pd, rounding),
-    workedDays,
-    prorated: true,
+    weekendDays, targetDays, absentCount, usedAbsent, overridden, workedDays,
+    staffType: employee?.staffType || '',
   };
 }
 
@@ -20224,11 +20225,16 @@ function IncomeTaxLine({ tax, employee }) {
   );
 }
 
-// ---- 土日祝皆勤手当の根拠（給与計算画面） ----
+// ---- 土日祝の出欠の内訳（給与計算の画面） ----
 // 対象日を1日ずつ出して、どの日を欠勤と数えたのかが分かるようにしています。
 // シフトや勤怠が実態と違うことがあるため、欠勤日数は画面で直せます。
-function WeekendBonusNote({ bonus, employee, override, onOverride, current, onApply, isPublished }) {
-  if (!bonus) return null;
+// 金額は「式で計算」が出すため、ここは数え方の根拠だけを見せます。
+// どの日が対象で、どの日を欠勤に数えたのかが分からないと、
+// 金額が合っているかを人が確かめられないためです。
+function WeekendBonusNote({ attendance, enabled = false, employee, override, onOverride, current, isPublished }) {
+  if (!attendance) return null;
+  // この手当を使わないグループでは、欠勤が無ければ出しません（画面を増やさないため）
+  if (!enabled && attendance.absentCount === 0) return null;
 
   const dayLabel = (d) => {
     const [, m, day] = d.key.split('-').map(Number);
@@ -20239,49 +20245,24 @@ function WeekendBonusNote({ bonus, employee, override, onOverride, current, onAp
     worked: '出勤', paid: '有休', leave: '', absent: '欠勤',
     'before-hire': '入社前', 'after-resign': '退職後',
   };
-
-  if (bonus.amount == null) {
-    const why = {
-      noPrescribed: '出勤規定日数が未登録のため、日割が要るかどうか判断できません。グループまたはこの方の規定日数を登録するか、金額を手で入れてください。',
-    }[bonus.reason] || '自動計算できません。';
-    return (
-      <div className="rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-[11.5px] leading-relaxed text-amber-900 space-y-1">
-        <div className="font-bold">土日祝皆勤手当を自動計算できません（0円のままです）</div>
-        <div>{why}</div>
-      </div>
-    );
-  }
-
-  // 正社員でない方は対象外です。明細を並べても意味がないので1行だけ出します。
-  if (bonus.reason === 'notRegular') {
-    return (
-      <div className="rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-[11.5px] leading-relaxed text-slate-500">
-        土日祝皆勤手当は正社員のみが対象のため、{employee?.name || 'この方'}さん
-        （{bonus.staffType || '雇用形態が未設定'}）は対象外です。0円になります。
-        対象であれば、スタッフの「詳細」→「業務・契約」タブで雇用形態をご確認ください。
-      </div>
-    );
-  }
-
-  const differs = current != null && Number(current) !== bonus.amount;
   const tone = isPublished
     ? 'border-slate-200 bg-slate-50 text-slate-500'
-    : differs
-      ? 'border-amber-200 bg-amber-50 text-amber-900'
-      : 'border-teal-200 bg-teal-50 text-teal-900';
+    : 'border-teal-200 bg-teal-50 text-teal-900';
 
   return (
     <div className={`rounded-xl border px-3.5 py-2.5 text-[11.5px] leading-relaxed space-y-1.5 ${tone}`}>
       <div className="font-bold">
-        土日祝皆勤手当 {formatYen(bonus.amount)}
-        {bonus.reason === 'noTarget' && '（在籍していた土日祝がないため支給しません）'}
+        土日祝の出欠
+        {enabled
+          ? <>（土日祝皆勤手当 {current == null ? '—' : formatYen(Number(current))}）</>
+          : <>（このグループでは土日祝皆勤手当を使わない設定です）</>}
       </div>
 
       {/* その月の土日祝を全部出します。対象外の日も、なぜ対象外なのかが
           分かるように薄い色で並べます（日が抜けて見えるのを防ぐため）。 */}
-      {bonus.weekendDays.length > 0 && (
+      {attendance.weekendDays.length > 0 && (
         <div className="flex flex-wrap gap-1">
-          {bonus.weekendDays.map((d) => (
+          {attendance.weekendDays.map((d) => (
             <span
               key={d.key}
               className={`rounded-full px-2 py-0.5 text-[10.5px] font-bold ${
@@ -20298,21 +20279,23 @@ function WeekendBonusNote({ bonus, employee, override, onOverride, current, onAp
       )}
 
       <div className="text-[10.5px] opacity-80">
-        その月の土日祝 {bonus.weekendDays.length}日
-        {bonus.weekendDays.length > bonus.targetDays.length
-          && `（うち在籍していたのは ${bonus.targetDays.length}日）`}
-        ／自動で数えた欠勤 {bonus.absentCount}日
-        {bonus.overridden && <b>／画面で {bonus.usedAbsent}日 に直しています</b>}
-        {' '}→ 基準額 {formatYen(bonus.baseAmount)}
-        {bonus.prorated
-          ? `／勤務実績 ${bonus.workedDays}日 ＜ 規定日数 ${bonus.prescribedDays}日 のため日割（1円未満切り上げ）`
-          : bonus.prescribedDays != null && bonus.baseAmount > 0
-            ? `／勤務実績 ${bonus.workedDays}日 が規定日数 ${bonus.prescribedDays}日 以上のため日割なし`
-            : ''}
+        その月の土日祝 {attendance.weekendDays.length}日
+        {attendance.weekendDays.length > attendance.targetDays.length
+          && `（うち在籍していたのは ${attendance.targetDays.length}日）`}
+        ／自動で数えた欠勤 {attendance.absentCount}日
+        {attendance.overridden && <b>／画面で {attendance.usedAbsent}日 に直しています</b>}
+        ／勤務実績 {attendance.workedDays}日
       </div>
 
+      {enabled && (
+        <div className="text-[10.5px] opacity-80">
+          この日数が式の【土日祝の欠勤日数】【土日祝の対象日数】【勤務実績日数】に入ります。
+          金額の決め方は「給与の設定」→「支給・控除項目一覧」→「土日祝皆勤手当」で見られます。
+        </div>
+      )}
+
       {/* 対象日が0日のときは、欠勤日数を直しても結果が変わらないので出しません */}
-      {!isPublished && bonus.targetDays.length > 0 && (
+      {!isPublished && attendance.targetDays.length > 0 && (
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-[10.5px] font-bold">欠勤日数を直す</span>
           <input
@@ -20320,7 +20303,7 @@ function WeekendBonusNote({ bonus, employee, override, onOverride, current, onAp
             min="0"
             value={override}
             onChange={(e) => onOverride(e.target.value)}
-            placeholder={String(bonus.absentCount)}
+            placeholder={String(attendance.absentCount)}
             className="w-20 rounded-lg border border-slate-200 bg-white px-2 py-1 font-mono text-[12px] text-right"
           />
           {override !== '' && (
@@ -20328,16 +20311,10 @@ function WeekendBonusNote({ bonus, employee, override, onOverride, current, onAp
               自動で数えた値に戻す
             </button>
           )}
+          <span className="text-[10.5px] opacity-80">
+            直したあとは「いまの設定で作り直す」で金額に反映されます
+          </span>
         </div>
-      )}
-
-      {differs && !isPublished && onApply && (
-        <button
-          onClick={onApply}
-          className="w-full rounded-lg border-2 border-amber-300 bg-white py-1.5 text-[12px] font-bold text-amber-800"
-        >
-          支給欄の金額（{formatYen(Number(current))}）を {formatYen(bonus.amount)} に入れ直す
-        </button>
       )}
 
       <div className="text-[10.5px] opacity-80">
@@ -20778,24 +20755,22 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     monthlyAvgDays: formulas.monthlyAvgDays,
   }) : null;
 
-  // 土日祝皆勤手当。スタッフ詳細の固定支給項目に登録されている方だけが対象です。
-  // この方の給与規定グループで「使う」にしているときに計算します。
-  // 計算した金額を明細に自動で入れるのは、スタッフ詳細の固定支給項目に
-  // 登録した方だけです（登録していない方にひとりでに手当が付かないように）。
-  // 登録していない方には0円の行だけ出し、下の案内で計算結果と
-  // 「入れ直す」ボタンを出して、入れ忘れに気づけるようにしています。
-  const weekendBonusEnabled = payrollItemsForEmployee(settings, 'payment', employee)
-    .some((x) => x.label === WEEKEND_BONUS_LABEL);
-  const weekendBonus = employee && weekendBonusEnabled ? computeWeekendHolidayBonus({
+  // 土日祝の出欠を数えます。金額はここでは出しません。
+  // 数えた日数を式に渡して、支給・控除項目一覧の「式で計算」が金額を出します。
+  // 数えること自体は手当を使わない方にも意味がある（画面で内訳を見せる）ため、
+  // グループの設定にかかわらず数えます。
+  const weekendAttendance = employee ? computeWeekendAttendance({
     employee,
     year,
     month,
     records: records[employeeId] || {},
     leaveRequests,
-    prescribedDays: attendanceDays,
     absentOverride: weekendAbsentOverride === '' ? null : weekendAbsentOverride,
-    rounding: payrollRoundingFor(settings, 'payment', WEEKEND_BONUS_LABEL),
   }) : null;
+  // この方の給与規定グループで、土日祝皆勤手当を「使う」にしているか
+  const weekendBonusEnabled = employee
+    ? payrollItemsForEmployee(settings, 'payment', employee).some((x) => x.label === WEEKEND_BONUS_LABEL)
+    : false;
 
   // いまの勤怠と設定から、支給・控除項目を組み立てます。
   // 画面を開いたときと、「いまの設定で作り直す」を押したときの両方で使います。
@@ -20821,6 +20796,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
       absentDays: Number(absentDaysValue) || 0,
       monthlyStandardHours: monthlyStandardHoursOf(settings),
       wageType,
+      weekend: weekendAttendance,
     });
 
     const draftLate = computeLateEarlyDeduction({
@@ -20861,13 +20837,11 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
       ...(draftAbsence && draftAbsence.amount > 0
         ? [{ label: ABSENCE_DEDUCTION_LABEL, amount: -draftAbsence.amount }]
         : []),
-      // 土日祝皆勤手当は、登録した固定額ではなく計算した額を入れます。
-      // 計算できないとき（シフト未取り込みなど）は0にして、画面で知らせます。
-      ...employeeSalaryItems.filter((it) => it.kind === 'payment').map((it) => (
-        String(it.label).trim() === WEEKEND_BONUS_LABEL
-          ? { label: it.label, amount: weekendBonus?.amount == null ? 0 : weekendBonus.amount }
-          : { label: it.label, amount: it.amount }
-      )),
+      // スタッフ詳細に登録した毎月の固定支給項目。
+      // 土日祝皆勤手当は「式で計算」に移したため、ここでは特別扱いしません。
+      ...employeeSalaryItems
+        .filter((it) => it.kind === 'payment')
+        .map((it) => ({ label: it.label, amount: it.amount })),
     ];
     const nextPaymentItems = applyFormulaItems(
       applyPayrollItemSettings(draftPayment, allPayment, paymentOrder),
@@ -21253,16 +21227,12 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
           <div className="text-[11px] text-slate-400 -mt-1">スタッフ詳細で登録された固定支給・控除項目（{employeeSalaryItems.length}件）を初期値として含めています。</div>
         )}
         <WeekendBonusNote
-          bonus={weekendBonus}
+          attendance={weekendAttendance}
+          enabled={weekendBonusEnabled}
           employee={employee}
           override={weekendAbsentOverride}
           onOverride={setWeekendAbsentOverride}
           current={paymentItems.find((it) => String(it.label).trim() === WEEKEND_BONUS_LABEL)?.amount ?? null}
-          onApply={() => setPaymentItems((prev) => prev.map((it) => (
-            String(it.label).trim() === WEEKEND_BONUS_LABEL
-              ? { ...it, amount: weekendBonus.amount }
-              : it
-          )))}
           isPublished={isPublished}
         />
         <PayrollItemsEditor title="支給項目" items={paymentItems} onChange={setPaymentItems} addLabel="支給項目を追加" />
