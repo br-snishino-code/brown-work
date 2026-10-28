@@ -15182,8 +15182,12 @@ function roundUnworkedMinutes(minutes) {
   return hours * 60 + Math.floor(rest / UNWORKED_ROUND_UNIT_MIN) * UNWORKED_ROUND_UNIT_MIN;
 }
 
-function computePayrollPreview({ wageType, hourlyWage, monthlySalary, workedMinutes, overtimeMinutes, commuteAllowance = 0, attendanceDays = null, actualDays = 0, monthlyStandardHours = MONTHLY_STANDARD_HOURS }) {
+function computePayrollPreview({ wageType, hourlyWage, monthlySalary, workedMinutes, overtimeMinutes, commuteAllowance = 0, attendanceDays = null, actualDays = 0, monthlyStandardHours = MONTHLY_STANDARD_HOURS, deemedOvertimeMinutes = 0 }) {
   const regularMinutes = Math.max(0, workedMinutes - overtimeMinutes);
+  // みなし残業。決めた時間までは残業手当を追加で払わず、超えた分だけ払います。
+  // 月給制の方にだけ当てます（deemedOvertimeFor が時給制には0を返します）。
+  const deemedMin = wageType === 'monthly' ? Math.max(0, Math.round(Number(deemedOvertimeMinutes) || 0)) : 0;
+  const paidOvertimeMinutes = Math.max(0, overtimeMinutes - deemedMin);
   let baseAmount = 0;
   let overtimeAmount = 0;
   let wageRate = 0;
@@ -15194,7 +15198,7 @@ function computePayrollPreview({ wageType, hourlyWage, monthlySalary, workedMinu
     wageRate = Number(hourlyWage) || 0;
     wageRateHourly = wageRate;
     baseAmount = ceilYen((regularMinutes / 60) * wageRate);
-    overtimeAmount = ceilYen((overtimeMinutes / 60) * wageRate * OVERTIME_MULTIPLIER);
+    overtimeAmount = ceilYen((paidOvertimeMinutes / 60) * wageRate * OVERTIME_MULTIPLIER);
   } else {
     wageRate = Number(monthlySalary) || 0;
     if (attendanceDays && attendanceDays > 0) {
@@ -15208,11 +15212,19 @@ function computePayrollPreview({ wageType, hourlyWage, monthlySalary, workedMinu
     // 月平均所定労働時間は画面で設定できます（未設定なら MONTHLY_STANDARD_HOURS）
     const hours = Number(monthlyStandardHours) > 0 ? Number(monthlyStandardHours) : MONTHLY_STANDARD_HOURS;
     wageRateHourly = wageRate / hours;
-    overtimeAmount = ceilYen((overtimeMinutes / 60) * wageRateHourly * OVERTIME_MULTIPLIER);
+    overtimeAmount = ceilYen((paidOvertimeMinutes / 60) * wageRateHourly * OVERTIME_MULTIPLIER);
   }
   const allowanceAmount = Math.round(Number(commuteAllowance) || 0);
-  // wageRateHourly … 割増基礎単価（1時間あたり）。画面に根拠を出すために返します
-  return { wageRate, wageRateHourly, regularMinutes, baseAmount, overtimeAmount, allowanceAmount, totalAmount: baseAmount + overtimeAmount + allowanceAmount, prorated };
+  // wageRateHourly        … 割増基礎単価（1時間あたり）
+  // deemedOvertimeMinutes  … 当てたみなし残業の分数
+  // paidOvertimeMinutes    … 実際に残業手当を払う分数（残業 − みなし残業）
+  // いずれも画面に根拠を出すために返します。
+  return {
+    wageRate, wageRateHourly, regularMinutes, baseAmount, overtimeAmount, allowanceAmount,
+    overtimeMinutes: Math.max(0, Math.round(Number(overtimeMinutes) || 0)),
+    deemedOvertimeMinutes: deemedMin, paidOvertimeMinutes,
+    totalAmount: baseAmount + overtimeAmount + allowanceAmount, prorated,
+  };
 }
 
 const formatYen = (n) => `¥${Math.round(n || 0).toLocaleString('ja-JP')}`;
@@ -16889,6 +16901,94 @@ async function savePayrollItemGroups(groups, actor = null) {
   return { ok: true };
 }
 
+// ============================================================
+// みなし残業（固定残業代）
+// ============================================================
+// 月あたり決めた時間までは残業手当を追加で払わず、それを超えた分だけ払います。
+// ジョブカンの勤務体系設定「月あたり ○時間 はみなし残業とする」と同じ扱いです
+// （御社のジョブカンは22時間0分。2026-10-28に設定画面で確認）。
+//
+// 時間数は給与規定グループ（メイングループ × スタッフ種別）ごとに決めます（御社に確認済み）。
+// スタッフ詳細の「みなし残業時間」に値が入っている方は、そちらが優先されます
+// （雇用契約で個別に決まっている方のため）。どちらも無ければ0時間、
+// つまりこれまでどおり1分目から残業手当を払います。
+//
+// ⚠ 月給制の方にだけ当てます。
+//   時給制の方は、働いた時間ぶんの賃金を基本給と残業手当に分けて払う形です。
+//   ここで残業手当を差し引くと、実際に働いた時間の賃金が払われないことになります。
+//   みなし残業は「決まった月給に一定時間分の残業代を含める」仕組みなので、
+//   月給制でないと成り立ちません。
+//
+// ⚠ 22時間分の賃金がどの項目にいくら含まれているかは、この設定では決まりません。
+//   固定残業代は、その金額と時間数を基本給と区分して示す必要があるとされています。
+//   雇用契約書・賃金規程の記載をご確認ください（確認事項の一覧に入れています）。
+const SETTING_DEEMED_OVERTIME_GROUPS = 'deemed_overtime_groups';   // グループごとの時間数（JSON）
+
+// グループごとの時間数を読みます。壊れていても画面は動かします。
+// 形：{ "[\"第一営業部\",\"正社員\"]": 22 }
+function parseDeemedOvertimeGroups(settings) {
+  let raw = null;
+  try {
+    const v = JSON.parse(settings?.[SETTING_DEEMED_OVERTIME_GROUPS] || 'null');
+    if (v && typeof v === 'object' && !Array.isArray(v)) raw = v;
+  } catch (_) { raw = null; }
+  if (!raw) return {};
+  const out = {};
+  Object.entries(raw).forEach(([key, hours]) => {
+    const h = Number(hours);
+    // 0時間は「みなし残業なし」と同じなので持ちません
+    if (Number.isFinite(h) && h > 0 && h <= 200) out[key] = h;
+  });
+  return out;
+}
+
+// その方のみなし残業時間。どこから来た値なのかも返します（画面で根拠を出すため）。
+//   personal … スタッフ詳細の「みなし残業時間」
+//   group    … 給与規定グループの設定
+//   none     … どちらも無い（0時間。1分目から残業手当を払う）
+function deemedOvertimeFor(employee, settings) {
+  const none = { hours: 0, minutes: 0, source: 'none' };
+  if (!employee) return none;
+  // 時給制の方には当てません（上のコメントの理由）
+  if (String(employee.wageType || 'hourly') !== 'monthly') {
+    return { ...none, source: 'hourly' };
+  }
+  const personal = Number(employee.deemedOvertimeHours);
+  if (Number.isFinite(personal) && personal > 0) {
+    return { hours: personal, minutes: Math.round(personal * 60), source: 'personal' };
+  }
+  const groups = parseDeemedOvertimeGroups(settings);
+  const h = groups[payrollGroupKey(employee.mainGroup, employee.staffType)];
+  if (Number.isFinite(h) && h > 0) {
+    return { hours: h, minutes: Math.round(h * 60), source: 'group' };
+  }
+  return none;
+}
+
+// グループごとのみなし残業時間を保存する（マスター管理者のみ）。
+async function saveDeemedOvertimeGroups(map, actor = null) {
+  const slim = {};
+  Object.entries(map || {}).forEach(([key, hours]) => {
+    const h = Number(hours);
+    if (Number.isFinite(h) && h > 0 && h <= 200) slim[key] = h;
+  });
+  const { error } = await supabase.from('app_settings').upsert(
+    {
+      key: SETTING_DEEMED_OVERTIME_GROUPS,
+      value: JSON.stringify(slim),
+      updated_by: actor?.id || null,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: 'key' }
+  );
+  if (error) {
+    console.error('みなし残業の設定の保存に失敗しました', error);
+    return { ok: false, message: error.message || '' };
+  }
+  await logAudit(actor, 'みなし残業の設定を変更', `${Object.keys(slim).length}グループ`);
+  return { ok: true };
+}
+
 // スタッフが見る給与明細と、印刷した明細に出す項目を選びます。
 //
 // 給与計算の画面（作る側）には、一覧で「使う」にした項目が金額0円でも全部並びます。
@@ -17170,6 +17270,175 @@ function applyDeductionAmounts(items, amounts) {
     else next.push({ label, amount: value });
   });
   return next;
+}
+
+// ---- みなし残業の設定（給与計算画面・グループごと） ----
+// グループを一度に並べます。設定し忘れているグループがひと目で分かるようにするためです。
+function DeemedOvertimeSettings({ settings, employeeAccounts = [], actor, isMasterAdmin, onSaved }) {
+  const [open, setOpen] = useState(false);
+  const [hours, setHours] = useState(() => parseDeemedOvertimeGroups(settings));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [done, setDone] = useState('');
+
+  const savedJson = settings?.[SETTING_DEEMED_OVERTIME_GROUPS] || '';
+  useEffect(() => {
+    setHours(parseDeemedOvertimeGroups(settings));
+    // settings は毎回あたらしい物になるため、中身の文字列を見ています
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savedJson]);
+
+  if (!isMasterAdmin) return null;
+
+  const groups = payrollGroupsInUse(employeeAccounts, settings);
+  const set = (key, v) => setHours((prev) => {
+    const next = { ...prev };
+    const n = Number(v);
+    if (v === '' || !Number.isFinite(n) || n <= 0) delete next[key];
+    else next[key] = n;
+    return next;
+  });
+  // スタッフ詳細に値が入っている方は、グループの設定より優先されます。
+  // 気づかないうちにその方だけ違う額になるのを避けるため、ここに出します。
+  const personal = (employeeAccounts || []).filter(
+    (a) => a && !a.resignationDate && Number(a.deemedOvertimeHours) > 0
+  );
+  const count = Object.keys(hours).length;
+
+  const save = async () => {
+    setError(''); setDone(''); setSaving(true);
+    const res = await saveDeemedOvertimeGroups(hours, actor);
+    setSaving(false);
+    if (!res.ok) { setError(`保存できませんでした。${res.message}`); return; }
+    setDone('みなし残業の設定を保存しました。');
+    if (onSaved) await onSaved();
+  };
+
+  return (
+    <div className="rounded-xl border border-slate-200 overflow-hidden">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="w-full px-3.5 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center gap-2 flex-wrap text-left"
+      >
+        <span className="text-[12px] font-bold text-slate-600">みなし残業</span>
+        <span className="text-[11px] text-slate-400">
+          {count > 0 ? `${count}グループに設定あり` : '設定なし（1分目から残業手当を払います）'}
+        </span>
+        {personal.length > 0 && (
+          <span className="text-[10.5px] font-bold text-amber-700">個別設定 {personal.length}名</span>
+        )}
+        <span className="ml-auto text-[11px] font-bold text-slate-500">{open ? '閉じる' : '開く'}</span>
+      </button>
+
+      {open && (
+        <div className="px-3.5 py-3 space-y-3">
+          {error && <div className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-700">{error}</div>}
+          {done && <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-[11px] text-emerald-700">{done}</div>}
+
+          <div className="text-[10.5px] text-slate-500 leading-relaxed">
+            月あたり決めた時間までは、残業手当を追加で払いません。超えた分だけ払います。
+            <b className="block pt-0.5">月給制の方にだけ当てます。</b>
+            時給制の方は、働いた時間ぶんの賃金を基本給と残業手当に分けて払う形なので、
+            ここで差し引くと実際に働いた時間の賃金が払われないことになります。
+            空欄のグループは、これまでどおり1分目から残業手当を払います。
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-[11.5px] min-w-[420px]">
+              <thead className="bg-slate-50 text-slate-500">
+                <tr className="text-left">
+                  <th className="px-2.5 py-1.5 font-medium">給与規定グループ</th>
+                  <th className="px-2.5 py-1.5 font-medium text-center whitespace-nowrap">在籍</th>
+                  <th className="px-2.5 py-1.5 font-medium text-center whitespace-nowrap">みなし残業（時間／月）</th>
+                </tr>
+              </thead>
+              <tbody>
+                {groups.length === 0 ? (
+                  <tr><td colSpan={3} className="px-2.5 py-6 text-center text-slate-300">在籍しているスタッフがいません</td></tr>
+                ) : groups.map((g) => (
+                  <tr key={g.key} className="border-t border-slate-100">
+                    <td className="px-2.5 py-1.5 font-bold text-slate-700 whitespace-nowrap">{g.label}</td>
+                    <td className="px-2.5 py-1.5 text-center text-slate-400 whitespace-nowrap">{g.count}名</td>
+                    <td className="px-2.5 py-1.5 text-center">
+                      <input
+                        type="number" step="0.5" min="0" max="200"
+                        value={hours[g.key] === undefined ? '' : hours[g.key]}
+                        onChange={(e) => set(g.key, e.target.value)}
+                        placeholder="なし"
+                        className="w-24 box-border border border-slate-200 rounded-lg px-2 py-1 font-mono text-[12px] text-right bg-white"
+                      />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {personal.length > 0 && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-[10.5px] text-amber-900 leading-relaxed">
+              <b className="block">スタッフ詳細に個別のみなし残業時間が入っている方がいます。</b>
+              この方々はグループの設定ではなく、そちらの時間数が使われます。
+              <div className="pt-1 font-mono">
+                {personal.map((a) => `${a.name}（${a.deemedOvertimeHours}時間）`).join('／')}
+              </div>
+            </div>
+          )}
+
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-[10.5px] text-amber-800 leading-relaxed">
+            <b className="block">その時間分の賃金がどこに入っているかは、ここでは決まりません。</b>
+            固定残業代は、金額と時間数を基本給と区分して示す必要があるとされています。
+            雇用契約書・賃金規程の記載をご確認ください。
+          </div>
+
+          <button
+            onClick={save}
+            disabled={saving}
+            className="w-full rounded-lg bg-slate-800 py-2 text-[12.5px] font-bold text-white disabled:bg-slate-300"
+          >
+            {saving ? '保存中…' : 'みなし残業の設定を保存する'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---- みなし残業の根拠（給与計算画面） ----
+// 残業手当がいくらになったのか、なぜ0円なのかを必ず見せます。
+// 設定が無い方には何も出しません（これまでどおり1分目から払うため）。
+function DeemedOvertimeNote({ deemed, preview, employee }) {
+  if (!deemed || !preview || deemed.minutes <= 0) return null;
+  const over = preview.paidOvertimeMinutes > 0;
+  // 「22:00」は時刻に見えてしまうので、この文章では「22時間0分」と書きます
+  const hm = (min) => {
+    const m = Math.max(0, Math.round(Number(min) || 0));
+    return `${Math.floor(m / 60)}時間${m % 60}分`;
+  };
+  const where = deemed.source === 'personal'
+    ? `${employee?.name || 'この方'}さんだけの設定`
+    : 'この方の給与規定グループの設定';
+  return (
+    <div className={`rounded-xl border px-3.5 py-2.5 text-[11.5px] leading-relaxed ${over ? 'border-slate-200 bg-slate-50 text-slate-600' : 'border-amber-200 bg-amber-50 text-amber-900'}`}>
+      <div className="font-bold">
+        みなし残業 {hm(deemed.minutes)}（{where}）
+      </div>
+      {over ? (
+        <>
+          今月の残業 {hm(preview.overtimeMinutes ?? 0)} のうち、
+          みなし残業を超えた <b>{hm(preview.paidOvertimeMinutes)}</b> の残業手当を出しています。
+        </>
+      ) : (
+        <>
+          今月の残業はみなし残業の範囲内のため、<b>残業手当は0円</b>です。
+          みなし残業の時間分の賃金は、基本給などに含まれている前提の計算です。
+        </>
+      )}
+      <div className="text-[10.5px] pt-0.5 opacity-80">
+        みなし残業の時間数は「給与の設定 → みなし残業」で決めます。
+        スタッフ詳細の「みなし残業時間」に値を入れると、その方だけその値になります。
+      </div>
+    </div>
+  );
 }
 
 // ---- 支給・控除項目一覧（給与計算画面） ----
@@ -18255,6 +18524,9 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     settings,
   }) : null;
 
+  // みなし残業。画面で選んでいる給与形態を見ます（保存前の切り替えにも付いていくため）。
+  const deemed = employee ? deemedOvertimeFor({ ...employee, wageType }, settings) : { hours: 0, minutes: 0, source: 'none' };
+
   const preview = employee ? computePayrollPreview({
     wageType,
     hourlyWage,
@@ -18265,6 +18537,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     attendanceDays,
     actualDays: monthly.days,
     monthlyStandardHours: monthlyStandardHoursOf(settings),
+    deemedOvertimeMinutes: deemed.minutes,
   }) : null;
 
   // 土日祝皆勤手当。スタッフ詳細の固定支給項目に登録されている方だけが対象です。
@@ -18498,6 +18771,13 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
             onSaved={onRefresh}
             isDesktop={isDesktop}
           />
+          <DeemedOvertimeSettings
+            settings={settings}
+            employeeAccounts={employeeAccounts}
+            actor={session}
+            isMasterAdmin={isMasterAdmin}
+            onSaved={onRefresh}
+          />
         </div>
       )}
 
@@ -18573,6 +18853,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
           <PayrollMetric label="遅刻" value={`${monthly.lateMin || 0}分`} />
           <PayrollMetric label="早退" value={`${monthly.earlyLeaveMin || 0}分`} />
         </div>
+        <DeemedOvertimeNote deemed={deemed} preview={preview} employee={employee} />
         <div className="grid grid-cols-3 gap-3">
           <Field label="欠勤日数">
             <input type="number" step="0.5" value={absentDays} onChange={(e) => setAbsentDays(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px] bg-white" />
