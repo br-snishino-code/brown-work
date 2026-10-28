@@ -15358,7 +15358,7 @@ function roundUnworkedMinutes(minutes) {
 //   overtime  … 残業手当
 //   allowance … 通勤手当
 // 渡されなかったときは、これまでどおり基本給と残業手当は切り上げ、通勤手当は四捨五入です。
-function computePayrollPreview({ wageType, hourlyWage, monthlySalary, dailyWage = 0, dailyStandardMinutes = null, workedMinutes, overtimeMinutes, commuteAllowance = 0, attendanceDays = null, actualDays = 0, monthlyStandardHours = MONTHLY_STANDARD_HOURS, deemedOvertimeMinutes = 0, nightMinutes = 0, rounding = null, overtimeRate = OVERTIME_MULTIPLIER, nightRate = NIGHT_MULTIPLIER }) {
+function computePayrollPreview({ wageType, hourlyWage, monthlySalary, dailyWage = 0, dailyStandardMinutes = null, workedMinutes, overtimeMinutes, commuteAllowance = 0, attendanceDays = null, actualDays = 0, monthlyStandardHours = MONTHLY_STANDARD_HOURS, deemedOvertimeMinutes = 0, nightMinutes = 0, rounding = null, overtimeRate = OVERTIME_MULTIPLIER, nightRate = NIGHT_MULTIPLIER, premiumBaseAllowance = 0 }) {
   const rBase = rounding?.base || 'ceil';
   const rOver = rounding?.overtime || 'ceil';
   const rAllow = rounding?.allowance || 'round';
@@ -15409,6 +15409,18 @@ function computePayrollPreview({ wageType, hourlyWage, monthlySalary, dailyWage 
     wageRateHourly = wageRate / hours;
     overtimeAmount = roundYenBy((paidOvertimeMinutes / 60) * wageRateHourly * overtimeRate, rOver);
   }
+  // 割増基礎単価に入れる手当。労働基準法施行規則第19条にならい、月額の手当は
+  // 月平均所定労働時間で割って1時間あたりに直してから、上の単価に足します。
+  // 足したあとで残業手当・深夜手当を出し直します（基礎が変わるため）。
+  const premiumAllowance = Math.max(0, Math.round(Number(premiumBaseAllowance) || 0));
+  let premiumAllowanceHourly = 0;
+  if (premiumAllowance > 0) {
+    const stdHours = Number(monthlyStandardHours) > 0 ? Number(monthlyStandardHours) : MONTHLY_STANDARD_HOURS;
+    premiumAllowanceHourly = premiumAllowance / stdHours;
+    wageRateHourly += premiumAllowanceHourly;
+    overtimeAmount = roundYenBy((paidOvertimeMinutes / 60) * wageRateHourly * overtimeRate, rOver);
+  }
+
   const allowanceAmount = roundYenBy(Number(commuteAllowance) || 0, rAllow);
   // 深夜手当は割増の0.25だけ。働いた時間ぶんの賃金は基本給・残業手当に入っています。
   // みなし残業は当てません（みなし残業が覆うのは時間外の割増で、深夜の割増は別のため）。
@@ -15428,6 +15440,8 @@ function computePayrollPreview({ wageType, hourlyWage, monthlySalary, dailyWage 
     dailyStandardMinutes: wageType === 'daily' ? (Number(dailyStandardMinutes) || 0) : null,
     // 使った割増率。画面に根拠を出すために返します
     overtimeRate, nightRate,
+    // 割増基礎単価に足した手当。画面に根拠を出すために返します
+    premiumBaseAllowance: premiumAllowance, premiumBaseAllowanceHourly: premiumAllowanceHourly,
     totalAmount: baseAmount + overtimeAmount + allowanceAmount + nightAmount, prorated,
   };
 }
@@ -17306,6 +17320,99 @@ function parseDeemedOvertimeGroups(settings) {
   return out;
 }
 
+// ---- 割増基礎単価に入れる項目 ----
+// 残業手当・深夜手当のもとになる1時間あたりの単価です。
+//
+// 労働基準法第37条第5項と労働基準法施行規則第21条により、
+// 割増賃金の基礎から外してよい賃金は次の7つに限られます（限定列挙）。
+// ここに無い手当は、名前が何であれ基礎に入れる必要があります。
+const PREMIUM_BASE_EXCLUDABLE = [
+  '家族手当', '通勤手当', '別居手当', '子女教育手当', '住宅手当',
+  '臨時に支払われた賃金', '1か月を超える期間ごとに支払われる賃金',
+];
+
+// 除外してよい手当かどうか。名前にこれらの語が含まれていれば除外できる扱いにします。
+// あくまで画面に注意を出すための目安で、最終の判断は人がします
+//（たとえば「住宅手当」でも、住宅費に関わらず一律の額なら基礎に入れる必要があります）。
+function isPremiumBaseExcludable(label) {
+  const name = String(label || '').trim();
+  if (!name) return false;
+  return PREMIUM_BASE_EXCLUDABLE.some((x) => name.includes(x) || name.includes(x.replace('手当', '')));
+}
+
+const SETTING_PREMIUM_BASE_ITEMS = 'premium_base_items';
+
+// 基礎に入れる項目の名前の一覧を読みます。
+// 保存が無いときは「基本給だけ」＝これまでの動きです。
+function parsePremiumBaseItems(settings) {
+  let raw = null;
+  try {
+    const v = JSON.parse(settings?.[SETTING_PREMIUM_BASE_ITEMS] || 'null');
+    if (Array.isArray(v)) raw = v;
+  } catch (_) { raw = null; }
+  if (!raw) return [];
+  const out = [];
+  const seen = new Set();
+  raw.forEach((x) => {
+    const label = String(x || '').trim();
+    // 基本給は必ず入るので一覧には持ちません
+    if (!label || label === '基本給' || seen.has(label)) return;
+    seen.add(label);
+    out.push(label);
+  });
+  return out;
+}
+
+async function savePremiumBaseItems(labels, actor = null) {
+  const slim = parsePremiumBaseItems({ [SETTING_PREMIUM_BASE_ITEMS]: JSON.stringify(labels || []) });
+  const { error } = await supabase.from('app_settings').upsert(
+    {
+      key: SETTING_PREMIUM_BASE_ITEMS,
+      value: JSON.stringify(slim),
+      updated_by: actor?.id || null,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: 'key' }
+  );
+  if (error) {
+    console.error('割増基礎単価の設定の保存に失敗しました', error);
+    return { ok: false, message: error.message || '' };
+  }
+  await logAudit(actor, '割増基礎単価に入れる項目を変更', slim.length > 0 ? slim.join('／') : '基本給のみ');
+  return { ok: true };
+}
+
+// その方の、基礎に入れる手当の月額の合計。
+//   employeeItems … スタッフ詳細の「毎月の固定支給項目」
+//   groupItems    … 給与規定グループの固定額（全スタッフ共通の設定を含む）
+// 同じ名前が両方にあるときは、スタッフ詳細の金額を使います
+//（給与明細を作るときと同じ考え方です）。
+function premiumBaseAllowanceTotal({ settings, employeeItems = [], groupItems = [] }) {
+  const wanted = parsePremiumBaseItems(settings);
+  if (wanted.length === 0) return { total: 0, parts: [] };
+  const byLabel = new Map();
+  groupItems.forEach((x) => {
+    if (x?.source === 'fixed' && x.enabled !== false) {
+      byLabel.set(String(x.label || '').trim(), Math.max(0, Math.round(Number(x.amount) || 0)));
+    }
+  });
+  (employeeItems || []).forEach((x) => {
+    if (x?.kind !== 'payment') return;
+    const label = String(x.label || '').trim();
+    if (!label) return;
+    byLabel.set(label, Math.max(0, Math.round(Number(x.amount) || 0)));
+  });
+  const parts = [];
+  let total = 0;
+  wanted.forEach((label) => {
+    const amount = byLabel.get(label);
+    if (!(amount > 0)) return;
+    parts.push({ label, amount });
+    total += amount;
+  });
+  return { total, parts };
+}
+
 // ---- 計算のきまり（割増率と控除単価の出し方） ----
 // これまでコードに書いていた数字と出し方を、画面から変えられるようにします。
 //
@@ -17866,11 +17973,12 @@ function applyDeductionAmounts(items, amounts) {
 // ---- 深夜手当・遅刻早退控除の根拠（給与計算画面） ----
 // どちらも勤怠から自動で出すため、下書きにそのまま入ります。
 // 金額がどこから来たのかと、いまの作りの限界を必ず見せます。
-function NightAndLateNote({ preview, lateDeduction, isPublished }) {
+function NightAndLateNote({ preview, lateDeduction, isPublished, premiumBaseParts = [] }) {
   if (!preview) return null;
   const night = preview.nightMinutes > 0;
   const late = lateDeduction && lateDeduction.amount != null && lateDeduction.unworkedMinutes > 0;
-  if (!night && !late) return null;
+  const premium = (preview.premiumBaseAllowance || 0) > 0;
+  if (!night && !late && !premium) return null;
   const hm = (min) => {
     const m = Math.max(0, Math.round(Number(min) || 0));
     return `${Math.floor(m / 60)}時間${m % 60}分`;
@@ -17878,8 +17986,25 @@ function NightAndLateNote({ preview, lateDeduction, isPublished }) {
   const tone = isPublished ? 'border-slate-200 bg-slate-50 text-slate-500' : 'border-teal-200 bg-teal-50 text-teal-900';
   return (
     <div className={`rounded-xl border px-3.5 py-2.5 text-[11.5px] leading-relaxed space-y-1.5 ${tone}`}>
-      {night && (
+      {premium && (
         <div>
+          <div className="font-bold">割増基礎単価 {formatYen(Math.round(preview.wageRateHourly))}（手当を足しています）</div>
+          基本給ぶん {formatYen(Math.round(preview.wageRateHourly - preview.premiumBaseAllowanceHourly))}
+          ＋ 手当ぶん {formatYen(Math.round(preview.premiumBaseAllowanceHourly))}。
+          手当は月額 {formatYen(preview.premiumBaseAllowance)} を月平均所定労働時間で割っています
+          （労働基準法施行規則第19条）。
+          {premiumBaseParts.length > 0 && (
+            <div className="text-[10.5px] pt-0.5 opacity-80 font-mono">
+              {premiumBaseParts.map((x) => `${x.label} ${formatYen(x.amount)}`).join('／')}
+            </div>
+          )}
+          <div className="text-[10.5px] pt-0.5 opacity-80">
+            入れる項目は「給与の設定」→「割増基礎単価に入れる項目」で選べます。
+          </div>
+        </div>
+      )}
+      {night && (
+        <div className={premium ? 'pt-1.5 border-t border-current/15' : ''}>
           <div className="font-bold">深夜手当 {formatYen(preview.nightAmount)}</div>
           割増基礎単価 {formatYen(Math.round(preview.wageRateHourly))} × 深夜 {hm(preview.nightMinutes)} × {preview.nightRate}。
           深夜は22時から翌5時までです。働いた時間ぶんの賃金は基本給・残業手当に入っているため、
@@ -17892,7 +18017,7 @@ function NightAndLateNote({ preview, lateDeduction, isPublished }) {
         </div>
       )}
       {late && (
-        <div className={night ? 'pt-1.5 border-t border-current/15' : ''}>
+        <div className={(night || premium) ? 'pt-1.5 border-t border-current/15' : ''}>
           <div className="font-bold">遅刻早退控除 {formatYen(lateDeduction.amount)}</div>
           {lateDeduction.wageType === 'daily' ? (
             <>
@@ -18009,6 +18134,152 @@ function PartialMonthNote({ employee, year, month, wageType, isPublished }) {
         。日割りの算式（暦日で割るか、所定労働日で割るか）は賃金規程で決まります。
         決まったら自動計算を作れますので、お知らせください。
       </div>
+    </div>
+  );
+}
+
+// ---- 割増基礎単価に入れる項目の設定（給与の設定・全社共通） ----
+// 法令で外してよい手当は限られているため、外している項目があれば注意を出します。
+function PremiumBaseSettings({ settings, actor, isMasterAdmin, onSaved }) {
+  const [open, setOpen] = useState(false);
+  const [picked, setPicked] = useState(() => new Set(parsePremiumBaseItems(settings)));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [done, setDone] = useState('');
+
+  const savedJson = settings?.[SETTING_PREMIUM_BASE_ITEMS] || '';
+  useEffect(() => {
+    setPicked(new Set(parsePremiumBaseItems(settings)));
+    // settings は毎回あたらしい物になるため、中身の文字列を見ています
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savedJson]);
+
+  if (!isMasterAdmin) return null;
+
+  // 対象は「使う」にしている支給項目のうち、毎月決まって払うもの。
+  // 残業手当・深夜手当・交通費精算などの自動計算は、それ自体が割増の結果か
+  // 毎月変わるものなので基礎には入れません。
+  const candidates = payrollItemsOf(settings, 'payment')
+    .filter((x) => x.label !== '基本給' && x.source !== 'auto');
+
+  const toggle = (label) => {
+    setError(''); setDone('');
+    setPicked((prev) => {
+      const next = new Set(prev);
+      if (next.has(label)) next.delete(label); else next.add(label);
+      return next;
+    });
+  };
+
+  // 外してよい手当に当てはまらないのに、基礎に入れていない項目
+  const risky = candidates.filter((x) => !picked.has(x.label) && !isPremiumBaseExcludable(x.label));
+  const count = picked.size;
+
+  const save = async () => {
+    setError(''); setDone(''); setSaving(true);
+    const res = await savePremiumBaseItems(Array.from(picked), actor);
+    setSaving(false);
+    if (!res.ok) { setError(`保存できませんでした。${res.message}`); return; }
+    setDone('割増基礎単価に入れる項目を保存しました。これから作る給与明細に使われます。');
+    if (onSaved) await onSaved();
+  };
+
+  return (
+    <div className="rounded-xl border border-slate-200 overflow-hidden">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="w-full px-3.5 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center gap-2 flex-wrap text-left"
+      >
+        <span className="text-[12px] font-bold text-slate-600">割増基礎単価に入れる項目</span>
+        <span className="text-[11px] text-slate-400">
+          {count > 0 ? `基本給＋${count}項目` : '基本給のみ'}
+        </span>
+        {risky.length > 0 && (
+          <span className="text-[10.5px] font-bold text-amber-700">要確認 {risky.length}項目</span>
+        )}
+        <span className="ml-auto text-[11px] font-bold text-slate-500">{open ? '閉じる' : '開く'}</span>
+      </button>
+
+      {open && (
+        <div className="px-3.5 py-3 space-y-3">
+          {error && <div className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-700">{error}</div>}
+          {done && <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-[11px] text-emerald-700">{done}</div>}
+
+          <div className="text-[10.5px] text-slate-500 leading-relaxed">
+            残業手当・深夜手当のもとになる1時間あたりの単価です。
+            <b className="block pt-0.5">基本給は必ず入ります。ここで選ぶのは、それに足す手当です。</b>
+            月額の手当は、月平均所定労働時間で割って1時間あたりに直してから足します
+            （労働基準法施行規則第19条）。
+          </div>
+
+          <div className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 text-[10.5px] text-slate-600 leading-relaxed">
+            <b className="block">外してよい手当は法令で決まっています（限定列挙）。</b>
+            {PREMIUM_BASE_EXCLUDABLE.join('・')}
+            <span className="block pt-0.5">
+              この7つ以外は、名前が何であれ基礎に入れる必要があります
+              （労働基準法第37条第5項・同法施行規則第21条）。
+            </span>
+          </div>
+
+          {candidates.length === 0 ? (
+            <div className="px-2.5 py-6 text-center text-[11.5px] text-slate-300">
+              対象になる手当がありません。支給・控除項目一覧で手当を足すと、ここに出ます。
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              {candidates.map((x) => {
+                const on = picked.has(x.label);
+                const excludable = isPremiumBaseExcludable(x.label);
+                return (
+                  <label key={x.label} className="flex items-start gap-2 text-[11.5px] text-slate-700">
+                    <input type="checkbox" checked={on} onChange={() => toggle(x.label)} className="mt-0.5 shrink-0" />
+                    <span className="min-w-0">
+                      <b>{x.label}</b>
+                      <span className="text-[10.5px] text-slate-400 pl-1.5">{PAYROLL_ITEM_SOURCES[x.source] || ''}</span>
+                      {!on && !excludable && (
+                        <span className="block text-[10.5px] font-bold text-amber-700">
+                          法令で外してよい7つに当てはまりません。基礎に入れる必要がないか、ご確認ください。
+                        </span>
+                      )}
+                      {!on && excludable && (
+                        <span className="block text-[10.5px] text-slate-400">
+                          外してよい手当にあたります。ただし、実態によっては入れる必要があります
+                          （一律の額を払っている住宅手当など）。
+                        </span>
+                      )}
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+
+          {risky.length > 0 && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-[10.5px] text-amber-900 leading-relaxed">
+              <b className="block">基礎に入れていない手当があります。</b>
+              下の{risky.length}項目は、法令で外してよい7つに当てはまりません。
+              基礎に入れないと、残業手当・深夜手当が本来より少なくなります。
+              <div className="pt-1 font-mono">{risky.map((x) => x.label).join('／')}</div>
+              <span className="block pt-0.5">判断に迷う場合は社会保険労務士にご確認ください。</span>
+            </div>
+          )}
+
+          <div className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 text-[10.5px] text-slate-600 leading-relaxed">
+            <b className="block">金額は、毎月決まって払う額だけを見ます。</b>
+            スタッフ詳細の「毎月の固定支給項目」と、給与規定グループの固定額が対象です。
+            給与計算の画面で毎月入れる金額や、残業手当・交通費精算などの自動計算は入れません。
+            <span className="block pt-0.5">すでに作った給与明細の金額は変わりません。</span>
+          </div>
+
+          <button
+            onClick={save}
+            disabled={saving}
+            className="w-full rounded-lg bg-slate-800 py-2 text-[12.5px] font-bold text-white disabled:bg-slate-300"
+          >
+            {saving ? '保存中…' : '割増基礎単価に入れる項目を保存する'}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -19674,6 +19945,12 @@ function PayrollSettingsTab({ settings, employeeAccounts = [], groupAttendanceSc
         isMasterAdmin={isMasterAdmin}
         onSaved={onRefresh}
       />
+      <PremiumBaseSettings
+        settings={settings}
+        actor={session}
+        isMasterAdmin={isMasterAdmin}
+        onSaved={onRefresh}
+      />
       <DeemedOvertimeSettings
         settings={settings}
         employeeAccounts={employeeAccounts}
@@ -19807,6 +20084,15 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
   // 計算のきまり（割増率と控除単価の出し方）。給与の設定で変えられます。
   const formulas = parsePayrollFormulas(settings);
 
+  // 割増基礎単価に足す手当の月額。毎月決まって払う額だけを見ます。
+  const premiumBase = employee
+    ? premiumBaseAllowanceTotal({
+        settings,
+        employeeItems: employeeSalaryItems,
+        groupItems: payrollItemsForEmployee(settings, 'payment', employee),
+      })
+    : { total: 0, parts: [] };
+
   // 日給制の1日の所定労働時間。給与規定グループの所定勤務時間から出します
   //（始業〜終業 − 休憩60分）。残業の割増基礎単価の分母になります。
   const groupHours = employee ? groupWorkHoursFor(employee, settings) : null;
@@ -19831,6 +20117,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     rounding: payrollRoundingSet(settings),
     overtimeRate: formulas.overtimeRate,
     nightRate: formulas.nightRate,
+    premiumBaseAllowance: premiumBase.total,
   }) : null;
 
   // 遅刻早退控除を「1日あたり単価 ÷ 1日の所定労働時間」で出すときに使う1日単価。
@@ -20257,7 +20544,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
             <input type="number" step="0.5" value={paidLeaveHours} onChange={(e) => setPaidLeaveHours(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px] bg-white" />
           </Field>
         </div>
-        <NightAndLateNote preview={preview} lateDeduction={lateDeduction} isPublished={isPublished} />
+        <NightAndLateNote preview={preview} lateDeduction={lateDeduction} isPublished={isPublished} premiumBaseParts={premiumBase.parts} />
         <AbsenceDeductionNote
           deduction={absenceDeduction}
           wageType={wageType}
