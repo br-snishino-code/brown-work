@@ -15234,14 +15234,16 @@ function computePayrollPreview({ wageType, hourlyWage, monthlySalary, workedMinu
     overtimeAmount = roundYenBy((paidOvertimeMinutes / 60) * wageRate * OVERTIME_MULTIPLIER, rOver);
   } else {
     wageRate = Number(monthlySalary) || 0;
-    if (attendanceDays && attendanceDays > 0) {
-      // 出勤規定日数に対する実出勤日数の割合で月給を日割り計算（規定日数を超えて働いた分は満額まで）
-      const dailyWage = wageRate / attendanceDays;
-      baseAmount = roundYenBy(dailyWage * Math.min(Number(actualDays) || 0, attendanceDays), rBase);
-      prorated = true;
-    } else {
-      baseAmount = roundYenBy(wageRate, rBase);
-    }
+    // 月給制の基本給は月給そのものです。休んだぶんは「欠勤控除」で引きます（御社に確認済み）。
+    //
+    // 以前は「月給 ÷ 出勤規定日数 × 実出勤日数」で日割りしていました。
+    // この実出勤日数は打刻のある日だけを数えるため、有休を取った日が分子から外れ、
+    // 有休を取ると基本給が減っていました。有休は賃金を支払う日なので誤りです。
+    //
+    // ⚠ 入社月・退職月も満額になります。在籍していない日の分を引くかどうかは
+    //   賃金規程しだいなので、画面で知らせて人が判断する形にしています。
+    //   日割りの算式が決まったら、ここに足してください。
+    baseAmount = roundYenBy(wageRate, rBase);
     // 月平均所定労働時間は画面で設定できます（未設定なら MONTHLY_STANDARD_HOURS）
     const hours = Number(monthlyStandardHours) > 0 ? Number(monthlyStandardHours) : MONTHLY_STANDARD_HOURS;
     wageRateHourly = wageRate / hours;
@@ -16690,6 +16692,7 @@ const BUILTIN_PAYROLL_ITEMS = [
   { label: '通勤手当', kind: 'payment', rounding: 'round', desc: '通勤経路の月額換算の合計（給与作成時にコピー）' },
   { label: '残業手当', kind: 'payment', rounding: 'ceil', desc: '【割増基礎単価】×【残業時間】× 1.25' },
   { label: '交通費精算', kind: 'payment', rounding: 'ceil', desc: '承認済みの交通費精算の合計' },
+  { label: '欠勤控除', kind: 'payment', rounding: 'floor', desc: '欠勤控除単価（基本給 ÷ 当月の出勤規定日数・1円未満切り捨て）×【欠勤日数】。賃金そのものが減るものなので、支給項目にマイナスの金額で入ります。' },
   { label: '土日祝皆勤手当', kind: 'payment', rounding: 'ceil', desc: '土日祝の欠勤0日 10,000円／1日 5,000円／2日以上 0円（勤務実績が規定日数に満たないときは日割り）' },
   { label: '健康保険料', kind: 'deduction', statutory: true, desc: '標準報酬月額 ×【健康保険料率】÷ 2' },
   { label: '介護保険料', kind: 'deduction', statutory: true, desc: '標準報酬月額 ×【介護保険料率】÷ 2（40歳から64歳の月のみ）' },
@@ -16947,6 +16950,40 @@ async function savePayrollItemGroups(groups, actor = null) {
   }
   await logAudit(actor, '給与規定グループの設定を変更', `${Object.keys(slim).length}グループ`);
   return { ok: true };
+}
+
+// ============================================================
+// 欠勤控除
+// ============================================================
+// 欠勤控除単価 × 欠勤日数。御社のジョブカンと同じ出し方です
+// （2026-10-28に設定画面で確認）：
+//   欠勤控除単価 ＝ 基本給 ÷ 所定労働日数（当月）
+//   対象項目は基本給のみ。単価の1円未満は切り捨て。
+//
+// 単価の端数を切り捨てにしているのは、賃金規程の
+// 「控除項目（欠勤、遅刻等の不就労時間）は切り捨て」とも一致するためです。
+// 金額側の端数は、支給・控除項目一覧の「1円未満」の設定に従います（既定は切り捨て）。
+//
+// ⚠ 支給項目に「マイナスの金額」で入れます。控除項目ではありません。
+//   欠勤控除は社会保険料や税のような「手取りからの控除」ではなく、
+//   賃金そのものが減るものです。支給側で引かないと、
+//   雇用保険の賃金総額と所得税の課税対象額が減らず、多く取られてしまいます。
+const ABSENCE_DEDUCTION_LABEL = '欠勤控除';
+
+// 戻り値の reason：
+//   ''              … 計算できた
+//   'noPrescribed'  … 当月の出勤規定日数が未登録（単価が出せない）
+//   'noBase'        … 基本給が0円（単価が出せない）
+function computeAbsenceDeduction({ baseAmount, prescribedDays, absentDays, rounding = 'floor' }) {
+  const base = Math.max(0, Math.round(Number(baseAmount) || 0));
+  const pd = Number(prescribedDays);
+  const days = Math.max(0, Number(absentDays) || 0);
+  const common = { baseAmount: base, prescribedDays: Number.isFinite(pd) && pd > 0 ? pd : null, absentDays: days };
+  if (!Number.isFinite(pd) || pd <= 0) return { ...common, unit: null, amount: null, reason: 'noPrescribed' };
+  if (base <= 0) return { ...common, unit: null, amount: null, reason: 'noBase' };
+  // 単価の1円未満は切り捨て（ジョブカンの設定・賃金規程のどちらとも一致）
+  const unit = floorYen(base / pd);
+  return { ...common, unit, amount: roundYenBy(unit * days, rounding), reason: '' };
 }
 
 // ============================================================
@@ -17339,6 +17376,87 @@ function applyDeductionAmounts(items, amounts) {
     else next.push({ label, amount: value });
   });
   return next;
+}
+
+// ---- 欠勤控除の根拠（給与計算画面） ----
+// 単価がどこから出たのか、いくら引くのかを必ず見せます。
+// 金額は自動で入れず、ボタンを押してもらう形にしています（手で直した額を勝手に
+// 書き換えないため。土日祝皆勤手当と同じ考え方です）。
+function AbsenceDeductionNote({ deduction, current, onApply, isPublished, wageType }) {
+  // 時給制は働いた時間ぶんを払う形なので、欠勤控除そのものがありません
+  if (!deduction || wageType !== 'monthly') return null;
+  if (deduction.absentDays <= 0 && !current) return null;
+
+  if (deduction.amount == null) {
+    const why = deduction.reason === 'noPrescribed'
+      ? `${deduction.absentDays}日の欠勤がありますが、この月の出勤規定日数が未登録のため、1日あたりの単価を出せません。「出勤規定日数設定」でグループまたはこの方の日数を登録するか、金額を手で入れてください。`
+      : '基本給が0円のため、1日あたりの単価を出せません。';
+    return (
+      <div className="rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-[11.5px] leading-relaxed text-amber-900 space-y-1">
+        <div className="font-bold">欠勤控除を自動計算できません</div>
+        <div>{why}</div>
+      </div>
+    );
+  }
+
+  // 支給項目にはマイナスで入っているので、符号をそろえて比べます
+  const applied = current == null ? null : Math.abs(Number(current) || 0);
+  const differs = applied == null ? deduction.amount > 0 : applied !== deduction.amount;
+  const tone = isPublished
+    ? 'border-slate-200 bg-slate-50 text-slate-500'
+    : differs
+      ? 'border-amber-200 bg-amber-50 text-amber-900'
+      : 'border-teal-200 bg-teal-50 text-teal-900';
+
+  return (
+    <div className={`rounded-xl border px-3.5 py-2.5 text-[11.5px] leading-relaxed space-y-1 ${tone}`}>
+      <div className="font-bold">
+        欠勤控除 {formatYen(deduction.amount)}
+        {differs && !isPublished && <span className="ml-1.5 text-[10.5px]">（下の支給欄の金額と違います）</span>}
+      </div>
+      <div>
+        基本給 {formatYen(deduction.baseAmount)} ÷ 出勤規定日数 {deduction.prescribedDays}日
+        ＝ 1日あたり <b>{formatYen(deduction.unit)}</b>（1円未満切り捨て）
+        × 欠勤 {deduction.absentDays}日
+      </div>
+      <div className="text-[10.5px] opacity-80">
+        支給項目に<b>マイナスの金額</b>で入ります。欠勤で減るのは賃金そのものなので、
+        支給側で引かないと雇用保険と所得税の対象額が減りません。
+      </div>
+      {differs && !isPublished && onApply && (
+        <button
+          onClick={onApply}
+          className="w-full rounded-lg border-2 border-amber-300 bg-white py-1.5 text-[12px] font-bold text-amber-800"
+        >
+          この金額を支給項目に入れる
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ---- 入社月・退職月の知らせ（給与計算画面） ----
+// 月給制の基本給は満額を出すため、在籍していない日があっても減りません。
+// 日割りの算式は賃金規程しだいなので、人が判断できるように知らせます。
+function PartialMonthNote({ employee, year, month, wageType, isPublished }) {
+  if (!employee || wageType !== 'monthly') return null;
+  const prefix = `${year}-${pad(month)}`;
+  const hired = String(employee.hireDate || '').startsWith(prefix);
+  const resigned = String(employee.resignationDate || '').startsWith(prefix);
+  if (!hired && !resigned) return null;
+  const what = hired && resigned ? '入社と退職' : hired ? '入社' : '退職';
+  return (
+    <div className={`rounded-xl border px-3.5 py-2.5 text-[11.5px] leading-relaxed ${isPublished ? 'border-slate-200 bg-slate-50 text-slate-500' : 'border-amber-200 bg-amber-50 text-amber-900'}`}>
+      <div className="font-bold">この月に{what}日があります（基本給は満額で出ています）</div>
+      月給制の基本給は月給そのものを出すため、在籍していない日があっても減りません。
+      日割りが必要な場合は、<b>基本給の金額を手で直してください。</b>
+      <div className="text-[10.5px] pt-0.5 opacity-80">
+        {hired && `入社日 ${employee.hireDate}`}{hired && resigned && '／'}{resigned && `退職日 ${employee.resignationDate}`}
+        。日割りの算式（暦日で割るか、所定労働日で割るか）は賃金規程で決まります。
+        決まったら自動計算を作れますので、お知らせください。
+      </div>
+    </div>
+  );
 }
 
 // ---- みなし残業の設定（給与計算画面・グループごと） ----
@@ -18631,6 +18749,15 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     rounding: payrollRoundingSet(settings),
   }) : null;
 
+  // 欠勤控除。画面の欠勤日数から出します（欠勤日数は手で直せるため、state を見ます）。
+  // 金額は自動では入れず、下の案内から「入れる」を押してもらいます。
+  const absenceDeduction = employee && preview ? computeAbsenceDeduction({
+    baseAmount: preview.baseAmount,
+    prescribedDays: attendanceDays,
+    absentDays: Number(absentDays) || 0,
+    rounding: payrollRoundingFor(settings, 'payment', ABSENCE_DEDUCTION_LABEL),
+  }) : null;
+
   // 土日祝皆勤手当。スタッフ詳細の固定支給項目に登録されている方だけが対象です。
   // この方の給与規定グループで「使う」にしているときに計算します。
   // 計算した金額を明細に自動で入れるのは、スタッフ詳細の固定支給項目に
@@ -18665,6 +18792,13 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     const paymentOrder = payrollItemOrderMap(settings, 'payment');
     const deductionOrder = payrollItemOrderMap(settings, 'deduction');
 
+    const draftAbsence = computeAbsenceDeduction({
+      baseAmount: preview.baseAmount,
+      prescribedDays: attendanceDays,
+      absentDays: Number(existing?.attendanceExtra?.absentDays ?? 0),
+      rounding: payrollRoundingFor(settings, 'payment', ABSENCE_DEDUCTION_LABEL),
+    });
+
     // 支給項目を先に組み立てます。雇用保険料はこの中身から出すため、
     // 画面の state（1回遅れて入る）ではなく、ここで作ったものを使います。
     const draftPayment = [
@@ -18672,6 +18806,11 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
       ...(preview.allowanceAmount > 0 ? [{ label: '通勤手当', amount: preview.allowanceAmount }] : []),
       ...(preview.overtimeAmount > 0 ? [{ label: '残業手当', amount: preview.overtimeAmount }] : []),
       ...(approvedCommuteTotal > 0 ? [{ label: `交通費精算（${month}月分）`, amount: approvedCommuteTotal }] : []),
+      // 欠勤控除は支給額から引くため、マイナスの金額で入れます。
+      // 保存されている欠勤日数から出します（新しく作るときは0日なので0円）。
+      ...(draftAbsence && draftAbsence.amount > 0
+        ? [{ label: ABSENCE_DEDUCTION_LABEL, amount: -draftAbsence.amount }]
+        : []),
       // 土日祝皆勤手当は、登録した固定額ではなく計算した額を入れます。
       // 計算できないとき（シフト未取り込みなど）は0にして、画面で知らせます。
       ...employeeSalaryItems.filter((it) => it.kind === 'payment').map((it) => (
@@ -18838,8 +18977,11 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
           ? {}
           : { weekendAbsentOverride: Number(weekendAbsentOverride) || 0 }),
       },
-      notes: preview.prorated
-        ? `出勤規定日数 ${attendanceDays}日（${attendanceSource === 'personal' ? 'この方だけの設定' : `${employee.mainGroup}の設定`}）に対し実出勤 ${monthly.days}日で日割り計算`
+      // 欠勤控除を入れたときは、その根拠を明細のメモに残します
+      notes: absenceDeduction && absenceDeduction.amount > 0
+        ? `欠勤控除：基本給 ${formatYen(absenceDeduction.baseAmount)} ÷ 出勤規定日数 ${absenceDeduction.prescribedDays}日`
+          + `（${attendanceSource === 'personal' ? 'この方だけの設定' : `${employee.mainGroup}の設定`}）`
+          + ` ＝ 1日 ${formatYen(absenceDeduction.unit)} × 欠勤 ${absenceDeduction.absentDays}日`
         : null,
     });
   };
@@ -18957,6 +19099,23 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
             <input type="number" step="0.5" value={paidLeaveHours} onChange={(e) => setPaidLeaveHours(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px] bg-white" />
           </Field>
         </div>
+        <AbsenceDeductionNote
+          deduction={absenceDeduction}
+          wageType={wageType}
+          current={paymentItems.find((it) => String(it.label).trim() === ABSENCE_DEDUCTION_LABEL)?.amount ?? null}
+          isPublished={isPublished}
+          onApply={() => setPaymentItems((prev) => {
+            const amount = -absenceDeduction.amount;
+            const at = prev.findIndex((it) => String(it.label).trim() === ABSENCE_DEDUCTION_LABEL);
+            if (at >= 0) return prev.map((it, i) => (i === at ? { ...it, amount } : it));
+            // まだ行が無ければ、一覧の並び順どおりの位置に入れます
+            return sortByPayrollItemOrder(
+              [...prev, { label: ABSENCE_DEDUCTION_LABEL, amount }],
+              payrollItemOrderMap(settings, 'payment'),
+            );
+          })}
+        />
+        <PartialMonthNote employee={employee} year={year} month={month} wageType={wageType} isPublished={isPublished} />
 
         {commuteRouteTotal > 0 && (
           <div className="text-[11px] text-slate-400 -mt-1">通勤手当は、スタッフ詳細で登録された経路（合計 {formatYen(commuteRouteTotal)}）を初期値にしています。金額は下の支給項目欄で調整できます。</div>
