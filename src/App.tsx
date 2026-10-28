@@ -1085,8 +1085,14 @@ function computeMonthlySummary(records, target = new Date()) {
     acc.overtimeMin += m.overtimeMin;
     acc.lateMin += m.lateMin;
     acc.earlyLeaveMin += m.earlyLeaveMin;
+    // 深夜（22時〜翌5時）と勤務時間の重なり。賃金台帳の記載事項でもあります
+    acc.nightMin += computeNightMinutes(record);
+    // 不就労時間（遅刻＋早退）。賃金規程どおり、日ごとに15分単位で切り捨ててから足します。
+    // 月の合計を丸めると結果が変わるため、必ず日ごとに丸めます
+    //（例：遅刻14分が5日 → 日ごとなら0分、月合計70分を丸めると60分）。
+    acc.unworkedMin += roundUnworkedMinutes(m.lateMin + m.earlyLeaveMin);
     return acc;
-  }, { days: 0, workedMin: 0, overtimeMin: 0, lateMin: 0, earlyLeaveMin: 0 });
+  }, { days: 0, workedMin: 0, overtimeMin: 0, lateMin: 0, earlyLeaveMin: 0, nightMin: 0, unworkedMin: 0 });
 }
 
 // ---- 給与明細・賞与明細の修正履歴 ----
@@ -15197,8 +15203,7 @@ function roundDivBy(num, den, mode) {
 
 // 不就労時間の端数処理。1時間未満の端数を15分単位で切り捨てます。
 // 賃金規程どおり、日ごとに丸めます（月の合計に対してではありません）。
-// ⚠ まだ不就労控除そのものを作っていないため、この関数は使っていません。
-//   控除を作るときに、1日分の不就労時間をここに通してください。
+// computeMonthlySummary が1日分ずつここに通し、その合計を unworkedMin にしています。
 const UNWORKED_ROUND_UNIT_MIN = 15;
 function roundUnworkedMinutes(minutes) {
   const m = Math.max(0, Math.floor(Number(minutes) || 0));
@@ -15212,10 +15217,11 @@ function roundUnworkedMinutes(minutes) {
 //   overtime  … 残業手当
 //   allowance … 通勤手当
 // 渡されなかったときは、これまでどおり基本給と残業手当は切り上げ、通勤手当は四捨五入です。
-function computePayrollPreview({ wageType, hourlyWage, monthlySalary, workedMinutes, overtimeMinutes, commuteAllowance = 0, attendanceDays = null, actualDays = 0, monthlyStandardHours = MONTHLY_STANDARD_HOURS, deemedOvertimeMinutes = 0, rounding = null }) {
+function computePayrollPreview({ wageType, hourlyWage, monthlySalary, workedMinutes, overtimeMinutes, commuteAllowance = 0, attendanceDays = null, actualDays = 0, monthlyStandardHours = MONTHLY_STANDARD_HOURS, deemedOvertimeMinutes = 0, nightMinutes = 0, rounding = null }) {
   const rBase = rounding?.base || 'ceil';
   const rOver = rounding?.overtime || 'ceil';
   const rAllow = rounding?.allowance || 'round';
+  const rNight = rounding?.night || 'ceil';
   const regularMinutes = Math.max(0, workedMinutes - overtimeMinutes);
   // みなし残業。決めた時間までは残業手当を追加で払わず、超えた分だけ払います。
   // 月給制の方にだけ当てます（deemedOvertimeFor が時給制には0を返します）。
@@ -15250,6 +15256,10 @@ function computePayrollPreview({ wageType, hourlyWage, monthlySalary, workedMinu
     overtimeAmount = roundYenBy((paidOvertimeMinutes / 60) * wageRateHourly * OVERTIME_MULTIPLIER, rOver);
   }
   const allowanceAmount = roundYenBy(Number(commuteAllowance) || 0, rAllow);
+  // 深夜手当は割増の0.25だけ。働いた時間ぶんの賃金は基本給・残業手当に入っています。
+  // みなし残業は当てません（みなし残業が覆うのは時間外の割増で、深夜の割増は別のため）。
+  const nightMin = Math.max(0, Math.round(Number(nightMinutes) || 0));
+  const nightAmount = roundYenBy((nightMin / 60) * wageRateHourly * NIGHT_MULTIPLIER, rNight);
   // wageRateHourly        … 割増基礎単価（1時間あたり）
   // deemedOvertimeMinutes  … 当てたみなし残業の分数
   // paidOvertimeMinutes    … 実際に残業手当を払う分数（残業 − みなし残業）
@@ -15258,7 +15268,8 @@ function computePayrollPreview({ wageType, hourlyWage, monthlySalary, workedMinu
     wageRate, wageRateHourly, regularMinutes, baseAmount, overtimeAmount, allowanceAmount,
     overtimeMinutes: Math.max(0, Math.round(Number(overtimeMinutes) || 0)),
     deemedOvertimeMinutes: deemedMin, paidOvertimeMinutes,
-    totalAmount: baseAmount + overtimeAmount + allowanceAmount, prorated,
+    nightMinutes: nightMin, nightAmount,
+    totalAmount: baseAmount + overtimeAmount + allowanceAmount + nightAmount, prorated,
   };
 }
 
@@ -16692,6 +16703,8 @@ const BUILTIN_PAYROLL_ITEMS = [
   { label: '通勤手当', kind: 'payment', rounding: 'round', desc: '通勤経路の月額換算の合計（給与作成時にコピー）' },
   { label: '残業手当', kind: 'payment', rounding: 'ceil', desc: '【割増基礎単価】×【残業時間】× 1.25' },
   { label: '交通費精算', kind: 'payment', rounding: 'ceil', desc: '承認済みの交通費精算の合計' },
+  { label: '深夜手当', kind: 'payment', rounding: 'ceil', desc: '【割増基礎単価】×【深夜時間】× 0.25。深夜は22時から翌5時まで。働いた時間ぶんの賃金は基本給・残業手当に入っているため、上に乗る割増だけを足します。' },
+  { label: '遅刻早退控除', kind: 'payment', rounding: 'floor', desc: '遅刻早退控除単価（基本給 ÷ 月平均所定労働時間・1円未満切り捨て）×【遅刻早退時間】。時間は日ごとに15分単位で切り捨てた合計。賃金そのものが減るものなので、支給項目にマイナスの金額で入ります。' },
   { label: '欠勤控除', kind: 'payment', rounding: 'floor', desc: '欠勤控除単価（基本給 ÷ 当月の出勤規定日数・1円未満切り捨て）×【欠勤日数】。賃金そのものが減るものなので、支給項目にマイナスの金額で入ります。' },
   { label: '土日祝皆勤手当', kind: 'payment', rounding: 'ceil', desc: '土日祝の欠勤0日 10,000円／1日 5,000円／2日以上 0円（勤務実績が規定日数に満たないときは日割り）' },
   { label: '健康保険料', kind: 'deduction', statutory: true, desc: '標準報酬月額 ×【健康保険料率】÷ 2' },
@@ -16953,6 +16966,62 @@ async function savePayrollItemGroups(groups, actor = null) {
 }
 
 // ============================================================
+// 遅刻早退控除
+// ============================================================
+// 御社のジョブカンと同じ出し方です（2026-10-28に設定画面で確認）：
+//   遅刻早退控除単価 ＝ 基本給 ÷ 1ヶ月の平均所定労働時間
+//   対象項目は基本給のみ。単価の1円未満は切り捨て。
+//   金額 ＝ 単価 ×【遅刻早退時間】
+//
+// 時間のほうは、賃金規程どおり日ごとに15分単位で切り捨てた合計を使います
+// （computeMonthlySummary の unworkedMin）。
+//
+// ⚠ 分母の月平均所定労働時間が未設定のあいだは、仮の値で計算されます。
+//   正しい値は社労士の確認待ちです（確認事項の一覧の6番）。
+//
+// ⚠ 欠勤控除と同じく、支給項目にマイナスの金額で入れます。
+//   賃金そのものが減るものなので、支給側で引かないと
+//   雇用保険の賃金総額と所得税の課税対象額が減りません。
+const LATE_DEDUCTION_LABEL = '遅刻早退控除';
+
+// 戻り値の reason：
+//   ''             … 計算できた
+//   'noBase'       … 基本給が0円（単価が出せない）
+//   'provisional'  … 計算したが、月平均所定労働時間が未設定で仮の値
+function computeLateEarlyDeduction({ baseAmount, monthlyStandardHours, hoursConfigured = false, unworkedMinutes, rounding = 'floor' }) {
+  const base = Math.max(0, Math.round(Number(baseAmount) || 0));
+  const hours = Number(monthlyStandardHours) > 0 ? Number(monthlyStandardHours) : MONTHLY_STANDARD_HOURS;
+  const minutes = Math.max(0, Math.round(Number(unworkedMinutes) || 0));
+  const common = { baseAmount: base, monthlyStandardHours: hours, unworkedMinutes: minutes, hoursConfigured: !!hoursConfigured };
+  if (base <= 0) return { ...common, unit: null, amount: null, reason: 'noBase' };
+  // 単価の1円未満は切り捨て（ジョブカンの設定・賃金規程のどちらとも一致）
+  const unit = floorYen(base / hours);
+  return {
+    ...common,
+    unit,
+    amount: roundYenBy((unit * minutes) / 60, rounding),
+    reason: hoursConfigured ? '' : 'provisional',
+  };
+}
+
+// ============================================================
+// 深夜手当
+// ============================================================
+// 御社のジョブカンと同じ出し方です（2026-10-28に設定画面で確認）：
+//   【割増基礎単価】×【深夜時間】× 0.25
+//   深夜の対象は22:00〜29:00（翌5:00）。早朝勤務も深夜労働に含む。
+//
+// 0.25 なのは、働いた時間ぶんの賃金（1.0）がすでに基本給や残業手当に
+// 入っているためです。深夜はその上に乗る割増だけを足します。
+//
+// 深夜時間は computeNightMinutes が出します（賃金台帳でも使っている関数）。
+// ⚠ 日をまたぐ勤務には対応していません（夜勤の運用が無いため）。
+// ⚠ 休憩（固定60分）が何時に取られたかを記録していないため、
+//   休憩が深夜帯にかかっても差し引けません。深夜時間が多めに出ます。
+const NIGHT_ALLOWANCE_LABEL = '深夜手当';
+const NIGHT_MULTIPLIER = 0.25;
+
+// ============================================================
 // 欠勤控除
 // ============================================================
 // 欠勤控除単価 × 欠勤日数。御社のジョブカンと同じ出し方です
@@ -17043,6 +17112,7 @@ function payrollRoundingSet(settings) {
     base: payrollRoundingFor(settings, 'payment', '基本給'),
     overtime: payrollRoundingFor(settings, 'payment', '残業手当'),
     allowance: payrollRoundingFor(settings, 'payment', '通勤手当'),
+    night: payrollRoundingFor(settings, 'payment', NIGHT_ALLOWANCE_LABEL),
   };
 }
 
@@ -17376,6 +17446,57 @@ function applyDeductionAmounts(items, amounts) {
     else next.push({ label, amount: value });
   });
   return next;
+}
+
+// ---- 深夜手当・遅刻早退控除の根拠（給与計算画面） ----
+// どちらも勤怠から自動で出すため、下書きにそのまま入ります。
+// 金額がどこから来たのかと、いまの作りの限界を必ず見せます。
+function NightAndLateNote({ preview, lateDeduction, isPublished }) {
+  if (!preview) return null;
+  const night = preview.nightMinutes > 0;
+  const late = lateDeduction && lateDeduction.amount != null && lateDeduction.unworkedMinutes > 0;
+  if (!night && !late) return null;
+  const hm = (min) => {
+    const m = Math.max(0, Math.round(Number(min) || 0));
+    return `${Math.floor(m / 60)}時間${m % 60}分`;
+  };
+  const tone = isPublished ? 'border-slate-200 bg-slate-50 text-slate-500' : 'border-teal-200 bg-teal-50 text-teal-900';
+  return (
+    <div className={`rounded-xl border px-3.5 py-2.5 text-[11.5px] leading-relaxed space-y-1.5 ${tone}`}>
+      {night && (
+        <div>
+          <div className="font-bold">深夜手当 {formatYen(preview.nightAmount)}</div>
+          割増基礎単価 {formatYen(Math.round(preview.wageRateHourly))} × 深夜 {hm(preview.nightMinutes)} × 0.25。
+          深夜は22時から翌5時までです。働いた時間ぶんの賃金は基本給・残業手当に入っているため、
+          上に乗る割増だけを足しています。
+          <div className="text-[10.5px] pt-0.5 opacity-80">
+            <b>休憩が深夜帯にかかっても差し引けません。</b>休憩（固定60分）を何時に取ったかを記録していないためです。
+            深夜に休憩を取った方がいる場合は、金額を手で直してください。
+            日をまたぐ勤務にも対応していません。
+          </div>
+        </div>
+      )}
+      {late && (
+        <div className={night ? 'pt-1.5 border-t border-current/15' : ''}>
+          <div className="font-bold">遅刻早退控除 {formatYen(lateDeduction.amount)}</div>
+          基本給 {formatYen(lateDeduction.baseAmount)} ÷ 月平均所定労働時間 {lateDeduction.monthlyStandardHours}時間
+          ＝ 1時間あたり <b>{formatYen(lateDeduction.unit)}</b>（1円未満切り捨て）
+          × 遅刻早退 {hm(lateDeduction.unworkedMinutes)}。
+          <div className="text-[10.5px] pt-0.5 opacity-80">
+            時間は賃金規程どおり、<b>日ごとに15分単位で切り捨て</b>た合計です（00〜14分は0分、15〜29分は15分…）。
+            支給項目にマイナスの金額で入ります。
+          </div>
+          {lateDeduction.reason === 'provisional' && (
+            <div className="rounded-lg border border-amber-300 bg-amber-50 text-amber-900 px-2.5 py-1.5 text-[10.5px] mt-1">
+              <b>月平均所定労働時間がまだ設定されていません。</b>
+              仮の{MONTHLY_STANDARD_HOURS}時間で計算しているため、この金額は暫定です。
+              「給与の設定 → 支給・控除項目一覧 → 単価設定」で登録してください（正しい値は社労士にご確認ください）。
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ---- 欠勤控除の根拠（給与計算画面） ----
@@ -18746,7 +18867,17 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     actualDays: monthly.days,
     monthlyStandardHours: monthlyStandardHoursOf(settings),
     deemedOvertimeMinutes: deemed.minutes,
+    nightMinutes: monthly.nightMin,
     rounding: payrollRoundingSet(settings),
+  }) : null;
+
+  // 遅刻早退控除。勤怠から出すので、人の入力は要りません（下書きに自動で入ります）。
+  const lateDeduction = employee && preview ? computeLateEarlyDeduction({
+    baseAmount: preview.baseAmount,
+    monthlyStandardHours: monthlyStandardHoursOf(settings),
+    hoursConfigured: Number(settings?.[SETTING_MONTHLY_STANDARD_HOURS]) > 0,
+    unworkedMinutes: monthly.unworkedMin,
+    rounding: payrollRoundingFor(settings, 'payment', LATE_DEDUCTION_LABEL),
   }) : null;
 
   // 欠勤控除。画面の欠勤日数から出します（欠勤日数は手で直せるため、state を見ます）。
@@ -18792,6 +18923,13 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     const paymentOrder = payrollItemOrderMap(settings, 'payment');
     const deductionOrder = payrollItemOrderMap(settings, 'deduction');
 
+    const draftLate = computeLateEarlyDeduction({
+      baseAmount: preview.baseAmount,
+      monthlyStandardHours: monthlyStandardHoursOf(settings),
+      hoursConfigured: Number(settings?.[SETTING_MONTHLY_STANDARD_HOURS]) > 0,
+      unworkedMinutes: monthly.unworkedMin,
+      rounding: payrollRoundingFor(settings, 'payment', LATE_DEDUCTION_LABEL),
+    });
     const draftAbsence = computeAbsenceDeduction({
       baseAmount: preview.baseAmount,
       prescribedDays: attendanceDays,
@@ -18805,6 +18943,11 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
       { label: '基本給', amount: preview.baseAmount },
       ...(preview.allowanceAmount > 0 ? [{ label: '通勤手当', amount: preview.allowanceAmount }] : []),
       ...(preview.overtimeAmount > 0 ? [{ label: '残業手当', amount: preview.overtimeAmount }] : []),
+      ...(preview.nightAmount > 0 ? [{ label: NIGHT_ALLOWANCE_LABEL, amount: preview.nightAmount }] : []),
+      // 遅刻早退控除も支給額から引くため、マイナスの金額で入れます
+      ...(draftLate && draftLate.amount > 0
+        ? [{ label: LATE_DEDUCTION_LABEL, amount: -draftLate.amount }]
+        : []),
       ...(approvedCommuteTotal > 0 ? [{ label: `交通費精算（${month}月分）`, amount: approvedCommuteTotal }] : []),
       // 欠勤控除は支給額から引くため、マイナスの金額で入れます。
       // 保存されている欠勤日数から出します（新しく作るときは0日なので0円）。
@@ -19087,6 +19230,12 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
           <PayrollMetric label="遅刻" value={`${monthly.lateMin || 0}分`} />
           <PayrollMetric label="早退" value={`${monthly.earlyLeaveMin || 0}分`} />
         </div>
+        {monthly.nightMin > 0 && (
+          <div className="grid grid-cols-2 gap-3">
+            <PayrollMetric label="深夜（22時〜翌5時）" value={minutesToHHMM(monthly.nightMin)} />
+            <PayrollMetric label="不就労（15分単位で切り捨て後）" value={minutesToHHMM(monthly.unworkedMin)} />
+          </div>
+        )}
         <DeemedOvertimeNote deemed={deemed} preview={preview} employee={employee} />
         <div className="grid grid-cols-3 gap-3">
           <Field label="欠勤日数">
@@ -19099,6 +19248,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
             <input type="number" step="0.5" value={paidLeaveHours} onChange={(e) => setPaidLeaveHours(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px] bg-white" />
           </Field>
         </div>
+        <NightAndLateNote preview={preview} lateDeduction={lateDeduction} isPublished={isPublished} />
         <AbsenceDeductionNote
           deduction={absenceDeduction}
           wageType={wageType}
