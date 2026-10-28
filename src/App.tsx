@@ -15128,28 +15128,75 @@ function AdminDashboardTab({ missingCount, correctionCount, leaveCount, gpsAlert
 const MONTHLY_STANDARD_HOURS = 160; // 月給制の残業単価を出すための簡易換算（週40h×概ね4週）
 const OVERTIME_MULTIPLIER = 1.25;
 
+// ============================================================
+// 端数処理（賃金規程）
+// ============================================================
+// 金額：
+//   支給項目（基本給・時間外勤務手当・休日勤務手当・深夜勤務手当）… 1円未満を切り上げ
+//   控除項目（欠勤・遅刻等の不就労時間）                          … 1円未満を切り捨て
+// 時間：
+//   支給項目                                  … 1分単位
+//   控除項目（欠勤・遅刻等の不就労時間）      … 1時間未満の端数を15分単位で切り捨て
+//                                               （00〜14分→0分／15〜29分→15分／
+//                                                 30〜44分→30分／45〜59分→45分）
+//                                               日ごとに丸める（月の合計ではない）
+
+// 1円未満を切り上げる。
+// ⚠ Math.ceil をそのまま使ってはいけません。割り算の結果に小数の誤差が乗るため、
+//   本来ちょうど割り切れる額が1円増えます。
+//   例）時給800円 × 33分 ＝ (33/60)*800 が 440.00000000000006 になり、
+//       Math.ceil では 441円 になってしまう（正しくは 440円）。
+//       残業でも同じ。時給801円 × 48分 × 1.25 ＝ 801.0000000000001 → 802円。
+//   誤差の範囲（1円の百万分の1）は同じ額とみなしてから切り上げます。
+const YEN_EPSILON = 1e-6;
+const ceilYen = (n) => {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v <= 0) return 0;
+  return Math.ceil(v - YEN_EPSILON);
+};
+
+// 1円未満を切り捨てる（控除項目用）。不就労控除を作るときに使います。
+const floorYen = (n) => {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v <= 0) return 0;
+  return Math.floor(v + YEN_EPSILON);
+};
+
+// 不就労時間の端数処理。1時間未満の端数を15分単位で切り捨てます。
+// 賃金規程どおり、日ごとに丸めます（月の合計に対してではありません）。
+// ⚠ まだ不就労控除そのものを作っていないため、この関数は使っていません。
+//   控除を作るときに、1日分の不就労時間をここに通してください。
+const UNWORKED_ROUND_UNIT_MIN = 15;
+function roundUnworkedMinutes(minutes) {
+  const m = Math.max(0, Math.floor(Number(minutes) || 0));
+  const hours = Math.floor(m / 60);
+  const rest = m - hours * 60;
+  return hours * 60 + Math.floor(rest / UNWORKED_ROUND_UNIT_MIN) * UNWORKED_ROUND_UNIT_MIN;
+}
+
 function computePayrollPreview({ wageType, hourlyWage, monthlySalary, workedMinutes, overtimeMinutes, commuteAllowance = 0, attendanceDays = null, actualDays = 0 }) {
   const regularMinutes = Math.max(0, workedMinutes - overtimeMinutes);
   let baseAmount = 0;
   let overtimeAmount = 0;
   let wageRate = 0;
   let prorated = false;
+  // 支給項目の金額は1円未満を切り上げ（賃金規程）
   if (wageType === 'hourly') {
     wageRate = Number(hourlyWage) || 0;
-    baseAmount = Math.round((regularMinutes / 60) * wageRate);
-    overtimeAmount = Math.round((overtimeMinutes / 60) * wageRate * OVERTIME_MULTIPLIER);
+    baseAmount = ceilYen((regularMinutes / 60) * wageRate);
+    overtimeAmount = ceilYen((overtimeMinutes / 60) * wageRate * OVERTIME_MULTIPLIER);
   } else {
     wageRate = Number(monthlySalary) || 0;
     if (attendanceDays && attendanceDays > 0) {
       // 出勤規定日数に対する実出勤日数の割合で月給を日割り計算（規定日数を超えて働いた分は満額まで）
       const dailyWage = wageRate / attendanceDays;
-      baseAmount = Math.round(dailyWage * Math.min(Number(actualDays) || 0, attendanceDays));
+      baseAmount = ceilYen(dailyWage * Math.min(Number(actualDays) || 0, attendanceDays));
       prorated = true;
     } else {
-      baseAmount = Math.round(wageRate);
+      baseAmount = ceilYen(wageRate);
     }
     const hourlyEquivalent = wageRate / MONTHLY_STANDARD_HOURS;
-    overtimeAmount = Math.round((overtimeMinutes / 60) * hourlyEquivalent * OVERTIME_MULTIPLIER);
+    overtimeAmount = ceilYen((overtimeMinutes / 60) * hourlyEquivalent * OVERTIME_MULTIPLIER);
   }
   const allowanceAmount = Math.round(Number(commuteAllowance) || 0);
   return { wageRate, regularMinutes, baseAmount, overtimeAmount, allowanceAmount, totalAmount: baseAmount + overtimeAmount + allowanceAmount, prorated };
