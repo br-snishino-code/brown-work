@@ -1670,6 +1670,7 @@ const rowToAccount = (row) => ({
   emergencyContactPhone: row.emergency_contact_phone || '',
   emergencyContactAddress: row.emergency_contact_address || '',
   wageType: row.wage_type || 'hourly',
+  dailyWage: row.daily_wage != null ? Number(row.daily_wage) : 0,
   hourlyWage: row.hourly_wage != null ? Number(row.hourly_wage) : 0,
   monthlySalary: row.monthly_salary != null ? Number(row.monthly_salary) : 0,
   birthDate: row.birth_date || '',
@@ -4533,6 +4534,7 @@ function AttendanceApp() {
       emergencyContactPhone: 'emergency_contact_phone',
       emergencyContactAddress: 'emergency_contact_address',
       wageType: 'wage_type',
+      dailyWage: 'daily_wage',
       hourlyWage: 'hourly_wage',
       monthlySalary: 'monthly_salary',
       birthDate: 'birth_date',
@@ -5426,6 +5428,7 @@ function AttendanceApp() {
         year: payload.year,
         month: payload.month,
         wage_type: payload.wageType,
+        daily_wage: payload.dailyWage ?? null,
         wage_rate: payload.wageRate,
         worked_minutes: payload.workedMinutes,
         overtime_minutes: payload.overtimeMinutes,
@@ -15355,7 +15358,7 @@ function roundUnworkedMinutes(minutes) {
 //   overtime  … 残業手当
 //   allowance … 通勤手当
 // 渡されなかったときは、これまでどおり基本給と残業手当は切り上げ、通勤手当は四捨五入です。
-function computePayrollPreview({ wageType, hourlyWage, monthlySalary, workedMinutes, overtimeMinutes, commuteAllowance = 0, attendanceDays = null, actualDays = 0, monthlyStandardHours = MONTHLY_STANDARD_HOURS, deemedOvertimeMinutes = 0, nightMinutes = 0, rounding = null }) {
+function computePayrollPreview({ wageType, hourlyWage, monthlySalary, dailyWage = 0, dailyStandardMinutes = null, workedMinutes, overtimeMinutes, commuteAllowance = 0, attendanceDays = null, actualDays = 0, monthlyStandardHours = MONTHLY_STANDARD_HOURS, deemedOvertimeMinutes = 0, nightMinutes = 0, rounding = null }) {
   const rBase = rounding?.base || 'ceil';
   const rOver = rounding?.overtime || 'ceil';
   const rAllow = rounding?.allowance || 'round';
@@ -15376,6 +15379,19 @@ function computePayrollPreview({ wageType, hourlyWage, monthlySalary, workedMinu
     wageRateHourly = wageRate;
     baseAmount = roundYenBy((regularMinutes / 60) * wageRate, rBase);
     overtimeAmount = roundYenBy((paidOvertimeMinutes / 60) * wageRate * OVERTIME_MULTIPLIER, rOver);
+  } else if (wageType === 'daily') {
+    // 日給制の基本給は「日額 × 実出勤日数」です（御社に確認済み）。
+    // 休んだ日はそもそも数えないため、欠勤控除は使いません。
+    wageRate = Number(dailyWage) || 0;
+    baseAmount = roundYenBy(wageRate * Math.max(0, Number(actualDays) || 0), rBase);
+    // 割増基礎単価は「日額 ÷ 1日の所定労働時間」
+    //（労働基準法施行規則第19条第1項第2号）。
+    // 1日の所定労働時間は給与規定グループの所定勤務時間から出します。
+    // 設定が無いときは割増基礎単価を出せないので0にします
+    //（0円のまま残業手当を払わないより、画面で未設定だと知らせる作りにしています）。
+    const dailyMin = Number(dailyStandardMinutes) > 0 ? Number(dailyStandardMinutes) : 0;
+    wageRateHourly = dailyMin > 0 ? wageRate / (dailyMin / 60) : 0;
+    overtimeAmount = roundYenBy((paidOvertimeMinutes / 60) * wageRateHourly * OVERTIME_MULTIPLIER, rOver);
   } else {
     wageRate = Number(monthlySalary) || 0;
     // 月給制の基本給は月給そのものです。休んだぶんは「欠勤控除」で引きます（御社に確認済み）。
@@ -15407,9 +15423,16 @@ function computePayrollPreview({ wageType, hourlyWage, monthlySalary, workedMinu
     overtimeMinutes: Math.max(0, Math.round(Number(overtimeMinutes) || 0)),
     deemedOvertimeMinutes: deemedMin, paidOvertimeMinutes,
     nightMinutes: nightMin, nightAmount,
+    // 日給制で1日の所定労働時間が分からないと、割増基礎単価が0になって
+    // 残業手当・深夜手当が0円になります。画面で知らせるために返します。
+    dailyStandardMinutes: wageType === 'daily' ? (Number(dailyStandardMinutes) || 0) : null,
     totalAmount: baseAmount + overtimeAmount + allowanceAmount + nightAmount, prorated,
   };
 }
+
+// 給与形態の呼び方。3通りあるので1か所にまとめています。
+const WAGE_TYPES = { hourly: '時給', daily: '日給', monthly: '月給' };
+const wageTypeLabel = (wageType) => WAGE_TYPES[wageType] || WAGE_TYPES.hourly;
 
 const formatYen = (n) => `¥${Math.round(n || 0).toLocaleString('ja-JP')}`;
 
@@ -15446,7 +15469,7 @@ function printPayslip(p, employeeName, settings = null) {
   <h1>給与明細</h1>
   <div class="sub">${employeeName} 様　／　${p.year}年${p.month}月分</div>
   <table>
-    <tr><td class="label">区分</td><td class="value">${p.wageType === 'hourly' ? `時給 ${formatYen(p.wageRate)}` : `月給 ${formatYen(p.wageRate)}`}</td></tr>
+    <tr><td class="label">区分</td><td class="value">${wageTypeLabel(p.wageType)} ${formatYen(p.wageRate)}</td></tr>
     <tr><td class="label">実働時間</td><td class="value">${minutesToHHMM(p.workedMinutes)}</td></tr>
     <tr><td class="label">残業時間</td><td class="value">${minutesToHHMM(p.overtimeMinutes)}</td></tr>
     ${p.attendanceExtra?.absentDays ? `<tr><td class="label">欠勤日数</td><td class="value">${p.attendanceExtra.absentDays}日</td></tr>` : ''}
@@ -15745,7 +15768,7 @@ function PayslipDetailModal({ record, employeeName, onClose, settings = null }) 
         </div>
 
         <div className="px-5 py-4 space-y-2">
-          <Row label="区分" value={p.wageType === 'hourly' ? `時給 ${formatYen(p.wageRate)}` : `月給 ${formatYen(p.wageRate)}`} />
+          <Row label="区分" value={`${wageTypeLabel(p.wageType)} ${formatYen(p.wageRate)}`} />
           <Row label="実働時間" value={minutesToHHMM(p.workedMinutes)} />
           <Row label="残業時間" value={minutesToHHMM(p.overtimeMinutes)} />
 
@@ -16283,7 +16306,7 @@ function PayslipView({ records, employeeName, settings = null }) {
                   <span className="text-[10.5px] font-bold text-emerald-600 bg-emerald-50 px-2 py-1 rounded-full">公開済み</span>
                 </div>
                 <div className="px-5 py-4 space-y-2">
-                  <Row label="区分" value={p.wageType === 'hourly' ? `時給 ${formatYen(p.wageRate)}` : `月給 ${formatYen(p.wageRate)}`} />
+                  <Row label="区分" value={`${wageTypeLabel(p.wageType)} ${formatYen(p.wageRate)}`} />
                   <Row label="実働時間" value={minutesToHHMM(p.workedMinutes)} />
                   <Row label="残業時間" value={minutesToHHMM(p.overtimeMinutes)} />
 
@@ -16837,7 +16860,7 @@ const BUILTIN_PAYROLL_ITEMS = [
   // showZero … 金額が0円のときに、スタッフが見る給与明細と印刷に出すか。
   //   基本給だけ既定で出します（0円でも行が無いと明細が壊れて見えるため）。
   //   ほかの項目は既定で隠し、出したいものだけ画面でオンにします。
-  { label: '基本給', kind: 'payment', showZero: true, rounding: 'ceil', desc: '時給制：時給 ×（実働時間 − 残業時間）／月給制：月給そのまま（休んだぶんは欠勤控除で引きます。入社月・退職月も満額）' },
+  { label: '基本給', kind: 'payment', showZero: true, rounding: 'ceil', desc: '時給制：時給 ×（実働時間 − 残業時間）／日給制：日額 × 実出勤日数／月給制：月給そのまま（休んだぶんは欠勤控除で引きます。入社月・退職月も満額）' },
   { label: '通勤手当', kind: 'payment', rounding: 'round', desc: '通勤経路の月額換算の合計（給与作成時にコピー）' },
   { label: '残業手当', kind: 'payment', rounding: 'ceil', desc: '【割増基礎単価】×【残業時間】× 1.25' },
   { label: '交通費精算', kind: 'payment', rounding: 'ceil', desc: '承認済みの交通費精算の合計' },
@@ -17126,11 +17149,28 @@ const LATE_DEDUCTION_LABEL = '遅刻早退控除';
 //   ''             … 計算できた
 //   'noBase'       … 基本給が0円（単価が出せない）
 //   'provisional'  … 計算したが、月平均所定労働時間が未設定で仮の値
-function computeLateEarlyDeduction({ baseAmount, monthlyStandardHours, hoursConfigured = false, unworkedMinutes, rounding = 'floor' }) {
+//   'noDailyHours' … 日給制で1日の所定労働時間が未設定（単価が出せない）
+//
+// dailyWage / dailyStandardMinutes を渡すと、日給制の出し方に切り替わります。
+// 日給制は「日額 ÷ 1日の所定労働時間」が1時間あたりの単価です。
+// 基本給（＝日額 × 実出勤日数）を月平均所定労働時間で割ると、
+// 出勤日数の少ない月に単価が小さくなってしまうため、分けています。
+function computeLateEarlyDeduction({ baseAmount, monthlyStandardHours, hoursConfigured = false, unworkedMinutes, rounding = 'floor', wageType = 'monthly', dailyWage = 0, dailyStandardMinutes = 0 }) {
   const base = Math.max(0, Math.round(Number(baseAmount) || 0));
   const hours = Number(monthlyStandardHours) > 0 ? Number(monthlyStandardHours) : MONTHLY_STANDARD_HOURS;
   const minutes = Math.max(0, Math.round(Number(unworkedMinutes) || 0));
-  const common = { baseAmount: base, monthlyStandardHours: hours, unworkedMinutes: minutes, hoursConfigured: !!hoursConfigured };
+  const common = { baseAmount: base, monthlyStandardHours: hours, unworkedMinutes: minutes, hoursConfigured: !!hoursConfigured, wageType };
+
+  if (wageType === 'daily') {
+    const day = Math.max(0, Number(dailyWage) || 0);
+    const dayMin = Math.max(0, Number(dailyStandardMinutes) || 0);
+    const info = { ...common, dailyWage: day, dailyStandardMinutes: dayMin };
+    if (day <= 0) return { ...info, unit: null, amount: null, reason: 'noBase' };
+    if (dayMin <= 0) return { ...info, unit: null, amount: null, reason: 'noDailyHours' };
+    const unit = floorYen(day / (dayMin / 60));
+    return { ...info, unit, amount: roundYenBy((unit * minutes) / 60, rounding), reason: '' };
+  }
+
   if (base <= 0) return { ...common, unit: null, amount: null, reason: 'noBase' };
   // 単価の1円未満は切り捨て（ジョブカンの設定・賃金規程のどちらとも一致）
   const unit = floorYen(base / hours);
@@ -17334,9 +17374,10 @@ function payrollRoundingSet(settings) {
 function deemedOvertimeFor(employee, settings) {
   const none = { hours: 0, minutes: 0, source: 'none' };
   if (!employee) return none;
-  // 時給制の方には当てません（上のコメントの理由）
+  // 月給制の方だけに当てます。時給制・日給制は働いた時間（日数）ぶんの賃金を
+  // 払う形なので、ここで差し引くと実際に働いた分の賃金が払われないことになります。
   if (String(employee.wageType || 'hourly') !== 'monthly') {
-    return { ...none, source: 'hourly' };
+    return { ...none, source: 'notMonthly' };
   }
   const personal = Number(employee.deemedOvertimeHours);
   if (Number.isFinite(personal) && personal > 0) {
@@ -17722,9 +17763,19 @@ function NightAndLateNote({ preview, lateDeduction, isPublished }) {
       {late && (
         <div className={night ? 'pt-1.5 border-t border-current/15' : ''}>
           <div className="font-bold">遅刻早退控除 {formatYen(lateDeduction.amount)}</div>
-          基本給 {formatYen(lateDeduction.baseAmount)} ÷ 月平均所定労働時間 {lateDeduction.monthlyStandardHours}時間
-          ＝ 1時間あたり <b>{formatYen(lateDeduction.unit)}</b>（1円未満切り捨て）
-          × 遅刻早退 {hm(lateDeduction.unworkedMinutes)}。
+          {lateDeduction.wageType === 'daily' ? (
+            <>
+              日額 {formatYen(lateDeduction.dailyWage)} ÷ 1日の所定労働時間 {hm(lateDeduction.dailyStandardMinutes)}
+              ＝ 1時間あたり <b>{formatYen(lateDeduction.unit)}</b>（1円未満切り捨て）
+              × 遅刻早退 {hm(lateDeduction.unworkedMinutes)}。
+            </>
+          ) : (
+            <>
+              基本給 {formatYen(lateDeduction.baseAmount)} ÷ 月平均所定労働時間 {lateDeduction.monthlyStandardHours}時間
+              ＝ 1時間あたり <b>{formatYen(lateDeduction.unit)}</b>（1円未満切り捨て）
+              × 遅刻早退 {hm(lateDeduction.unworkedMinutes)}。
+            </>
+          )}
           <div className="text-[10.5px] pt-0.5 opacity-80">
             時間は賃金規程どおり、<b>日ごとに15分単位で切り捨て</b>た合計です（00〜14分は0分、15〜29分は15分…）。
             支給項目にマイナスの金額で入ります。
@@ -17747,7 +17798,7 @@ function NightAndLateNote({ preview, lateDeduction, isPublished }) {
 // 金額は自動で入れず、ボタンを押してもらう形にしています（手で直した額を勝手に
 // 書き換えないため。土日祝皆勤手当と同じ考え方です）。
 function AbsenceDeductionNote({ deduction, current, onApply, isPublished, wageType }) {
-  // 時給制は働いた時間ぶんを払う形なので、欠勤控除そのものがありません
+  // 時給制・日給制は働いた時間（日数）ぶんを払う形なので、欠勤控除そのものがありません
   if (!deduction || wageType !== 'monthly') return null;
   if (deduction.absentDays <= 0 && !current) return null;
 
@@ -18040,7 +18091,7 @@ function DeemedOvertimeSettings({ settings, employeeAccounts = [], actor, isMast
           <div className="text-[10.5px] text-slate-500 leading-relaxed">
             月あたり決めた時間までは、残業手当を追加で払いません。超えた分だけ払います。
             <b className="block pt-0.5">月給制の方にだけ当てます。</b>
-            時給制の方は、働いた時間ぶんの賃金を基本給と残業手当に分けて払う形なので、
+            時給制・日給制の方は、働いた時間（日数）ぶんの賃金を基本給と残業手当に分けて払う形なので、
             ここで差し引くと実際に働いた時間の賃金が払われないことになります。
             空欄のグループは、これまでどおり1分目から残業手当を払います。
           </div>
@@ -19307,6 +19358,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
   const [wageType, setWageType] = useState('hourly');
   const [hourlyWage, setHourlyWage] = useState('0');
   const [monthlySalary, setMonthlySalary] = useState('0');
+  const [dailyWage, setDailyWage] = useState('0');
   const [paymentItems, setPaymentItems] = useState([]);
   const [deductionItems, setDeductionItems] = useState([]);
   const [absentDays, setAbsentDays] = useState('0');
@@ -19337,6 +19389,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     setWageType(employee.wageType || 'hourly');
     setHourlyWage(String(employee.hourlyWage || 0));
     setMonthlySalary(String(employee.monthlySalary || 0));
+    setDailyWage(String(employee.dailyWage || 0));
   }, [employeeId]);
 
   // スタッフの固定支給・控除項目、通勤経路を取得（毎月同じ内容を自動で候補に出すため）
@@ -19416,10 +19469,19 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
   // みなし残業。画面で選んでいる給与形態を見ます（保存前の切り替えにも付いていくため）。
   const deemed = employee ? deemedOvertimeFor({ ...employee, wageType }, settings) : { hours: 0, minutes: 0, source: 'none' };
 
+  // 日給制の1日の所定労働時間。給与規定グループの所定勤務時間から出します
+  //（始業〜終業 − 休憩60分）。残業の割増基礎単価の分母になります。
+  const groupHours = employee ? groupWorkHoursFor(employee, settings) : null;
+  const dailyStandardMinutes = groupHours && groupHours.source === 'group'
+    ? Math.max(0, toMinutes(groupHours.end) - toMinutes(groupHours.start) - BREAK_MINUTES_DEFAULT)
+    : 0;
+
   const preview = employee ? computePayrollPreview({
     wageType,
     hourlyWage,
     monthlySalary,
+    dailyWage,
+    dailyStandardMinutes,
     workedMinutes: monthly.workedMin,
     overtimeMinutes: monthly.overtimeMin,
     commuteAllowance: commuteRouteTotal > 0 ? commuteRouteTotal : (employee.commuteAllowance || 0),
@@ -19438,6 +19500,9 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     hoursConfigured: Number(settings?.[SETTING_MONTHLY_STANDARD_HOURS]) > 0,
     unworkedMinutes: monthly.unworkedMin,
     rounding: payrollRoundingFor(settings, 'payment', LATE_DEDUCTION_LABEL),
+    wageType,
+    dailyWage: Number(dailyWage) || 0,
+    dailyStandardMinutes,
   }) : null;
 
   // 欠勤控除。画面の欠勤日数から出します（欠勤日数は手で直せるため、state を見ます）。
@@ -19489,6 +19554,9 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
       hoursConfigured: Number(settings?.[SETTING_MONTHLY_STANDARD_HOURS]) > 0,
       unworkedMinutes: monthly.unworkedMin,
       rounding: payrollRoundingFor(settings, 'payment', LATE_DEDUCTION_LABEL),
+      wageType,
+      dailyWage: Number(dailyWage) || 0,
+      dailyStandardMinutes,
     });
     const draftAbsence = computeAbsenceDeduction({
       baseAmount: preview.baseAmount,
@@ -19653,6 +19721,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
       wageType,
       hourlyWage: wageType === 'hourly' ? Number(hourlyWage) : employee.hourlyWage,
       monthlySalary: wageType === 'monthly' ? Number(monthlySalary) : employee.monthlySalary,
+      dailyWage: wageType === 'daily' ? Number(dailyWage) : employee.dailyWage,
     });
   };
 
@@ -19728,20 +19797,57 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
         <div className="bg-slate-50 rounded-xl p-4 space-y-3">
           <div className="text-[12px] font-bold text-slate-600">給与形態（{employee.name}さん）</div>
           <div className="flex gap-2">
-            <button onClick={() => setWageType('hourly')} className={`flex-1 py-2 rounded-lg text-[12.5px] font-bold border-2 ${wageType === 'hourly' ? 'border-slate-800 bg-white text-slate-800' : 'border-transparent text-slate-400 bg-white'}`}>時給制</button>
-            <button onClick={() => setWageType('monthly')} className={`flex-1 py-2 rounded-lg text-[12.5px] font-bold border-2 ${wageType === 'monthly' ? 'border-slate-800 bg-white text-slate-800' : 'border-transparent text-slate-400 bg-white'}`}>月給制</button>
+            {Object.entries(WAGE_TYPES).map(([key, label]) => (
+              <button
+                key={key}
+                onClick={() => setWageType(key)}
+                className={`flex-1 py-2 rounded-lg text-[12.5px] font-bold border-2 ${wageType === key ? 'border-slate-800 bg-white text-slate-800' : 'border-transparent text-slate-400 bg-white'}`}
+              >
+                {label}制
+              </button>
+            ))}
           </div>
-          {wageType === 'hourly' ? (
+          {wageType === 'hourly' && (
             <Field label="時給（円）">
               <input type="number" value={hourlyWage} onChange={(e) => setHourlyWage(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px] bg-white" />
             </Field>
-          ) : (
+          )}
+          {wageType === 'daily' && (
+            <Field label="日額（円）">
+              <input type="number" value={dailyWage} onChange={(e) => setDailyWage(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px] bg-white" />
+            </Field>
+          )}
+          {wageType === 'monthly' && (
             <Field label="月給（円）">
               <input type="number" value={monthlySalary} onChange={(e) => setMonthlySalary(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px] bg-white" />
             </Field>
           )}
           <button onClick={saveWageSettings} className="text-[11.5px] font-bold text-amber-600">この給与形態をスタッフ情報に保存</button>
         </div>
+        )}
+
+        {/* 日給制。基本給の出し方と、残業の割増基礎単価の根拠を必ず見せます。 */}
+        {wageType === 'daily' && (
+          <div className="grid grid-cols-2 gap-3">
+            <PayrollMetric label="実出勤日数" value={`${monthly.days}日`} />
+            <PayrollMetric
+              label="1日の所定労働時間"
+              value={dailyStandardMinutes > 0 ? minutesToHHMM(dailyStandardMinutes) : '未設定'}
+            />
+          </div>
+        )}
+        {wageType === 'daily' && dailyStandardMinutes <= 0 && (
+          <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 text-[11.5px] text-amber-800">
+            <b className="block">1日の所定労働時間が出せません。</b>
+            日給制の残業単価は「日額 ÷ 1日の所定労働時間」で出します（労働基準法施行規則第19条）。
+            この時間は給与規定グループの「所定勤務時間」から出しますが、
+            {employee.mainGroup ? `「${employee.mainGroup} ／ ${employee.staffType}」` : 'この方のグループ'}
+            に設定がありません。
+            <span className="block pt-0.5">
+              このままだと<b>残業手当と深夜手当が0円</b>になります。
+              給与タブ →「給与の設定」→「所定勤務時間」から設定してください。
+            </span>
+          </div>
         )}
 
         {wageType === 'monthly' && (
