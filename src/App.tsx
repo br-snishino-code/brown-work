@@ -3091,21 +3091,49 @@ async function saveInsuranceRateSettings(payload) {
 }
 
 // ---- 月ごとの規定勤怠時間パターン（スタッフが月初に自分で設定） ----
+//
+// その月の登録が無いときは、直前に登録のあった月から引き継ぎます。
+// 毎月の登録を忘れても、前の月と同じ時間で打刻できるようにするためです
+// （引き継ぎが無いと所定の始業が9:00に戻り、10:00出勤の方に毎日60分の
+//   遅刻が付いてしまいます）。
+//
+// 返す形：{ patterns, inheritedFrom }
+//   inheritedFrom … 引き継いだ場合に { year, month }。その月の登録があれば null。
 async function fetchSchedulePatterns(employeeId, year, month) {
+  const target = year * 12 + month;
   const { data, error } = await supabase
     .from('employee_schedule_patterns')
     .select('*')
     .eq('employee_id', employeeId)
-    .eq('year', year)
-    .eq('month', month)
+    .order('year', { ascending: false })
+    .order('month', { ascending: false })
     .order('pattern_no', { ascending: true });
-  if (error) { console.error('規定勤怠時間の取得に失敗しました', error); return []; }
-  return (data || []).map((row) => ({
+  if (error) { console.error('規定勤怠時間の取得に失敗しました', error); return { patterns: [], inheritedFrom: null }; }
+  const rows = data || [];
+  // その月のものを優先。無ければ、その月より前でいちばん新しい月のもの
+  const sameMonth = rows.filter((r) => r.year === year && r.month === month);
+  const pick = sameMonth.length > 0
+    ? sameMonth
+    : (() => {
+        const past = rows.filter((r) => r.year * 12 + r.month < target);
+        if (past.length === 0) return [];
+        const newest = Math.max(...past.map((r) => r.year * 12 + r.month));
+        return past.filter((r) => r.year * 12 + r.month === newest);
+      })();
+  const toPattern = (row) => ({
     patternNo: row.pattern_no,
     label: row.label || '',
     startTime: row.start_time,
     endTime: row.end_time,
-  }));
+  });
+  const patterns = pick
+    .slice()
+    .sort((a, b) => a.pattern_no - b.pattern_no)
+    .map(toPattern);
+  const inheritedFrom = sameMonth.length === 0 && pick.length > 0
+    ? { year: pick[0].year, month: pick[0].month }
+    : null;
+  return { patterns, inheritedFrom };
 }
 
 async function saveSchedulePatterns(employeeId, year, month, patterns) {
@@ -3164,6 +3192,8 @@ function AttendanceApp() {
   const [personalMode, setPersonalMode] = useState(false);
   const [viewMode, setViewMode] = useState(() => (typeof window !== 'undefined' && window.matchMedia('(min-width: 1024px)').matches ? 'desktop' : 'mobile'));
   const [schedulePatterns, setSchedulePatterns] = useState([]);
+  // 前の月から引き継いだときに { year, month }。その月に登録があれば null
+  const [patternInheritedFrom, setPatternInheritedFrom] = useState(null);
   const [activePatternNo, setActivePatternNo] = useState(1);
   const [passwordRecoveryMode, setPasswordRecoveryMode] = useState(false);
   // メールのリンクから戻ってきたときのエラー文（ログイン画面に出す）
@@ -3208,8 +3238,9 @@ function AttendanceApp() {
     if (!session) return;
     const y = now.getFullYear();
     const m = now.getMonth() + 1;
-    fetchSchedulePatterns(session.id, y, m).then((patterns) => {
+    fetchSchedulePatterns(session.id, y, m).then(({ patterns, inheritedFrom }) => {
       setSchedulePatterns(patterns);
+      setPatternInheritedFrom(inheritedFrom);
       if (patterns.length > 0 && !patterns.some((p) => p.patternNo === activePatternNo)) {
         setActivePatternNo(patterns[0].patternNo);
       }
@@ -3222,8 +3253,9 @@ function AttendanceApp() {
     const m = now.getMonth() + 1;
     const ok = await saveSchedulePatterns(session.id, y, m, patterns);
     if (ok) {
-      const updated = await fetchSchedulePatterns(session.id, y, m);
+      const { patterns: updated, inheritedFrom } = await fetchSchedulePatterns(session.id, y, m);
       setSchedulePatterns(updated);
+      setPatternInheritedFrom(inheritedFrom);
       if (updated.length > 0 && !updated.some((p) => p.patternNo === activePatternNo)) {
         setActivePatternNo(updated[0].patternNo);
       }
@@ -4025,6 +4057,11 @@ function AttendanceApp() {
   const todayRecord = employeeRecords[today];
 
   const activePattern = schedulePatterns.find((p) => p.patternNo === activePatternNo) || schedulePatterns[0] || null;
+  // 規定勤怠時間が1つも無いときに使う所定の時刻（給与規定グループの設定 → 9:00〜18:00）。
+  // ここで決めた時刻が、その日の記録に書き込まれて遅刻・早退の基準になります。
+  const myWorkHours = groupWorkHoursFor(session, data.settings);
+  const scheduledStartForClockIn = activePattern?.startTime || myWorkHours.start;
+  const scheduledEndForClockIn = activePattern?.endTime || myWorkHours.end;
 
   // 交通費精算：前月分を毎月1日までに申請できているか（未提出・却下のままなら出勤時にリマインド）
   const commuteClaimTargetMonthKey = prevMonthKey(now);
@@ -4052,8 +4089,8 @@ function AttendanceApp() {
         clock_out: null,
         break_periods: [],
         break_started_at: null,
-        scheduled_start: activePattern?.startTime || SCHEDULED_START,
-        scheduled_end: activePattern?.endTime || SCHEDULED_END,
+        scheduled_start: scheduledStartForClockIn,
+        scheduled_end: scheduledEndForClockIn,
         clock_in_location: loc,
         clock_out_location: null,
         off_shift: confirm.offShift ? true : null,
@@ -4238,8 +4275,11 @@ function AttendanceApp() {
         break_periods: existing?.breakPeriods || [],
         break_started_at: existing?.breakStartedAt || null,
         break_minutes_override: patch.breakMinutes != null ? Number(patch.breakMinutes) : existing?.breakMinutesOverride ?? null,
-        scheduled_start: existing?.scheduledStart || SCHEDULED_START,
-        scheduled_end: existing?.scheduledEnd || SCHEDULED_END,
+        // 所定の始業・終業。打刻のときに書き込まれた値をそのまま引き継ぎますが、
+        // 規定勤怠時間の登録漏れなどで誤った時刻が入った日を直せるよう、
+        // 管理者が patch で上書きできるようにしています（遅刻・早退の基準になるため）。
+        scheduled_start: patch.scheduledStart || existing?.scheduledStart || SCHEDULED_START,
+        scheduled_end: patch.scheduledEnd || existing?.scheduledEnd || SCHEDULED_END,
         clock_in_location: clockInCleared ? null : (existing?.clockInLocation || null),
         clock_out_location: clockOutCleared ? null : (existing?.clockOutLocation || null),
         clock_in_actual: clockInCleared ? null : (existing?.clockInActual || null),
@@ -4280,14 +4320,20 @@ function AttendanceApp() {
     if (!opts.silent) {
       await refreshData();
       const target = data.accounts.find((a) => a.id === targetEmployeeId);
-      await logAudit(session, '管理者が勤怠を修正', `${dateStr}（${patch.clockIn || '--'} - ${patch.clockOut || '--'}）`, targetEmployeeId, target?.name || '');
+      // 何を直したのかを残します。所定の時刻は遅刻・早退の基準になり、
+      // 遅刻早退控除を通じて賃金に影響するため、打刻と区別して記録します
+      const what = [
+        (patch.clockIn || patch.clockOut) ? `${patch.clockIn || '--'} - ${patch.clockOut || '--'}` : '',
+        (patch.scheduledStart || patch.scheduledEnd) ? `所定 ${patch.scheduledStart || '--'}〜${patch.scheduledEnd || '--'}` : '',
+      ].filter(Boolean).join('／') || '承認のみ';
+      await logAudit(session, '管理者が勤怠を修正', `${dateStr}（${what}）`, targetEmployeeId, target?.name || '');
       show('勤怠を修正しました', 'success');
     }
     return true;
   };
 
   // 管理者が複数行をまとめて修正（1件ずつ保存し、最後にまとめて反映・通知）
-  const adminUpdateAttendanceBatch = async (changes) => {
+  const adminUpdateAttendanceBatch = async (changes, opts = {}) => {
     let okCount = 0;
     for (const { employeeId: targetEmployeeId, date: dateStr, patch } of changes) {
       const ok = await adminUpdateAttendance(targetEmployeeId, dateStr, patch, { silent: true });
@@ -4295,7 +4341,8 @@ function AttendanceApp() {
     }
     await refreshData();
     if (okCount > 0) {
-      await logAudit(session, '管理者が勤怠をまとめて修正', `${okCount}件`);
+      // 何をまとめて直したのかを残す（所定の時刻の直しは賃金に影響するため）
+      await logAudit(session, opts.auditLabel || '管理者が勤怠をまとめて修正', `${okCount}件${opts.auditDetail ? `／${opts.auditDetail}` : ''}`);
       show(`${okCount}件の勤怠を更新しました`, 'success');
     }
     if (okCount < changes.length) {
@@ -6008,6 +6055,7 @@ function AttendanceApp() {
                 onMarkNotificationRead={async (id) => { await markNotificationRead(id); await refreshData(); }}
                 onMarkAllNotificationsRead={async (ids) => { await markNotificationsRead(ids); await refreshData(); }}
                 schedulePatterns={schedulePatterns}
+                patternInheritedFrom={patternInheritedFrom}
                 activePatternNo={activePatternNo}
                 onSetActivePattern={setActivePatternNo}
                 onSavePatterns={savePatterns}
@@ -8230,7 +8278,7 @@ function OffShiftConfirmModal({ shift, onClose, onContinue }) {
   );
 }
 
-function EmployeeView({ now, todayRecord, todayShift = null, onClockIn, onClockOut, geoStatus, historyDates, records, corrections, onOpenCorrection, notifications, onMarkNotificationRead, onMarkAllNotificationsRead, schedulePatterns = [], activePatternNo, onSetActivePattern, onSavePatterns, needsCommuteClaimReminder, commuteClaimTargetMonth, onGoToCommuteClaim, isDesktop }) {
+function EmployeeView({ now, todayRecord, todayShift = null, onClockIn, onClockOut, geoStatus, historyDates, records, corrections, onOpenCorrection, notifications, onMarkNotificationRead, onMarkAllNotificationsRead, schedulePatterns = [], patternInheritedFrom = null, activePatternNo, onSetActivePattern, onSavePatterns, needsCommuteClaimReminder, commuteClaimTargetMonth, onGoToCommuteClaim, isDesktop }) {
   const status = computeDayStatus(todayRecord);
   const canClockIn = !todayRecord?.clockIn;
   const canClockOut = todayRecord?.clockIn && !todayRecord?.clockOut;
@@ -8284,6 +8332,7 @@ function EmployeeView({ now, todayRecord, todayShift = null, onClockIn, onClockO
     <SchedulePatternCard
       now={now}
       patterns={schedulePatterns}
+      inheritedFrom={patternInheritedFrom}
       activePatternNo={activePatternNo}
       onSetActivePattern={onSetActivePattern}
       onSavePatterns={onSavePatterns}
@@ -8675,7 +8724,7 @@ function Metric({ label, value, warn = false, danger = false }) {
   return <div><div className="text-[9.5px] font-bold text-slate-400">{label}</div><div className={`mt-1 font-mono text-[13px] font-bold ${danger ? 'text-rose-600' : warn ? 'text-amber-600' : 'text-slate-800'}`}>{value}</div></div>;
 }
 
-function SchedulePatternCard({ now, patterns, activePatternNo, onSetActivePattern, onSavePatterns, locked }) {
+function SchedulePatternCard({ now, patterns, inheritedFrom = null, activePatternNo, onSetActivePattern, onSavePatterns, locked }) {
   const [editing, setEditing] = useState(patterns.length === 0);
   const [form, setForm] = useState(() => {
     const base = [1, 2, 3].map((no) => {
@@ -8714,6 +8763,16 @@ function SchedulePatternCard({ now, patterns, activePatternNo, onSetActivePatter
           <button onClick={() => setEditing(true)} className="text-[11px] font-bold text-slate-500 border border-slate-200 rounded-md px-2 py-1 bg-white">編集</button>
         )}
       </div>
+
+      {/* その月の登録が無いときは、直前に登録のあった月から引き継いでいます。
+          登録し直さなくても同じ時間で打刻できますが、変わった場合は直せるように
+          どこから来た値なのかを出しておきます。 */}
+      {inheritedFrom && (
+        <div className="px-5 py-2.5 bg-sky-50 border-b border-sky-100 text-[11px] text-sky-800 leading-relaxed">
+          <b className="block">{inheritedFrom.year}年{inheritedFrom.month}月の設定をそのまま使っています。</b>
+          今月の勤務時間が変わる場合は「編集」から直してください。
+        </div>
+      )}
 
       {editing ? (
         <div className="px-5 py-4 space-y-3">
@@ -17155,6 +17214,79 @@ function parseDeemedOvertimeGroups(settings) {
   return out;
 }
 
+// ---- グループごとの所定勤務時間 ----
+// 遅刻・早退は「打刻の時刻 − その日の記録に入っている所定の始業・終業」で出します。
+// 所定の時刻は、出勤打刻をしたその瞬間に記録へ書き込まれます（あとから規定を
+// 変えても、すでに打刻した日は変わりません。賃金台帳の記録を守るためです）。
+//
+// どこから取るかの順番：
+//   1. ご本人の「規定勤怠時間」（その月のもの。無ければ直前に登録のあった月から引き継ぎ）
+//   2. 給与規定グループ（メイングループ＋スタッフ種別）の所定勤務時間 ← ここ
+//   3. それも無ければ WORK_HOURS_FALLBACK（9:00〜18:00）
+const SETTING_GROUP_WORK_HOURS = 'group_work_hours';   // グループごとの始業・終業（JSON）
+
+// どこにも設定が無いときに使う値。根拠のない時刻で遅刻が付くと遅刻早退控除で
+// 誤って賃金を引いてしまうため、この値が使われたグループは設定画面で知らせます。
+const WORK_HOURS_FALLBACK = { start: SCHEDULED_START, end: SCHEDULED_END };
+
+const isHHMM = (s) => /^([01]\d|2[0-3]):[0-5]\d$/.test(String(s || ''));
+
+// グループごとの所定勤務時間を読みます。壊れていても画面は動かします。
+// 形：{ "[\"第一営業部\",\"正社員\"]": { start: '10:00', end: '19:00' } }
+function parseGroupWorkHours(settings) {
+  let raw = null;
+  try {
+    const v = JSON.parse(settings?.[SETTING_GROUP_WORK_HOURS] || 'null');
+    if (v && typeof v === 'object' && !Array.isArray(v)) raw = v;
+  } catch (_) { raw = null; }
+  if (!raw) return {};
+  const out = {};
+  Object.entries(raw).forEach(([key, v]) => {
+    const start = v?.start;
+    const end = v?.end;
+    // 始業と終業の両方がそろっていて、終業が始業より後のものだけ持ちます
+    if (isHHMM(start) && isHHMM(end) && toMinutes(end) > toMinutes(start)) {
+      out[key] = { start, end };
+    }
+  });
+  return out;
+}
+
+// その方の所定勤務時間。どこから来た値なのかも返します（画面で根拠を出すため）。
+//   group    … 給与規定グループの設定
+//   fallback … どこにも設定が無い（この日は遅刻・早退を出しません）
+function groupWorkHoursFor(employee, settings) {
+  const groups = parseGroupWorkHours(settings);
+  const found = groups[payrollGroupKey(employee?.mainGroup, employee?.staffType)];
+  if (found) return { ...found, source: 'group' };
+  return { ...WORK_HOURS_FALLBACK, source: 'fallback' };
+}
+
+// グループごとの所定勤務時間を保存する（マスター管理者のみ）。
+async function saveGroupWorkHours(map, actor = null) {
+  const slim = {};
+  Object.entries(map || {}).forEach(([key, v]) => {
+    const start = v?.start;
+    const end = v?.end;
+    if (isHHMM(start) && isHHMM(end) && toMinutes(end) > toMinutes(start)) slim[key] = { start, end };
+  });
+  const { error } = await supabase.from('app_settings').upsert(
+    {
+      key: SETTING_GROUP_WORK_HOURS,
+      value: JSON.stringify(slim),
+      updated_by: actor?.id || null,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: 'key' }
+  );
+  if (error) {
+    console.error('所定勤務時間の設定の保存に失敗しました', error);
+    return { ok: false, message: error.message || '' };
+  }
+  await logAudit(actor, '所定勤務時間の設定を変更', `${Object.keys(slim).length}グループ`);
+  return { ok: true };
+}
+
 // その方の、項目ごとの1円未満の端数処理。
 // 法令で丸め方が決まっている項目（保険料・税）は設定を持たないので null を返します。
 // 一覧に無い名前のときは、支給なら切り上げ・控除なら切り捨て（賃金規程の既定）。
@@ -17667,6 +17799,157 @@ function PartialMonthNote({ employee, year, month, wageType, isPublished }) {
         。日割りの算式（暦日で割るか、所定労働日で割るか）は賃金規程で決まります。
         決まったら自動計算を作れますので、お知らせください。
       </div>
+    </div>
+  );
+}
+
+// ---- 所定勤務時間の設定（給与の設定・グループごと） ----
+// 遅刻・早退の基準になる始業・終業です。ご本人が「規定勤怠時間」を登録して
+// いればそちらが優先され、ここは登録が無いときの既定値になります。
+function GroupWorkHoursSettings({ settings, employeeAccounts = [], actor, isMasterAdmin, onSaved }) {
+  const [open, setOpen] = useState(false);
+  const [hours, setHours] = useState(() => parseGroupWorkHours(settings));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [done, setDone] = useState('');
+
+  const savedJson = settings?.[SETTING_GROUP_WORK_HOURS] || '';
+  useEffect(() => {
+    setHours(parseGroupWorkHours(settings));
+    // settings は毎回あたらしい物になるため、中身の文字列を見ています
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savedJson]);
+
+  if (!isMasterAdmin) return null;
+
+  const groups = payrollGroupsInUse(employeeAccounts, settings);
+  const set = (key, field, v) => {
+    // 直したのに前の注意書きが残らないようにする
+    setError(''); setDone('');
+    setHours((prev) => {
+      const next = { ...prev };
+      const cur = next[key] || { start: '', end: '' };
+      const merged = { ...cur, [field]: v };
+      if (!merged.start && !merged.end) delete next[key];
+      else next[key] = merged;
+      return next;
+    });
+  };
+
+  // 入力のおかしいグループ（片方だけ・終業が始業より前）を先に知らせます
+  const invalid = Object.entries(hours).filter(([, v]) =>
+    !(isHHMM(v?.start) && isHHMM(v?.end) && toMinutes(v.end) > toMinutes(v.start))
+  );
+  // 未設定のグループ。9:00〜18:00が使われるため、実際の勤務と違うと遅刻が付きます
+  const unset = groups.filter((g) => !hours[g.key]);
+  const count = groups.filter((g) => hours[g.key]).length;
+
+  const save = async () => {
+    setError(''); setDone('');
+    if (invalid.length > 0) {
+      setError('始業と終業の両方を入れてください。終業は始業より後の時刻にしてください。');
+      return;
+    }
+    setSaving(true);
+    const res = await saveGroupWorkHours(hours, actor);
+    setSaving(false);
+    if (!res.ok) { setError(`保存できませんでした。${res.message}`); return; }
+    setDone('所定勤務時間の設定を保存しました。これから打刻する日に使われます。');
+    if (onSaved) await onSaved();
+  };
+
+  return (
+    <div className="rounded-xl border border-slate-200 overflow-hidden">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="w-full px-3.5 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center gap-2 flex-wrap text-left"
+      >
+        <span className="text-[12px] font-bold text-slate-600">所定勤務時間</span>
+        <span className="text-[11px] text-slate-400">
+          {count > 0 ? `${count}グループに設定あり` : '設定なし'}
+        </span>
+        {unset.length > 0 && (
+          <span className="text-[10.5px] font-bold text-amber-700">未設定 {unset.length}グループ</span>
+        )}
+        <span className="ml-auto text-[11px] font-bold text-slate-500">{open ? '閉じる' : '開く'}</span>
+      </button>
+
+      {open && (
+        <div className="px-3.5 py-3 space-y-3">
+          {error && <div className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-700">{error}</div>}
+          {done && <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-[11px] text-emerald-700">{done}</div>}
+
+          <div className="text-[10.5px] text-slate-500 leading-relaxed">
+            遅刻・早退は「打刻の時刻 − 所定の始業・終業」で出します。
+            <b className="block pt-0.5">ご本人が勤怠画面で「規定勤怠時間」を登録していれば、そちらが優先されます。</b>
+            ここは登録が無いときに使う値です。空欄のグループは
+            <b> {WORK_HOURS_FALLBACK.start}〜{WORK_HOURS_FALLBACK.end}</b> が使われます。
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-[11.5px] min-w-[420px]">
+              <thead className="bg-slate-50 text-slate-500">
+                <tr className="text-left">
+                  <th className="px-2.5 py-1.5 font-medium">給与規定グループ</th>
+                  <th className="px-2.5 py-1.5 font-medium text-center whitespace-nowrap">在籍</th>
+                  <th className="px-2.5 py-1.5 font-medium text-center whitespace-nowrap">始業</th>
+                  <th className="px-2.5 py-1.5 font-medium text-center whitespace-nowrap">終業</th>
+                </tr>
+              </thead>
+              <tbody>
+                {groups.length === 0 ? (
+                  <tr><td colSpan={4} className="px-2.5 py-6 text-center text-slate-300">在籍しているスタッフがいません</td></tr>
+                ) : groups.map((g) => (
+                  <tr key={g.key} className="border-t border-slate-100">
+                    <td className="px-2.5 py-1.5 font-bold text-slate-700 whitespace-nowrap">{g.label}</td>
+                    <td className="px-2.5 py-1.5 text-center text-slate-400 whitespace-nowrap">{g.count}名</td>
+                    <td className="px-2.5 py-1.5 text-center">
+                      <input
+                        type="time"
+                        value={hours[g.key]?.start || ''}
+                        onChange={(e) => set(g.key, 'start', e.target.value)}
+                        className="w-[104px] box-border border border-slate-200 rounded-lg px-2 py-1 font-mono text-[12px] bg-white"
+                      />
+                    </td>
+                    <td className="px-2.5 py-1.5 text-center">
+                      <input
+                        type="time"
+                        value={hours[g.key]?.end || ''}
+                        onChange={(e) => set(g.key, 'end', e.target.value)}
+                        className="w-[104px] box-border border border-slate-200 rounded-lg px-2 py-1 font-mono text-[12px] bg-white"
+                      />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {unset.length > 0 && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-[10.5px] text-amber-900 leading-relaxed">
+              <b className="block">未設定のグループがあります。</b>
+              このグループの方が規定勤怠時間を登録しないまま打刻すると、
+              所定の始業が {WORK_HOURS_FALLBACK.start} として記録され、
+              実際の始業がそれより遅い場合はその差が毎日の遅刻になります。
+              <div className="pt-1 font-mono">{unset.map((g) => g.label).join('／')}</div>
+            </div>
+          )}
+
+          <div className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 text-[10.5px] text-slate-600 leading-relaxed">
+            <b className="block">ここを変えても、すでに打刻した日の記録は変わりません。</b>
+            所定の時刻は打刻したその瞬間に記録へ書き込まれます。過ぎた日を直すときは、
+            勤怠タブ → スタッフの月間勤怠 →「所定の時刻をまとめて直す」をお使いください。
+          </div>
+
+          <button
+            onClick={save}
+            disabled={saving}
+            className="w-full rounded-lg bg-slate-800 py-2 text-[12.5px] font-bold text-white disabled:bg-slate-300"
+          >
+            {saving ? '保存中…' : '所定勤務時間の設定を保存する'}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -18977,6 +19260,13 @@ function PayrollSettingsTab({ settings, employeeAccounts = [], groupAttendanceSc
         isMasterAdmin={isMasterAdmin}
         onSaved={onRefresh}
         isDesktop={isDesktop}
+      />
+      <GroupWorkHoursSettings
+        settings={settings}
+        employeeAccounts={employeeAccounts}
+        actor={session}
+        isMasterAdmin={isMasterAdmin}
+        onSaved={onRefresh}
       />
       <DeemedOvertimeSettings
         settings={settings}
@@ -21047,6 +21337,11 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
   const [edits, setEdits] = useState({}); // { date: { clockIn, clockOut, breakMinutes, approve } }
   const [savingAll, setSavingAll] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null); // 打刻を削除する日
+  // 所定の始業・終業をまとめて直す（規定勤怠時間の登録漏れで誤った時刻が
+  // 記録された月を直すため。遅刻・早退の基準になります）
+  const [schedOpen, setSchedOpen] = useState(false);
+  const [schedFix, setSchedFix] = useState({ start: '', end: '' });
+  const [savingSched, setSavingSched] = useState(false);
   const [y, m] = month.split('-').map(Number);
   const days = Array.from({ length: lastDayOfMonth(y, m) }, (_, i) => i + 1);
   const todayStr = todayKey();
@@ -21085,12 +21380,24 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
         clockInPayDeductionNote: record?.clockInPayDeductionNote || '',
         clockOutPayDeduction: record?.clockOutPayDeduction || false,
         clockOutPayDeductionNote: record?.clockOutPayDeductionNote || '',
+        // 遅刻・早退の基準。打刻した瞬間に記録へ書き込まれた値です
+        scheduledStart: record?.scheduledStart || '',
+        scheduledEnd: record?.scheduledEnd || '',
+        lateMin: metrics?.lateMin ?? 0,
+        earlyLeaveMin: metrics?.earlyLeaveMin ?? 0,
       };
     });
 
   const totalWorked = rows.reduce((s, r) => s + r.workedMin, 0);
   const totalOvertime = rows.reduce((s, r) => s + r.overtimeMin, 0);
   const workedDays = rows.filter((r) => r.clockIn).length;
+  const totalLate = rows.reduce((s, r) => s + r.lateMin + r.earlyLeaveMin, 0);
+  // 打刻のある日に入っている所定の時刻。何種類あるかを出して、
+  // 規定勤怠時間の登録漏れで違う時刻が混ざっていないか分かるようにします
+  const recordedDays = rows.filter((r) => r.hasRecord);
+  const scheduleKinds = Array.from(new Set(
+    recordedDays.filter((r) => r.scheduledStart && r.scheduledEnd).map((r) => `${r.scheduledStart}〜${r.scheduledEnd}`)
+  ));
 
   const saveAll = async () => {
     setSavingAll(true);
@@ -21099,6 +21406,28 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
     setEdits({});
     setSavingAll(false);
   };
+
+  // 打刻のある日だけを直します。打刻の無い日に書き込むと、
+  // 出勤していない日の記録を作ってしまうためです。
+  const applyScheduleToMonth = async () => {
+    if (!isHHMM(schedFix.start) || !isHHMM(schedFix.end)) return;
+    if (toMinutes(schedFix.end) <= toMinutes(schedFix.start)) return;
+    setSavingSched(true);
+    const changes = recordedDays.map((r) => ({
+      employeeId,
+      date: r.date,
+      patch: { scheduledStart: schedFix.start, scheduledEnd: schedFix.end },
+    }));
+    await onAdminUpdateAttendanceBatch(changes, {
+      auditLabel: '管理者が所定の始業・終業をまとめて修正',
+      auditDetail: `${employeeName} ${month} → ${schedFix.start}〜${schedFix.end}`,
+    });
+    setSavingSched(false);
+    setSchedOpen(false);
+  };
+
+  const schedFixValid = isHHMM(schedFix.start) && isHHMM(schedFix.end)
+    && toMinutes(schedFix.end) > toMinutes(schedFix.start);
 
   return (
     <div className="space-y-5">
@@ -21113,10 +21442,78 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
         <input type="month" value={month} onChange={(e) => { setMonth(e.target.value); setEdits({}); }} className="ml-auto border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px] bg-white" />
       </div>
 
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-4 gap-3">
         <StatMini label="出勤日数" value={`${workedDays}日`} />
         <StatMini label="総実働" value={minutesToHHMM(totalWorked)} />
         <StatMini label="総残業" value={minutesToHHMM(totalOvertime)} />
+        <StatMini label="遅刻・早退" value={`${totalLate}分`} />
+      </div>
+
+      {/* 所定の始業・終業。遅刻・早退はこの時刻との差で出るため、
+          規定勤怠時間の登録漏れで違う時刻が入っていると遅刻が付いてしまいます。
+          何が記録されているかを見せて、違っていれば直せるようにします。 */}
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        <button
+          onClick={() => setSchedOpen((v) => !v)}
+          className="w-full px-5 py-3.5 flex items-center gap-2 flex-wrap text-left"
+        >
+          <Clock size={15} className="text-slate-400" />
+          <h2 className="font-bold text-[13.5px]">この月の所定の始業・終業</h2>
+          <span className="text-[11.5px] font-mono text-slate-500">
+            {scheduleKinds.length === 0 ? '打刻のある日がありません' : scheduleKinds.join('／')}
+          </span>
+          {scheduleKinds.length > 1 && (
+            <span className="text-[10.5px] font-bold text-amber-700">日によって違います</span>
+          )}
+          <span className="ml-auto text-[11.5px] font-bold text-slate-500">{schedOpen ? '閉じる' : 'まとめて直す'}</span>
+        </button>
+
+        {schedOpen && (
+          <div className="px-5 pb-4 space-y-3 border-t border-slate-100 pt-3">
+            <div className="text-[11px] text-slate-500 leading-relaxed">
+              遅刻・早退は「打刻の時刻 − 所定の始業・終業」で出します。
+              所定の時刻は<b>出勤打刻をしたその瞬間</b>に記録へ書き込まれるため、
+              あとから規定勤怠時間を直しても、すでに打刻した日は変わりません。
+              ここで打刻のある{recordedDays.length}日分をまとめて直せます。
+            </div>
+            <div className="flex flex-wrap items-end gap-3">
+              <label className="flex flex-col gap-1 text-[11px] font-bold text-slate-500">
+                始業
+                <input
+                  type="time"
+                  value={schedFix.start}
+                  onChange={(e) => setSchedFix((p) => ({ ...p, start: e.target.value }))}
+                  className="w-[112px] border border-slate-200 rounded-lg px-2 py-1.5 font-mono text-[12.5px] bg-white"
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-[11px] font-bold text-slate-500">
+                終業
+                <input
+                  type="time"
+                  value={schedFix.end}
+                  onChange={(e) => setSchedFix((p) => ({ ...p, end: e.target.value }))}
+                  className="w-[112px] border border-slate-200 rounded-lg px-2 py-1.5 font-mono text-[12.5px] bg-white"
+                />
+              </label>
+              <button
+                onClick={applyScheduleToMonth}
+                disabled={!schedFixValid || savingSched || recordedDays.length === 0}
+                className="rounded-lg bg-slate-800 px-4 py-2 text-[12.5px] font-bold text-white disabled:bg-slate-300"
+              >
+                {savingSched ? '保存中…' : `打刻のある${recordedDays.length}日に当てる`}
+              </button>
+            </div>
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[10.5px] text-amber-900 leading-relaxed">
+              <b className="block">遅刻・早退の分数が変わります。</b>
+              遅刻早退控除をお使いの場合は、この月の給与明細の金額も変わります。
+              公開済みの明細がある場合は、作り直しが必要かご確認ください。
+              <span className="block pt-0.5">
+                同じことが起きないよう、給与タブ →「給与の設定」→「所定勤務時間」で
+                グループごとの始業・終業も設定しておくことをおすすめします。
+              </span>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
@@ -21127,10 +21524,10 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
         </div>
         {isDesktop ? (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[760px] text-[12.5px]">
+            <table className="w-full min-w-[880px] text-[12.5px]">
               <thead>
                 <tr className="text-left text-[10.5px] text-slate-400 border-b border-slate-100">
-                  {['日付', '出勤', '退勤', '休憩(分)', '実働', '残業', '状態', '承認', ...(isMasterAdmin ? ['削除'] : [])].map((h) => <th key={h} className="px-3 py-2 font-medium">{h}</th>)}
+                  {['日付', '出勤', '退勤', '休憩(分)', '実働', '残業', '遅刻・早退', '状態', '承認', ...(isMasterAdmin ? ['削除'] : [])].map((h) => <th key={h} className="px-3 py-2 font-medium">{h}</th>)}
                 </tr>
               </thead>
               <tbody>
@@ -21162,6 +21559,16 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
                       <td className="px-3 py-2"><input type="number" min="0" step="5" value={e.breakMinutes ?? ''} onChange={(ev) => setField('breakMinutes', ev.target.value)} className="w-16 border border-slate-200 rounded px-1.5 py-1 font-mono text-[12px]" /></td>
                       <td className="px-3 py-2 font-mono font-semibold whitespace-nowrap">{minutesToHHMM(r.workedMin)}</td>
                       <td className="px-3 py-2 font-mono whitespace-nowrap">{minutesToHHMM(r.overtimeMin)}</td>
+                      {/* 遅刻・早退と、その基準になっている所定の時刻。
+                          規定勤怠時間の登録漏れに気づけるよう、根拠を並べて出します */}
+                      <td className="px-3 py-2 whitespace-nowrap">
+                        <div className={`font-mono ${r.lateMin + r.earlyLeaveMin > 0 ? 'text-rose-500 font-bold' : 'text-slate-300'}`}>
+                          {r.hasRecord ? `${r.lateMin + r.earlyLeaveMin}分` : '-'}
+                        </div>
+                        {r.hasRecord && r.scheduledStart && r.scheduledEnd && (
+                          <div className="text-[9.5px] text-slate-400 font-mono">所定 {r.scheduledStart}〜{r.scheduledEnd}</div>
+                        )}
+                      </td>
                       <td className="px-3 py-2 whitespace-nowrap">
                         {r.status}
                         {r.clockInPayDeduction && r.clockInPayDeductionNote && <div className="text-[9.5px] text-rose-500">出勤メモ：{r.clockInPayDeductionNote}</div>}
