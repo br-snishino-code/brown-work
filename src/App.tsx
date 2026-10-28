@@ -5846,7 +5846,11 @@ function AttendanceApp() {
         {effectiveTopTab === 'payroll' && (
           showStaffScreens ? (
             <div className="space-y-5">
-              <PayslipView records={data.payrollRecords.filter((p) => p.employeeId === employeeId && p.status === 'published')} employeeName={session.name} />
+              <PayslipView
+                records={data.payrollRecords.filter((p) => p.employeeId === employeeId && p.status === 'published')}
+                employeeName={session.name}
+                settings={data.settings}
+              />
               <BonusSlipView records={(data.bonusRecords || []).filter((b) => b.employeeId === employeeId && b.status === 'published')} employeeName={session.name} />
             </div>
           ) : (
@@ -15213,13 +15217,19 @@ function computePayrollPreview({ wageType, hourlyWage, monthlySalary, workedMinu
 
 const formatYen = (n) => `¥${Math.round(n || 0).toLocaleString('ja-JP')}`;
 
-function printPayslip(p, employeeName) {
+// settings … 支給・控除項目一覧。0円の行を出すかどうかを見るために使います。
+// 渡されなかったときは、これまでどおり保存されている行をそのまま出します。
+function printPayslip(p, employeeName, settings = null) {
   const win = window.open('', '_blank', 'width=480,height=700');
   if (!win) return;
-  const paymentItems = p.paymentItems || [{ label: '基本給', amount: p.baseAmount }, ...(p.overtimeAmount ? [{ label: '残業手当', amount: p.overtimeAmount }] : [])];
-  const deductionItems = p.deductionItems || [];
-  const paymentTotal = sumItems(paymentItems);
-  const deductionTotal = sumItems(deductionItems);
+  const allPayment = p.paymentItems || [{ label: '基本給', amount: p.baseAmount }, ...(p.overtimeAmount ? [{ label: '残業手当', amount: p.overtimeAmount }] : [])];
+  const allDeduction = p.deductionItems || [];
+  // 合計は間引く前の全部から出します（間引くのは見た目だけなので、
+  // 0円を除いても合計は変わりませんが、考え方をはっきりさせるためです）
+  const paymentTotal = sumItems(allPayment);
+  const deductionTotal = sumItems(allDeduction);
+  const paymentItems = settings ? visiblePayslipItems(allPayment, settings, 'payment') : allPayment;
+  const deductionItems = settings ? visiblePayslipItems(allDeduction, settings, 'deduction') : allDeduction;
   const rowsHtml = (items) => items.map((it) => `<tr><td class="label">${it.label || '（項目名なし）'}</td><td class="value">${formatYen(Number(it.amount) || 0)}</td></tr>`).join('');
   const html = `<!doctype html>
 <html lang="ja"><head><meta charset="utf-8"><title>給与明細 ${p.year}年${p.month}月分</title>
@@ -15509,14 +15519,17 @@ function PublishSchedulePanel({ kind, year, period, draftCount, actor, isMasterA
 // ---- 給与明細の中身（管理者が一覧から開く） ----
 // スタッフ側の画面と同じ内容を出し、印刷・PDF保存もできるようにします。
 // 管理者には下書きも見えるため、公開済みかどうかを目立つ形で出しています。
-function PayslipDetailModal({ record, employeeName, onClose }) {
+function PayslipDetailModal({ record, employeeName, onClose, settings = null }) {
   if (!record) return null;
   const p = record;
-  const paymentItems = p.paymentItems || [
+  const allPayment = p.paymentItems || [
     { label: '基本給', amount: p.baseAmount },
     ...(p.overtimeAmount ? [{ label: '残業手当', amount: p.overtimeAmount }] : []),
   ];
-  const deductionItems = p.deductionItems || [];
+  const allDeduction = p.deductionItems || [];
+  // 0円の行は、一覧で「出す」にした項目だけ見せます（合計は変わりません）
+  const paymentItems = settings ? visiblePayslipItems(allPayment, settings, 'payment') : allPayment;
+  const deductionItems = settings ? visiblePayslipItems(allDeduction, settings, 'deduction') : allDeduction;
   const published = p.status === 'published';
 
   return (
@@ -15583,7 +15596,7 @@ function PayslipDetailModal({ record, employeeName, onClose }) {
               閉じる
             </button>
             <button
-              onClick={() => printPayslip(p, employeeName)}
+              onClick={() => printPayslip(p, employeeName, settings)}
               className="flex-1 rounded-xl bg-slate-800 py-2.5 text-[13px] font-bold text-white flex items-center justify-center gap-1.5"
             >
               <Download size={14} /> 印刷・PDF保存
@@ -16044,7 +16057,7 @@ function BonusSlipView({ records, employeeName }) {
   );
 }
 
-function PayslipView({ records, employeeName }) {
+function PayslipView({ records, employeeName, settings = null }) {
   const sorted = [...records].sort((a, b) => (a.year !== b.year ? b.year - a.year : b.month - a.month));
   return (
     <div className="space-y-4">
@@ -16058,8 +16071,15 @@ function PayslipView({ records, employeeName }) {
       ) : (
         <div className="grid gap-4 sm:grid-cols-2">
           {sorted.map((p) => {
-            const paymentItems = p.paymentItems || [{ label: '基本給', amount: p.baseAmount }, ...(p.overtimeAmount ? [{ label: '残業手当', amount: p.overtimeAmount }] : [])];
-            const deductionItems = p.deductionItems || [];
+            const allPayment = p.paymentItems || [{ label: '基本給', amount: p.baseAmount }, ...(p.overtimeAmount ? [{ label: '残業手当', amount: p.overtimeAmount }] : [])];
+            const allDeduction = p.deductionItems || [];
+            // 合計は間引く前の全部から出します（0円を除いても合計は変わりませんが、
+            // 「見た目だけ間引いている」ことをはっきりさせるためです）
+            const paymentTotal = sumItems(allPayment);
+            const deductionTotal = sumItems(allDeduction);
+            // 0円の行は、一覧で「出す」にした項目だけ見せます
+            const paymentItems = settings ? visiblePayslipItems(allPayment, settings, 'payment') : allPayment;
+            const deductionItems = settings ? visiblePayslipItems(allDeduction, settings, 'deduction') : allDeduction;
             return (
               <div key={p.id} className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
                 <div className="px-5 py-3.5 border-b border-slate-100 flex items-center justify-between">
@@ -16075,7 +16095,7 @@ function PayslipView({ records, employeeName }) {
                   {paymentItems.map((it, i) => <Row key={i} label={it.label || '項目'} value={formatYen(Number(it.amount) || 0)} />)}
                   <div className="flex items-center justify-between pt-1 border-t border-slate-100">
                     <span className="text-[12px] font-bold text-slate-600">支給合計</span>
-                    <span className="font-mono font-bold text-slate-800">{formatYen(sumItems(paymentItems))}</span>
+                    <span className="font-mono font-bold text-slate-800">{formatYen(paymentTotal)}</span>
                   </div>
 
                   {deductionItems.length > 0 && (
@@ -16084,7 +16104,7 @@ function PayslipView({ records, employeeName }) {
                       {deductionItems.map((it, i) => <Row key={i} label={it.label || '項目'} value={formatYen(Number(it.amount) || 0)} />)}
                       <div className="flex items-center justify-between pt-1 border-t border-slate-100">
                         <span className="text-[12px] font-bold text-slate-600">控除合計</span>
-                        <span className="font-mono font-bold text-slate-800">{formatYen(sumItems(deductionItems))}</span>
+                        <span className="font-mono font-bold text-slate-800">{formatYen(deductionTotal)}</span>
                       </div>
                     </>
                   )}
@@ -16094,7 +16114,7 @@ function PayslipView({ records, employeeName }) {
                     <span className="font-mono text-[18px] font-bold text-slate-900">{formatYen(p.totalAmount)}</span>
                   </div>
                   <button
-                    onClick={() => printPayslip(p, employeeName)}
+                    onClick={() => printPayslip(p, employeeName, settings)}
                     className="w-full mt-2 py-2 rounded-lg border border-slate-200 text-[12px] font-bold text-slate-600 flex items-center justify-center gap-1.5"
                   >
                     <Download size={13} /> 印刷・PDF保存
@@ -16613,7 +16633,10 @@ const PAYROLL_ITEM_SOURCE_CHOICES = ['employee', 'fixed', 'manual'];
 // 名前と決め方は変えられません（変えると計算が項目を見つけられなくなります）。
 // desc には、いま実際にコードが行っている計算を書いています。
 const BUILTIN_PAYROLL_ITEMS = [
-  { label: '基本給', kind: 'payment', desc: '時給制：時給 ×（実働時間 − 残業時間）／月給制：月給（出勤規定日数があれば実出勤日数で日割り）' },
+  // showZero … 金額が0円のときに、スタッフが見る給与明細と印刷に出すか。
+  //   基本給だけ既定で出します（0円でも行が無いと明細が壊れて見えるため）。
+  //   ほかの項目は既定で隠し、出したいものだけ画面でオンにします。
+  { label: '基本給', kind: 'payment', showZero: true, desc: '時給制：時給 ×（実働時間 − 残業時間）／月給制：月給（出勤規定日数があれば実出勤日数で日割り）' },
   { label: '通勤手当', kind: 'payment', desc: '通勤経路の月額換算の合計（給与作成時にコピー）' },
   { label: '残業手当', kind: 'payment', desc: '【割増基礎単価】×【残業時間】× 1.25' },
   { label: '交通費精算', kind: 'payment', desc: '承認済みの交通費精算の合計' },
@@ -16631,12 +16654,13 @@ const BUILTIN_PAYROLL_LABELS = new Set(BUILTIN_PAYROLL_ITEMS.map((x) => x.label)
 // 組み込み項目のあとに、御社で使っている手当を「従業員ごとに金額を設定」で並べます。
 function defaultPayrollItems() {
   const builtins = BUILTIN_PAYROLL_ITEMS.map((x) => ({
-    label: x.label, kind: x.kind, source: 'auto', amount: 0, enabled: true, builtin: true, desc: x.desc,
+    label: x.label, kind: x.kind, source: 'auto', amount: 0, enabled: true,
+    showZero: x.showZero === true, builtin: true, desc: x.desc,
   }));
   const allowances = PAYMENT_ALLOWANCE_PRESETS
     // 土日祝皆勤手当は組み込みで自動計算するため、手当側では出しません
     .filter((label) => !BUILTIN_PAYROLL_LABELS.has(label))
-    .map((label) => ({ label, kind: 'payment', source: 'employee', amount: 0, enabled: true, builtin: false, desc: '' }));
+    .map((label) => ({ label, kind: 'payment', source: 'employee', amount: 0, enabled: true, showZero: false, builtin: false, desc: '' }));
   // 支給→控除の順に並べ替えて、画面のタブと同じ並びにします
   const all = [...builtins, ...allowances];
   return [...all.filter((x) => x.kind === 'payment'), ...all.filter((x) => x.kind === 'deduction')];
@@ -16664,7 +16688,10 @@ function parsePayrollItems(settings) {
     if (builtin) {
       out.push({
         label, kind: builtin.kind, source: 'auto', amount: 0,
-        enabled: row?.enabled !== false, builtin: true, desc: builtin.desc,
+        enabled: row?.enabled !== false,
+        // 保存が無い項目は、組み込みの既定（基本給だけ「出す」）に倒します
+        showZero: typeof row?.showZero === 'boolean' ? row.showZero : builtin.showZero === true,
+        builtin: true, desc: builtin.desc,
       });
       return;
     }
@@ -16673,14 +16700,18 @@ function parsePayrollItems(settings) {
     out.push({
       label, kind, source,
       amount: source === 'fixed' ? Math.max(0, Math.round(Number(row?.amount) || 0)) : 0,
-      enabled: row?.enabled !== false, builtin: false, desc: '',
+      enabled: row?.enabled !== false, showZero: row?.showZero === true,
+      builtin: false, desc: '',
     });
   });
   // 保存に無い組み込み項目を、同じ区分の最後に足します
   BUILTIN_PAYROLL_ITEMS.forEach((x) => {
     if (seen.has(x.label)) return;
     const at = out.map((o) => o.kind).lastIndexOf(x.kind);
-    const row = { label: x.label, kind: x.kind, source: 'auto', amount: 0, enabled: true, builtin: true, desc: x.desc };
+    const row = {
+      label: x.label, kind: x.kind, source: 'auto', amount: 0, enabled: true,
+      showZero: x.showZero === true, builtin: true, desc: x.desc,
+    };
     if (at < 0) out.push(row); else out.splice(at + 1, 0, row);
   });
   return out;
@@ -16858,6 +16889,31 @@ async function savePayrollItemGroups(groups, actor = null) {
   return { ok: true };
 }
 
+// スタッフが見る給与明細と、印刷した明細に出す項目を選びます。
+//
+// 給与計算の画面（作る側）には、一覧で「使う」にした項目が金額0円でも全部並びます。
+// 入れ忘れに気づけるようにするためです。一方、スタッフが見る明細に
+// 0円の行がずらりと並ぶと読みにくいので、ここで間引きます。
+//
+// 0円の行を出すかどうかは、支給・控除項目一覧の「0円のとき」で項目ごとに決めます。
+// 既定では基本給だけ出し、ほかは隠します。
+// 「残業手当 ¥0」を出して残業が無かったことを伝える、といった使い方ができます。
+//
+// 金額が0円でない行は必ず出します。一覧に無い項目（昔の明細に残っている名前など）も、
+// 出すかどうかを決められないのでそのまま出します。
+// 間引くのは見た目だけで、保存されている明細の中身と合計は変わりません。
+function visiblePayslipItems(items, settings, kind) {
+  const showZero = new Map();
+  parsePayrollItems(settings)
+    .filter((x) => x.kind === kind)
+    .forEach((x) => showZero.set(x.label, x.showZero === true));
+  return (items || []).filter((it) => {
+    if ((Number(it.amount) || 0) !== 0) return true;
+    const key = paymentItemKey(it.label);
+    return !showZero.has(key) || showZero.get(key);
+  });
+}
+
 // 一覧の設定を、給与明細の下書きに当てます。次の3つを順にやります。
 //
 //   1. 「使わない」にした項目を落とす
@@ -16893,6 +16949,7 @@ async function savePayrollItemSettings({ items, flags }, actor = null) {
       label: x.label, kind: x.kind, source: x.source,
       ...(x.source === 'fixed' ? { amount: Math.max(0, Math.round(Number(x.amount) || 0)) } : {}),
       enabled: x.enabled !== false,
+      showZero: x.showZero === true,
     }));
     rows.push({ key: SETTING_PAYROLL_ITEMS, value: JSON.stringify(slim), updated_by: actor?.id || null, updated_at: new Date().toISOString() });
   }
@@ -17546,7 +17603,7 @@ function PayrollItemSettings({ settings, employeeAccounts = [], actor, isMasterA
               スマホでは金額の欄がつぶれて1文字ずつ折り返すため、
               表に最低の幅を持たせて横スクロールにしています。 */}
           <div className="overflow-x-auto">
-            <table className={`w-full text-[11.5px] ${!inGroup && kind === 'payment' ? 'min-w-[680px]' : 'min-w-[460px]'}`}>
+            <table className={`w-full text-[11.5px] ${inGroup ? 'min-w-[460px]' : kind === 'payment' ? 'min-w-[780px]' : 'min-w-[560px]'}`}>
               <thead className="bg-slate-50 text-slate-500">
                 <tr className="text-left">
                   {view === 'reorder' && !inGroup && <th className="px-2 py-1.5 font-medium w-16 text-center">並び</th>}
@@ -17554,13 +17611,14 @@ function PayrollItemSettings({ settings, employeeAccounts = [], actor, isMasterA
                   <th className="px-2.5 py-1.5 font-medium min-w-[200px]">金額</th>
                   {kind === 'payment' && !inGroup && <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">雇用保険の賃金</th>}
                   {kind === 'payment' && !inGroup && <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">所得税の課税</th>}
+                  {!inGroup && <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">0円のとき</th>}
                   <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">使う</th>
                   <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">{inGroup ? '共通との違い' : ' '}</th>
                 </tr>
               </thead>
               <tbody>
                 {shown.length === 0 ? (
-                  <tr><td colSpan={7} className="px-2.5 py-6 text-center text-slate-300">{kindLabel}項目がありません</td></tr>
+                  <tr><td colSpan={8} className="px-2.5 py-6 text-center text-slate-300">{kindLabel}項目がありません</td></tr>
                 ) : shown.map((x, i) => {
                   const f = paymentItemFlag(x.label, flags);
                   const dim = x.enabled ? '' : 'text-slate-300';
@@ -17599,6 +17657,18 @@ function PayrollItemSettings({ settings, employeeAccounts = [], actor, isMasterA
                             </button>
                           </td>
                         ))}
+                        {/* 金額が0円のときに、スタッフが見る明細と印刷に出すか。
+                            作る側の給与計算の画面には、どちらでも全部並びます。 */}
+                        {!inGroup && (
+                          <td className="px-2 py-1.5 text-center">
+                            <button
+                              onClick={() => patch(x.label, { showZero: !x.showZero })}
+                              className={`rounded-lg border px-2.5 py-1 text-[11px] font-bold whitespace-nowrap ${x.showZero ? 'border-teal-300 bg-teal-50 text-teal-700' : 'border-slate-200 bg-white text-slate-400'}`}
+                            >
+                              {x.showZero ? '出す' : '隠す'}
+                            </button>
+                          </td>
+                        )}
                         <td className="px-2 py-1.5 text-center">
                           <button
                             onClick={() => (inGroup ? setOverride(x.label, 'enabled', !x.enabled) : patch(x.label, { enabled: !x.enabled }))}
@@ -17632,7 +17702,7 @@ function PayrollItemSettings({ settings, employeeAccounts = [], actor, isMasterA
                       </tr>
                       {editing === x.label && !inGroup && (
                         <tr className="border-t border-slate-100 bg-slate-50">
-                          <td colSpan={7} className="px-2.5 py-2.5">
+                          <td colSpan={8} className="px-2.5 py-2.5">
                             <div className={`grid gap-2 ${isDesktop ? 'grid-cols-3' : 'grid-cols-1'}`}>
                               <Field label="金額の決め方">
                                 <select
@@ -17685,6 +17755,8 @@ function PayrollItemSettings({ settings, employeeAccounts = [], actor, isMasterA
                 扱いが違うので別々に持っています。通勤手当の非課税の限度額は見ていないため、限度を超える方がいる場合は所得税の金額を手で直してください。
               </>
             )}
+            <b className="block pt-0.5">「0円のとき」は、金額が0円の行をスタッフが見る明細と印刷に出すかどうかです。</b>
+            {!inGroup && <>給与計算の画面（作る側）には、どちらにしても「使う」にした項目が全部並びます。入れ忘れに気づけるようにするためです。合計は変わりません。</>}
             <b className="block pt-0.5">「使わない」にすると、</b>
             {inGroup
               ? <>このグループの方だけ、スタッフ詳細の候補にも、給与明細を新しく作るときの初期値にも出なくなります。</>
@@ -18627,6 +18699,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
           record={openSlip}
           employeeName={openSlip.employeeName || employeeAccounts.find((a) => a.id === openSlip.employeeId)?.name || ''}
           onClose={() => setOpenSlip(null)}
+          settings={settings}
         />
       )}
 
