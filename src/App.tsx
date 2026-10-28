@@ -3155,6 +3155,8 @@ function AttendanceApp() {
   const [leaveModalOpen, setLeaveModalOpen] = useState(false);
   // スタッフ画面の「勤怠」タブの中のサブタブ（勤怠＝打刻／実績＝実績入力／シフト＝月間シフト）
   const [employeeTab, setEmployeeTab] = useState('attendance');
+  // 給与タブのサブタブ（給与／賞与／交通費／給与の設定）
+  const [payrollTab, setPayrollTab] = useState('payroll');
   const [topTab, setTopTab] = useState('attendance'); // attendance | labor | requests(スタッフ) | hr(管理) | payroll | help
   // 各種申請タブの中でいま開いている申請（null = 候補の一覧）
   const [requestTab, setRequestTab] = useState(null);
@@ -5636,6 +5638,12 @@ function AttendanceApp() {
     setTopTab('requests');
     setRequestTab(key);
   };
+  // 給与タブのサブタブ。給与・賞与・給与の設定はマスター管理者だけが扱います
+  // （supabase/72_payslip_master_only.sql）。交通費精算はほかの管理者も確認できます。
+  const payrollTabItems = payrollSubTabItems(session.role);
+  // 権限が変わったときに、出せないサブタブを選んだままにしない
+  const activePayrollTab = resolvePayrollTab(payrollTabItems, payrollTab);
+
   // 「勤怠」タブのサブタブ。実績入力は、その業務に入力フォーマットがある方にだけ出す
   const employeeTabItems = [
     { key: 'attendance', label: '勤怠', icon: Clock },
@@ -5861,6 +5869,14 @@ function AttendanceApp() {
             </div>
           ) : (
             <div className="space-y-5">
+              {/* サブタブ。勤怠タブと同じ作り。
+                  使える画面だけを並べる（payrollTabItems が権限で絞ってある）。 */}
+              <PayrollSubTabBar
+                items={payrollTabItems}
+                activeKey={activePayrollTab}
+                onSelect={setPayrollTab}
+                isDesktop={isDesktop}
+              />
               {/* 給与明細・賞与明細はマスター管理者だけが扱う
                   （supabase/72_payslip_master_only.sql）。
                   それ以外の管理者には交通費精算だけを出す。 */}
@@ -5871,7 +5887,7 @@ function AttendanceApp() {
                   総務担当へご依頼ください。ご自身の明細は「自分の勤怠」に切り替えるとご覧になれます。
                 </div>
               )}
-              {session.role === 'master_admin' && (
+              {session.role === 'master_admin' && activePayrollTab === 'payroll' && (
               <PayrollAdminTab
                 employeeAccounts={employeeAccounts}
                 records={data.records}
@@ -5892,7 +5908,7 @@ function AttendanceApp() {
                 isDesktop={isDesktop}
               />
               )}
-              {session.role === 'master_admin' && (
+              {session.role === 'master_admin' && activePayrollTab === 'bonus' && (
               <BonusAdminTab
                 employeeAccounts={employeeAccounts}
                 bonusRecords={data.bonusRecords || []}
@@ -5906,6 +5922,7 @@ function AttendanceApp() {
                 isDesktop={isDesktop}
               />
               )}
+              {activePayrollTab === 'commute' && (
               <AdminCommuteExpenseClaimsTab
                 isMasterAdmin={session.role === 'master_admin'}
                 claims={data.commuteExpenseClaims}
@@ -5913,6 +5930,18 @@ function AttendanceApp() {
                 onDecide={decideCommuteExpenseClaim}
                 isDesktop={isDesktop}
               />
+              )}
+              {session.role === 'master_admin' && activePayrollTab === 'settings' && (
+              <PayrollSettingsTab
+                settings={data.settings}
+                employeeAccounts={employeeAccounts}
+                groupAttendanceSchedules={data.groupLeaveSchedules}
+                session={session}
+                isMasterAdmin={session.role === 'master_admin'}
+                onRefresh={refreshData}
+                isDesktop={isDesktop}
+              />
+              )}
             </div>
           )
         )}
@@ -15176,6 +15205,36 @@ const floorYen = (n) => {
   return Math.floor(v + YEN_EPSILON);
 };
 
+// 給与タブのサブタブ。給与明細・賞与明細・給与の設定はマスター管理者だけが
+// 扱うため（supabase/72_payslip_master_only.sql）、それ以外の管理者には
+// 交通費だけを出します。
+const PAYROLL_SUBTABS = {
+  payroll: { label: '給与', icon: Wallet },
+  bonus: { label: '賞与', icon: Briefcase },
+  commute: { label: '交通費', icon: MapPin },
+  settings: { label: '給与の設定', icon: Settings },
+};
+const PAYROLL_SUBTAB_ORDER = ['payroll', 'bonus', 'commute', 'settings'];
+const PAYROLL_SUBTABS_MASTER_ONLY = ['payroll', 'bonus', 'settings'];
+
+// その権限で出せるサブタブの並び
+function payrollSubTabKeys(role) {
+  return PAYROLL_SUBTAB_ORDER.filter(
+    (key) => role === 'master_admin' || !PAYROLL_SUBTABS_MASTER_ONLY.includes(key)
+  );
+}
+
+function payrollSubTabItems(role) {
+  return payrollSubTabKeys(role).map((key) => ({ key, ...PAYROLL_SUBTABS[key] }));
+}
+
+// 権限が変わって選べなくなったサブタブを選んだままにしない
+function resolvePayrollTab(items, current) {
+  const keys = (items || []).map((t) => (t && typeof t === 'object' ? t.key : t));
+  if (keys.includes(current)) return current;
+  return keys[0] || 'commute';
+}
+
 // 1円未満の端数をどう処理するか。支給・控除項目一覧で項目ごとに選べます。
 // 賃金規程は「支給項目は切り上げ、控除項目（不就労時間）は切り捨て」なので、
 // 既定はそれに合わせています。
@@ -18872,6 +18931,64 @@ function PayrollItemsEditor({ title, items, onChange, addLabel = '項目を追�
   );
 }
 
+// ---- 給与タブのサブタブ ----
+// 給与タブのサブタブバー。勤怠タブのサブタブと同じ見た目にそろえています。
+function PayrollSubTabBar({ items = [], activeKey, onSelect, isDesktop }) {
+  if (!items.length) return null;
+  const width = items.length > 1 ? 'max-w-lg' : 'max-w-[160px]';
+  return (
+    <div className={`flex items-center bg-white rounded-2xl border border-slate-200 p-1.5 text-[12.5px] font-bold shadow-sm ${isDesktop ? width : ''}`}>
+      {items.map((t) => {
+        const Icon = t.icon;
+        const on = activeKey === t.key;
+        return (
+          <button
+            key={t.key}
+            onClick={() => onSelect?.(t.key)}
+            aria-current={on ? 'page' : undefined}
+            className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl transition-colors whitespace-nowrap ${
+              on ? 'bg-slate-950 text-white' : 'text-slate-500 hover:bg-slate-50'
+            }`}
+          >
+            {/* 「給与の設定」は字数が多く、狭い画面ではアイコンと並べると
+                2行に折れてしまうため、スマホではアイコンを出しません。 */}
+            {Icon ? <Icon size={14} className={`hidden sm:block shrink-0 ${on ? 'text-white' : 'text-slate-400'}`} /> : null}
+            {t.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// サブタブ「給与の設定」の中身。支給・控除項目一覧と、みなし残業の時間数。
+// どちらも全スタッフ共通の設定で、毎月触るものではないため、
+// 給与計算の画面とは別のサブタブに分けています。
+function PayrollSettingsTab({ settings, employeeAccounts = [], groupAttendanceSchedules = {}, session, isMasterAdmin = false, onRefresh, isDesktop }) {
+  if (!isMasterAdmin) return null;
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-3">
+      <h2 className="font-bold text-[14px] text-slate-800 flex items-center gap-2"><Settings size={16} className="text-slate-400" />給与の設定</h2>
+      <PayrollItemSettings
+        settings={settings}
+        employeeAccounts={employeeAccounts}
+        groupAttendanceSchedules={groupAttendanceSchedules}
+        actor={session}
+        isMasterAdmin={isMasterAdmin}
+        onSaved={onRefresh}
+        isDesktop={isDesktop}
+      />
+      <DeemedOvertimeSettings
+        settings={settings}
+        employeeAccounts={employeeAccounts}
+        actor={session}
+        isMasterAdmin={isMasterAdmin}
+        onSaved={onRefresh}
+      />
+    </div>
+  );
+}
+
 function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExpenseClaims = [], monthlyConfirmations = [], groupAttendanceSchedules = {}, employeeAttendanceSchedules = {}, leaveRequests = [], settings = {}, session = null, onSaveDraft, onPublish, onUnpublish, onRefresh, isMasterAdmin = false, onUpdateWage, isDesktop }) {
   const now = new Date();
   const [employeeId, setEmployeeId] = useState(employeeAccounts[0]?.id || '');
@@ -19268,30 +19385,6 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
 
   return (
     <div className="space-y-5">
-      {/* 支給・控除項目一覧（全社共通の設定）。開くまでは1行なので、
-          給与計算の邪魔にならないよう一番上に置いています。 */}
-      {isMasterAdmin && (
-        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-3">
-          <h2 className="font-bold text-[14px] text-slate-800 flex items-center gap-2"><Settings size={16} className="text-slate-400" />給与の設定</h2>
-          <PayrollItemSettings
-            settings={settings}
-            employeeAccounts={employeeAccounts}
-            groupAttendanceSchedules={groupAttendanceSchedules}
-            actor={session}
-            isMasterAdmin={isMasterAdmin}
-            onSaved={onRefresh}
-            isDesktop={isDesktop}
-          />
-          <DeemedOvertimeSettings
-            settings={settings}
-            employeeAccounts={employeeAccounts}
-            actor={session}
-            isMasterAdmin={isMasterAdmin}
-            onSaved={onRefresh}
-          />
-        </div>
-      )}
-
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
         <h2 className="font-bold text-[14px] text-slate-800 flex items-center gap-2"><Wallet size={16} className="text-slate-400" />給与計算</h2>
         <div className={`grid gap-3 ${isDesktop ? 'grid-cols-3' : 'grid-cols-1'}`}>
