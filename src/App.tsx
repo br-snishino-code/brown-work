@@ -16858,6 +16858,31 @@ async function savePayrollItemGroups(groups, actor = null) {
   return { ok: true };
 }
 
+// 一覧の設定を、給与明細の下書きに当てます。次の3つを順にやります。
+//
+//   1. 「使わない」にした項目を落とす
+//   2. 「使う」にした項目のうち、まだ無いものを足す
+//      （固定額の項目はその金額、それ以外は0円）
+//   3. 一覧の並び順に並べ替える（一覧に無い項目は最後）
+//
+// 2で0円の行を足すのは、「この方にこの手当を付けるはずだった」という
+// 入れ忘れに気づけるようにするためです（御社に確認済み）。
+// 0円の行は合計を変えないので、雇用保険料や所得税の計算には影響しません。
+//
+// list は payrollItemsForEmployee(..., { includeDisabled: true }) で取った
+// その方のグループの一覧です。
+function applyPayrollItemSettings(draft, list, orderMap) {
+  const off = new Set((list || []).filter((x) => !x.enabled).map((x) => x.label));
+  const out = (draft || []).filter((it) => !off.has(paymentItemKey(it.label)));
+  const used = new Set(out.map((it) => paymentItemKey(it.label)));
+  (list || []).filter((x) => x.enabled).forEach((x) => {
+    if (used.has(x.label)) return;
+    used.add(x.label);
+    out.push({ label: x.label, amount: x.source === 'fixed' ? x.amount : 0 });
+  });
+  return sortByPayrollItemOrder(out, orderMap);
+}
+
 // 支給・控除項目一覧と、支給項目ごとの扱いを保存する（全社共通・マスター管理者のみ）。
 // app_settings の書き込みは27番でマスター管理者に限っています。
 async function savePayrollItemSettings({ items, flags }, actor = null) {
@@ -18171,10 +18196,14 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
   }) : null;
 
   // 土日祝皆勤手当。スタッフ詳細の固定支給項目に登録されている方だけが対象です。
-  const weekendBonusRegistered = employeeSalaryItems.some(
-    (it) => it.kind === 'payment' && String(it.label).trim() === WEEKEND_BONUS_LABEL
-  );
-  const weekendBonus = employee && weekendBonusRegistered ? computeWeekendHolidayBonus({
+  // この方の給与規定グループで「使う」にしているときに計算します。
+  // 計算した金額を明細に自動で入れるのは、スタッフ詳細の固定支給項目に
+  // 登録した方だけです（登録していない方にひとりでに手当が付かないように）。
+  // 登録していない方には0円の行だけ出し、下の案内で計算結果と
+  // 「入れ直す」ボタンを出して、入れ忘れに気づけるようにしています。
+  const weekendBonusEnabled = payrollItemsForEmployee(settings, 'payment', employee)
+    .some((x) => x.label === WEEKEND_BONUS_LABEL);
+  const weekendBonus = employee && weekendBonusEnabled ? computeWeekendHolidayBonus({
     employee,
     year,
     month,
@@ -18196,13 +18225,8 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     // グループで変えていない項目は、全スタッフ共通のままになります。
     const allPayment = payrollItemsForEmployee(settings, 'payment', employee, { includeDisabled: true });
     const allDeduction = payrollItemsForEmployee(settings, 'deduction', employee, { includeDisabled: true });
-    const disabled = (list) => new Set(list.filter((x) => !x.enabled).map((x) => x.label));
-    const offPayment = disabled(allPayment);
-    const offDeduction = disabled(allDeduction);
     const paymentOrder = payrollItemOrderMap(settings, 'payment');
     const deductionOrder = payrollItemOrderMap(settings, 'deduction');
-    // 全スタッフ共通の固定額の項目（一覧で「固定額」にしたもの）
-    const fixedOf = (list) => list.filter((x) => x.enabled && x.source === 'fixed');
 
     // 支給項目を先に組み立てます。雇用保険料はこの中身から出すため、
     // 画面の state（1回遅れて入る）ではなく、ここで作ったものを使います。
@@ -18218,14 +18242,9 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
           ? { label: it.label, amount: weekendBonus?.amount == null ? 0 : weekendBonus.amount }
           : { label: it.label, amount: it.amount }
       )),
-    ].filter((it) => !offPayment.has(paymentItemKey(it.label)));
-    // 固定額の項目を足します（すでに同じ名前が入っているときは足しません）
-    const usedPayment = new Set(draftPayment.map((it) => paymentItemKey(it.label)));
-    fixedOf(allPayment).forEach((x) => {
-      if (usedPayment.has(x.label)) return;
-      draftPayment.push({ label: x.label, amount: x.amount });
-    });
-    const nextPaymentItems = existing?.paymentItems || sortByPayrollItemOrder(draftPayment, paymentOrder);
+    ];
+    const nextPaymentItems = existing?.paymentItems
+      || applyPayrollItemSettings(draftPayment, allPayment, paymentOrder);
     setPaymentItems(nextPaymentItems);
 
     if (existing?.deductionItems) {
@@ -18267,16 +18286,10 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
             : it
         )),
         ...employeeSalaryItems
-          .filter((it) => it.kind === 'deduction' && !offDeduction.has(paymentItemKey(it.label)))
+          .filter((it) => it.kind === 'deduction')
           .map((it) => ({ label: it.label, amount: it.amount })),
       ];
-      // 固定額の控除項目を足します（すでに同じ名前が入っているときは足しません）
-      const usedDeduction = new Set(draftDeduction.map((it) => paymentItemKey(it.label)));
-      fixedOf(allDeduction).forEach((x) => {
-        if (usedDeduction.has(x.label)) return;
-        draftDeduction.push({ label: x.label, amount: x.amount });
-      });
-      setDeductionItems(sortByPayrollItemOrder(draftDeduction, deductionOrder));
+      setDeductionItems(applyPayrollItemSettings(draftDeduction, allDeduction, deductionOrder));
     }
     setAbsentDays(String(existing?.attendanceExtra?.absentDays ?? 0));
     setPaidLeaveDays(String(existing?.attendanceExtra?.paidLeaveDays ?? 0));
