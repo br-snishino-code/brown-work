@@ -15170,6 +15170,31 @@ const floorYen = (n) => {
   return Math.floor(v + YEN_EPSILON);
 };
 
+// 1円未満の端数をどう処理するか。支給・控除項目一覧で項目ごとに選べます。
+// 賃金規程は「支給項目は切り上げ、控除項目（不就労時間）は切り捨て」なので、
+// 既定はそれに合わせています。
+const PAYROLL_ROUNDINGS = { ceil: '切り上げ', floor: '切り捨て', round: '四捨五入' };
+
+function roundYenBy(n, mode) {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v <= 0) return 0;
+  if (mode === 'floor') return floorYen(v);
+  if (mode === 'round') return Math.round(v);
+  return ceilYen(v);
+}
+
+// 割り算の結果を丸めます。日割りのように「分子 ÷ 分母」で出すときに使います。
+// 小数にしてから丸めると誤差で1円ずれることがあるため、整数のまま計算します。
+function roundDivBy(num, den, mode) {
+  const a = Math.round(Number(num) || 0);
+  const b = Math.round(Number(den) || 0);
+  if (!(b > 0) || a <= 0) return 0;
+  if (mode === 'floor') return Math.floor(a / b);
+  if (mode === 'round') return Math.floor((2 * a + b) / (2 * b));
+  // ceilDiv と同じ式です。ここで呼ばないのは、ceilDiv の定義がこの下にあるためです。
+  return Math.floor((a + b - 1) / b);
+}
+
 // 不就労時間の端数処理。1時間未満の端数を15分単位で切り捨てます。
 // 賃金規程どおり、日ごとに丸めます（月の合計に対してではありません）。
 // ⚠ まだ不就労控除そのものを作っていないため、この関数は使っていません。
@@ -15182,7 +15207,15 @@ function roundUnworkedMinutes(minutes) {
   return hours * 60 + Math.floor(rest / UNWORKED_ROUND_UNIT_MIN) * UNWORKED_ROUND_UNIT_MIN;
 }
 
-function computePayrollPreview({ wageType, hourlyWage, monthlySalary, workedMinutes, overtimeMinutes, commuteAllowance = 0, attendanceDays = null, actualDays = 0, monthlyStandardHours = MONTHLY_STANDARD_HOURS, deemedOvertimeMinutes = 0 }) {
+// rounding … 1円未満の端数の処理を項目ごとに受け取ります（支給・控除項目一覧の設定）。
+//   base      … 基本給
+//   overtime  … 残業手当
+//   allowance … 通勤手当
+// 渡されなかったときは、これまでどおり基本給と残業手当は切り上げ、通勤手当は四捨五入です。
+function computePayrollPreview({ wageType, hourlyWage, monthlySalary, workedMinutes, overtimeMinutes, commuteAllowance = 0, attendanceDays = null, actualDays = 0, monthlyStandardHours = MONTHLY_STANDARD_HOURS, deemedOvertimeMinutes = 0, rounding = null }) {
+  const rBase = rounding?.base || 'ceil';
+  const rOver = rounding?.overtime || 'ceil';
+  const rAllow = rounding?.allowance || 'round';
   const regularMinutes = Math.max(0, workedMinutes - overtimeMinutes);
   // みなし残業。決めた時間までは残業手当を追加で払わず、超えた分だけ払います。
   // 月給制の方にだけ当てます（deemedOvertimeFor が時給制には0を返します）。
@@ -15197,24 +15230,24 @@ function computePayrollPreview({ wageType, hourlyWage, monthlySalary, workedMinu
   if (wageType === 'hourly') {
     wageRate = Number(hourlyWage) || 0;
     wageRateHourly = wageRate;
-    baseAmount = ceilYen((regularMinutes / 60) * wageRate);
-    overtimeAmount = ceilYen((paidOvertimeMinutes / 60) * wageRate * OVERTIME_MULTIPLIER);
+    baseAmount = roundYenBy((regularMinutes / 60) * wageRate, rBase);
+    overtimeAmount = roundYenBy((paidOvertimeMinutes / 60) * wageRate * OVERTIME_MULTIPLIER, rOver);
   } else {
     wageRate = Number(monthlySalary) || 0;
     if (attendanceDays && attendanceDays > 0) {
       // 出勤規定日数に対する実出勤日数の割合で月給を日割り計算（規定日数を超えて働いた分は満額まで）
       const dailyWage = wageRate / attendanceDays;
-      baseAmount = ceilYen(dailyWage * Math.min(Number(actualDays) || 0, attendanceDays));
+      baseAmount = roundYenBy(dailyWage * Math.min(Number(actualDays) || 0, attendanceDays), rBase);
       prorated = true;
     } else {
-      baseAmount = ceilYen(wageRate);
+      baseAmount = roundYenBy(wageRate, rBase);
     }
     // 月平均所定労働時間は画面で設定できます（未設定なら MONTHLY_STANDARD_HOURS）
     const hours = Number(monthlyStandardHours) > 0 ? Number(monthlyStandardHours) : MONTHLY_STANDARD_HOURS;
     wageRateHourly = wageRate / hours;
-    overtimeAmount = ceilYen((paidOvertimeMinutes / 60) * wageRateHourly * OVERTIME_MULTIPLIER);
+    overtimeAmount = roundYenBy((paidOvertimeMinutes / 60) * wageRateHourly * OVERTIME_MULTIPLIER, rOver);
   }
-  const allowanceAmount = Math.round(Number(commuteAllowance) || 0);
+  const allowanceAmount = roundYenBy(Number(commuteAllowance) || 0, rAllow);
   // wageRateHourly        … 割増基礎単価（1時間あたり）
   // deemedOvertimeMinutes  … 当てたみなし残業の分数
   // paidOvertimeMinutes    … 実際に残業手当を払う分数（残業 − みなし残業）
@@ -16645,20 +16678,25 @@ const PAYROLL_ITEM_SOURCE_CHOICES = ['employee', 'fixed', 'manual'];
 // 名前と決め方は変えられません（変えると計算が項目を見つけられなくなります）。
 // desc には、いま実際にコードが行っている計算を書いています。
 const BUILTIN_PAYROLL_ITEMS = [
+  // rounding  … 1円未満の端数。いまの動きをそのまま既定にしています
+  //             （通勤手当だけ四捨五入なのは、もとからそうだったためです）。
+  // statutory … 法令で丸め方が決まっている項目。設定を当てません。
+  //             社会保険料は50銭以下切り捨て・50銭超切り上げ、所得税は10円未満四捨五入、
+  //             住民税は通知書の額そのままです。画面でも「法令どおり」と出します。
   // showZero … 金額が0円のときに、スタッフが見る給与明細と印刷に出すか。
   //   基本給だけ既定で出します（0円でも行が無いと明細が壊れて見えるため）。
   //   ほかの項目は既定で隠し、出したいものだけ画面でオンにします。
-  { label: '基本給', kind: 'payment', showZero: true, desc: '時給制：時給 ×（実働時間 − 残業時間）／月給制：月給（出勤規定日数があれば実出勤日数で日割り）' },
-  { label: '通勤手当', kind: 'payment', desc: '通勤経路の月額換算の合計（給与作成時にコピー）' },
-  { label: '残業手当', kind: 'payment', desc: '【割増基礎単価】×【残業時間】× 1.25' },
-  { label: '交通費精算', kind: 'payment', desc: '承認済みの交通費精算の合計' },
-  { label: '土日祝皆勤手当', kind: 'payment', desc: '土日祝の欠勤0日 10,000円／1日 5,000円／2日以上 0円（勤務実績が規定日数に満たないときは日割り）' },
-  { label: '健康保険料', kind: 'deduction', desc: '標準報酬月額 ×【健康保険料率】÷ 2' },
-  { label: '介護保険料', kind: 'deduction', desc: '標準報酬月額 ×【介護保険料率】÷ 2（40歳から64歳の月のみ）' },
-  { label: '厚生年金保険料', kind: 'deduction', desc: '標準報酬月額 ×【厚生年金保険料率】÷ 2' },
-  { label: '雇用保険料', kind: 'deduction', desc: '雇用保険の賃金に含める支給額の合計 ×【雇用保険料率】' },
-  { label: '所得税', kind: 'deduction', desc: '「給与所得の源泉徴収税額表」に当てはめて算出（電算機計算の特例）' },
-  { label: '住民税', kind: 'deduction', desc: '住民税の通知書に登録した月額' },
+  { label: '基本給', kind: 'payment', showZero: true, rounding: 'ceil', desc: '時給制：時給 ×（実働時間 − 残業時間）／月給制：月給（出勤規定日数があれば実出勤日数で日割り）' },
+  { label: '通勤手当', kind: 'payment', rounding: 'round', desc: '通勤経路の月額換算の合計（給与作成時にコピー）' },
+  { label: '残業手当', kind: 'payment', rounding: 'ceil', desc: '【割増基礎単価】×【残業時間】× 1.25' },
+  { label: '交通費精算', kind: 'payment', rounding: 'ceil', desc: '承認済みの交通費精算の合計' },
+  { label: '土日祝皆勤手当', kind: 'payment', rounding: 'ceil', desc: '土日祝の欠勤0日 10,000円／1日 5,000円／2日以上 0円（勤務実績が規定日数に満たないときは日割り）' },
+  { label: '健康保険料', kind: 'deduction', statutory: true, desc: '標準報酬月額 ×【健康保険料率】÷ 2' },
+  { label: '介護保険料', kind: 'deduction', statutory: true, desc: '標準報酬月額 ×【介護保険料率】÷ 2（40歳から64歳の月のみ）' },
+  { label: '厚生年金保険料', kind: 'deduction', statutory: true, desc: '標準報酬月額 ×【厚生年金保険料率】÷ 2' },
+  { label: '雇用保険料', kind: 'deduction', statutory: true, desc: '雇用保険の賃金に含める支給額の合計 ×【雇用保険料率】' },
+  { label: '所得税', kind: 'deduction', statutory: true, desc: '「給与所得の源泉徴収税額表」に当てはめて算出（電算機計算の特例）' },
+  { label: '住民税', kind: 'deduction', statutory: true, desc: '住民税の通知書に登録した月額' },
 ];
 const BUILTIN_PAYROLL_LABELS = new Set(BUILTIN_PAYROLL_ITEMS.map((x) => x.label));
 
@@ -16667,12 +16705,16 @@ const BUILTIN_PAYROLL_LABELS = new Set(BUILTIN_PAYROLL_ITEMS.map((x) => x.label)
 function defaultPayrollItems() {
   const builtins = BUILTIN_PAYROLL_ITEMS.map((x) => ({
     label: x.label, kind: x.kind, source: 'auto', amount: 0, enabled: true,
-    showZero: x.showZero === true, builtin: true, desc: x.desc,
+    showZero: x.showZero === true,
+    // 法令で丸め方が決まっている項目は設定を持ちません
+    rounding: x.statutory === true ? null : (x.rounding || 'ceil'),
+    statutory: x.statutory === true,
+    builtin: true, desc: x.desc,
   }));
   const allowances = PAYMENT_ALLOWANCE_PRESETS
     // 土日祝皆勤手当は組み込みで自動計算するため、手当側では出しません
     .filter((label) => !BUILTIN_PAYROLL_LABELS.has(label))
-    .map((label) => ({ label, kind: 'payment', source: 'employee', amount: 0, enabled: true, showZero: false, builtin: false, desc: '' }));
+    .map((label) => ({ label, kind: 'payment', source: 'employee', amount: 0, enabled: true, showZero: false, rounding: 'ceil', statutory: false, builtin: false, desc: '' }));
   // 支給→控除の順に並べ替えて、画面のタブと同じ並びにします
   const all = [...builtins, ...allowances];
   return [...all.filter((x) => x.kind === 'payment'), ...all.filter((x) => x.kind === 'deduction')];
@@ -16703,6 +16745,10 @@ function parsePayrollItems(settings) {
         enabled: row?.enabled !== false,
         // 保存が無い項目は、組み込みの既定（基本給だけ「出す」）に倒します
         showZero: typeof row?.showZero === 'boolean' ? row.showZero : builtin.showZero === true,
+        // 法令で決まっている項目は、保存に何が入っていても設定を持ちません
+        rounding: builtin.statutory === true ? null
+          : (PAYROLL_ROUNDINGS[row?.rounding] ? row.rounding : (builtin.rounding || 'ceil')),
+        statutory: builtin.statutory === true,
         builtin: true, desc: builtin.desc,
       });
       return;
@@ -16713,7 +16759,8 @@ function parsePayrollItems(settings) {
       label, kind, source,
       amount: source === 'fixed' ? Math.max(0, Math.round(Number(row?.amount) || 0)) : 0,
       enabled: row?.enabled !== false, showZero: row?.showZero === true,
-      builtin: false, desc: '',
+      rounding: PAYROLL_ROUNDINGS[row?.rounding] ? row.rounding : (kind === 'deduction' ? 'floor' : 'ceil'),
+      statutory: false, builtin: false, desc: '',
     });
   });
   // 保存に無い組み込み項目を、同じ区分の最後に足します
@@ -16722,7 +16769,8 @@ function parsePayrollItems(settings) {
     const at = out.map((o) => o.kind).lastIndexOf(x.kind);
     const row = {
       label: x.label, kind: x.kind, source: 'auto', amount: 0, enabled: true,
-      showZero: x.showZero === true, builtin: true, desc: x.desc,
+      showZero: x.showZero === true, rounding: x.statutory === true ? null : (x.rounding || 'ceil'),
+      statutory: x.statutory === true, builtin: true, desc: x.desc,
     };
     if (at < 0) out.push(row); else out.splice(at + 1, 0, row);
   });
@@ -16942,6 +16990,25 @@ function parseDeemedOvertimeGroups(settings) {
   return out;
 }
 
+// その方の、項目ごとの1円未満の端数処理。
+// 法令で丸め方が決まっている項目（保険料・税）は設定を持たないので null を返します。
+// 一覧に無い名前のときは、支給なら切り上げ・控除なら切り捨て（賃金規程の既定）。
+function payrollRoundingFor(settings, kind, label) {
+  const key = paymentItemKey(label);
+  const found = parsePayrollItems(settings).find((x) => x.kind === kind && x.label === key);
+  if (found) return found.rounding;
+  return kind === 'deduction' ? 'floor' : 'ceil';
+}
+
+// 給与計算で使う3つ分をまとめて取ります（computePayrollPreview に渡す形）。
+function payrollRoundingSet(settings) {
+  return {
+    base: payrollRoundingFor(settings, 'payment', '基本給'),
+    overtime: payrollRoundingFor(settings, 'payment', '残業手当'),
+    allowance: payrollRoundingFor(settings, 'payment', '通勤手当'),
+  };
+}
+
 // その方のみなし残業時間。どこから来た値なのかも返します（画面で根拠を出すため）。
 //   personal … スタッフ詳細の「みなし残業時間」
 //   group    … 給与規定グループの設定
@@ -17050,6 +17117,7 @@ async function savePayrollItemSettings({ items, flags }, actor = null) {
       ...(x.source === 'fixed' ? { amount: Math.max(0, Math.round(Number(x.amount) || 0)) } : {}),
       enabled: x.enabled !== false,
       showZero: x.showZero === true,
+      ...(x.statutory ? {} : { rounding: PAYROLL_ROUNDINGS[x.rounding] ? x.rounding : 'ceil' }),
     }));
     rows.push({ key: SETTING_PAYROLL_ITEMS, value: JSON.stringify(slim), updated_by: actor?.id || null, updated_at: new Date().toISOString() });
   }
@@ -17171,7 +17239,7 @@ function approvedLeaveOn(leaveRequests, employeeId, dateKey) {
 // （0円は「計算した結果0円」で、null とは別の意味です）
 function computeWeekendHolidayBonus({
   employee, year, month, records, leaveRequests,
-  prescribedDays, absentOverride = null,
+  prescribedDays, absentOverride = null, rounding = 'ceil',
 }) {
   const employeeId = employee?.id;
   const keys = monthDateKeys(year, month);
@@ -17251,10 +17319,11 @@ function computeWeekendHolidayBonus({
   }
   if (workedDays >= pd) return { ...common, amount: baseAmount, workedDays };
 
-  // 1円未満切り上げ。整数の割り算で行います（小数の誤差で1円ずれないように）
+  // 日割りの1円未満。整数の割り算で行います（小数の誤差で1円ずれないように）。
+  // 丸め方は支給・控除項目一覧の「1円未満」の設定に従います（既定は切り上げ）。
   return {
     ...common,
-    amount: ceilDiv(baseAmount * workedDays, pd),
+    amount: roundDivBy(baseAmount * workedDays, pd, rounding),
     workedDays,
     prorated: true,
   };
@@ -17872,7 +17941,7 @@ function PayrollItemSettings({ settings, employeeAccounts = [], actor, isMasterA
               スマホでは金額の欄がつぶれて1文字ずつ折り返すため、
               表に最低の幅を持たせて横スクロールにしています。 */}
           <div className="overflow-x-auto">
-            <table className={`w-full text-[11.5px] ${inGroup ? 'min-w-[460px]' : kind === 'payment' ? 'min-w-[780px]' : 'min-w-[560px]'}`}>
+            <table className={`w-full text-[11.5px] ${inGroup ? 'min-w-[460px]' : kind === 'payment' ? 'min-w-[880px]' : 'min-w-[660px]'}`}>
               <thead className="bg-slate-50 text-slate-500">
                 <tr className="text-left">
                   {view === 'reorder' && !inGroup && <th className="px-2 py-1.5 font-medium w-16 text-center">並び</th>}
@@ -17880,6 +17949,7 @@ function PayrollItemSettings({ settings, employeeAccounts = [], actor, isMasterA
                   <th className="px-2.5 py-1.5 font-medium min-w-[200px]">金額</th>
                   {kind === 'payment' && !inGroup && <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">雇用保険の賃金</th>}
                   {kind === 'payment' && !inGroup && <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">所得税の課税</th>}
+                  {!inGroup && <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">1円未満</th>}
                   {!inGroup && <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">0円のとき</th>}
                   <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">使う</th>
                   <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">{inGroup ? '共通との違い' : ' '}</th>
@@ -17887,7 +17957,7 @@ function PayrollItemSettings({ settings, employeeAccounts = [], actor, isMasterA
               </thead>
               <tbody>
                 {shown.length === 0 ? (
-                  <tr><td colSpan={8} className="px-2.5 py-6 text-center text-slate-300">{kindLabel}項目がありません</td></tr>
+                  <tr><td colSpan={9} className="px-2.5 py-6 text-center text-slate-300">{kindLabel}項目がありません</td></tr>
                 ) : shown.map((x, i) => {
                   const f = paymentItemFlag(x.label, flags);
                   const dim = x.enabled ? '' : 'text-slate-300';
@@ -17926,6 +17996,24 @@ function PayrollItemSettings({ settings, employeeAccounts = [], actor, isMasterA
                             </button>
                           </td>
                         ))}
+                        {/* 1円未満の端数。法令で丸め方が決まっている項目は変えられません。 */}
+                        {!inGroup && (
+                          <td className="px-2 py-1.5 text-center">
+                            {x.statutory ? (
+                              <span className="text-[10.5px] text-slate-400" title="社会保険料は50銭以下切り捨て・50銭超切り上げ、所得税は10円未満四捨五入、住民税は通知書の額そのままです">
+                                法令どおり
+                              </span>
+                            ) : (
+                              <select
+                                value={x.rounding || 'ceil'}
+                                onChange={(e) => patch(x.label, { rounding: e.target.value })}
+                                className="box-border border border-slate-200 rounded-lg px-1.5 py-1 text-[11px] bg-white"
+                              >
+                                {Object.entries(PAYROLL_ROUNDINGS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                              </select>
+                            )}
+                          </td>
+                        )}
                         {/* 金額が0円のときに、スタッフが見る明細と印刷に出すか。
                             作る側の給与計算の画面には、どちらでも全部並びます。 */}
                         {!inGroup && (
@@ -17971,7 +18059,7 @@ function PayrollItemSettings({ settings, employeeAccounts = [], actor, isMasterA
                       </tr>
                       {editing === x.label && !inGroup && (
                         <tr className="border-t border-slate-100 bg-slate-50">
-                          <td colSpan={8} className="px-2.5 py-2.5">
+                          <td colSpan={9} className="px-2.5 py-2.5">
                             <div className={`grid gap-2 ${isDesktop ? 'grid-cols-3' : 'grid-cols-1'}`}>
                               <Field label="金額の決め方">
                                 <select
@@ -18024,6 +18112,8 @@ function PayrollItemSettings({ settings, employeeAccounts = [], actor, isMasterA
                 扱いが違うので別々に持っています。通勤手当の非課税の限度額は見ていないため、限度を超える方がいる場合は所得税の金額を手で直してください。
               </>
             )}
+            <b className="block pt-0.5">「1円未満」は、Brown Work が金額を計算したときの端数の処理です。</b>
+            {!inGroup && <>基本給・残業手当・通勤手当・土日祝皆勤手当のように、計算で小数が出る項目に効きます。金額をそのまま入れる項目には関係ありません。賃金規程は「支給は切り上げ、控除（不就労時間）は切り捨て」なので、それを既定にしています。保険料と税は法令で丸め方が決まっているため変えられません。</>}
             <b className="block pt-0.5">「0円のとき」は、金額が0円の行をスタッフが見る明細と印刷に出すかどうかです。</b>
             {!inGroup && <>給与計算の画面（作る側）には、どちらにしても「使う」にした項目が全部並びます。入れ忘れに気づけるようにするためです。合計は変わりません。</>}
             <b className="block pt-0.5">「使わない」にすると、</b>
@@ -18538,6 +18628,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     actualDays: monthly.days,
     monthlyStandardHours: monthlyStandardHoursOf(settings),
     deemedOvertimeMinutes: deemed.minutes,
+    rounding: payrollRoundingSet(settings),
   }) : null;
 
   // 土日祝皆勤手当。スタッフ詳細の固定支給項目に登録されている方だけが対象です。
@@ -18556,6 +18647,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     leaveRequests,
     prescribedDays: attendanceDays,
     absentOverride: weekendAbsentOverride === '' ? null : weekendAbsentOverride,
+    rounding: payrollRoundingFor(settings, 'payment', WEEKEND_BONUS_LABEL),
   }) : null;
 
   // スタッフ・年月・下書きの有無が変わったら、支給・控除項目を初期化する
