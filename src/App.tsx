@@ -27010,6 +27010,174 @@ const PROFILE_MODAL_TABS = [
 // ---- 有休の付与の一覧と登録（スタッフ詳細→業務・契約） ----
 // 法定の付与は入職日から導いて灰色で並べ、表に登録した行（引き継ぎ・手動）は色を変えています。
 // 時効が切れた付与も「使えた期間」を見るために残して表示します。
+// ---- 規定勤怠時間（スタッフ詳細→業務・契約） ----
+// これまでは本人の勤怠画面からしか登録できず、管理者は中身を見ることも
+// できませんでした。遅刻・早退の基準になる値なので、管理者からも
+// 確認・登録・修正できるようにします。
+//
+// 月ごとの設定です。その月の登録が無ければ、直前に登録のあった月から
+// 引き継いで使われます（本人の画面と同じ動き）。
+function AdminSchedulePatternPanel({ employee, actor = null }) {
+  const now = new Date();
+  const [ym, setYm] = useState(`${now.getFullYear()}-${pad(now.getMonth() + 1)}`);
+  const [patterns, setPatterns] = useState([]);
+  const [inheritedFrom, setInheritedFrom] = useState(null);
+  const [form, setForm] = useState([1, 2, 3].map((no) => ({ patternNo: no, label: '', startTime: '', endTime: '' })));
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [result, setResult] = useState(null);
+
+  const [year, month] = ym.split('-').map(Number);
+  const employeeId = employee?.id;
+
+  // 読み直しでは result を触りません。保存したあとに呼ぶため、
+  // ここで消すと「保存しました」の知らせが出ないまま消えてしまいます。
+  const load = async () => {
+    if (!employeeId) return;
+    setLoading(true);
+    const { patterns: got, inheritedFrom: from } = await fetchSchedulePatterns(employeeId, year, month);
+    setPatterns(got);
+    setInheritedFrom(from);
+    // 引き継いだ値は、そのまま保存するとその月の登録になります。
+    // 画面に出しておくことで「引き継いだ内容で確定する」操作ができます。
+    setForm([1, 2, 3].map((no) => {
+      const found = got.find((p) => p.patternNo === no);
+      return found ? { ...found } : { patternNo: no, label: '', startTime: '', endTime: '' };
+    }));
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [employeeId, ym]);
+
+  const setField = (no, field, value) => {
+    setResult(null);
+    setForm((prev) => prev.map((p) => (p.patternNo === no ? { ...p, [field]: value } : p)));
+  };
+
+  // 始業と終業は両方そろっている必要があります（片方だけでは所定が出せません）
+  const invalid = form.filter((p) => (p.startTime && !p.endTime) || (!p.startTime && p.endTime));
+  const reversed = form.filter((p) => p.startTime && p.endTime && toMinutes(p.endTime) <= toMinutes(p.startTime));
+
+  const save = async () => {
+    if (invalid.length > 0) {
+      setResult({ ok: false, text: '始業と終業は両方を入れてください（片方だけでは所定の時間が出せません）。' });
+      return;
+    }
+    if (reversed.length > 0) {
+      setResult({ ok: false, text: '終業は始業より後の時刻にしてください。' });
+      return;
+    }
+    setSaving(true);
+    const ok = await saveSchedulePatterns(employeeId, year, month, form);
+    setSaving(false);
+    if (!ok) {
+      setResult({ ok: false, text: '保存できませんでした。通信の状態をご確認のうえ、もう一度お試しください。' });
+      return;
+    }
+    await logAudit(actor, '規定勤怠時間を管理者が変更',
+      `${year}年${month}月／` + (form.filter((p) => p.startTime && p.endTime)
+        .map((p) => `${p.startTime}〜${p.endTime}`).join('・') || '登録なし'),
+      employeeId, employee?.name || '');
+    await load();
+    setResult({ ok: true, text: `${year}年${month}月の規定勤怠時間を保存しました。これから打刻する日に使われます。` });
+  };
+
+  const filled = form.filter((p) => p.startTime && p.endTime);
+
+  return (
+    <div className="rounded-xl border border-slate-200 overflow-hidden">
+      <div className="px-3.5 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center gap-2 flex-wrap">
+        <span className="text-[12px] font-bold text-slate-600">規定勤怠時間</span>
+        <span className="text-[11px] text-slate-400">
+          {loading ? '読み込み中…'
+            : filled.length === 0 ? '登録なし'
+              : filled.map((p) => `${p.startTime}〜${p.endTime}`).join('／')}
+        </span>
+        <input
+          type="month"
+          value={ym}
+          onChange={(e) => { setResult(null); setYm(e.target.value); }}
+          className="ml-auto border border-slate-200 rounded-lg px-2 py-1 font-mono text-[12px] bg-white"
+        />
+      </div>
+
+      <div className="px-3.5 py-3 space-y-2.5">
+        {result && (
+          <div className={`rounded-lg px-2.5 py-1.5 text-[11px] border ${result.ok
+            ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+            : 'border-rose-200 bg-rose-50 text-rose-700'}`}>
+            {result.text}
+          </div>
+        )}
+
+        <div className="text-[10.5px] text-slate-500 leading-relaxed">
+          遅刻・早退は「打刻の時刻 − 所定の始業・終業」で出します。ここが実際の勤務時間と
+          違うと、その差が毎日の遅刻になります。
+          <b className="block pt-0.5">ご本人も勤怠画面から登録できます。ここは管理者が代わりに入れる欄です。</b>
+        </div>
+
+        {inheritedFrom && (
+          <div className="rounded-lg border border-sky-200 bg-sky-50 px-2.5 py-2 text-[10.5px] text-sky-800 leading-relaxed">
+            <b className="block">{year}年{month}月の登録はありません。</b>
+            {inheritedFrom.year}年{inheritedFrom.month}月の設定をそのまま使っています。
+            下の内容で保存すると、{year}年{month}月の登録として確定します。
+          </div>
+        )}
+        {!loading && !inheritedFrom && filled.length === 0 && (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-[10.5px] text-amber-900 leading-relaxed">
+            <b className="block">登録がありません。</b>
+            この状態で打刻すると、給与規定グループの「所定勤務時間」が使われます。
+            それも未設定なら {WORK_HOURS_FALLBACK.start}〜{WORK_HOURS_FALLBACK.end} になります。
+          </div>
+        )}
+
+        {form.map((p) => (
+          <div key={p.patternNo} className="grid grid-cols-[52px_1fr_104px_104px] gap-2 items-center">
+            <span className="text-[11px] font-bold text-slate-400">パターン{p.patternNo}</span>
+            <input
+              value={p.label}
+              onChange={(e) => setField(p.patternNo, 'label', e.target.value)}
+              placeholder="呼び方（任意）"
+              className="min-w-0 border border-slate-200 rounded-lg px-2 py-1.5 text-[12px] bg-white"
+            />
+            <input
+              type="time" value={p.startTime}
+              onChange={(e) => setField(p.patternNo, 'startTime', e.target.value)}
+              className="box-border w-full border border-slate-200 rounded-lg px-2 py-1.5 font-mono text-[12px] bg-white"
+            />
+            <input
+              type="time" value={p.endTime}
+              onChange={(e) => setField(p.patternNo, 'endTime', e.target.value)}
+              className="box-border w-full border border-slate-200 rounded-lg px-2 py-1.5 font-mono text-[12px] bg-white"
+            />
+          </div>
+        ))}
+        <div className="text-[10.5px] text-slate-400">
+          パターンは最大3つまで。2つ以上あるときは、ご本人が打刻の前にその日のパターンを選びます。
+          空欄にして保存すると、そのパターンは消えます。
+        </div>
+
+        <button
+          onClick={save}
+          disabled={saving || loading}
+          className="w-full rounded-lg bg-slate-800 py-2 text-[12.5px] font-bold text-white disabled:bg-slate-300"
+        >
+          {saving ? '保存中…' : `${year}年${month}月の規定勤怠時間を保存する`}
+        </button>
+
+        <div className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 text-[10.5px] text-slate-600 leading-relaxed">
+          <b className="block">すでに打刻した日の所定の時刻は変わりません。</b>
+          所定の時刻は打刻したその瞬間に記録へ書き込まれます。過ぎた日を直すときは、
+          勤怠タブ → その方の月間勤怠 →「この月の所定の始業・終業」をお使いください。
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PaidLeaveGrantsPanel({ employee, grantRows = [], leaveRequests = [], settings = {}, actor = null, onChanged, isDesktop }) {
   const [editing, setEditing] = useState(null); // null か { id?, grantDate, days, kind, note }
   const [saving, setSaving] = useState(false);
@@ -28596,6 +28764,10 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
               <Field label="みなし残業時間（月あたり・時間）">
                 <input type="number" step="0.5" value={form.deemedOvertimeHours} onChange={set('deemedOvertimeHours')} placeholder="未設定" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
               </Field>
+
+              {/* 規定勤怠時間。ほかの欄と違って別の表に保存するため、
+                  スタッフ詳細の「保存」とは別に、この中のボタンで保存します。 */}
+              <AdminSchedulePatternPanel employee={account} actor={actor} />
               <Field label="有休の手動調整（日・マイナス可）">
                 <input type="number" value={form.leaveAdjustment} onChange={set('leaveAdjustment')} placeholder="0" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
               </Field>
