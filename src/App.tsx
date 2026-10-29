@@ -16,6 +16,7 @@ import {
   buildNenkinSanteiFields, NENKIN_SANTEI_SPECS, santeiTotals, standardRemunerationCode,
   SANTEI_KINDS, EMPTY_SANTEI_MONTH,
   buildNenkinBonusFields, NENKIN_BONUS_SPECS, bonusAmounts,
+  buildNenkinGegakuFields, NENKIN_GEGAKU_SPECS, gegakuTotals, addMonthsToYm, GEGAKU_KINDS,
 } from './denshiShinsei';
 
 // ---- constants ----
@@ -16985,8 +16986,12 @@ const BUILTIN_PAYROLL_ITEMS = [
   // showZero … 金額が0円のときに、スタッフが見る給与明細と印刷に出すか。
   //   基本給だけ既定で出します（0円でも行が無いと明細が壊れて見えるため）。
   //   ほかの項目は既定で隠し、出したいものだけ画面でオンにします。
-  { label: '基本給', kind: 'payment', showZero: true, rounding: 'ceil', desc: '時給制：時給 ×（実働時間 − 残業時間）／日給制：日額 × 実出勤日数／月給制：月給そのまま（休んだぶんは欠勤控除で引きます。入社月・退職月も満額）' },
-  { label: '通勤手当', kind: 'payment', rounding: 'round', desc: '通勤経路の月額換算の合計（給与作成時にコピー）' },
+  // fixedWage … 固定的賃金かどうか（月額変更届で使います）。
+  //   稼働に関係なく毎月決まって同じ額が支払われるものが固定的賃金です。
+  //   基本給と通勤手当だけを既定で固定的賃金にしています。
+  //   残業手当・深夜手当・交通費精算などは働いた分で変わるため、非固定です。
+  { label: '基本給', kind: 'payment', fixedWage: true, showZero: true, rounding: 'ceil', desc: '時給制：時給 ×（実働時間 − 残業時間）／日給制：日額 × 実出勤日数／月給制：月給そのまま（休んだぶんは欠勤控除で引きます。入社月・退職月も満額）' },
+  { label: '通勤手当', kind: 'payment', fixedWage: true, rounding: 'round', desc: '通勤経路の月額換算の合計（給与作成時にコピー）' },
   { label: '残業手当', kind: 'payment', rounding: 'ceil', desc: '【割増基礎単価】×【残業時間】×【割増率】。割増率は「給与の設定」→「計算のきまり」で変えられます（既定1.25）。' },
   { label: '交通費精算', kind: 'payment', rounding: 'ceil', desc: '承認済みの交通費精算の合計' },
   { label: '有給休暇手当', kind: 'payment', rounding: 'ceil', desc: '時給制：時給 × 1日の所定労働時間 × 有給使用日数／日給制：その日の日額 × 有給使用日数（平日・土日祝それぞれの日額を使います）。月給制には付きません（基本給が月給そのままで、有休を取っても減らないため）。' },
@@ -17011,6 +17016,7 @@ function defaultPayrollItems() {
     // 法令で丸め方が決まっている項目は設定を持ちません
     rounding: x.statutory === true ? null : (x.rounding || 'ceil'),
     statutory: x.statutory === true,
+    fixedWage: x.fixedWage === true,
     builtin: true, desc: x.desc,
   }));
   const allowances = PAYMENT_ALLOWANCE_PRESETS
@@ -17019,8 +17025,10 @@ function defaultPayrollItems() {
       // 土日祝皆勤手当だけは式で計算します。日の判定（土日祝・有休・在籍期間）は
       // コードが行い、その日数を式に渡して金額を出します。
       label === WEEKEND_BONUS_LABEL
-        ? { label, kind: 'payment', source: 'formula', formula: WEEKEND_BONUS_DEFAULT_FORMULA, amount: 0, enabled: false, showZero: false, rounding: 'ceil', statutory: false, builtin: false, desc: '' }
-        : { label, kind: 'payment', source: 'employee', amount: 0, enabled: true, showZero: false, rounding: 'ceil', statutory: false, builtin: false, desc: '' }
+        // 式で計算するものは月によって変わるので非固定、
+        // 人ごとに決めた額の手当は毎月同じなので固定的賃金にしておきます
+        ? { label, kind: 'payment', source: 'formula', formula: WEEKEND_BONUS_DEFAULT_FORMULA, amount: 0, enabled: false, showZero: false, rounding: 'ceil', statutory: false, fixedWage: false, builtin: false, desc: '' }
+        : { label, kind: 'payment', source: 'employee', amount: 0, enabled: true, showZero: false, rounding: 'ceil', statutory: false, fixedWage: true, builtin: false, desc: '' }
     ));
   // 支給→控除の順に並べ替えて、画面のタブと同じ並びにします
   const all = [...builtins, ...allowances];
@@ -17056,6 +17064,7 @@ function parsePayrollItems(settings) {
         rounding: builtin.statutory === true ? null
           : (PAYROLL_ROUNDINGS[row?.rounding] ? row.rounding : (builtin.rounding || 'ceil')),
         statutory: builtin.statutory === true,
+        fixedWage: typeof row?.fixedWage === 'boolean' ? row.fixedWage : builtin.fixedWage === true,
         builtin: true, desc: builtin.desc,
       });
       return;
@@ -17073,7 +17082,7 @@ function parsePayrollItems(settings) {
         amount: 0, enabled: false,
         showZero: row?.showZero === true,
         rounding: PAYROLL_ROUNDINGS[row?.rounding] ? row.rounding : 'ceil',
-        statutory: false, builtin: false, desc: '',
+        statutory: false, fixedWage: row?.fixedWage === true, builtin: false, desc: '',
       });
       return;
     }
@@ -17084,7 +17093,14 @@ function parsePayrollItems(settings) {
       formula: source === 'formula' ? String(row?.formula || '') : '',
       enabled: row?.enabled !== false, showZero: row?.showZero === true,
       rounding: PAYROLL_ROUNDINGS[row?.rounding] ? row.rounding : (kind === 'deduction' ? 'floor' : 'ceil'),
-      statutory: false, builtin: false, desc: '',
+      statutory: false,
+      // 保存が無いときは、金額の決め方から決めます。
+      // 人ごとに決めた額・決まった額は毎月同じなので固定的賃金、
+      // 式で計算するものは月によって変わるので非固定にします。
+      fixedWage: typeof row?.fixedWage === 'boolean'
+        ? row.fixedWage
+        : (kind === 'payment' && (source === 'employee' || source === 'fixed')),
+      builtin: false, desc: '',
     });
   });
   // 保存に無い組み込み項目を、同じ区分の最後に足します
@@ -17094,11 +17110,27 @@ function parsePayrollItems(settings) {
     const row = {
       label: x.label, kind: x.kind, source: 'auto', amount: 0, enabled: true,
       showZero: x.showZero === true, rounding: x.statutory === true ? null : (x.rounding || 'ceil'),
-      statutory: x.statutory === true, builtin: true, desc: x.desc,
+      statutory: x.statutory === true, fixedWage: x.fixedWage === true, builtin: true, desc: x.desc,
     };
     if (at < 0) out.push(row); else out.splice(at + 1, 0, row);
   });
   return out;
+}
+
+// 固定的賃金に当たる支給項目の名前。月額変更届（随時改定）の判断に使います。
+// 稼働に関係なく毎月決まって同じ額が支払われるものが固定的賃金です。
+function fixedWageLabels(settings) {
+  return parsePayrollItems(settings)
+    .filter((x) => x.kind === 'payment' && x.fixedWage === true)
+    .map((x) => x.label);
+}
+
+// 給与明細のうち、固定的賃金にあたる支給項目の合計。
+function fixedWageTotal(record, labels) {
+  const set = new Set(labels || []);
+  return ((record?.paymentItems) || [])
+    .filter((it) => set.has(paymentItemKey(it?.label)))
+    .reduce((s, it) => s + (Number(it?.amount) || 0), 0);
 }
 
 // 画面や計算で使う形。kind で絞り、使う項目だけを並び順どおりに返します。
@@ -18226,6 +18258,7 @@ async function savePayrollItemSettings({ items, flags }, actor = null) {
       ...(x.source === 'formula' ? { formula: String(x.formula || '').trim() } : {}),
       enabled: x.enabled !== false,
       showZero: x.showZero === true,
+      ...(x.kind === 'payment' ? { fixedWage: x.fixedWage === true } : {}),
       ...(x.statutory ? {} : { rounding: PAYROLL_ROUNDINGS[x.rounding] ? x.rounding : 'ceil' }),
     }));
     rows.push({ key: SETTING_PAYROLL_ITEMS, value: JSON.stringify(slim), updated_by: actor?.id || null, updated_at: new Date().toISOString() });
@@ -19710,9 +19743,10 @@ const SHINSEI_KINDS = {
   hwRishoku: { label: '雇用保険被保険者資格喪失届（離職票交付あり）＋離職証明書', where: 'ハローワーク' },
   nenkinSantei: { label: '健康保険・厚生年金保険 被保険者報酬月額算定基礎届', where: '年金事務所' },
   nenkinBonus: { label: '健康保険・厚生年金保険 被保険者賞与支払届', where: '年金事務所' },
+  nenkinGegaku: { label: '健康保険・厚生年金保険 被保険者報酬月額変更届（随時改定）', where: '年金事務所' },
 };
 const SHINSEI_KIND_ORDER = [
-  'nenkinShutoku', 'nenkinSoshitsu', 'nenkinSantei', 'nenkinBonus',
+  'nenkinShutoku', 'nenkinSoshitsu', 'nenkinSantei', 'nenkinGegaku', 'nenkinBonus',
   'hwShutoku', 'hwSoshitsu', 'hwRishoku',
 ];
 
@@ -20097,6 +20131,134 @@ function SanteiMonthTable({ months, onChange, totals, wageType, kindLabel }) {
   );
 }
 
+
+// ---- 月額変更届（随時改定）の画面 ----
+
+// 支給月1つ分を、Brown Work から入れます。
+function fillPaidMonth({ employee, payrollRecords, records, leaveRequests, payYm, offset }) {
+  const m = /^(\d{4})-(\d{2})$/.exec(String(payYm || ''));
+  if (!m) return { ...EMPTY_SANTEI_MONTH, payYm: '', srcYear: 0, srcMonth: 0 };
+  const t = Number(m[1]) * 12 + (Number(m[2]) - 1) - Number(offset || 0);
+  const y = Math.floor(t / 12), mo = (t % 12) + 1;
+  const mine = records?.[employee?.id] || {};
+  const rec = (payrollRecords || []).find(
+    (p) => p.employeeId === employee?.id && p.year === y && p.month === mo,
+  );
+  const cash = paymentTotalOfPayroll(rec);
+  const start = `${y}-${String(mo).padStart(2, '0')}-01`;
+  const end = `${y}-${String(mo).padStart(2, '0')}-${String(lastDayOfMonth(y, mo)).padStart(2, '0')}`;
+  const isMonthly = String(employee?.wageType || '') === 'monthly';
+  const days = isMonthly
+    ? (cash == null ? null : lastDayOfMonth(y, mo))
+    : countWageBaseDays(mine, leaveRequests, employee?.id, start, end);
+  return { days, cash, goods: 0, payYm, srcYear: y, srcMonth: mo, record: rec || null };
+}
+
+// 改定年月の前三ヶ月・前二ヶ月・前一ヶ月を入れます。
+function fillGegakuMonths({ employee, payrollRecords, records, leaveRequests, revisedMonth, offset }) {
+  return [3, 2, 1].map((back) => fillPaidMonth({
+    employee, payrollRecords, records, leaveRequests,
+    payYm: addMonthsToYm(revisedMonth, -back), offset,
+  }));
+}
+
+const GEGAKU_BACK_LABELS = ['前三ヶ月', '前二ヶ月', '前一ヶ月'];
+
+function GegakuMonthTable({ months, onChange, totals, wageType, kindLabel }) {
+  const isMonthly = String(wageType || '') === 'monthly';
+  const set = (i, key) => (e) => {
+    const raw = e?.target ? e.target.value : e;
+    const v = raw === '' ? null : Number(raw);
+    onChange(months.map((m, j) => (j === i ? { ...m, [key]: v } : m)));
+  };
+  const cell = 'w-full box-border min-w-0 border border-slate-200 rounded px-1 py-1 text-[11.5px] text-right';
+  return (
+    <div className="rounded-xl border border-slate-200 overflow-hidden">
+      <div className="px-3 py-2 bg-slate-50 border-b border-slate-200 text-[11px] font-bold text-slate-600">
+        改定年月の前3か月に支払った給与
+      </div>
+      <div className="px-3 py-2 text-[10.5px] text-slate-500 leading-relaxed border-b border-slate-100">
+        御社は当月末締め・翌月25日払いなので、支給月の前月分の給与を見ます。
+        <b className="block pt-0.5">
+          給与計算の基礎日数は、{isMonthly ? '月給制なのでその計算期間の暦日数を入れています。' : '出勤した日＋承認済みの有給を取った日で数えています。'}
+          数え方が違う場合はこの表で直してください。
+        </b>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-[11.5px] min-w-[560px]">
+          <thead className="bg-slate-50 text-slate-500">
+            <tr className="text-left">
+              <th className="px-2 py-1.5 font-medium whitespace-nowrap">支給月</th>
+              <th className="px-2 py-1.5 font-medium whitespace-nowrap">対象の給与</th>
+              <th className="px-2 py-1.5 font-medium whitespace-nowrap text-center">基礎日数</th>
+              <th className="px-2 py-1.5 font-medium whitespace-nowrap text-center">通貨</th>
+              <th className="px-2 py-1.5 font-medium whitespace-nowrap text-center">現物</th>
+              <th className="px-2 py-1.5 font-medium whitespace-nowrap text-center">合計</th>
+            </tr>
+          </thead>
+          <tbody>
+            {months.map((m, i) => {
+              const short = totals.shortMonths.indexOf(i) >= 0;
+              return (
+                <tr key={i} className="border-t border-slate-100">
+                  <td className="px-2 py-1 font-bold text-slate-700 whitespace-nowrap">
+                    {m.payYm ? `${Number(m.payYm.slice(5, 7))}月` : '—'}
+                    <span className="ml-1 text-[10px] font-normal text-slate-400">{GEGAKU_BACK_LABELS[i]}</span>
+                  </td>
+                  <td className="px-2 py-1 text-slate-500 whitespace-nowrap">
+                    {m.srcYear ? `${m.srcYear}年${m.srcMonth}月分` : '—'}
+                  </td>
+                  <td className="px-2 py-1 w-[64px]">
+                    <input type="number" min="0" max="99" value={m.days ?? ''} onChange={set(i, 'days')}
+                      className={`${cell} ${short ? 'border-rose-300 bg-rose-50' : ''}`} />
+                  </td>
+                  <td className="px-2 py-1 w-[100px]">
+                    <input type="number" min="0" value={m.cash ?? ''} onChange={set(i, 'cash')} className={cell} />
+                  </td>
+                  <td className="px-2 py-1 w-[90px]">
+                    <input type="number" min="0" value={m.goods ?? ''} onChange={set(i, 'goods')} className={cell} />
+                  </td>
+                  <td className="px-2 py-1 text-right text-slate-600 whitespace-nowrap">
+                    {totals.monthTotals[i].toLocaleString()}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+          <tfoot className="bg-slate-50 border-t border-slate-200">
+            <tr>
+              <td colSpan={4} className="px-2 py-1.5 text-right text-[11px] font-bold text-slate-600">総計</td>
+              <td colSpan={2} className="px-2 py-1.5 text-right text-[12px] font-bold text-slate-800 whitespace-nowrap">
+                {totals.total.toLocaleString()}
+              </td>
+            </tr>
+            <tr>
+              <td colSpan={4} className="px-2 py-1.5 text-right text-[11px] font-bold text-slate-600">平均額（総計 ÷ 3）</td>
+              <td colSpan={2} className="px-2 py-1.5 text-right text-[12px] font-bold text-slate-800 whitespace-nowrap">
+                {totals.average.toLocaleString()}
+              </td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+      <div className="px-3 py-2 border-t border-slate-100 text-[10px] leading-relaxed">
+        {totals.eligible ? (
+          <span className="text-slate-500">
+            {kindLabel}なので、3か月とも基礎日数が<b>{totals.threshold}日以上</b>であることが要ります。満たしています。
+          </span>
+        ) : (
+          <span className="text-rose-700 font-bold">
+            基礎日数が{totals.threshold}日に届かない月があります
+            （{totals.shortMonths.map((i) => GEGAKU_BACK_LABELS[i]).join('・')}）。
+            この場合は随時改定の対象になりません。
+          </span>
+        )}
+        <span className="text-slate-500"> 平均額は1円未満を切り捨てています。</span>
+      </div>
+    </div>
+  );
+}
+
 function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = [], records = {},
   leaveRequests = [], bonusRecords = [],
   actor, isMasterAdmin, onSaved, isDesktop }) {
@@ -20120,6 +20282,8 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
   const [santeiMonths, setSanteiMonths] = useState([]);
   // 賞与支払届で使うもの
   const [bonusId, setBonusId] = useState('');
+  // 月額変更届で使うもの
+  const [gegakuMonths, setGegakuMonths] = useState([]);
 
   const office = useMemo(() => parseOfficeInfo(settings), [settings]);
   const employee = useMemo(
@@ -20127,7 +20291,7 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
     [employeeAccounts, employeeId]
   );
   const isNenkin = kind === 'nenkinShutoku' || kind === 'nenkinSoshitsu'
-    || kind === 'nenkinSantei' || kind === 'nenkinBonus';
+    || kind === 'nenkinSantei' || kind === 'nenkinBonus' || kind === 'nenkinGegaku';
 
   // 種類やスタッフを変えたら、入力中の内容と読み込んだ番号は捨てます
   useEffect(() => {
@@ -20196,8 +20360,17 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
       insuredNumberBonus: '',
       bonusCash: '', bonusGoods: '0',
       bonusNote1: false, bonusNote2: false, bonusFirstPayDay: '',
+      // 月額変更届
+      insuredNumberGegaku: '',
+      raiseYm: '', gegakuKind: 'normal',
+      gegakuPrevHealth: employee.standardRemunerationHealth ?? '',
+      gegakuPrevPension: employee.standardRemunerationPension ?? '',
+      gegakuPrevRevisedMonth: '',
+      gegakuRaiseKind: '1', gegakuRetroMonth: '', gegakuRetroAmount: '',
+      gegakuCorrectedAverage: '', gegakuReason: '',
+      gegakuNote1: false, gegakuNote2: false, gegakuNote5: false, gegakuNote: '',
     });
-    setBonusId('');
+    setBonusId(''); setGegakuMonths([]);
     setReasonKey(''); setReasonDetails({}); setWageRows([]); setSanteiMonths([]);
     // settings は毎回あたらしい物になるため、必要な中身だけを見ています
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -20226,6 +20399,39 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
     // データは毎回あたらしい配列になるため、鍵になる値だけを見ています
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kind, employee?.id, santeiYear, santeiPay]);
+
+  // 昇給（降給）のあった支払月から、改定年月（4か月目）を出します
+  const gegakuRevisedMonth = form.raiseYm ? addMonthsToYm(form.raiseYm, 3) : '';
+
+  // 月額変更届の表を作り直します
+  useEffect(() => {
+    if (kind !== 'nenkinGegaku' || !employee || !gegakuRevisedMonth) { setGegakuMonths([]); return; }
+    setGegakuMonths(fillGegakuMonths({
+      employee, payrollRecords, records, leaveRequests,
+      revisedMonth: gegakuRevisedMonth,
+      offset: SANTEI_PAY_OFFSETS[santeiPay]?.offset ?? 1,
+    }));
+    // データは毎回あたらしい配列になるため、鍵になる値だけを見ています
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kind, employee?.id, gegakuRevisedMonth, santeiPay]);
+
+  // 固定的賃金が変わったかの目安。昇給月の給与と、その前の月の給与をくらべます。
+  const fixedWageHint = useMemo(() => {
+    if (kind !== 'nenkinGegaku' || !employee || !form.raiseYm) return null;
+    const labels = fixedWageLabels(settings);
+    if (labels.length === 0) return { noLabels: true };
+    const offset = SANTEI_PAY_OFFSETS[santeiPay]?.offset ?? 1;
+    const now = fillPaidMonth({ employee, payrollRecords, records, leaveRequests, payYm: form.raiseYm, offset });
+    const before = fillPaidMonth({
+      employee, payrollRecords, records, leaveRequests,
+      payYm: addMonthsToYm(form.raiseYm, -1), offset,
+    });
+    if (!now.record || !before.record) return { missing: true };
+    const a = fixedWageTotal(before.record, labels);
+    const b = fixedWageTotal(now.record, labels);
+    return { before: a, after: b, changed: a !== b, labels };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kind, employee?.id, form.raiseYm, santeiPay, settings, payrollRecords]);
 
   // その方の賞与の一覧（新しい順）
   const myBonuses = useMemo(() => (bonusRecords || [])
@@ -20318,6 +20524,27 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
         officeName: office.nameKanji, note: form.note || '', hwName: office.hwName,
       });
     }
+    if (kind === 'nenkinGegaku') {
+      return buildNenkinGegakuFields(office, {
+        insuredNumber: form.insuredNumberGegaku || '',
+        kanaName: kana, kanjiName: name, birthDate: employee.birthDate || '',
+        revisedMonth: gegakuRevisedMonth,
+        prevHealth: Number(form.gegakuPrevHealth) || null,
+        prevPension: Number(form.gegakuPrevPension) || null,
+        prevRevisedMonth: form.gegakuPrevRevisedMonth || '',
+        raiseMonth: form.raiseYm ? form.raiseYm.slice(5, 7) : '',
+        raiseKind: form.gegakuRaiseKind || '',
+        retroMonth: form.gegakuRetroMonth || '',
+        retroAmount: form.gegakuRetroAmount === '' ? null : Number(form.gegakuRetroAmount),
+        months: gegakuMonths,
+        kind: form.gegakuKind || 'normal',
+        correctedAverage: form.gegakuCorrectedAverage === '' ? null : Number(form.gegakuCorrectedAverage),
+        myNumber, pensionNumber: employee.pensionBasicNumber || '',
+        note1: Boolean(form.gegakuNote1), note2: Boolean(form.gegakuNote2),
+        reasonText: form.gegakuReason || '',
+        note5: Boolean(form.gegakuNote5), note: form.gegakuNote || '',
+      });
+    }
     if (kind === 'nenkinBonus') {
       return buildNenkinBonusFields(office, {
         insuredNumber: form.insuredNumberBonus || '',
@@ -20401,9 +20628,10 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
       : kind === 'nenkinSoshitsu' ? NENKIN_SOSHITSU_SPECS
         : kind === 'nenkinSantei' ? NENKIN_SANTEI_SPECS
           : kind === 'nenkinBonus' ? NENKIN_BONUS_SPECS
-            : kind === 'hwShutoku' ? HW_SHUTOKU_SPECS
-              : kind === 'hwRishoku' ? HW_RISHOKU_SPECS
-                : HW_SOSHITSU_SPECS;
+            : kind === 'nenkinGegaku' ? NENKIN_GEGAKU_SPECS
+              : kind === 'hwShutoku' ? HW_SHUTOKU_SPECS
+                : kind === 'hwRishoku' ? HW_RISHOKU_SPECS
+                  : HW_SOSHITSU_SPECS;
 
   const draft = employee ? buildOne() : null;
 
@@ -20425,6 +20653,40 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
       }
       if (!employee.birthDate) out.push({ no: 10, label: '生年月日', message: 'スタッフ詳細にご登録ください' });
       if (!employee.gender) out.push({ no: 11, label: '性別', message: 'スタッフ詳細にご登録ください' });
+    }
+    if (kind === 'nenkinGegaku') {
+      if (!form.insuredNumberGegaku) {
+        out.push({ no: 5, label: '被保険者整理番号', message: '入力が要ります' });
+      }
+      if (!employee.birthDate) out.push({ no: 9, label: '生年月日', message: 'スタッフ詳細にご登録ください' });
+      if (!form.raiseYm) {
+        out.push({ no: 18, label: '昇（降）給のあった支払月', message: '入力が要ります' });
+      }
+      if (!form.gegakuRaiseKind) {
+        out.push({ no: 19, label: '昇給か降給か', message: '選んでください' });
+      }
+      if (!Number(form.gegakuPrevHealth)) {
+        out.push({ no: 13, label: '従前の標準報酬月額（健保）', message: '入力が要ります' });
+      }
+      if (!Number(form.gegakuPrevPension)) {
+        out.push({ no: 14, label: '従前の標準報酬月額（厚年）', message: '入力が要ります' });
+      }
+      if (!/^\d{4}-\d{2}$/.test(String(form.gegakuPrevRevisedMonth || ''))) {
+        out.push({ no: 15, label: '従前の改定月', message: '入力が要ります' });
+      }
+      if (!form.gegakuReason) {
+        out.push({ no: 46, label: '昇給・降給の理由', message: '「基本給の変更」などの理由を入れてください' });
+      }
+      const gt = gegakuTotals(gegakuMonths, form.gegakuKind || 'normal');
+      if (!gt.eligible) {
+        out.push({
+          no: 25, label: '給与計算の基礎日数',
+          message: `3か月とも${gt.threshold}日以上でないと、随時改定の対象になりません`,
+        });
+      }
+      if ((gegakuMonths || []).every((m) => !Number(m?.cash) && !Number(m?.goods))) {
+        out.push({ no: 28, label: '報酬の額', message: '3か月の表に金額を入れてください' });
+      }
     }
     if (kind === 'nenkinBonus') {
       if (!form.insuredNumberBonus) {
@@ -20826,6 +21088,129 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
                 <div className="sm:col-span-4 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[10.5px] text-slate-500">
                   この届出は<b>離職票を交付しない場合</b>のものです。離職票が要るときは、
                   離職証明書を添えた別の様式になります。Brown Work ではまだ作れません。
+                </div>
+              </div>
+            )}
+
+            {kind === 'nenkinGegaku' && (
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                  {labeled('昇（降）給のあった支払月',
+                    <input type="month" value={form.raiseYm ?? ''} onChange={set('raiseYm')} className={inputClass} />,
+                    '固定的賃金が変わった分を支払った月')}
+                  {labeled('昇給か降給か',
+                    <select value={form.gegakuRaiseKind ?? ''} onChange={set('gegakuRaiseKind')} className={selectClass}>
+                      <option value="">選んでください</option>
+                      <option value="1">昇給</option>
+                      <option value="2">降給</option>
+                    </select>)}
+                  {labeled('改定年月',
+                    <input value={gegakuRevisedMonth ? `${gegakuRevisedMonth.slice(0, 4)}年${Number(gegakuRevisedMonth.slice(5, 7))}月` : '—'}
+                      readOnly className={`${inputClass} bg-slate-50 text-slate-500`} />,
+                    '昇（降）給のあった月の4か月目です')}
+                  {labeled('給与の支払い',
+                    <select value={santeiPay} onChange={(e) => setSanteiPay(e.target.value)} className={selectClass}>
+                      {Object.entries(SANTEI_PAY_OFFSETS).map(([k, v]) => (
+                        <option key={k} value={k}>{v.label}</option>
+                      ))}
+                    </select>)}
+                  {labeled('被保険者整理番号',
+                    <input value={form.insuredNumberGegaku ?? ''} onChange={set('insuredNumberGegaku')} maxLength={6} className={inputClass} />)}
+                  {labeled('被保険者の区分',
+                    <select value={form.gegakuKind || 'normal'} onChange={set('gegakuKind')} className={selectClass}>
+                      {Object.entries(GEGAKU_KINDS).map(([k, v]) => (
+                        <option key={k} value={k}>{v.label}</option>
+                      ))}
+                    </select>)}
+                  {labeled('従前の標準報酬月額（健保・円）',
+                    <input type="number" min="0" value={form.gegakuPrevHealth ?? ''} onChange={set('gegakuPrevHealth')} className={inputClass} />,
+                    form.gegakuPrevHealth ? `届出には「${standardRemunerationCode(Number(form.gegakuPrevHealth))}」と入ります` : '')}
+                  {labeled('従前の標準報酬月額（厚年・円）',
+                    <input type="number" min="0" value={form.gegakuPrevPension ?? ''} onChange={set('gegakuPrevPension')} className={inputClass} />,
+                    form.gegakuPrevPension ? `届出には「${standardRemunerationCode(Number(form.gegakuPrevPension))}」と入ります` : '')}
+                  {labeled('従前の改定月',
+                    <input type="month" value={form.gegakuPrevRevisedMonth ?? ''} onChange={set('gegakuPrevRevisedMonth')} className={inputClass} />,
+                    '前に標準報酬月額が決まった月')}
+                  {labeled('昇給・降給の理由',
+                    <input value={form.gegakuReason ?? ''} onChange={set('gegakuReason')} maxLength={37} className={inputClass} />,
+                    '例）基本給の変更、家族手当の支給')}
+                  {labeled('遡及支払月',
+                    <select value={form.gegakuRetroMonth ?? ''} onChange={set('gegakuRetroMonth')} className={selectClass}>
+                      <option value="">なし</option>
+                      {gegakuMonths.map((m) => m.payYm ? (
+                        <option key={m.payYm} value={m.payYm.slice(5, 7)}>{Number(m.payYm.slice(5, 7))}月</option>
+                      ) : null)}
+                    </select>)}
+                  {labeled('遡及支払額（円）',
+                    <input type="number" min="0" value={form.gegakuRetroAmount ?? ''} onChange={set('gegakuRetroAmount')} className={inputClass} />)}
+                </div>
+
+                {fixedWageHint && (
+                  <div className={`rounded-lg border px-2.5 py-2 text-[10.5px] leading-relaxed ${
+                    fixedWageHint.changed ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                      : 'border-slate-200 bg-slate-50 text-slate-600'}`}>
+                    {fixedWageHint.noLabels ? (
+                      <>
+                        <b className="block">固定的賃金の項目がまだ決まっていません。</b>
+                        「給与の設定」→「支給・控除項目一覧」で、支給項目ごとに「固定的賃金」を選んでください。
+                        決めておくと、昇給・降給があったかをここで照らせます。
+                      </>
+                    ) : fixedWageHint.missing ? (
+                      <>昇給月かその前月の給与明細が無いため、固定的賃金が変わったかを照らせません。</>
+                    ) : fixedWageHint.changed ? (
+                      <>
+                        <b className="block">固定的賃金が変わっています。</b>
+                        前月 {fixedWageHint.before.toLocaleString()}円 → 当月 {fixedWageHint.after.toLocaleString()}円
+                        （{fixedWageHint.labels.join('・')}の合計）
+                      </>
+                    ) : (
+                      <>
+                        <b className="block text-amber-700">固定的賃金は変わっていないようです。</b>
+                        前月・当月とも {fixedWageHint.after.toLocaleString()}円（{fixedWageHint.labels.join('・')}の合計）。
+                        随時改定は固定的賃金の変動が要件です。設定を見直すか、別の月をお確かめください。
+                      </>
+                    )}
+                  </div>
+                )}
+
+                {gegakuMonths.length > 0 && (
+                  <GegakuMonthTable
+                    months={gegakuMonths}
+                    onChange={(next) => { setError(''); setGegakuMonths(next); }}
+                    totals={gegakuTotals(gegakuMonths, form.gegakuKind || 'normal')}
+                    wageType={employee.wageType}
+                    kindLabel={GEGAKU_KINDS[form.gegakuKind || 'normal'].label}
+                  />
+                )}
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  {labeled('修正平均額（円）',
+                    <input type="number" min="0" value={form.gegakuCorrectedAverage ?? ''} onChange={set('gegakuCorrectedAverage')} className={inputClass} />,
+                    '保険者算定や年間平均での申立てのときだけ')}
+                  {labeled('備考',
+                    <input value={form.gegakuNote ?? ''} onChange={set('gegakuNote')} maxLength={37} className={inputClass} />)}
+                </div>
+                <div className="flex flex-wrap gap-x-4 gap-y-1">
+                  {[
+                    ['gegakuNote1', '70歳以上被用者'],
+                    ['gegakuNote2', '二以上の事業所に勤めている'],
+                    ['gegakuNote5', '健康保険のみ月額変更'],
+                  ].map(([k, label]) => (
+                    <label key={k} className="flex items-center gap-1.5 text-[11.5px] text-slate-600">
+                      <input type="checkbox" checked={Boolean(form[k])} onChange={set(k)} />
+                      {label}
+                    </label>
+                  ))}
+                </div>
+
+                <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-[10.5px] text-amber-800 leading-relaxed">
+                  <b className="block">随時改定には3つの条件がそろうことが要ります。</b>
+                  ①固定的賃金の変動または賃金体系の変更があった　
+                  ②変動月からの3か月の報酬の平均による標準報酬月額が、従前と<b>2等級以上</b>違う　
+                  ③3か月とも給与計算の基礎日数が条件を満たす。
+                  <b className="block pt-0.5">
+                    ②の等級の照合は Brown Work では行っていません。保険者の等級表でお確かめください。
+                  </b>
                 </div>
               </div>
             )}
@@ -21499,6 +21884,8 @@ function PayrollItemSettings({ settings, employeeAccounts = [], groupAttendanceS
       amount: adding.source === 'fixed' ? Math.max(0, Math.round(Number(adding.amount) || 0)) : 0,
       formula: adding.source === 'formula' ? String(adding.formula || '').trim() : '',
       enabled: true, builtin: false, desc: '',
+      // 人ごとに決めた額・決まった額は毎月同じなので、固定的賃金として入れておきます
+      fixedWage: kind === 'payment' && (adding.source === 'employee' || adding.source === 'fixed'),
     };
     // 同じ区分の最後に足します
     setItems((prev) => {
@@ -21902,7 +22289,7 @@ function PayrollItemSettings({ settings, employeeAccounts = [], groupAttendanceS
               スマホでは金額の欄がつぶれて1文字ずつ折り返すため、
               表に最低の幅を持たせて横スクロールにしています。 */}
           <div className="overflow-x-auto">
-            <table className={`w-full text-[11.5px] ${inGroup ? 'min-w-[460px]' : kind === 'payment' ? 'min-w-[880px]' : 'min-w-[660px]'}`}>
+            <table className={`w-full text-[11.5px] ${inGroup ? 'min-w-[460px]' : kind === 'payment' ? 'min-w-[980px]' : 'min-w-[660px]'}`}>
               <thead className="bg-slate-50 text-slate-500">
                 <tr className="text-left">
                   {view === 'reorder' && !inGroup && <th className="px-2 py-1.5 font-medium w-16 text-center">並び</th>}
@@ -21910,6 +22297,7 @@ function PayrollItemSettings({ settings, employeeAccounts = [], groupAttendanceS
                   <th className="px-2.5 py-1.5 font-medium min-w-[200px]">金額</th>
                   {kind === 'payment' && !inGroup && <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">雇用保険の賃金</th>}
                   {kind === 'payment' && !inGroup && <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">所得税の課税</th>}
+                  {kind === 'payment' && !inGroup && <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">固定的賃金</th>}
                   {!inGroup && <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">1円未満</th>}
                   {!inGroup && <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">0円のとき</th>}
                   <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">使う</th>
@@ -21918,7 +22306,7 @@ function PayrollItemSettings({ settings, employeeAccounts = [], groupAttendanceS
               </thead>
               <tbody>
                 {shown.length === 0 ? (
-                  <tr><td colSpan={9} className="px-2.5 py-6 text-center text-slate-300">{kindLabel}項目がありません</td></tr>
+                  <tr><td colSpan={10} className="px-2.5 py-6 text-center text-slate-300">{kindLabel}項目がありません</td></tr>
                 ) : shown.map((x, i) => {
                   const f = paymentItemFlag(x.label, flags);
                   const dim = x.enabled ? '' : 'text-slate-300';
@@ -21957,6 +22345,18 @@ function PayrollItemSettings({ settings, employeeAccounts = [], groupAttendanceS
                             </button>
                           </td>
                         ))}
+                        {/* 固定的賃金かどうか。月額変更届（随時改定）の判断に使います。 */}
+                        {kind === 'payment' && !inGroup && (
+                          <td className="px-2 py-1.5 text-center">
+                            <button
+                              onClick={() => patch(x.label, { fixedWage: !x.fixedWage })}
+                              className={`rounded-lg border px-2.5 py-1 text-[11px] font-bold whitespace-nowrap ${x.fixedWage ? 'border-indigo-300 bg-indigo-50 text-indigo-700' : 'border-slate-200 bg-white text-slate-400'}`}
+                              title="稼働に関係なく毎月決まって同じ額が支払われるものが固定的賃金です。月額変更届（随時改定）の判断に使います"
+                            >
+                              {x.fixedWage ? '固定' : '非固定'}
+                            </button>
+                          </td>
+                        )}
                         {/* 1円未満の端数。法令で丸め方が決まっている項目は変えられません。 */}
                         {!inGroup && (
                           <td className="px-2 py-1.5 text-center">
@@ -22020,7 +22420,7 @@ function PayrollItemSettings({ settings, employeeAccounts = [], groupAttendanceS
                       </tr>
                       {editing === x.label && !inGroup && (
                         <tr className="border-t border-slate-100 bg-slate-50">
-                          <td colSpan={9} className="px-2.5 py-2.5">
+                          <td colSpan={10} className="px-2.5 py-2.5">
                             <div className={`grid gap-2 ${isDesktop ? 'grid-cols-3' : 'grid-cols-1'}`}>
                               <Field label="金額の決め方">
                                 <select

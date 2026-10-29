@@ -2393,3 +2393,202 @@ export function buildNenkinBonusFields(office: OfficeInfo, p: NenkinBonusInput):
 export function buildNenkinBonus(office: OfficeInfo, p: NenkinBonusInput): string {
   return join(buildNenkinBonusFields(office, p));
 }
+
+// ============================================================
+// 健康保険・厚生年金保険 被保険者報酬月額変更届
+//   ／厚生年金保険70歳以上被用者月額変更届（随時改定）
+//   仕様書 ４．８．１（年金事務所提出・49項目）
+//
+//   固定的賃金が変わった月から3か月の報酬で、標準報酬月額を見直します。
+//   3か月とも、給与計算の基礎日数が17日以上（特定適用事業所の短時間労働者は
+//   11日以上）でないと、随時改定の対象になりません（仕様書 項番25〜27・38）。
+//   改定後の標準報酬月額は、変わった月の4か月目から使います。
+// ============================================================
+
+export const NENKIN_GEGAKU_FORM_CODE = '2221700';
+
+export const NENKIN_GEGAKU_SPECS: FieldSpec[] = [
+  { no: 1, label: '様式コード', kind: 'num', min: 7, max: 7 },
+  { no: 2, label: '都道府県コード', kind: 'num', min: 2, max: 2 },
+  { no: 3, label: '郡市区符号', kind: 'num', min: 2, max: 2 },
+  { no: 4, label: '事業所記号', kind: 'kana', min: 1, max: 4 },
+  { no: 5, label: '被保険者整理番号', kind: 'num', min: 0, max: 6 },
+  { no: 6, label: '被保険者氏名（カナ）', kind: 'kana', min: 1, max: 25 },
+  { no: 7, label: '被保険者氏名（漢字）', kind: 'kanji', min: 0, max: 12 },
+  { no: 8, label: '元号（生年月日）', kind: 'num', min: 1, max: 1 },
+  { no: 9, label: '生年月日', kind: 'num', min: 6, max: 6 },
+  { no: 10, label: '元号（改定年月）', kind: 'num', min: 1, max: 1 },
+  { no: 11, label: '年（改定年月）', kind: 'num', min: 2, max: 2 },
+  { no: 12, label: '月（改定年月）', kind: 'num', min: 2, max: 2 },
+  { no: 13, label: '従前の標準報酬月額（健保）', kind: 'num', min: 0, max: 4 },
+  { no: 14, label: '従前の標準報酬月額（厚年）', kind: 'num', min: 0, max: 4 },
+  { no: 15, label: '元号（従前の改定月）', kind: 'num', min: 1, max: 1 },
+  { no: 16, label: '年（従前の改定月）', kind: 'num', min: 2, max: 2 },
+  { no: 17, label: '月（従前の改定月）', kind: 'num', min: 2, max: 2 },
+  { no: 18, label: '昇（降）給月', kind: 'num', min: 0, max: 2 },
+  { no: 19, label: '昇（降）給区分', kind: 'num', min: 0, max: 1 },
+  { no: 20, label: '遡及支払月', kind: 'num', min: 0, max: 2 },
+  { no: 21, label: '遡及支払額', kind: 'num', min: 0, max: 7 },
+  { no: 22, label: '給与支給月（前三ヶ月）', kind: 'num', min: 2, max: 2 },
+  { no: 23, label: '給与支給月（前二ヶ月）', kind: 'num', min: 2, max: 2 },
+  { no: 24, label: '給与支給月（前一ヶ月）', kind: 'num', min: 2, max: 2 },
+  { no: 25, label: '給与計算の基礎日数（前三ヶ月）', kind: 'num', min: 2, max: 2 },
+  { no: 26, label: '給与計算の基礎日数（前二ヶ月）', kind: 'num', min: 2, max: 2 },
+  { no: 27, label: '給与計算の基礎日数（前一ヶ月）', kind: 'num', min: 2, max: 2 },
+  { no: 28, label: '通貨によるものの額（前三ヶ月）', kind: 'num', min: 1, max: 7 },
+  { no: 29, label: '通貨によるものの額（前二ヶ月）', kind: 'num', min: 1, max: 7 },
+  { no: 30, label: '通貨によるものの額（前一ヶ月）', kind: 'num', min: 1, max: 7 },
+  { no: 31, label: '現物によるものの額（前三ヶ月）', kind: 'num', min: 1, max: 7 },
+  { no: 32, label: '現物によるものの額（前二ヶ月）', kind: 'num', min: 1, max: 7 },
+  { no: 33, label: '現物によるものの額（前一ヶ月）', kind: 'num', min: 1, max: 7 },
+  { no: 34, label: '合計（前三ヶ月）', kind: 'num', min: 1, max: 7 },
+  { no: 35, label: '合計（前二ヶ月）', kind: 'num', min: 1, max: 7 },
+  { no: 36, label: '合計（前一ヶ月）', kind: 'num', min: 1, max: 7 },
+  { no: 37, label: '総計', kind: 'num', min: 1, max: 7 },
+  { no: 38, label: '平均額', kind: 'num', min: 1, max: 7 },
+  { no: 39, label: '修正平均額', kind: 'num', min: 0, max: 7 },
+  { no: 40, label: '個人番号', kind: 'num', min: 0, max: 12 },
+  { no: 41, label: '課所符号', kind: 'num', min: 0, max: 4 },
+  { no: 42, label: '一連番号', kind: 'num', min: 0, max: 6 },
+  { no: 43, label: '備考欄項目1（70歳以上被用者）', kind: 'num', min: 0, max: 1 },
+  { no: 44, label: '備考欄項目2（二以上事業所勤務）', kind: 'num', min: 0, max: 1 },
+  { no: 45, label: '備考欄項目3（短時間労働者）', kind: 'num', min: 0, max: 1 },
+  { no: 46, label: '備考欄項目4（昇給・降給の理由）', kind: 'mixed', min: 0, max: 37, maxHalf: 75 },
+  { no: 47, label: '備考欄項目5（健康保険のみ月額変更）', kind: 'num', min: 0, max: 1 },
+  { no: 48, label: '備考欄', kind: 'mixed', min: 0, max: 37, maxHalf: 75 },
+  { no: 49, label: '70歳以上被用者届のみ提出', kind: 'num', min: 0, max: 1 },
+];
+
+/** 随時改定の区分。基礎日数のしきい値が変わります（仕様書 項番25〜27） */
+export const GEGAKU_KINDS = {
+  normal: { label: '一般の被保険者', threshold: 17 },
+  shortTime: { label: '特定適用事業所の短時間労働者', threshold: 11 },
+};
+export type GegakuKind = 'normal' | 'shortTime';
+
+export type GegakuTotals = {
+  monthTotals: number[];
+  total: number;
+  average: number;
+  threshold: number;
+  /** 3か月とも基礎日数がしきい値以上か。満たさないと随時改定の対象外 */
+  eligible: boolean;
+  shortMonths: number[];   // しきい値に届かなかった月（0=前三ヶ月）
+};
+
+/**
+ * 総計と平均額を出します（仕様書 項番37・38）。
+ * 算定基礎届と違い、しきい値で月を絞りません。3か月すべてが対象で、
+ * 1つでも基礎日数がしきい値に届かない月があれば、随時改定の対象外です。
+ * 平均額は総計を3で割り、1円未満を切り捨てます。
+ */
+export function gegakuTotals(months: SanteiMonth[], kind: GegakuKind = 'normal'): GegakuTotals {
+  const three = [0, 1, 2].map((i) => months?.[i] || EMPTY_SANTEI_MONTH);
+  const monthTotals = three.map((m) => (Number(m.cash) || 0) + (Number(m.goods) || 0));
+  const threshold = kind === 'shortTime' ? 11 : 17;
+  const shortMonths = [0, 1, 2].filter((i) => (Number(three[i].days) || 0) < threshold);
+  const total = monthTotals.reduce((s, v) => s + v, 0);
+  const average = Math.floor(total / 3);
+  return { monthTotals, total, average, threshold, eligible: shortMonths.length === 0, shortMonths };
+}
+
+/** 'YYYY-MM' に月を足し引きする */
+export function addMonthsToYm(ym: string, delta: number): string {
+  const m = /^(\d{4})-(\d{2})$/.exec(String(ym || ''));
+  if (!m) return '';
+  const t = Number(m[1]) * 12 + (Number(m[2]) - 1) + delta;
+  return `${Math.floor(t / 12)}-${pad2((t % 12) + 1)}`;
+}
+
+export type NenkinGegakuInput = {
+  insuredNumber: string;
+  kanaName: string;
+  kanjiName: string;
+  birthDate: string;
+  /** 改定年月 'YYYY-MM'（昇給・降給のあった月の4か月目） */
+  revisedMonth: string;
+  prevHealth: number | null;
+  prevPension: number | null;
+  prevRevisedMonth: string;   // 'YYYY-MM'
+  raiseMonth: string;         // 昇（降）給月（'09' など）
+  raiseKind: string;          // 1=昇給 2=降給
+  retroMonth: string;
+  retroAmount: number | null;
+  /** 改定年月の前三ヶ月・前二ヶ月・前一ヶ月 */
+  months: SanteiMonth[];
+  kind: GegakuKind;
+  correctedAverage: number | null;
+  myNumber: string;
+  pensionNumber: string;
+  note1?: boolean;            // 70歳以上被用者
+  note2?: boolean;            // 二以上事業所勤務
+  reasonText: string;         // 備考欄項目4（昇給・降給の理由）
+  note5?: boolean;            // 健康保険のみ月額変更
+  note?: string;              // 備考欄
+  over70Only?: boolean;
+};
+
+/** 月額変更届・70歳以上被用者月額変更届 データレコード（年金事務所提出・49項目） */
+export function buildNenkinGegakuFields(office: OfficeInfo, p: NenkinGegakuInput): string[] {
+  const birth = toWareki(p.birthDate);
+  const rev = /^(\d{4})-(\d{2})$/.exec(String(p.revisedMonth || ''));
+  const revW = rev ? toWareki(`${rev[1]}-${rev[2]}-01`) : null;
+  const prevM = /^(\d{4})-(\d{2})$/.exec(String(p.prevRevisedMonth || ''));
+  const prevW = prevM ? toWareki(`${prevM[1]}-${prevM[2]}-01`) : null;
+  const my = digits(p.myNumber);
+  const pn = digits(p.pensionNumber);
+  const t = gegakuTotals(p.months, p.kind);
+  const m = (i: number) => p.months?.[i] || EMPTY_SANTEI_MONTH;
+  const amt = (v: number | null | undefined) =>
+    (v == null || !Number.isFinite(Number(v))) ? '0' : String(Math.max(0, Math.round(Number(v))));
+  const dayCount = (v: number | null | undefined) =>
+    (v == null || !Number.isFinite(Number(v))) ? '00' : pad2(Math.max(0, Math.min(99, Math.round(Number(v)))));
+  // 給与支給月は、改定年月の前三ヶ月・前二ヶ月・前一ヶ月
+  const payMonth = (back: number) => {
+    const ym = addMonthsToYm(p.revisedMonth, -back);
+    return ym ? ym.slice(5, 7) : '';
+  };
+
+  return [
+    NENKIN_GEGAKU_FORM_CODE,
+    office.prefCode, office.cityCode, office.officeSymbol,
+    digits(p.insuredNumber),
+    normalizeKanaName(p.kanaName),
+    normalizeKanjiName(p.kanjiName),
+    birth ? String(birth.code) : '',
+    birth ? birth.yymmdd : '',
+    revW ? String(revW.code) : '',
+    revW ? revW.yy : '',
+    revW ? revW.mm : '',
+    standardRemunerationCode(p.prevHealth),
+    standardRemunerationCode(p.prevPension),
+    prevW ? String(prevW.code) : '',
+    prevW ? prevW.yy : '',
+    prevW ? prevW.mm : '',
+    String(p.raiseMonth || ''),
+    String(p.raiseKind || ''),
+    String(p.retroMonth || ''),
+    p.retroAmount != null && Number(p.retroAmount) > 0 ? String(Math.round(Number(p.retroAmount))) : '',
+    payMonth(3), payMonth(2), payMonth(1),
+    dayCount(m(0).days), dayCount(m(1).days), dayCount(m(2).days),
+    amt(m(0).cash), amt(m(1).cash), amt(m(2).cash),
+    amt(m(0).goods), amt(m(1).goods), amt(m(2).goods),
+    String(t.monthTotals[0]), String(t.monthTotals[1]), String(t.monthTotals[2]),
+    String(t.total), String(t.average),
+    p.correctedAverage != null && Number(p.correctedAverage) > 0
+      ? String(Math.floor(Number(p.correctedAverage))) : '',
+    my,
+    my ? '' : pn.slice(0, 4),
+    my ? '' : pn.slice(4, 10),
+    flag(p.note1), flag(p.note2),
+    flag(p.kind === 'shortTime'),
+    String(p.reasonText || ''),
+    flag(p.note5),
+    String(p.note || ''),
+    flag(p.over70Only),
+  ];
+}
+
+export function buildNenkinGegaku(office: OfficeInfo, p: NenkinGegakuInput): string {
+  return join(buildNenkinGegakuFields(office, p));
+}
