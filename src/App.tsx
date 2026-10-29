@@ -16960,6 +16960,7 @@ const BUILTIN_PAYROLL_ITEMS = [
   { label: '通勤手当', kind: 'payment', rounding: 'round', desc: '通勤経路の月額換算の合計（給与作成時にコピー）' },
   { label: '残業手当', kind: 'payment', rounding: 'ceil', desc: '【割増基礎単価】×【残業時間】×【割増率】。割増率は「給与の設定」→「計算のきまり」で変えられます（既定1.25）。' },
   { label: '交通費精算', kind: 'payment', rounding: 'ceil', desc: '承認済みの交通費精算の合計' },
+  { label: '有給休暇手当', kind: 'payment', rounding: 'ceil', desc: '時給制：時給 × 1日の所定労働時間 × 有給使用日数／日給制：その日の日額 × 有給使用日数（平日・土日祝それぞれの日額を使います）。月給制には付きません（基本給が月給そのままで、有休を取っても減らないため）。' },
   { label: '深夜手当', kind: 'payment', rounding: 'ceil', desc: '【割増基礎単価】×【深夜時間】×【割増率】。割増率は「給与の設定」→「計算のきまり」で変えられます（既定0.25）。深夜は22時から翌5時まで。働いた時間ぶんの賃金は基本給・残業手当に入っているため、上に乗る割増だけを足します。' },
   { label: '遅刻早退控除', kind: 'payment', rounding: 'floor', desc: '遅刻早退控除単価（1円未満切り捨て）×【遅刻早退時間】。単価の出し方は「給与の設定」→「計算のきまり」で選べます。時給制の方には当てません（基本給が実働時間で出るため、遅刻したぶんはすでに引かれています）。時間は日ごとに15分単位で切り捨てた合計。賃金そのものが減るものなので、支給項目にマイナスの金額で入ります。' },
   { label: '欠勤控除', kind: 'payment', rounding: 'floor', desc: '欠勤控除単価（基本給 ÷ 当月の出勤規定日数・1円未満切り捨て）×【欠勤日数】。賃金そのものが減るものなので、支給項目にマイナスの金額で入ります。' },
@@ -17261,6 +17262,67 @@ async function savePayrollItemGroups(groups, actor = null) {
 //   賃金そのものが減るものなので、支給側で引かないと
 //   雇用保険の賃金総額と所得税の課税対象額が減りません。
 const LATE_DEDUCTION_LABEL = '遅刻早退控除';
+
+// ============================================================
+// 有給休暇手当
+// ============================================================
+// 労働基準法第39条第9項により、有給休暇を取った日にも賃金を払う必要があります。
+//
+// 月給制には付けません。基本給が月給そのままで、有休を取っても減らないためです
+//（付けると二重払いになります）。
+//
+// 計算の決まり（御社に確認済み）：
+//   時給制 … 時給 × 1日の所定労働時間 × 有給使用日数
+//   日給制 … その日の日額 × 有給使用日数
+//             平日に取れば平日の日額、土日祝に取れば土日祝の日額です。
+//
+// 1日の所定労働時間は、給与規定グループの「所定勤務時間」
+//（始業〜終業 − 休憩60分）から出します。
+const PAID_LEAVE_LABEL = '有給休暇手当';
+
+// 戻り値の reason：
+//   ''              … 計算できた
+//   'monthly'       … 月給制（基本給に含まれているため付けない）
+//   'noLeave'       … 有休を取っていない
+//   'noWage'        … 時給・日額が未登録
+//   'noDailyHours'  … 時給制で1日の所定労働時間が未設定
+function computePaidLeavePay({
+  wageType, hourlyWage = 0, dailyWage = 0, dailyWageHoliday = 0,
+  dailyStandardMinutes = 0, weekdayDays = 0, holidayDays = 0, rounding = 'ceil',
+}) {
+  const wd = Math.max(0, Number(weekdayDays) || 0);
+  const hd = Math.max(0, Number(holidayDays) || 0);
+  const common = { wageType, weekdayDays: wd, holidayDays: hd, days: wd + hd };
+
+  // 月給制は基本給が月給そのままなので、有休を取っても減りません
+  if (wageType === 'monthly') return { ...common, amount: null, unit: null, reason: 'monthly' };
+  if (wd + hd <= 0) return { ...common, amount: 0, unit: null, reason: 'noLeave' };
+
+  if (wageType === 'daily') {
+    const weekdayRate = Math.max(0, Number(dailyWage) || 0);
+    const holidayRate = Number(dailyWageHoliday) > 0 ? Number(dailyWageHoliday) : weekdayRate;
+    if (weekdayRate <= 0 && holidayRate <= 0) {
+      return { ...common, amount: null, unit: null, reason: 'noWage' };
+    }
+    return {
+      ...common,
+      weekdayRate, holidayRate,
+      unit: weekdayRate,
+      amount: roundYenBy(weekdayRate * wd + holidayRate * hd, rounding),
+      reason: '',
+    };
+  }
+
+  // 時給制
+  const wage = Math.max(0, Number(hourlyWage) || 0);
+  const dayMin = Math.max(0, Number(dailyStandardMinutes) || 0);
+  const info = { ...common, hourlyWage: wage, dailyStandardMinutes: dayMin };
+  if (wage <= 0) return { ...info, amount: null, unit: null, reason: 'noWage' };
+  if (dayMin <= 0) return { ...info, amount: null, unit: null, reason: 'noDailyHours' };
+  // 1日あたりの額＝時給 × 1日の所定労働時間
+  const unit = wage * (dayMin / 60);
+  return { ...info, unit, amount: roundYenBy(unit * (wd + hd), rounding), reason: '' };
+}
 
 // 戻り値の reason：
 //   ''             … 計算できた
@@ -18218,6 +18280,32 @@ async function saveMonthlyStandardHours(hours, actor = null) {
 }
 
 // ============================================================
+// ============================================================
+// 有給休暇の日数（時給制・日給制の有休の賃金に使う）
+// ============================================================
+// 労働基準法第39条第9項により、有給休暇を取った日にも賃金を払う必要があります。
+//
+// 月給制は基本給が月給そのままなので、有休を取っても減りません（払われています）。
+// 時給制・日給制は「働いた時間・日数」で基本給を出すため、有休の日は打刻が無く
+// 基本給に入りません。そのぶんを「有給休暇手当」として別に払います。
+//
+// 日給制で平日と土日祝の日額が分かれている方のために、日種別に分けて数えます
+//（取得した日の単価で払うため。御社に確認済み）。
+// 半休は0.5日として数えます。
+function countPaidLeaveDays(leaveRequests, employeeId, year, month) {
+  const keys = monthDateKeys(year, month);
+  let weekday = 0;
+  let holiday = 0;
+  keys.forEach((key) => {
+    const leave = approvedLeaveOn(leaveRequests, employeeId, key);
+    if (!leave || leave.type !== WEEKEND_BONUS_PAID_LEAVE_TYPE) return;
+    const days = leave.halfDay ? 0.5 : 1;
+    if (isWeekendOrHoliday(key)) holiday += days;
+    else weekday += days;
+  });
+  return { weekday, holiday, total: weekday + holiday };
+}
+
 // 土日祝の出欠の数え方（土日祝皆勤手当のもとになる日数）
 // ============================================================
 // 賃金規程（御社から提供された条文）：
@@ -20320,6 +20408,65 @@ function IncomeTaxLine({ tax, employee }) {
   );
 }
 
+// ---- 有給休暇手当の根拠（給与計算の画面） ----
+// 有休を取っているのに金額が出せない月は、必ず理由を出します。
+// 黙って0円にすると、有休が無給のまま気づけないためです（労基法39条9項）。
+function PaidLeaveNote({ pay, employee, isPublished }) {
+  if (!pay) return null;
+  // 月給制と、有休を取っていない月は何も出しません
+  if (pay.reason === 'monthly' || pay.reason === 'noLeave') return null;
+
+  const dayText = `${pay.days}日`
+    + (pay.holidayDays > 0 && pay.weekdayDays > 0
+      ? `（平日 ${pay.weekdayDays}日／土日祝 ${pay.holidayDays}日）`
+      : pay.holidayDays > 0 ? '（すべて土日祝）' : '');
+
+  if (pay.amount == null) {
+    const why = {
+      noWage: pay.wageType === 'daily'
+        ? '日額が未登録のため計算できません。給与形態の欄に日額を入れてください。'
+        : '時給が未登録のため計算できません。給与形態の欄に時給を入れてください。',
+      noDailyHours: '1日の所定労働時間が出せません。給与規定グループの「所定勤務時間」を'
+        + '「給与の設定」→「所定勤務時間」から設定してください。',
+    }[pay.reason] || '計算できません。';
+    return (
+      <div className="rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-[11.5px] leading-relaxed text-rose-800 space-y-1">
+        <div className="font-bold">有給休暇手当を計算できません（{dayText} 取得／0円のままです）</div>
+        <div>{why}</div>
+        <div className="text-[10.5px] opacity-80">
+          有給休暇には賃金を払う必要があります（労働基準法第39条第9項）。
+          このままでは有休が無給になります。
+        </div>
+      </div>
+    );
+  }
+
+  const tone = isPublished ? 'border-slate-200 bg-slate-50 text-slate-500' : 'border-teal-200 bg-teal-50 text-teal-900';
+  return (
+    <div className={`rounded-xl border px-3.5 py-2.5 text-[11.5px] leading-relaxed space-y-1 ${tone}`}>
+      <div className="font-bold">有給休暇手当 {formatYen(pay.amount)}（{dayText}）</div>
+      {pay.wageType === 'daily' ? (
+        <>
+          {pay.weekdayDays > 0 && <>平日 {formatYen(pay.weekdayRate)} × {pay.weekdayDays}日</>}
+          {pay.weekdayDays > 0 && pay.holidayDays > 0 && ' ＋ '}
+          {pay.holidayDays > 0 && <>土日祝 {formatYen(pay.holidayRate)} × {pay.holidayDays}日</>}
+          。取得した日の日額で払います。
+        </>
+      ) : (
+        <>
+          時給 {formatYen(pay.hourlyWage)} × 1日の所定労働時間 {Math.floor(pay.dailyStandardMinutes / 60)}時間
+          {pay.dailyStandardMinutes % 60 > 0 ? `${pay.dailyStandardMinutes % 60}分` : ''}
+          ＝ 1日 {formatYen(Math.round(pay.unit))} × {pay.days}日。
+        </>
+      )}
+      <div className="text-[10.5px] opacity-80">
+        有休の日は打刻が無いため基本給に入りません。そのぶんをここで払っています
+        （労働基準法第39条第9項）。半休は0.5日として数えています。
+      </div>
+    </div>
+  );
+}
+
 // ---- 土日祝の出欠の内訳（給与計算の画面） ----
 // 対象日を1日ずつ出して、どの日を欠勤と数えたのかが分かるようにしています。
 // シフトや勤怠が実態と違うことがあるため、欠勤日数は画面で直せます。
@@ -20859,6 +21006,22 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     monthlyAvgDays: formulas.monthlyAvgDays,
   }) : null;
 
+  // 有給休暇。取得した日を平日と土日祝に分けて数えます
+  //（日給制は取得した日の単価で払うため）。
+  const paidLeaveCount = employee
+    ? countPaidLeaveDays(leaveRequests, employeeId, year, month)
+    : { weekday: 0, holiday: 0, total: 0 };
+  const paidLeavePay = employee ? computePaidLeavePay({
+    wageType,
+    hourlyWage: Number(hourlyWage) || 0,
+    dailyWage: Number(dailyWage) || 0,
+    dailyWageHoliday: Number(dailyWageHoliday) || 0,
+    dailyStandardMinutes,
+    weekdayDays: paidLeaveCount.weekday,
+    holidayDays: paidLeaveCount.holiday,
+    rounding: payrollRoundingFor(settings, 'payment', PAID_LEAVE_LABEL),
+  }) : null;
+
   // 土日祝の出欠を数えます。金額はここでは出しません。
   // 数えた日数を式に渡して、支給・控除項目一覧の「式で計算」が金額を出します。
   // 数えること自体は手当を使わない方にも意味がある（画面で内訳を見せる）ため、
@@ -20936,6 +21099,10 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
         ? [{ label: LATE_DEDUCTION_LABEL, amount: -draftLate.amount }]
         : []),
       ...(approvedCommuteTotal > 0 ? [{ label: `交通費精算（${month}月分）`, amount: approvedCommuteTotal }] : []),
+      // 有給休暇手当。月給制には付けません（基本給が月給そのままのため）。
+      ...(paidLeavePay && paidLeavePay.amount > 0
+        ? [{ label: PAID_LEAVE_LABEL, amount: paidLeavePay.amount }]
+        : []),
       // 欠勤控除は支給額から引くため、マイナスの金額で入れます。
       // 保存されている欠勤日数から出します（新しく作るときは0日なので0円）。
       ...(draftAbsence && draftAbsence.amount > 0
@@ -21304,6 +21471,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
             <input type="number" step="0.5" value={paidLeaveHours} onChange={(e) => setPaidLeaveHours(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px] bg-white" />
           </Field>
         </div>
+        <PaidLeaveNote pay={paidLeavePay} employee={employee} isPublished={isPublished} />
         <FormulaErrorNote paymentItems={paymentItems} deductionItems={deductionItems} isPublished={isPublished} />
         <NightAndLateNote preview={preview} lateDeduction={lateDeduction} isPublished={isPublished} premiumBaseParts={premiumBase.parts} />
         <AbsenceDeductionNote
