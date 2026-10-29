@@ -11,6 +11,8 @@ import {
   NENKIN_SHUTOKU_SPECS, NENKIN_SOSHITSU_SPECS, HW_SHUTOKU_SPECS, HW_SOSHITSU_SPECS,
   NENKIN_SOSHITSU_REASONS, HW_ACQUIRE_REASONS, HW_WAGE_FORMS, HW_EMPLOYMENT_TYPES,
   HW_JOB_CATEGORIES, HW_JOB_ROUTES, HW_LOSS_REASONS, csvSizeWarning,
+  buildHwRishokuFields, HW_RISHOKU_SPECS, HW_RISHOKU_REASONS, HW_RISHOKU_DETAIL_FIELDS,
+  HW_FILE_RISHOKU, HW_WAGE_ROWS, wagePeriodsFor, addDays,
 } from './denshiShinsei';
 
 // ---- constants ----
@@ -5829,6 +5831,9 @@ function AttendanceApp() {
               <DenshiShinseiTab
                 settings={data.settings}
                 employeeAccounts={employeeAccounts}
+                payrollRecords={data.payrollRecords}
+                records={data.records}
+                leaveRequests={data.leaveRequests}
                 actor={session}
                 isMasterAdmin={session.role === 'master_admin'}
                 onSaved={refreshData}
@@ -19511,6 +19516,7 @@ const OFFICE_FIELD_HINTS = {
   officeNumber: '「納入告知書 納付書・領収証書」の事業所番号',
   eiOffice: '「雇用保険適用事業所設置届事業主控」の番号',
   hwName: '例）京都西陣（「公共職業安定所」は書かない）',
+  ownerAddress: '離職証明書に入れます。離職票を出さないなら空のままで構いません',
   mediaSeq: '出すたびに1ずつ増やします。999の次は1に戻します',
 };
 
@@ -19540,7 +19546,7 @@ function OfficeInfoSettings({ settings, actor, isMasterAdmin, onSaved, codec }) 
   const missingHw = missingOfficeFields(form, OFFICE_REQUIRED_HW);
 
   // 届出に使えない文字が入っていないかを先に知らせます
-  const charIssues = !codec ? [] : ['officeSymbol', 'addressKanji', 'nameKanji', 'ownerKanji', 'hwName']
+  const charIssues = !codec ? [] : ['officeSymbol', 'addressKanji', 'nameKanji', 'ownerKanji', 'ownerAddress', 'hwName']
     .map((k) => {
       const r = codec.check(String(form[k] || ''));
       return r.ok ? null : { label: OFFICE_FIELD_LABELS[k], bad: r.bad.join('') };
@@ -19662,6 +19668,9 @@ function OfficeInfoSettings({ settings, actor, isMasterAdmin, onSaved, codec }) 
               {field('nameKanji', { maxLength: 25 })}
               {field('ownerKanji', { maxLength: 12 })}
             </div>
+            <div className="grid grid-cols-1 gap-2.5">
+              {field('ownerAddress', { maxLength: 40 })}
+            </div>
           </div>
 
           {missingNenkin.length > 0 && (
@@ -19694,8 +19703,9 @@ const SHINSEI_KINDS = {
   nenkinSoshitsu: { label: '健康保険・厚生年金保険 被保険者資格喪失届', where: '年金事務所' },
   hwShutoku: { label: '雇用保険被保険者資格取得届', where: 'ハローワーク' },
   hwSoshitsu: { label: '雇用保険被保険者資格喪失届（離職票交付なし）', where: 'ハローワーク' },
+  hwRishoku: { label: '雇用保険被保険者資格喪失届（離職票交付あり）＋離職証明書', where: 'ハローワーク' },
 };
-const SHINSEI_KIND_ORDER = ['nenkinShutoku', 'nenkinSoshitsu', 'hwShutoku', 'hwSoshitsu'];
+const SHINSEI_KIND_ORDER = ['nenkinShutoku', 'nenkinSoshitsu', 'hwShutoku', 'hwSoshitsu', 'hwRishoku'];
 
 // 1週間の所定労働時間を、所定勤務時間と週の勤務日数から出します。
 // どちらかが未登録のときは null（画面で入れてもらいます）。
@@ -19717,7 +19727,244 @@ function hwWageFormOf(wageType) {
   return '';
 }
 
-function DenshiShinseiTab({ settings, employeeAccounts = [], actor, isMasterAdmin, onSaved, isDesktop }) {
+
+// ---- 離職票交付あり（離職証明書）の画面 ----
+
+// 電話番号を「市外局番・市内局番・加入者番号」の3つに分けます。
+// ハイフンで区切られていればそのまま、無ければ分けられないので市外局番だけに入れます。
+function telParts(src) {
+  const t = String(src || '').trim();
+  const parts = t.split(/[-−ー－()（） ]+/).filter(Boolean);
+  if (parts.length >= 3) return [parts[0], parts[1], parts.slice(2).join('')];
+  if (parts.length === 2) return [parts[0], parts[1], ''];
+  return [t.replace(/[^0-9]/g, ''), '', ''];
+}
+
+// 賃金支払基礎日数を数えます。
+//   出勤した日と、承認済みの有給を取った日を1日ずつ数えます（半休は0.5日）。
+//   この数え方でよいかは画面に出し、合わなければ直せるようにしています。
+function countWageBaseDays(mine, leaveRequests, employeeId, start, end) {
+  if (!start || !end) return null;
+  let days = 0;
+  Object.entries(mine || {}).forEach(([date, rec]) => {
+    if (date < start || date > end) return;
+    if (rec?.clockIn) days += 1;
+  });
+  (leaveRequests || []).forEach((r) => {
+    if (r.employeeId !== employeeId) return;
+    if (r.status !== 'approved') return;
+    const kind = String(r.type || '');
+    if (kind !== WEEKEND_BONUS_PAID_LEAVE_TYPE && kind !== '有給') return;
+    const from = r.startDate, to = r.endDate || r.startDate;
+    if (!from) return;
+    for (let d = from; d <= to; d = addDays(d, 1)) {
+      if (d < start || d > end) continue;
+      // 出勤打刻もある日は二重に数えない
+      if (mine?.[d]?.clockIn) continue;
+      days += r.halfDay ? 0.5 : 1;
+    }
+  });
+  return Math.round(days * 10) / 10;
+}
+
+// 給与明細の支給合計を出します（控除を引く前の額）。
+// 離職証明書の賃金額は、支払われた賃金の総額です。
+function paymentTotalOfPayroll(rec) {
+  if (!rec) return null;
+  if (Array.isArray(rec.paymentItems) && rec.paymentItems.length > 0) {
+    return rec.paymentItems.reduce((s, x) => s + (Number(x?.amount) || 0), 0);
+  }
+  return null;
+}
+
+// 賃金の欄に、Brown Work にある値を入れます。
+// 給与明細が無い月は空のままにして、画面で手入力していただきます。
+function fillWageRows(rows, { employee, payrollRecords = [], records = {}, leaveRequests = [] }) {
+  const mine = records?.[employee?.id] || {};
+  const mine2 = payrollRecords.filter((p) => p.employeeId === employee?.id);
+  const isMonthly = String(employee?.wageType || '') === 'monthly';
+  return rows.map((r) => {
+    const m = /^(\d{4})-(\d{2})/.exec(r.payStart || '');
+    let amount = null;
+    if (m) {
+      const rec = mine2.find((p) => p.year === Number(m[1]) && p.month === Number(m[2]));
+      amount = paymentTotalOfPayroll(rec);
+    }
+    return {
+      ...r,
+      baseDays: countWageBaseDays(mine, leaveRequests, employee?.id, r.periodStart, r.periodEnd),
+      payBaseDays: countWageBaseDays(mine, leaveRequests, employee?.id, r.payStart, r.payEnd),
+      wageA: isMonthly ? amount : null,
+      wageB: isMonthly ? null : amount,
+      note: '',
+    };
+  });
+}
+
+const mdLabel = (iso) => {
+  const m = /^\d{4}-(\d{2})-(\d{2})$/.exec(String(iso || ''));
+  return m ? `${Number(m[1])}/${Number(m[2])}` : '';
+};
+
+function RishokuWageTable({ rows, onChange, wageType, isDesktop }) {
+  const isMonthly = String(wageType || '') === 'monthly';
+  const set = (i, key) => (e) => {
+    const raw = e?.target ? e.target.value : e;
+    const v = raw === '' ? null : Number(raw);
+    onChange(rows.map((r, j) => (j === i ? { ...r, [key]: v } : r)));
+  };
+  const setText = (i, key) => (e) => {
+    const v = e?.target ? e.target.value : e;
+    onChange(rows.map((r, j) => (j === i ? { ...r, [key]: v } : r)));
+  };
+  const cell = 'w-full box-border min-w-0 border border-slate-200 rounded px-1 py-1 text-[11.5px] text-right';
+  return (
+    <div className="rounded-xl border border-slate-200 overflow-hidden">
+      <div className="px-3 py-2 bg-slate-50 border-b border-slate-200 text-[11px] font-bold text-slate-600">
+        賃金の欄（離職証明書）
+      </div>
+      <div className="px-3 py-2 text-[10.5px] text-slate-500 leading-relaxed border-b border-slate-100">
+        被保険者期間算定対象期間は、離職日の翌日から1か月ずつさかのぼって入れています。
+        賃金の締切期間は、御社の<b>当月末締め</b>に合わせています。
+        <b className="block pt-0.5">
+          賃金支払基礎日数は「出勤した日＋承認済みの有給を取った日」で数えています。
+          数え方が違う場合は、この表で直してください。
+        </b>
+        賃金額は給与明細の<b>支給合計</b>（控除を引く前）を入れています。明細が無い月は空です。
+        臨時に支払われた賃金と、3か月を超える期間ごとに支払われる賃金（賞与）は入れないでください。
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-[11px] min-w-[700px]">
+          <thead className="bg-slate-50 text-slate-500">
+            <tr className="text-left">
+              <th className="px-1.5 py-1.5 font-medium whitespace-nowrap">被保険者期間</th>
+              <th className="px-1.5 py-1.5 font-medium whitespace-nowrap text-center">基礎日数</th>
+              <th className="px-1.5 py-1.5 font-medium whitespace-nowrap">賃金の締切期間</th>
+              <th className="px-1.5 py-1.5 font-medium whitespace-nowrap text-center">基礎日数</th>
+              <th className="px-1.5 py-1.5 font-medium whitespace-nowrap text-center">賃金額Ａ</th>
+              <th className="px-1.5 py-1.5 font-medium whitespace-nowrap text-center">賃金額Ｂ</th>
+              <th className="px-1.5 py-1.5 font-medium whitespace-nowrap text-center">計</th>
+              <th className="px-1.5 py-1.5 font-medium whitespace-nowrap">備考</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r, i) => {
+              const total = (r.wageA == null && r.wageB == null)
+                ? null : (Number(r.wageA) || 0) + (Number(r.wageB) || 0);
+              return (
+                <tr key={i} className="border-t border-slate-100">
+                  <td className="px-1.5 py-1 whitespace-nowrap text-slate-600">
+                    {mdLabel(r.periodStart)}〜{i === 0 ? '離職日' : mdLabel(r.periodEnd)}
+                  </td>
+                  <td className="px-1.5 py-1 w-[58px]">
+                    <input type="number" min="0" max="99" value={r.baseDays ?? ''} onChange={set(i, 'baseDays')} className={cell} />
+                  </td>
+                  <td className="px-1.5 py-1 whitespace-nowrap text-slate-600">
+                    {mdLabel(r.payStart)}〜{i === 0 ? '離職日' : mdLabel(r.payEnd)}
+                  </td>
+                  <td className="px-1.5 py-1 w-[58px]">
+                    <input type="number" min="0" max="99" value={r.payBaseDays ?? ''} onChange={set(i, 'payBaseDays')} className={cell} />
+                  </td>
+                  <td className="px-1.5 py-1 w-[92px]">
+                    <input type="number" min="0" value={r.wageA ?? ''} onChange={set(i, 'wageA')}
+                      className={`${cell} ${isMonthly ? '' : 'bg-slate-50'}`} />
+                  </td>
+                  <td className="px-1.5 py-1 w-[92px]">
+                    <input type="number" min="0" value={r.wageB ?? ''} onChange={set(i, 'wageB')}
+                      className={`${cell} ${isMonthly ? 'bg-slate-50' : ''}`} />
+                  </td>
+                  <td className="px-1.5 py-1 text-right text-slate-600 whitespace-nowrap">
+                    {total == null ? '' : total.toLocaleString()}
+                  </td>
+                  <td className="px-1.5 py-1 w-[120px]">
+                    <input value={r.note || ''} onChange={setText(i, 'note')} maxLength={16}
+                      className="w-full box-border min-w-0 border border-slate-200 rounded px-1 py-1 text-[11.5px]" />
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div className="px-3 py-2 border-t border-slate-100 text-[10px] text-slate-400">
+        賃金額Ａは月によって決まる賃金（月給）、Ｂは日や時間で決まる賃金（日給・時給・出来高）です。
+        {isMonthly ? 'この方は月給制なのでＡに入れています。' : 'この方は月給制ではないのでＢに入れています。'}
+      </div>
+    </div>
+  );
+}
+
+function RishokuReasonPicker({ reasonKey, details, onChangeKey, onChangeDetail }) {
+  const groups = [];
+  HW_RISHOKU_REASONS.forEach((r) => {
+    const last = groups[groups.length - 1];
+    if (last && last.name === r.group) last.items.push(r);
+    else groups.push({ name: r.group, items: [r] });
+  });
+  const shown = HW_RISHOKU_DETAIL_FIELDS.filter((d) => d.forKeys.indexOf(reasonKey) >= 0);
+  return (
+    <div className="rounded-xl border border-slate-200 overflow-hidden">
+      <div className="px-3 py-2 bg-slate-50 border-b border-slate-200 text-[11px] font-bold text-slate-600">
+        離職理由（事業主が記入する欄）
+      </div>
+      <div className="px-3 py-2 text-[10.5px] text-slate-500 leading-relaxed border-b border-slate-100">
+        主たる離職理由を<b>1つだけ</b>選びます。
+        <b className="block pt-0.5">離職理由は、所定給付日数と給付制限の有無に影響します。</b>
+      </div>
+      <div className="px-3 py-2 space-y-2.5">
+        {groups.map((g) => (
+          <div key={g.name}>
+            <div className="text-[11px] font-bold text-slate-600 border-l-[3px] border-slate-300 pl-2 mb-1">{g.name}</div>
+            <div className="space-y-1">
+              {g.items.map((r) => (
+                <label key={r.key} className="flex items-start gap-1.5 text-[11.5px] text-slate-600 leading-snug">
+                  <input
+                    type="radio"
+                    name="rishoku-reason"
+                    checked={reasonKey === r.key}
+                    onChange={() => onChangeKey(r.key)}
+                    className="mt-0.5 shrink-0"
+                  />
+                  <span>{r.label}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+        ))}
+        {shown.length > 0 && (
+          <div className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 space-y-2">
+            <div className="text-[10.5px] font-bold text-slate-500">選んだ理由にあわせて入れる欄</div>
+            {shown.map((d) => (
+              <label key={d.field} className="block">
+                <span className="block text-[10.5px] text-slate-500 mb-0.5">{d.label}</span>
+                {d.type === 'choice' ? (
+                  <select
+                    value={details[d.field] ?? ''}
+                    onChange={(e) => onChangeDetail(d.field, e.target.value)}
+                    className="w-full border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white"
+                  >
+                    <option value="">選んでください</option>
+                    {d.choices.map((c) => <option key={c.code} value={c.code}>{c.label}</option>)}
+                  </select>
+                ) : (
+                  <input
+                    value={details[d.field] ?? ''}
+                    onChange={(e) => onChangeDetail(d.field, e.target.value)}
+                    maxLength={d.max}
+                    className="w-full border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px]"
+                  />
+                )}
+              </label>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = [], records = {}, leaveRequests = [],
+  actor, isMasterAdmin, onSaved, isDesktop }) {
   const { codec, failed: codecFailed } = useSjisCodec();
   const [kind, setKind] = useState('nenkinShutoku');
   const [employeeId, setEmployeeId] = useState('');
@@ -19727,6 +19974,11 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], actor, isMasterAdmi
   const [myNumberState, setMyNumberState] = useState('idle'); // idle | loading | done | error
   const [myNumberError, setMyNumberError] = useState('');
   const [error, setError] = useState('');
+  // 離職票交付ありで使うもの
+  const [wageRows, setWageRows] = useState([]);
+  const [wageRowCount, setWageRowCount] = useState(13);
+  const [reasonKey, setReasonKey] = useState('');
+  const [reasonDetails, setReasonDetails] = useState({});
 
   const office = useMemo(() => parseOfficeInfo(settings), [settings]);
   const employee = useMemo(
@@ -19782,10 +20034,30 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], actor, isMasterAdmi
       hwReasonLoss: '2',
       leaveReasonText: '',
       note: '',
+      // 離職証明書
+      certOfficeName: '', certOfficeAddress: '',
+      ownerName1: '', ownerName2: '',
+      wageNote: '', wageNoteExtra: '',
+      createdDate: todayKey(),
+      situationNote: '', objection: '', leaverSignature: '',
     });
+    setReasonKey(''); setReasonDetails({}); setWageRows([]);
     // settings は毎回あたらしい物になるため、必要な中身だけを見ています
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [employee?.id]);
+
+  // 離職日・人数・スタッフが決まったら、賃金の欄を作り直します。
+  // 手で直したあとに作り直すと入力が消えるため、作り直しは明示のボタンでも行えます。
+  const leaveDateForRishoku = form.hwLeaveDate || '';
+  useEffect(() => {
+    if (kind !== 'hwRishoku' || !employee || !leaveDateForRishoku) { setWageRows([]); return; }
+    setWageRows(fillWageRows(
+      wagePeriodsFor(leaveDateForRishoku, wageRowCount),
+      { employee, payrollRecords, records, leaveRequests },
+    ));
+    // データは毎回あたらしい配列になるため、鍵になる値だけを見ています
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kind, employee?.id, leaveDateForRishoku, wageRowCount]);
 
   const set = (key) => (e) => {
     setError('');
@@ -19861,6 +20133,38 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], actor, isMasterAdmi
         officeName: office.nameKanji, note: form.note || '', hwName: office.hwName,
       });
     }
+    if (kind === 'hwRishoku') {
+      const postal = String(employee.postalCode || '').replace(/[^0-9]/g, '');
+      return buildHwRishokuFields(office, {
+        myNumber, insuranceNumber: employee.employmentInsuranceNumber || '',
+        acquiredDate: employee.employmentInsuranceAcquiredDate || '',
+        leaveDate: form.hwLeaveDate || '', reason: form.hwReasonLoss || '',
+        kanaName: kana, kanjiName: name,
+        gender: employee.gender || '', birthDate: employee.birthDate || '',
+        address: employee.address || '', officeName: office.nameKanji,
+        leaveReasonText: form.leaveReasonText || '',
+        weeklyHours: Number(form.weeklyHours) || 0,
+        weeklyMinutes: Number(form.weeklyMinutes) || 0,
+        hwName: office.hwName,
+        certOfficeName: form.certOfficeName || office.nameKanji,
+        certOfficeAddress: form.certOfficeAddress || office.addressKanji,
+        leaverPostalParent: postal.slice(0, 3), leaverPostalChild: postal.slice(3, 7),
+        leaverAddress: employee.address || '',
+        leaverTel1: telParts(employee.phone)[0],
+        leaverTel2: telParts(employee.phone)[1],
+        leaverTel3: telParts(employee.phone)[2],
+        ownerAddress: office.ownerAddress,
+        ownerName1: form.ownerName1 || office.ownerKanji,
+        ownerName2: form.ownerName2 || '',
+        wageRows,
+        wageNote: form.wageNote || '', wageNoteExtra: form.wageNoteExtra || '',
+        createdDate: form.createdDate || '',
+        reasonKey, reasonDetails,
+        situationNote: form.situationNote || '',
+        objection: form.objection || '',
+        leaverSignature: form.leaverSignature || '',
+      });
+    }
     return buildHwSoshitsuFields(office, {
       myNumber, insuranceNumber: employee.employmentInsuranceNumber || '',
       acquiredDate: employee.employmentInsuranceAcquiredDate || '',
@@ -19879,7 +20183,8 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], actor, isMasterAdmi
     kind === 'nenkinShutoku' ? NENKIN_SHUTOKU_SPECS
       : kind === 'nenkinSoshitsu' ? NENKIN_SOSHITSU_SPECS
         : kind === 'hwShutoku' ? HW_SHUTOKU_SPECS
-          : HW_SOSHITSU_SPECS;
+          : kind === 'hwRishoku' ? HW_RISHOKU_SPECS
+            : HW_SOSHITSU_SPECS;
 
   const draft = employee ? buildOne() : null;
 
@@ -19920,11 +20225,39 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], actor, isMasterAdmi
         out.push({ no: 35, label: '契約期間', message: 'スタッフ詳細に契約の開始日と終了日をご登録ください' });
       }
     }
-    if (kind === 'hwSoshitsu') {
+    if (kind === 'hwSoshitsu' || kind === 'hwRishoku') {
       if (!form.hwLeaveDate) out.push({ no: 14, label: '離職等年月日', message: '入力が要ります' });
       if (!employee.employmentInsuranceAcquiredDate) {
         out.push({ no: 10, label: '資格取得年月日', message: 'スタッフ詳細に雇用保険の資格取得年月日をご登録ください' });
       }
+    }
+    if (kind === 'hwRishoku') {
+      if (!reasonKey) out.push({ no: 468, label: '離職理由', message: '主たる離職理由を1つ選んでください' });
+      HW_RISHOKU_DETAIL_FIELDS
+        .filter((d) => d.forKeys.indexOf(reasonKey) >= 0 && d.type === 'choice')
+        .forEach((d) => {
+          if (!String(reasonDetails?.[d.field] ?? '')) {
+            out.push({ no: 488, label: d.label, message: '選んでください' });
+          }
+        });
+      if (!form.situationNote) {
+        out.push({ no: 521, label: '具体的事情記載欄', message: '離職に至った事情を入れてください' });
+      }
+      if (!form.objection) {
+        out.push({ no: 522, label: '異議の有無', message: 'ご本人の確認を取ったうえで選んでください' });
+      }
+      if (!office.ownerAddress) {
+        out.push({ no: 79, label: '事業主住所', message: '事業所情報にご登録ください' });
+      }
+      const filled = (wageRows || []).filter((r) => r.wageA != null || r.wageB != null);
+      if (filled.length === 0) {
+        out.push({ no: 105, label: '賃金額', message: '賃金の欄に金額を入れてください' });
+      }
+      (wageRows || []).forEach((r, i) => {
+        if ((r.wageA != null || r.wageB != null) && r.baseDays == null) {
+          out.push({ no: 99, label: `賃金の欄 ${i + 1}行目の賃金支払基礎日数`, message: '入力が要ります' });
+        }
+      });
     }
     return out;
   })();
@@ -19948,12 +20281,15 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], actor, isMasterAdmi
     const now = new Date();
     const lines = rows.map((r) => r.line);
     if (isNenkin) return buildNenkinCsv(office, lines, now);
-    return buildHwCsv(office, kind === 'hwShutoku' ? 'shutoku' : 'soshitsu', lines, now);
+    const hwKind = kind === 'hwShutoku' ? 'shutoku' : kind === 'hwRishoku' ? 'rishoku' : 'soshitsu';
+    return buildHwCsv(office, hwKind, lines, now);
   }, [rows, office, isNenkin, kind]);
 
   const fileName = isNenkin
     ? NENKIN_FILE_NAME
-    : (kind === 'hwShutoku' ? HW_FILE_SHUTOKU : HW_FILE_SOSHITSU);
+    : kind === 'hwShutoku' ? HW_FILE_SHUTOKU
+      : kind === 'hwRishoku' ? HW_FILE_RISHOKU
+        : HW_FILE_SOSHITSU;
 
   const sizeWarning = codec && csvText ? csvSizeWarning(codec.encode(csvText).length, rows.length) : '';
 
@@ -20232,11 +20568,88 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], actor, isMasterAdmi
               </div>
             )}
 
+            {kind === 'hwRishoku' && (
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                  {labeled('離職年月日',
+                    <input type="date" value={form.hwLeaveDate || ''} onChange={set('hwLeaveDate')} className={inputClass} />,
+                    '最後に勤めた日。ここを変えると賃金の欄を作り直します')}
+                  {labeled('喪失原因',
+                    <select value={form.hwReasonLoss || ''} onChange={set('hwReasonLoss')} className={selectClass}>
+                      <option value="">選んでください</option>
+                      {HW_LOSS_REASONS.map((r) => <option key={r.code} value={r.code}>{r.label}</option>)}
+                    </select>)}
+                  {labeled('1週間の所定労働時間（時）',
+                    <input type="number" min="0" max="99" value={form.weeklyHours ?? ''} onChange={set('weeklyHours')} className={inputClass} />)}
+                  {labeled('1週間の所定労働時間（分）',
+                    <input type="number" min="0" max="59" value={form.weeklyMinutes ?? ''} onChange={set('weeklyMinutes')} className={inputClass} />)}
+                  {labeled('賃金の欄の行数',
+                    <select value={String(wageRowCount)} onChange={(e) => setWageRowCount(Number(e.target.value))} className={selectClass}>
+                      {[6, 13, 20, HW_WAGE_ROWS].map((n) => <option key={n} value={n}>{n}行</option>)}
+                    </select>,
+                    '月給制は13行、日給・時給制は多めに')}
+                  {labeled('事業所名称（離職証明書）',
+                    <input value={form.certOfficeName ?? ''} onChange={set('certOfficeName')} maxLength={40}
+                      placeholder={office.nameKanji} className={inputClass} />,
+                    '空なら事業所情報の名称を使います')}
+                  {labeled('事業主氏名（上段）',
+                    <input value={form.ownerName1 ?? ''} onChange={set('ownerName1')} maxLength={27}
+                      placeholder={office.ownerKanji} className={inputClass} />)}
+                  {labeled('事業主氏名（下段）',
+                    <input value={form.ownerName2 ?? ''} onChange={set('ownerName2')} maxLength={27} className={inputClass} />,
+                    '法人名と代表者名を分けて書く場合に使います')}
+                  {labeled('作成年月日',
+                    <input type="date" value={form.createdDate || ''} onChange={set('createdDate')} className={inputClass} />)}
+                </div>
+
+                {wageRows.length > 0 && (
+                  <RishokuWageTable
+                    rows={wageRows}
+                    onChange={(next) => { setError(''); setWageRows(next); }}
+                    wageType={employee.wageType}
+                    isDesktop={isDesktop}
+                  />
+                )}
+
+                {labeled('賃金に関する特記事項',
+                  <input value={form.wageNote ?? ''} onChange={set('wageNote')} maxLength={140} className={inputClass} />,
+                  '例）通勤手当は6か月分をまとめて支給')}
+
+                <RishokuReasonPicker
+                  reasonKey={reasonKey}
+                  details={reasonDetails}
+                  onChangeKey={(k) => { setError(''); setReasonKey(k); setReasonDetails({}); }}
+                  onChangeDetail={(f2, v) => setReasonDetails((prev) => ({ ...prev, [f2]: v }))}
+                />
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                  {labeled('具体的事情記載欄',
+                    <input value={form.situationNote ?? ''} onChange={set('situationNote')} maxLength={110} className={inputClass} />,
+                    '離職に至った事情を具体的に')}
+                  {labeled('ご本人の異議の有無',
+                    <select value={form.objection ?? ''} onChange={set('objection')} className={selectClass}>
+                      <option value="">選んでください</option>
+                      <option value="1">異議なし</option>
+                      <option value="0">異議あり</option>
+                    </select>,
+                    '事業主が書いた離職理由について')}
+                  {labeled('離職者署名',
+                    <input value={form.leaverSignature ?? ''} onChange={set('leaverSignature')} maxLength={15} className={inputClass} />)}
+                </div>
+
+                <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-[10.5px] text-amber-800 leading-relaxed">
+                  <b className="block">離職証明書はご本人の確認が要ります。</b>
+                  賃金の額と離職理由をご本人に確認いただき、異議の有無と署名をいただいてから出してください。
+                  賃金額に賞与や臨時の賃金が混ざっていないかも、あわせてご確認ください。
+                </div>
+              </div>
+            )}
+
             {issues.length > 0 && (
               <div className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-2 text-[11px] text-rose-700 space-y-0.5">
                 <div className="font-bold">このままでは出せません</div>
                 {issues.slice(0, 8).map((x) => (
-                  <div key={`${x.no}-${x.message}`}>{x.label}：{x.message}</div>
+                  <div key={`${x.no}-${x.label}-${x.message}`}>{x.label}：{x.message}</div>
                 ))}
                 {issues.length > 8 && <div className="text-[10px]">ほか{issues.length - 8}件</div>}
               </div>
