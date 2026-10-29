@@ -1293,7 +1293,7 @@ function ToastView({ toast }) {
 // 以降のコンポーネント（LoginScreenなど）は一切変更していません。
 // ============================================================
 
-const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, employeeAttendanceSchedules: {}, leaveGrants: [], leaveGrantsReady: true, announcements: [], yearEndAdjustments: [], commuteExpenseClaims: [], resignationReasons: [], monthlyConfirmations: [], shiftPeriods: [], shiftRequests: [], shiftTablesReady: true, bonusRecords: [], bonusTableReady: true, leavePeriods: [], leavePeriodsReady: true, shiftAssignments: [], shiftAssignmentReady: true, shiftImportLogs: [], shiftNameAliases: [], shiftChanges: [], loginAttempts: [], settings: {} };
+const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, employeeAttendanceSchedules: {}, leaveGrants: [], leaveGrantsReady: true, announcements: [], yearEndAdjustments: [], commuteExpenseClaims: [], resignationReasons: [], monthlyConfirmations: [], shiftPeriods: [], shiftRequests: [], shiftTablesReady: true, bonusRecords: [], bonusTableReady: true, leavePeriods: [], leavePeriodsReady: true, payrollItemOverrides: {}, payrollItemOverridesReady: true, shiftAssignments: [], shiftAssignmentReady: true, shiftImportLogs: [], shiftNameAliases: [], shiftChanges: [], loginAttempts: [], settings: {} };
 
 // 管理者宛の通知メールの送信先（app_settings の key）
 const SETTING_ADMIN_NOTIFY_EMAIL = 'admin_notify_email';
@@ -2192,6 +2192,7 @@ async function fetchAllData() {
     loginAttemptRes,
     leaveGrantRes,
     leavePeriodRes,
+    itemOverrideRes,
   ] = await Promise.all([
     // 個人情報（住所・生年月日・口座・賃金など）は本人とマスター管理者にしか
     // 返らない。管理者には null で返る。詳しくは supabase/71_employee_sensitive_fields.sql
@@ -2223,6 +2224,8 @@ async function fetchAllData() {
     supabase.from('employee_leave_grants').select('*').order('grant_date', { ascending: true }),
     // 産前産後休業・育児休業の記録（87番のSQL。未実行でも画面は動きます）
     supabase.from('employee_leave_periods').select('*').order('start_date', { ascending: false }),
+    // 支給・控除項目のスタッフごとの上書き（88番のSQL。未実行でも画面は動きます）
+    supabase.from('employee_payroll_item_overrides').select('*'),
   ]);
 
   for (const res of [employeesRes, recordsRes, correctionsRes, leaveRes, notifRes, payrollRes, auditRes, profileReqRes, groupLeaveRes, employeeAttendanceRes, announcementsRes, yearEndRes, commuteClaimsRes]) {
@@ -2250,6 +2253,16 @@ async function fetchAllData() {
   const shiftImportLogs = importLogRes?.error ? [] : (importLogRes?.data || []).map(rowToImportLog);
   const shiftNameAliases = aliasRes?.error ? [] : (aliasRes?.data || []).map(rowToShiftAlias);
   const shiftChanges = shiftChangeRes?.error ? [] : (shiftChangeRes?.data || []).map(rowToShiftChange);
+
+  // 支給・控除項目のスタッフごとの上書き（SQL未実行でも画面が落ちないよう、エラー時は空扱い）
+  const payrollItemOverrides = {};
+  if (!itemOverrideRes?.error) {
+    (itemOverrideRes?.data || []).forEach((row) => {
+      const clean = cleanItemOverrides(row?.overrides);
+      if (Object.keys(clean).length > 0) payrollItemOverrides[row.employee_id] = clean;
+    });
+  }
+  const payrollItemOverridesReady = !itemOverrideRes?.error;
 
   // 休業の記録（SQL未実行でも画面が落ちないよう、エラー時は空扱いにする）
   const leavePeriods = leavePeriodRes?.error ? [] : (leavePeriodRes?.data || []).map(rowToLeavePeriod);
@@ -2316,6 +2329,8 @@ async function fetchAllData() {
     bonusRecords,
     leavePeriods,
     leavePeriodsReady,
+    payrollItemOverrides,
+    payrollItemOverridesReady,
     bonusTableReady,
     shiftAssignments,
     shiftAssignmentReady,
@@ -6043,6 +6058,7 @@ function AttendanceApp() {
                 groupAttendanceSchedules={data.groupLeaveSchedules}
                 employeeAttendanceSchedules={data.employeeAttendanceSchedules}
                 leaveRequests={data.leaveRequests}
+                payrollItemOverrides={data.payrollItemOverrides}
                 settings={data.settings}
                 session={session}
                 onRefresh={refreshData}
@@ -6082,6 +6098,8 @@ function AttendanceApp() {
                 settings={data.settings}
                 employeeAccounts={employeeAccounts}
                 groupAttendanceSchedules={data.groupLeaveSchedules}
+                payrollItemOverrides={data.payrollItemOverrides}
+                payrollItemOverridesReady={data.payrollItemOverridesReady}
                 session={session}
                 isMasterAdmin={session.role === 'master_admin'}
                 onRefresh={refreshData}
@@ -17290,33 +17308,86 @@ function parsePayrollItemGroups(settings) {
   return out;
 }
 
+// 上書きの中身を、持ってよい形に整えます（グループ・スタッフで共通）。
+// 中身が空の上書きは持ちません（上の段と同じという意味になるため）。
+function cleanItemOverrides(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const out = {};
+  Object.entries(raw).forEach(([label, o]) => {
+    if (!label || !o || typeof o !== 'object') return;
+    const row = {};
+    if (typeof o.enabled === 'boolean') row.enabled = o.enabled;
+    if (o.amount != null && Number.isFinite(Number(o.amount))) {
+      row.amount = Math.max(0, Math.round(Number(o.amount)));
+    }
+    if (Object.keys(row).length > 0) out[label] = row;
+  });
+  return out;
+}
+
+// 上書きを1件ぶん重ねます。全社共通→グループ→スタッフの順に、この関数を重ねて使います。
+function applyItemOverride(item, o) {
+  if (!o) return item;
+  const next = { ...item };
+  if (typeof o.enabled === 'boolean' && o.enabled !== item.enabled) {
+    next.enabled = o.enabled;
+    next.overridden = true;
+  }
+  // 固定額のときだけ金額の上書きを見ます（従業員ごと・毎月入力には金額がないため）
+  if (item.source === 'fixed' && o.amount != null && o.amount !== item.amount) {
+    next.amount = o.amount;
+    next.overridden = true;
+  }
+  return next;
+}
+
+// スタッフごとの上書きを保存する（マスター管理者のみ。88番のSQL）。
+// 中身が空になったら行ごと消します（上書き無し＝グループどおり）。
+async function saveEmployeeItemOverrides(employeeId, overrides, actor = null) {
+  const clean = cleanItemOverrides(overrides);
+  if (Object.keys(clean).length === 0) {
+    const { error } = await supabase
+      .from('employee_payroll_item_overrides').delete().eq('employee_id', employeeId);
+    if (error) {
+      console.error('スタッフごとの項目設定の削除に失敗しました', error);
+      return { ok: false, message: error.message || '' };
+    }
+    await logAudit(actor, 'スタッフごとの項目設定を解除', '');
+    return { ok: true };
+  }
+  const { error } = await supabase.from('employee_payroll_item_overrides').upsert(
+    { employee_id: employeeId, overrides: clean, updated_by: actor?.id || null },
+    { onConflict: 'employee_id' },
+  );
+  if (error) {
+    console.error('スタッフごとの項目設定の保存に失敗しました', error);
+    return { ok: false, message: error.message || '' };
+  }
+  await logAudit(actor, 'スタッフごとの項目設定を変更', `${Object.keys(clean).length}項目`);
+  return { ok: true };
+}
+
 // そのグループの項目一覧。全社共通に、そのグループの上書きを重ねます。
 // groupKey が null のときは全社共通をそのまま返します。
 function payrollItemsForGroup(settings, kind, groupKey, { includeDisabled = false } = {}) {
   const overrides = groupKey == null ? {} : (parsePayrollItemGroups(settings)[groupKey] || {});
   return parsePayrollItems(settings)
     .filter((x) => x.kind === kind)
-    .map((x) => {
-      const o = overrides[x.label];
-      if (!o) return { ...x, overridden: false };
-      const next = { ...x, overridden: false };
-      if (typeof o.enabled === 'boolean' && o.enabled !== x.enabled) {
-        next.enabled = o.enabled;
-        next.overridden = true;
-      }
-      // 固定額のときだけ金額の上書きを見ます（従業員ごと・毎月入力には金額がないため）
-      if (x.source === 'fixed' && o.amount != null && o.amount !== x.amount) {
-        next.amount = o.amount;
-        next.overridden = true;
-      }
-      return next;
-    })
+    .map((x) => applyItemOverride({ ...x, overridden: false }, overrides[x.label]))
     .filter((x) => includeDisabled || x.enabled);
 }
 
-// そのスタッフに当てはまる項目一覧
-function payrollItemsForEmployee(settings, kind, employee, opts) {
-  return payrollItemsForGroup(settings, kind, payrollGroupKey(employee?.mainGroup, employee?.staffType), opts);
+// そのスタッフに当てはまる項目一覧。
+// 全社共通 → 給与規定グループ → ご本人 の順に重ね、あとのものが勝ちます。
+// personal は data.payrollItemOverrides[employee.id]（88番のSQL）。
+// 渡さなければ、これまでどおりグループまでで決まります。
+function payrollItemsForEmployee(settings, kind, employee, opts = {}, personal = null) {
+  const groupKey = payrollGroupKey(employee?.mainGroup, employee?.staffType);
+  const base = payrollItemsForGroup(settings, kind, groupKey, { includeDisabled: true });
+  const own = personal || {};
+  return base
+    .map((x) => applyItemOverride(x, own[x.label]))
+    .filter((x) => opts.includeDisabled || x.enabled);
 }
 
 // グループごとの上書きを保存する（マスター管理者のみ）。
@@ -22293,13 +22364,18 @@ function DeemedOvertimeNote({ deemed, preview, employee }) {
 //
 // できないこと：自動計算の項目（基本給・残業手当・社会保険料・所得税など）の
 //             計算式を変えること。式はコードの中にあり、改修が必要です。
-function PayrollItemSettings({ settings, employeeAccounts = [], groupAttendanceSchedules = {}, actor, isMasterAdmin, onSaved, isDesktop }) {
+function PayrollItemSettings({ settings, employeeAccounts = [], groupAttendanceSchedules = {},
+  payrollItemOverrides = {}, payrollItemOverridesReady = true,
+  actor, isMasterAdmin, onSaved, isDesktop }) {
   const [open, setOpen] = useState(false);
   const [view, setView] = useState('list');      // 'list'（一覧）/ 'reorder'（並べ替え）/ 'rates'（単価設定）
   const [kind, setKind] = useState('payment');   // 'payment'（支給）/ 'deduction'（控除）
   const [groupKey, setGroupKey] = useState(null); // null＝全スタッフ共通
   const [items, setItems] = useState(() => parsePayrollItems(settings));
   const [groups, setGroups] = useState(() => parsePayrollItemGroups(settings));
+  // スタッフごとの上書き（88番のSQL）。グループと同じ形で持ちます
+  const [people, setPeople] = useState(() => ({ ...payrollItemOverrides }));
+  const [personId, setPersonId] = useState(null);   // null＝スタッフを選んでいない
   const [flags, setFlags] = useState(() => parsePaymentItemFlags(settings));
   const [rate, setRate] = useState('');
   const [hours, setHours] = useState('');
@@ -22332,65 +22408,103 @@ function PayrollItemSettings({ settings, employeeAccounts = [], groupAttendanceS
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [savedItemsJson, savedGroupsJson, savedFlagsJson, savedRate, savedHours]);
 
+  const savedPeopleJson = JSON.stringify(payrollItemOverrides || {});
+  useEffect(() => {
+    setPeople({ ...payrollItemOverrides });
+    // 取得のたびに新しい物になるため、中身の文字列を見ています
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savedPeopleJson]);
+
   if (!isMasterAdmin) return null;
 
   const groupList = payrollGroupsInUse(employeeAccounts, settings);
-  const inGroup = groupKey != null;
+  const inPerson = personId != null;
+  const inGroup = groupKey != null && !inPerson;
+  // 上書きを編集している状態（グループでも本人でも、変えられるのは同じ2つだけ）
+  const inOverride = inGroup || inPerson;
+  const person = inPerson ? employeeAccounts.find((a) => a.id === personId) : null;
   const kindLabel = kind === 'payment' ? '支給' : '控除';
 
-  // いま見ている一覧。グループを選んでいるときは、全社共通に上書きを重ねます。
-  const overrides = inGroup ? (groups[groupKey] || {}) : {};
+  // 在籍しているスタッフ。すでに上書きがある方は、退職していても出します
+  const personList = (employeeAccounts || [])
+    .filter((a) => a && a.role !== 'master_admin' && (!a.resignationDate || people[a.id]))
+    .sort((a, b) => String(a.furigana || a.name).localeCompare(String(b.furigana || b.name), 'ja'));
+
+  // いま見ている一覧。
+  //   全社共通 … そのまま
+  //   グループ … 全社共通 ＋ グループの上書き
+  //   スタッフ … 全社共通 ＋ その方のグループの上書き ＋ ご本人の上書き
+  const personGroupKey = person ? payrollGroupKey(person.mainGroup, person.staffType) : null;
+  const groupOverrides = inPerson
+    ? (groups[personGroupKey] || {})
+    : (inGroup ? (groups[groupKey] || {}) : {});
+  const overrides = inPerson ? (people[personId] || {}) : groupOverrides;
   const shown = items.filter((x) => x.kind === kind).map((x) => {
-    const o = overrides[x.label];
-    if (!o) return { ...x, overridden: false };
-    const next = { ...x, overridden: false };
-    if (typeof o.enabled === 'boolean' && o.enabled !== x.enabled) { next.enabled = o.enabled; next.overridden = true; }
-    // 固定額のときだけ金額の上書きを見ます（従業員ごと・毎月入力には金額がないため）
-    if (x.source === 'fixed' && o.amount != null && o.amount !== x.amount) { next.amount = o.amount; next.overridden = true; }
-    return next;
+    // グループぶんを先に重ねます（本人を見ているときは、これが土台）
+    const base = inPerson
+      ? applyItemOverride({ ...x, overridden: false }, groupOverrides[x.label])
+      : { ...x, overridden: false };
+    if (inPerson) base.overridden = false;   // 「共通との違い」は本人の上書きだけを指します
+    return applyItemOverride(base, overrides[x.label]);
   });
   const overrideCount = (key) => Object.keys(groups[key] || {}).length;
+  const personCount = (id) => Object.keys(people[id] || {}).length;
 
   const patch = (label, next) => setItems((prev) => prev.map((x) => (x.label === label ? { ...x, ...next } : x)));
   const remove = (label) => {
     setItems((prev) => prev.filter((x) => x.label !== label));
-    // そのグループの上書きも一緒に消します（消した項目の設定が残らないように）
-    setGroups((prev) => {
+    // グループとスタッフの上書きも一緒に消します（消した項目の設定が残らないように）
+    const dropLabel = (prev) => {
       const next = {};
       Object.entries(prev).forEach(([k, ov]) => {
         const { [label]: _dropped, ...rest } = ov;
         if (Object.keys(rest).length > 0) next[k] = rest;
       });
       return next;
-    });
+    };
+    setGroups(dropLabel);
+    setPeople(dropLabel);
     setEditing(null);
   };
 
-  // グループの上書き。全社共通と同じ値に戻したら、上書きそのものを消します。
-  // そうしないと、あとで全社共通を変えてもこのグループだけ古い値のままになります。
-  const setOverride = (label, field, value) => setGroups((prev) => {
-    const base = items.find((x) => x.label === label);
-    const cur = { ...(prev[groupKey] || {}) };
+  // 上書きの書き換え。グループを見ているときは groups を、
+  // スタッフを見ているときは people を触ります。
+  // 土台と同じ値に戻したら上書きそのものを消します。そうしないと、
+  // あとから土台を変えても、ここだけ古い値のままになります。
+  const editOverride = (fn) => {
+    if (inPerson) setPeople((prev) => fn(prev, personId));
+    else setGroups((prev) => fn(prev, groupKey));
+  };
+  // 本人を見ているときの土台は、全社共通にそのグループの上書きを重ねたもの
+  const baseOf = (label) => {
+    const x = items.find((i) => i.label === label);
+    if (!x) return null;
+    return inPerson ? applyItemOverride({ ...x }, groupOverrides[label]) : x;
+  };
+
+  const setOverride = (label, field, value) => editOverride((prev, key) => {
+    const base = baseOf(label);
+    const cur = { ...(prev[key] || {}) };
     const row = { ...(cur[label] || {}) };
     if (base && base[field] === value) delete row[field];
     else row[field] = value;
     if (Object.keys(row).length === 0) delete cur[label]; else cur[label] = row;
     const next = { ...prev };
-    if (Object.keys(cur).length === 0) delete next[groupKey]; else next[groupKey] = cur;
+    if (Object.keys(cur).length === 0) delete next[key]; else next[key] = cur;
     return next;
   });
 
-  const resetRow = (label) => setGroups((prev) => {
-    const cur = { ...(prev[groupKey] || {}) };
+  const resetRow = (label) => editOverride((prev, key) => {
+    const cur = { ...(prev[key] || {}) };
     delete cur[label];
     const next = { ...prev };
-    if (Object.keys(cur).length === 0) delete next[groupKey]; else next[groupKey] = cur;
+    if (Object.keys(cur).length === 0) delete next[key]; else next[key] = cur;
     return next;
   });
 
-  const resetGroup = () => setGroups((prev) => {
+  const resetGroup = () => editOverride((prev, key) => {
     const next = { ...prev };
-    delete next[groupKey];
+    delete next[key];
     return next;
   });
 
@@ -22457,7 +22571,7 @@ function PayrollItemSettings({ settings, employeeAccounts = [], groupAttendanceS
     setDone('');
     // 式で計算する項目は、読めない式のまま保存させません。
     // 保存できてしまうと、給与明細を作るときに黙って0円になります。
-    if (!inGroup) {
+    if (!inOverride) {
       const broken = items
         .filter((x) => x.source === 'formula' && x.enabled !== false)
         .map((x) => ({ label: x.label, check: compileFormula(x.formula || '') }))
@@ -22468,12 +22582,16 @@ function PayrollItemSettings({ settings, employeeAccounts = [], groupAttendanceS
       }
     }
     setSaving(true);
-    const res = inGroup
-      ? await savePayrollItemGroups(groups, actor)
-      : await savePayrollItemSettings({ items, flags }, actor);
+    const res = inPerson
+      ? await saveEmployeeItemOverrides(personId, people[personId] || {}, actor)
+      : inGroup
+        ? await savePayrollItemGroups(groups, actor)
+        : await savePayrollItemSettings({ items, flags }, actor);
     setSaving(false);
     if (!res.ok) { setError(`保存できませんでした。${res.message}`); return; }
-    setDone(inGroup ? `「${payrollGroupLabel(groupKey)}」の設定を保存しました。` : '支給・控除項目一覧を保存しました。');
+    setDone(inPerson
+      ? `${person?.name || 'この方'}の設定を保存しました。`
+      : inGroup ? `「${payrollGroupLabel(groupKey)}」の設定を保存しました。` : '支給・控除項目一覧を保存しました。');
     if (onSaved) await onSaved();
   };
 
@@ -22564,21 +22682,45 @@ function PayrollItemSettings({ settings, employeeAccounts = [], groupAttendanceS
               <span className="text-[10.5px] text-slate-400">メイングループ ／ スタッフ種別</span>
             </div>
             <select
-              value={groupKey == null ? '' : groupKey}
+              value={inPerson ? `emp:${personId}` : (groupKey == null ? '' : groupKey)}
               onChange={(e) => {
-                setGroupKey(e.target.value === '' ? null : e.target.value);
+                const v = e.target.value;
+                if (v.startsWith('emp:')) { setPersonId(v.slice(4)); setGroupKey(null); }
+                else { setPersonId(null); setGroupKey(v === '' ? null : v); }
                 setView('list'); setEditing(null); setAdding(null); setError(''); setDone('');
               }}
               className="w-full box-border border border-slate-200 rounded-lg px-2.5 py-2 text-[12.5px] bg-white"
             >
-              <option value="">全スタッフ共通（グループで変えていない方はこれ）</option>
-              {groupList.map((g) => (
-                <option key={g.key} value={g.key}>
-                  {g.label}（在籍{g.count}名{overrideCount(g.key) > 0 ? `・${overrideCount(g.key)}件を変更` : ''}）
-                </option>
-              ))}
+              <option value="">全スタッフ共通（グループでも本人でも変えていない方はこれ）</option>
+              <optgroup label="給与規定グループ">
+                {groupList.map((g) => (
+                  <option key={g.key} value={g.key}>
+                    {g.label}（在籍{g.count}名{overrideCount(g.key) > 0 ? `・${overrideCount(g.key)}件を変更` : ''}）
+                  </option>
+                ))}
+              </optgroup>
+              <optgroup label="スタッフごと">
+                {personList.map((a) => (
+                  <option key={a.id} value={`emp:${a.id}`}>
+                    {a.name}
+                    {a.resignationDate ? '（退職）' : ''}
+                    {personCount(a.id) > 0 ? `・${personCount(a.id)}件を変更` : ''}
+                  </option>
+                ))}
+              </optgroup>
             </select>
-            {inGroup ? (
+            {inPerson ? (
+              <div className="text-[10.5px] text-slate-500 leading-relaxed">
+                この方で変えられるのは<b>「使う／使わない」と「固定額の金額」だけ</b>です。
+                土台は<b>「{payrollGroupLabel(personGroupKey)}」の設定</b>で、そこにこの方の分を重ねます。
+                触っていない項目はグループのままなので、あとからグループを変えればこの方にも入ります。
+                {!payrollItemOverridesReady && (
+                  <b className="block pt-0.5 text-amber-700">
+                    88番のSQLがまだ適用されていません。supabase/88_employee_payroll_items.sql を実行すると保存できます。
+                  </b>
+                )}
+              </div>
+            ) : inGroup ? (
               <div className="text-[10.5px] text-slate-500 leading-relaxed">
                 このグループで変えられるのは<b>「使う／使わない」と「固定額の金額」だけ</b>です。
                 項目名・並び順・金額の決め方・雇用保険／所得税の扱い・単価設定は全スタッフ共通です。
@@ -22586,8 +22728,10 @@ function PayrollItemSettings({ settings, employeeAccounts = [], groupAttendanceS
               </div>
             ) : (
               <div className="text-[10.5px] text-slate-500 leading-relaxed">
+                設定は<b>全スタッフ共通 → 給与規定グループ → スタッフごと</b>の順に重なり、あとのものが勝ちます。
                 グループは、スタッフ情報の<b>メイングループとスタッフ種別の組み合わせ</b>です。
                 割り当ての作業は要らず、異動や種別の変更にそのまま付いていきます。
+                グループでは合わない方が1人だけいるときは、「スタッフごと」で変えてください。
                 {groupList.length === 0 && <b className="block pt-0.5">在籍しているスタッフがいないため、グループが出ていません。</b>}
               </div>
             )}
@@ -22599,7 +22743,7 @@ function PayrollItemSettings({ settings, employeeAccounts = [], groupAttendanceS
               {tabBtn('deduction', '控除')}
             </div>
             {/* 項目の追加・並べ替え・単価設定は全スタッフ共通のときだけ */}
-            {!inGroup && (
+            {!inOverride && (
               <div className="ml-auto flex gap-1.5 flex-wrap">
                 <button
                   onClick={startAdd}
@@ -22611,18 +22755,18 @@ function PayrollItemSettings({ settings, employeeAccounts = [], groupAttendanceS
                 {toolBtn('rates', '単価設定', <Settings size={12} />)}
               </div>
             )}
-            {inGroup && overrideCount(groupKey) > 0 && (
+            {inOverride && (inPerson ? personCount(personId) > 0 : overrideCount(groupKey) > 0) && (
               <button
                 onClick={resetGroup}
                 className="ml-auto rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-[11.5px] font-bold text-slate-600"
               >
-                このグループを全部「共通どおり」に戻す
+                {inPerson ? 'この方を全部「グループどおり」に戻す' : 'このグループを全部「共通どおり」に戻す'}
               </button>
             )}
           </div>
 
           {/* ---- 単価設定 ---- */}
-          {view === 'rates' && !inGroup && (
+          {view === 'rates' && !inOverride && (
             <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 space-y-3">
               <div className="text-[11.5px] font-bold text-slate-600">単価設定</div>
 
@@ -22789,7 +22933,7 @@ function PayrollItemSettings({ settings, employeeAccounts = [], groupAttendanceS
           )}
 
           {/* ---- 項目を追加 ---- */}
-          {adding && !inGroup && (
+          {adding && !inOverride && (
             <div className="rounded-xl border border-slate-300 bg-white px-3 py-3 space-y-2.5">
               <div className="text-[11.5px] font-bold text-slate-600">{kindLabel}項目を追加</div>
               <div className={`grid gap-2 ${isDesktop ? 'grid-cols-2' : 'grid-cols-1'}`}>
@@ -22843,19 +22987,19 @@ function PayrollItemSettings({ settings, employeeAccounts = [], groupAttendanceS
               スマホでは金額の欄がつぶれて1文字ずつ折り返すため、
               表に最低の幅を持たせて横スクロールにしています。 */}
           <div className="overflow-x-auto">
-            <table className={`w-full text-[11.5px] ${inGroup ? 'min-w-[460px]' : kind === 'payment' ? 'min-w-[980px]' : 'min-w-[660px]'}`}>
+            <table className={`w-full text-[11.5px] ${inOverride ? 'min-w-[460px]' : kind === 'payment' ? 'min-w-[980px]' : 'min-w-[660px]'}`}>
               <thead className="bg-slate-50 text-slate-500">
                 <tr className="text-left">
-                  {view === 'reorder' && !inGroup && <th className="px-2 py-1.5 font-medium w-16 text-center">並び</th>}
+                  {view === 'reorder' && !inOverride && <th className="px-2 py-1.5 font-medium w-16 text-center">並び</th>}
                   <th className="px-2.5 py-1.5 font-medium whitespace-nowrap">項目名</th>
                   <th className="px-2.5 py-1.5 font-medium min-w-[200px]">金額</th>
-                  {kind === 'payment' && !inGroup && <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">雇用保険の賃金</th>}
-                  {kind === 'payment' && !inGroup && <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">所得税の課税</th>}
-                  {kind === 'payment' && !inGroup && <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">固定的賃金</th>}
-                  {!inGroup && <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">1円未満</th>}
-                  {!inGroup && <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">0円のとき</th>}
+                  {kind === 'payment' && !inOverride && <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">雇用保険の賃金</th>}
+                  {kind === 'payment' && !inOverride && <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">所得税の課税</th>}
+                  {kind === 'payment' && !inOverride && <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">固定的賃金</th>}
+                  {!inOverride && <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">1円未満</th>}
+                  {!inOverride && <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">0円のとき</th>}
                   <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">使う</th>
-                  <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">{inGroup ? '共通との違い' : ' '}</th>
+                  <th className="px-2 py-1.5 font-medium text-center whitespace-nowrap">{inOverride ? '共通との違い' : ' '}</th>
                 </tr>
               </thead>
               <tbody>
@@ -22869,7 +23013,7 @@ function PayrollItemSettings({ settings, employeeAccounts = [], groupAttendanceS
                       {/* 背景色は1つだけ当てます。2つ重ねると、どちらが効くかが
                           Tailwind の並び順しだいになって読めなくなるためです。 */}
                       <tr className={`border-t border-slate-100 ${x.overridden ? 'bg-amber-50/70' : x.enabled ? '' : 'bg-slate-50/60'}`}>
-                        {view === 'reorder' && !inGroup && (
+                        {view === 'reorder' && !inOverride && (
                           <td className="px-2 py-1.5 text-center whitespace-nowrap">
                             <button onClick={() => move(x.label, -1)} disabled={i === 0} className="px-1 text-[13px] font-bold text-slate-500 disabled:text-slate-200">↑</button>
                             <button onClick={() => move(x.label, 1)} disabled={i === shown.length - 1} className="px-1 text-[13px] font-bold text-slate-500 disabled:text-slate-200">↓</button>
@@ -22881,7 +23025,7 @@ function PayrollItemSettings({ settings, employeeAccounts = [], groupAttendanceS
                         </td>
                         <td className={`px-2.5 py-1.5 leading-snug ${dim || 'text-slate-500'}`}>
                           {/* グループを選んでいるときは、固定額だけその場で直せます */}
-                          {inGroup && x.source === 'fixed' ? (
+                          {inOverride && x.source === 'fixed' ? (
                             <input
                               type="number" min="0" value={x.amount}
                               onChange={(e) => setOverride(x.label, 'amount', Math.max(0, Math.round(Number(e.target.value) || 0)))}
@@ -22889,7 +23033,7 @@ function PayrollItemSettings({ settings, employeeAccounts = [], groupAttendanceS
                             />
                           ) : amountText(x)}
                         </td>
-                        {kind === 'payment' && !inGroup && ['ei', 'tax'].map((field) => (
+                        {kind === 'payment' && !inOverride && ['ei', 'tax'].map((field) => (
                           <td key={field} className="px-2 py-1.5 text-center">
                             <button
                               onClick={() => toggleFlag(x.label, field)}
@@ -22900,7 +23044,7 @@ function PayrollItemSettings({ settings, employeeAccounts = [], groupAttendanceS
                           </td>
                         ))}
                         {/* 固定的賃金かどうか。月額変更届（随時改定）の判断に使います。 */}
-                        {kind === 'payment' && !inGroup && (
+                        {kind === 'payment' && !inOverride && (
                           <td className="px-2 py-1.5 text-center">
                             <button
                               onClick={() => patch(x.label, { fixedWage: !x.fixedWage })}
@@ -22912,7 +23056,7 @@ function PayrollItemSettings({ settings, employeeAccounts = [], groupAttendanceS
                           </td>
                         )}
                         {/* 1円未満の端数。法令で丸め方が決まっている項目は変えられません。 */}
-                        {!inGroup && (
+                        {!inOverride && (
                           <td className="px-2 py-1.5 text-center">
                             {x.statutory ? (
                               <span className="text-[10.5px] text-slate-400" title="社会保険料は50銭以下切り捨て・50銭超切り上げ、所得税は10円未満四捨五入、住民税は通知書の額そのままです">
@@ -22931,7 +23075,7 @@ function PayrollItemSettings({ settings, employeeAccounts = [], groupAttendanceS
                         )}
                         {/* 金額が0円のときに、スタッフが見る明細と印刷に出すか。
                             作る側の給与計算の画面には、どちらでも全部並びます。 */}
-                        {!inGroup && (
+                        {!inOverride && (
                           <td className="px-2 py-1.5 text-center">
                             <button
                               onClick={() => patch(x.label, { showZero: !x.showZero })}
@@ -22943,14 +23087,14 @@ function PayrollItemSettings({ settings, employeeAccounts = [], groupAttendanceS
                         )}
                         <td className="px-2 py-1.5 text-center">
                           <button
-                            onClick={() => (inGroup ? setOverride(x.label, 'enabled', !x.enabled) : patch(x.label, { enabled: !x.enabled }))}
+                            onClick={() => (inOverride ? setOverride(x.label, 'enabled', !x.enabled) : patch(x.label, { enabled: !x.enabled }))}
                             className={`rounded-lg border px-2.5 py-1 text-[11px] font-bold whitespace-nowrap ${x.enabled ? 'border-slate-700 bg-slate-800 text-white' : 'border-slate-200 bg-white text-slate-400'}`}
                           >
                             {x.enabled ? '使う' : '使わない'}
                           </button>
                         </td>
                         <td className="px-2 py-1.5 text-center whitespace-nowrap">
-                          {inGroup ? (
+                          {inOverride ? (
                             x.overridden ? (
                               <button
                                 onClick={() => resetRow(x.label)}
@@ -22972,7 +23116,7 @@ function PayrollItemSettings({ settings, employeeAccounts = [], groupAttendanceS
                           )}
                         </td>
                       </tr>
-                      {editing === x.label && !inGroup && (
+                      {editing === x.label && !inOverride && (
                         <tr className="border-t border-slate-100 bg-slate-50">
                           <td colSpan={10} className="px-2.5 py-2.5">
                             <div className={`grid gap-2 ${isDesktop ? 'grid-cols-3' : 'grid-cols-1'}`}>
@@ -23029,20 +23173,22 @@ function PayrollItemSettings({ settings, employeeAccounts = [], groupAttendanceS
 
           <div className="text-[10.5px] text-slate-500 leading-relaxed">
             <b>「自動」の項目は、Brown Work が金額を計算します。</b>計算式はこの画面からは変えられません。
-            {kind === 'payment' && !inGroup && (
+            {kind === 'payment' && !inOverride && (
               <>
                 <b className="block pt-0.5">通勤手当は、雇用保険の賃金には含みますが、所得税では一定額まで非課税です。</b>
                 扱いが違うので別々に持っています。通勤手当の非課税の限度額は見ていないため、限度を超える方がいる場合は所得税の金額を手で直してください。
               </>
             )}
             <b className="block pt-0.5">「1円未満」は、Brown Work が金額を計算したときの端数の処理です。</b>
-            {!inGroup && <>基本給・残業手当・通勤手当・土日祝皆勤手当のように、計算で小数が出る項目に効きます。金額をそのまま入れる項目には関係ありません。賃金規程は「支給は切り上げ、控除（不就労時間）は切り捨て」なので、それを既定にしています。保険料と税は法令で丸め方が決まっているため変えられません。</>}
+            {!inOverride && <>基本給・残業手当・通勤手当・土日祝皆勤手当のように、計算で小数が出る項目に効きます。金額をそのまま入れる項目には関係ありません。賃金規程は「支給は切り上げ、控除（不就労時間）は切り捨て」なので、それを既定にしています。保険料と税は法令で丸め方が決まっているため変えられません。</>}
             <b className="block pt-0.5">「0円のとき」は、金額が0円の行をスタッフが見る明細と印刷に出すかどうかです。</b>
-            {!inGroup && <>給与計算の画面（作る側）には、どちらにしても「使う」にした項目が全部並びます。入れ忘れに気づけるようにするためです。合計は変わりません。</>}
+            {!inOverride && <>給与計算の画面（作る側）には、どちらにしても「使う」にした項目が全部並びます。入れ忘れに気づけるようにするためです。合計は変わりません。</>}
             <b className="block pt-0.5">「使わない」にすると、</b>
-            {inGroup
-              ? <>このグループの方だけ、スタッフ詳細の候補にも、給与明細を新しく作るときの初期値にも出なくなります。</>
-              : <>スタッフ詳細の候補にも、給与明細を新しく作るときの初期値にも出なくなります。</>}
+            {inPerson
+              ? <>この方だけ、スタッフ詳細の候補にも、給与明細を新しく作るときの初期値にも出なくなります。</>
+              : inGroup
+                ? <>このグループの方だけ、スタッフ詳細の候補にも、給与明細を新しく作るときの初期値にも出なくなります。</>
+                : <>スタッフ詳細の候補にも、給与明細を新しく作るときの初期値にも出なくなります。</>}
             すでに作った給与明細の金額はそのまま残ります。
           </div>
 
@@ -23051,7 +23197,10 @@ function PayrollItemSettings({ settings, employeeAccounts = [], groupAttendanceS
             disabled={saving}
             className="w-full rounded-lg bg-slate-800 py-2 text-[12.5px] font-bold text-white disabled:bg-slate-300"
           >
-            {saving ? '保存中…' : inGroup ? `「${payrollGroupLabel(groupKey)}」の設定を保存する` : 'この一覧を全スタッフに保存する'}
+            {saving ? '保存中…'
+              : inPerson ? `${person?.name || 'この方'}の設定を保存する`
+                : inGroup ? `「${payrollGroupLabel(groupKey)}」の設定を保存する`
+                  : 'この一覧を全スタッフに保存する'}
           </button>
         </div>
       )}
@@ -23491,7 +23640,9 @@ function PayrollSubTabBar({ items = [], activeKey, onSelect, isDesktop }) {
 // サブタブ「給与の設定」の中身。支給・控除項目一覧と、みなし残業の時間数。
 // どちらも全スタッフ共通の設定で、毎月触るものではないため、
 // 給与計算の画面とは別のサブタブに分けています。
-function PayrollSettingsTab({ settings, employeeAccounts = [], groupAttendanceSchedules = {}, session, isMasterAdmin = false, onRefresh, isDesktop }) {
+function PayrollSettingsTab({ settings, employeeAccounts = [], groupAttendanceSchedules = {},
+  payrollItemOverrides = {}, payrollItemOverridesReady = true,
+  session, isMasterAdmin = false, onRefresh, isDesktop }) {
   if (!isMasterAdmin) return null;
   return (
     <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-3">
@@ -23500,6 +23651,8 @@ function PayrollSettingsTab({ settings, employeeAccounts = [], groupAttendanceSc
         settings={settings}
         employeeAccounts={employeeAccounts}
         groupAttendanceSchedules={groupAttendanceSchedules}
+        payrollItemOverrides={payrollItemOverrides}
+        payrollItemOverridesReady={payrollItemOverridesReady}
         actor={session}
         isMasterAdmin={isMasterAdmin}
         onSaved={onRefresh}
@@ -23535,7 +23688,7 @@ function PayrollSettingsTab({ settings, employeeAccounts = [], groupAttendanceSc
   );
 }
 
-function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExpenseClaims = [], monthlyConfirmations = [], groupAttendanceSchedules = {}, employeeAttendanceSchedules = {}, leaveRequests = [], settings = {}, session = null, onSaveDraft, onPublish, onUnpublish, onRefresh, isMasterAdmin = false, onUpdateWage, isDesktop }) {
+function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExpenseClaims = [], monthlyConfirmations = [], groupAttendanceSchedules = {}, employeeAttendanceSchedules = {}, leaveRequests = [], settings = {}, payrollItemOverrides = {}, session = null, onSaveDraft, onPublish, onUnpublish, onRefresh, isMasterAdmin = false, onUpdateWage, isDesktop }) {
   const now = new Date();
   const [employeeId, setEmployeeId] = useState(employeeAccounts[0]?.id || '');
   const [year, setYear] = useState(now.getFullYear());
@@ -23666,7 +23819,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     ? premiumBaseAllowanceTotal({
         settings,
         employeeItems: employeeSalaryItems,
-        groupItems: payrollItemsForEmployee(settings, 'payment', employee),
+        groupItems: payrollItemsForEmployee(settings, 'payment', employee, {}, payrollItemOverrides[employee?.id]),
       })
     : { total: 0, parts: [] };
 
@@ -23771,7 +23924,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
   }) : null;
   // この方の給与規定グループで、土日祝皆勤手当を「使う」にしているか
   const weekendBonusEnabled = employee
-    ? payrollItemsForEmployee(settings, 'payment', employee).some((x) => x.label === WEEKEND_BONUS_LABEL)
+    ? payrollItemsForEmployee(settings, 'payment', employee, {}, payrollItemOverrides[employee?.id]).some((x) => x.label === WEEKEND_BONUS_LABEL)
     : false;
 
   // いまの勤怠と設定から、支給・控除項目を組み立てます。
@@ -23786,8 +23939,9 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     //   ・一覧に無い名前（昔の明細に残っている項目など）はそのまま残します
     // そのスタッフの給与規定グループ（メイングループ × スタッフ種別）の設定を使います。
     // グループで変えていない項目は、全スタッフ共通のままになります。
-    const allPayment = payrollItemsForEmployee(settings, 'payment', employee, { includeDisabled: true });
-    const allDeduction = payrollItemsForEmployee(settings, 'deduction', employee, { includeDisabled: true });
+    const own = payrollItemOverrides[employee?.id];
+    const allPayment = payrollItemsForEmployee(settings, 'payment', employee, { includeDisabled: true }, own);
+    const allDeduction = payrollItemsForEmployee(settings, 'deduction', employee, { includeDisabled: true }, own);
     const paymentOrder = payrollItemOrderMap(settings, 'payment');
     const deductionOrder = payrollItemOrderMap(settings, 'deduction');
 
@@ -25113,6 +25267,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
           onSaveEmployeeAttendance={onSaveEmployeeAttendance}
           resignationReasons={data.resignationReasons}
           settings={data.settings}
+          payrollItemOverrides={data.payrollItemOverrides}
           initialProfileId={pendingProfileId}
           onConsumeInitialProfile={() => setPendingProfileId(null)}
           rowInfo={staffRowInfo}
@@ -28855,7 +29010,7 @@ function MyNumberRetentionCard({ accounts, onListMyNumbers, onDeleteMyNumber, is
   );
 }
 
-function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail, onUpdateDates, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onListMyNumbers, onDeleteMyNumber, groupLeaveSchedules, employeeAttendanceSchedules, onSaveEmployeeAttendance, resignationReasons = [], settings = {}, initialProfileId = null, onConsumeInitialProfile, rowInfo = {}, rowActions = {}, session, leaveGrants = [], leaveRequests = [], onLeaveGrantsChanged, isDesktop }) {
+function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail, onUpdateDates, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onListMyNumbers, onDeleteMyNumber, groupLeaveSchedules, employeeAttendanceSchedules, onSaveEmployeeAttendance, resignationReasons = [], settings = {}, payrollItemOverrides = {}, initialProfileId = null, onConsumeInitialProfile, rowInfo = {}, rowActions = {}, session, leaveGrants = [], leaveRequests = [], onLeaveGrantsChanged, isDesktop }) {
   const knownGroups = Array.from(new Set([...employeeAccounts.map((a) => a.mainGroup).filter(Boolean), ...Object.keys(groupLeaveSchedules || {})]));
   const [listGroupFilter, setListGroupFilter] = useState('all');
   const [listStaffTypeFilter, setListStaffTypeFilter] = useState('all');
@@ -28983,6 +29138,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
         onSaveEmployeeAttendance={onSaveEmployeeAttendance}
         resignationReasons={resignationReasons}
         settings={settings}
+        payrollItemOverride={payrollItemOverrides[profileModalAccount?.id] || null}
         actor={session}
         leaveGrants={leaveGrants}
         leaveRequests={leaveRequests}
@@ -30871,7 +31027,7 @@ function WithholdingDependentsPanel({ employee, actor, isMasterAdmin, taxTableTy
   );
 }
 
-function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSaveMyNumber, isMasterAdmin, knownGroups = [], groupAttendanceSchedules = {}, employeeAttendanceSchedule = {}, onSaveEmployeeAttendance, resignationReasons = [], settings = {}, actor = null, leaveGrants = [], leaveRequests = [], onLeaveGrantsChanged, isDesktop }) {
+function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSaveMyNumber, isMasterAdmin, knownGroups = [], groupAttendanceSchedules = {}, employeeAttendanceSchedule = {}, onSaveEmployeeAttendance, resignationReasons = [], settings = {}, payrollItemOverride = null, actor = null, leaveGrants = [], leaveRequests = [], onLeaveGrantsChanged, isDesktop }) {
   const [activeTab, setActiveTab] = useState('basic');
   const containerRef = useRef(null);
   const sectionRefs = useRef({});
@@ -30913,7 +31069,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
   // 候補から選ぶことで「資格手当」と「資格 手当」のような表記のぶれを防ぎます。
   // この方の給与規定グループ（メイングループ × スタッフ種別）で
   // 「使わない」にした項目は候補に出しません。
-  const salaryItemPresets = (kind) => payrollItemsForEmployee(settings, kind, account)
+  const salaryItemPresets = (kind) => payrollItemsForEmployee(settings, kind, account, {}, payrollItemOverride)
     .filter((x) => x.source === 'employee')
     .map((x) => x.label);
   const [salaryItems, setSalaryItems] = useState([]);
