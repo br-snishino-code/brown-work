@@ -2046,3 +2046,230 @@ export function buildHwRishokuFields(office: OfficeInfo, p: HwRishokuInput): str
 export function buildHwRishoku(office: OfficeInfo, p: HwRishokuInput): string {
   return join(buildHwRishokuFields(office, p));
 }
+
+// ============================================================
+// 健康保険・厚生年金保険 被保険者報酬月額算定基礎届
+//   ／厚生年金保険70歳以上被用者算定基礎届
+//   仕様書 ４．７．１（年金事務所提出・53項目）
+//
+//   4月・5月・6月に「支払った」給与をもとに、9月からの標準報酬月額を決めます。
+//   御社は当月末締め・翌月25日払いなので、
+//     4月支給 ＝ 3月分の給与
+//     5月支給 ＝ 4月分の給与
+//     6月支給 ＝ 5月分の給与
+//   になります。仕様書の作成例も、基礎日数が「31,30,31」（3月・4月・5月の
+//   暦日数）で、同じ締め・支払いの形を示しています。
+// ============================================================
+
+export const NENKIN_SANTEI_FORM_CODE = '2225700';
+
+export const NENKIN_SANTEI_SPECS: FieldSpec[] = [
+  { no: 1, label: '様式コード', kind: 'num', min: 7, max: 7 },
+  { no: 2, label: '都道府県コード', kind: 'num', min: 2, max: 2 },
+  { no: 3, label: '郡市区符号', kind: 'num', min: 2, max: 2 },
+  { no: 4, label: '事業所記号', kind: 'kana', min: 1, max: 4 },
+  { no: 5, label: '被保険者整理番号', kind: 'num', min: 0, max: 6 },
+  { no: 6, label: '被保険者氏名（カナ）', kind: 'kana', min: 1, max: 25 },
+  { no: 7, label: '被保険者氏名（漢字）', kind: 'kanji', min: 0, max: 12 },
+  { no: 8, label: '元号（生年月日）', kind: 'num', min: 1, max: 1 },
+  { no: 9, label: '生年月日', kind: 'num', min: 6, max: 6 },
+  { no: 10, label: '元号（適用年月）', kind: 'num', min: 1, max: 1 },
+  { no: 11, label: '年（適用年月）', kind: 'num', min: 2, max: 2 },
+  { no: 12, label: '月（適用年月）', kind: 'num', min: 2, max: 2 },
+  { no: 13, label: '従前の標準報酬月額（健保）', kind: 'num', min: 0, max: 4 },
+  { no: 14, label: '従前の標準報酬月額（厚年）', kind: 'num', min: 0, max: 4 },
+  { no: 15, label: '元号（従前の改定月）', kind: 'num', min: 1, max: 1 },
+  { no: 16, label: '年（従前の改定月）', kind: 'num', min: 2, max: 2 },
+  { no: 17, label: '月（従前の改定月）', kind: 'num', min: 2, max: 2 },
+  { no: 18, label: '昇(降)給月', kind: 'num', min: 0, max: 2 },
+  { no: 19, label: '昇(降)給区分', kind: 'num', min: 0, max: 1 },
+  { no: 20, label: '遡及支払月', kind: 'num', min: 0, max: 2 },
+  { no: 21, label: '遡及支払額', kind: 'num', min: 0, max: 7 },
+  { no: 22, label: '給与支給月（4月）', kind: 'num', min: 2, max: 2 },
+  { no: 23, label: '給与支給月（5月）', kind: 'num', min: 2, max: 2 },
+  { no: 24, label: '給与支給月（6月）', kind: 'num', min: 2, max: 2 },
+  { no: 25, label: '給与計算の基礎日数（4月）', kind: 'num', min: 2, max: 2 },
+  { no: 26, label: '給与計算の基礎日数（5月）', kind: 'num', min: 2, max: 2 },
+  { no: 27, label: '給与計算の基礎日数（6月）', kind: 'num', min: 2, max: 2 },
+  { no: 28, label: '通貨によるものの額（4月）', kind: 'num', min: 1, max: 7 },
+  { no: 29, label: '通貨によるものの額（5月）', kind: 'num', min: 1, max: 7 },
+  { no: 30, label: '通貨によるものの額（6月）', kind: 'num', min: 1, max: 7 },
+  { no: 31, label: '現物によるものの額（4月）', kind: 'num', min: 1, max: 7 },
+  { no: 32, label: '現物によるものの額（5月）', kind: 'num', min: 1, max: 7 },
+  { no: 33, label: '現物によるものの額（6月）', kind: 'num', min: 1, max: 7 },
+  { no: 34, label: '合計（4月）', kind: 'num', min: 1, max: 7 },
+  { no: 35, label: '合計（5月）', kind: 'num', min: 1, max: 7 },
+  { no: 36, label: '合計（6月）', kind: 'num', min: 1, max: 7 },
+  { no: 37, label: '総計', kind: 'num', min: 1, max: 7 },
+  { no: 38, label: '平均額', kind: 'num', min: 1, max: 7 },
+  { no: 39, label: '修正平均額', kind: 'num', min: 0, max: 7 },
+  { no: 40, label: '個人番号', kind: 'num', min: 0, max: 12 },
+  { no: 41, label: '課所符号', kind: 'num', min: 0, max: 4 },
+  { no: 42, label: '一連番号', kind: 'num', min: 0, max: 6 },
+  { no: 43, label: '備考欄項目1（70歳以上被用者）', kind: 'num', min: 0, max: 1 },
+  { no: 44, label: '70歳算定基礎月', kind: 'num', min: 0, max: 4 },
+  { no: 45, label: '備考欄項目2（二以上事業所勤務）', kind: 'num', min: 0, max: 1 },
+  { no: 46, label: '備考欄項目3（月額変更の予定）', kind: 'num', min: 0, max: 1 },
+  { no: 47, label: '備考欄項目4（途中入社）', kind: 'num', min: 0, max: 1 },
+  { no: 48, label: '備考欄項目5（病休・育休・休職）', kind: 'num', min: 0, max: 1 },
+  { no: 49, label: '備考欄項目6（短時間労働者）', kind: 'num', min: 0, max: 1 },
+  { no: 50, label: '備考欄項目7（パート）', kind: 'num', min: 0, max: 1 },
+  { no: 51, label: '備考欄項目8（年間平均）', kind: 'num', min: 0, max: 1 },
+  { no: 52, label: '備考欄', kind: 'mixed', min: 0, max: 37, maxHalf: 75 },
+  { no: 53, label: '70歳以上被用者届のみ提出', kind: 'num', min: 0, max: 1 },
+];
+
+/** 被保険者の区分。平均額を出すときの基礎日数のしきい値が変わります */
+export const SANTEI_KINDS = {
+  normal: { label: '一般の被保険者', threshold: 17 },
+  part: { label: 'パート扱いする者（短時間就労者）', threshold: 17, fallback: 15 },
+  shortTime: { label: '特定適用事業所の短時間労働者', threshold: 11 },
+};
+export type SanteiKind = 'normal' | 'part' | 'shortTime';
+
+export type SanteiMonth = {
+  /** その月に支払った給与の、計算の基礎となる日数 */
+  days: number | null;
+  /** 通貨によるものの額 */
+  cash: number | null;
+  /** 現物によるものの額 */
+  goods: number | null;
+};
+
+export const EMPTY_SANTEI_MONTH: SanteiMonth = { days: null, cash: null, goods: null };
+
+export type SanteiTotals = {
+  monthTotals: number[];    // 4月・5月・6月それぞれの合計
+  total: number;            // 総計（しきい値を満たした月だけ）
+  average: number;          // 平均額（1円未満切り捨て）
+  usedMonths: number[];     // 平均に入れた月（0=4月, 1=5月, 2=6月）
+  threshold: number;        // 使ったしきい値
+  fellBackTo15: boolean;    // パートで17日以上が無く15日に下げたか
+};
+
+/**
+ * 総計と平均額を出します（仕様書 項番37・38）。
+ *   一般の被保険者          … 基礎日数17日以上の月
+ *   パート扱いする者        … 17日以上の月。1つも無ければ15日以上の月
+ *   特定適用事業所の短時間労働者 … 11日以上の月
+ * どの月も満たさないときは、総計も平均額も0にします。
+ * 平均額は1円未満を切り捨てます。
+ */
+export function santeiTotals(months: SanteiMonth[], kind: SanteiKind = 'normal'): SanteiTotals {
+  const three = [0, 1, 2].map((i) => months?.[i] || EMPTY_SANTEI_MONTH);
+  const monthTotals = three.map((m) => (Number(m.cash) || 0) + (Number(m.goods) || 0));
+  const base = kind === 'shortTime' ? 11 : 17;
+  const pick = (t: number) => [0, 1, 2].filter((i) => (Number(three[i].days) || 0) >= t);
+  let used = pick(base);
+  let threshold = base;
+  let fellBackTo15 = false;
+  if (kind === 'part' && used.length === 0) {
+    used = pick(15);
+    threshold = 15;
+    fellBackTo15 = used.length > 0;
+  }
+  const total = used.reduce((s, i) => s + monthTotals[i], 0);
+  const average = used.length > 0 ? Math.floor(total / used.length) : 0;
+  return { monthTotals, total, average, usedMonths: used, threshold, fellBackTo15 };
+}
+
+/** 標準報酬月額（円）を、届出の4桁（千円単位）にします。300000円 → 「0300」 */
+export function standardRemunerationCode(yen: number | null | undefined): string {
+  const n = Number(yen);
+  if (!Number.isFinite(n) || n <= 0) return '';
+  return String(Math.round(n / 1000)).padStart(4, '0').slice(-4);
+}
+
+export type NenkinSanteiInput = {
+  insuredNumber: string;     // 被保険者整理番号
+  kanaName: string;
+  kanjiName: string;
+  birthDate: string;
+  /** 適用年月（算定基礎届は、その年の9月から） */
+  applyYear: number;
+  /** 従前の標準報酬月額（円） */
+  prevHealth: number | null;
+  prevPension: number | null;
+  /** 従前の改定月 'YYYY-MM' */
+  prevRevisedMonth: string;
+  raiseMonth: string;        // 昇(降)給月（'04' など）
+  raiseKind: string;         // 1=昇給 2=降給
+  retroMonth: string;        // 遡及支払月
+  retroAmount: number | null;
+  months: SanteiMonth[];     // 4月・5月・6月
+  kind: SanteiKind;
+  correctedAverage: number | null;  // 修正平均額
+  myNumber: string;
+  pensionNumber: string;
+  note1?: boolean;           // 70歳以上被用者
+  over70SanteiMonths?: string;
+  note2?: boolean;           // 二以上事業所勤務
+  note3?: boolean;           // 月額変更の予定
+  note4?: boolean;           // 途中入社
+  note5?: boolean;           // 病休・育休・休職
+  note8?: boolean;           // 年間平均
+  note?: string;             // 備考欄
+  over70Only?: boolean;
+};
+
+/** 算定基礎届・70歳以上被用者算定基礎届 データレコード（年金事務所提出・53項目） */
+export function buildNenkinSanteiFields(office: OfficeInfo, p: NenkinSanteiInput): string[] {
+  const birth = toWareki(p.birthDate);
+  // 適用年月は、その年の9月
+  const apply = toWareki(`${p.applyYear}-09-01`);
+  const prevM = /^(\d{4})-(\d{2})$/.exec(String(p.prevRevisedMonth || ''));
+  const prev = prevM ? toWareki(`${prevM[1]}-${prevM[2]}-01`) : null;
+  const my = digits(p.myNumber);
+  const pn = digits(p.pensionNumber);
+  const t = santeiTotals(p.months, p.kind);
+  const m = (i: number) => p.months?.[i] || EMPTY_SANTEI_MONTH;
+  const amt = (v: number | null | undefined) =>
+    (v == null || !Number.isFinite(Number(v))) ? '0' : String(Math.max(0, Math.round(Number(v))));
+  const dayCount = (v: number | null | undefined) =>
+    (v == null || !Number.isFinite(Number(v))) ? '00' : pad2(Math.max(0, Math.min(99, Math.round(Number(v)))));
+
+  return [
+    NENKIN_SANTEI_FORM_CODE,
+    office.prefCode, office.cityCode, office.officeSymbol,
+    digits(p.insuredNumber),
+    normalizeKanaName(p.kanaName),
+    normalizeKanjiName(p.kanjiName),
+    birth ? String(birth.code) : '',
+    birth ? birth.yymmdd : '',
+    apply ? String(apply.code) : '',
+    apply ? apply.yy : '',
+    '09',
+    standardRemunerationCode(p.prevHealth),
+    standardRemunerationCode(p.prevPension),
+    prev ? String(prev.code) : '',
+    prev ? prev.yy : '',
+    prev ? prev.mm : '',
+    String(p.raiseMonth || ''),
+    String(p.raiseKind || ''),
+    String(p.retroMonth || ''),
+    p.retroAmount != null && Number(p.retroAmount) > 0 ? String(Math.round(Number(p.retroAmount))) : '',
+    '04', '05', '06',
+    dayCount(m(0).days), dayCount(m(1).days), dayCount(m(2).days),
+    amt(m(0).cash), amt(m(1).cash), amt(m(2).cash),
+    amt(m(0).goods), amt(m(1).goods), amt(m(2).goods),
+    String(t.monthTotals[0]), String(t.monthTotals[1]), String(t.monthTotals[2]),
+    String(t.total), String(t.average),
+    p.correctedAverage != null && Number(p.correctedAverage) > 0
+      ? String(Math.floor(Number(p.correctedAverage))) : '',
+    my,
+    my ? '' : pn.slice(0, 4),
+    my ? '' : pn.slice(4, 10),
+    flag(p.note1),
+    String(p.over70SanteiMonths || ''),
+    flag(p.note2), flag(p.note3), flag(p.note4), flag(p.note5),
+    flag(p.kind === 'shortTime'),     // 備考欄項目6（短時間労働者）
+    flag(p.kind === 'part'),          // 備考欄項目7（パート）
+    flag(p.note8),
+    String(p.note || ''),
+    flag(p.over70Only),
+  ];
+}
+
+export function buildNenkinSantei(office: OfficeInfo, p: NenkinSanteiInput): string {
+  return join(buildNenkinSanteiFields(office, p));
+}

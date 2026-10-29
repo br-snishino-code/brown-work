@@ -12,7 +12,9 @@ import {
   NENKIN_SOSHITSU_REASONS, HW_ACQUIRE_REASONS, HW_WAGE_FORMS, HW_EMPLOYMENT_TYPES,
   HW_JOB_CATEGORIES, HW_JOB_ROUTES, HW_LOSS_REASONS, csvSizeWarning,
   buildHwRishokuFields, HW_RISHOKU_SPECS, HW_RISHOKU_REASONS, HW_RISHOKU_DETAIL_FIELDS,
-  HW_FILE_RISHOKU, HW_WAGE_ROWS, wagePeriodsFor, addDays,
+  HW_FILE_RISHOKU, HW_WAGE_ROWS, wagePeriodsFor, addDays, lastDayOfMonth,
+  buildNenkinSanteiFields, NENKIN_SANTEI_SPECS, santeiTotals, standardRemunerationCode,
+  SANTEI_KINDS, EMPTY_SANTEI_MONTH,
 } from './denshiShinsei';
 
 // ---- constants ----
@@ -19704,8 +19706,9 @@ const SHINSEI_KINDS = {
   hwShutoku: { label: '雇用保険被保険者資格取得届', where: 'ハローワーク' },
   hwSoshitsu: { label: '雇用保険被保険者資格喪失届（離職票交付なし）', where: 'ハローワーク' },
   hwRishoku: { label: '雇用保険被保険者資格喪失届（離職票交付あり）＋離職証明書', where: 'ハローワーク' },
+  nenkinSantei: { label: '健康保険・厚生年金保険 被保険者報酬月額算定基礎届', where: '年金事務所' },
 };
-const SHINSEI_KIND_ORDER = ['nenkinShutoku', 'nenkinSoshitsu', 'hwShutoku', 'hwSoshitsu', 'hwRishoku'];
+const SHINSEI_KIND_ORDER = ['nenkinShutoku', 'nenkinSoshitsu', 'nenkinSantei', 'hwShutoku', 'hwSoshitsu', 'hwRishoku'];
 
 // 1週間の所定労働時間を、所定勤務時間と週の勤務日数から出します。
 // どちらかが未登録のときは null（画面で入れてもらいます）。
@@ -19963,6 +19966,131 @@ function RishokuReasonPicker({ reasonKey, details, onChangeKey, onChangeDetail }
   );
 }
 
+
+// ---- 算定基礎届の画面 ----
+
+// 給与の支払い方。算定基礎届は「4月・5月・6月に支払った」給与が対象なので、
+// どの月分の給与明細を見ればよいかが変わります。
+const SANTEI_PAY_OFFSETS = {
+  nextMonth: { label: '当月末締め・翌月払い（御社はこちら）', offset: 1 },
+  sameMonth: { label: '当月払い', offset: 0 },
+};
+
+// 4月・5月・6月に支払った給与を、Brown Work から入れます。
+function fillSanteiMonths({ employee, payrollRecords = [], records = {}, leaveRequests = [], year, offset }) {
+  const mine = records?.[employee?.id] || {};
+  const pays = payrollRecords.filter((p) => p.employeeId === employee?.id);
+  const isMonthly = String(employee?.wageType || '') === 'monthly';
+  return [4, 5, 6].map((payMonth) => {
+    const t = year * 12 + (payMonth - 1) - Number(offset || 0);
+    const y = Math.floor(t / 12), mo = (t % 12) + 1;
+    const rec = pays.find((p) => p.year === y && p.month === mo);
+    const cash = paymentTotalOfPayroll(rec);
+    const start = `${y}-${String(mo).padStart(2, '0')}-01`;
+    const end = `${y}-${String(mo).padStart(2, '0')}-${String(lastDayOfMonth(y, mo)).padStart(2, '0')}`;
+    // 月給制は、その給与の計算期間の暦日数。時給制・日給制は出勤した日数。
+    const days = isMonthly
+      ? (cash == null ? null : lastDayOfMonth(y, mo))
+      : countWageBaseDays(mine, leaveRequests, employee?.id, start, end);
+    return { days, cash, goods: 0, srcYear: y, srcMonth: mo, payMonth };
+  });
+}
+
+function SanteiMonthTable({ months, onChange, totals, wageType, kindLabel }) {
+  const isMonthly = String(wageType || '') === 'monthly';
+  const set = (i, key) => (e) => {
+    const raw = e?.target ? e.target.value : e;
+    const v = raw === '' ? null : Number(raw);
+    onChange(months.map((m, j) => (j === i ? { ...m, [key]: v } : m)));
+  };
+  const cell = 'w-full box-border min-w-0 border border-slate-200 rounded px-1 py-1 text-[11.5px] text-right';
+  return (
+    <div className="rounded-xl border border-slate-200 overflow-hidden">
+      <div className="px-3 py-2 bg-slate-50 border-b border-slate-200 text-[11px] font-bold text-slate-600">
+        4月・5月・6月に支払った給与
+      </div>
+      <div className="px-3 py-2 text-[10.5px] text-slate-500 leading-relaxed border-b border-slate-100">
+        算定基礎届は「4月・5月・6月に<b>支払った</b>給与」で見ます。
+        御社は当月末締め・翌月25日払いなので、4月支給は3月分、5月支給は4月分、6月支給は5月分です。
+        <b className="block pt-0.5">
+          給与計算の基礎日数は、{isMonthly ? '月給制なのでその計算期間の暦日数を入れています。' : '出勤した日＋承認済みの有給を取った日で数えています。'}
+          数え方が違う場合はこの表で直してください。
+        </b>
+        通貨によるものの額は給与明細の支給合計（控除を引く前）です。臨時の賃金と年3回以下の賞与は入れないでください。
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-[11.5px] min-w-[560px]">
+          <thead className="bg-slate-50 text-slate-500">
+            <tr className="text-left">
+              <th className="px-2 py-1.5 font-medium whitespace-nowrap">支給月</th>
+              <th className="px-2 py-1.5 font-medium whitespace-nowrap">対象の給与</th>
+              <th className="px-2 py-1.5 font-medium whitespace-nowrap text-center">基礎日数</th>
+              <th className="px-2 py-1.5 font-medium whitespace-nowrap text-center">通貨</th>
+              <th className="px-2 py-1.5 font-medium whitespace-nowrap text-center">現物</th>
+              <th className="px-2 py-1.5 font-medium whitespace-nowrap text-center">合計</th>
+              <th className="px-2 py-1.5 font-medium whitespace-nowrap text-center">平均へ</th>
+            </tr>
+          </thead>
+          <tbody>
+            {months.map((m, i) => {
+              const used = totals.usedMonths.indexOf(i) >= 0;
+              return (
+                <tr key={i} className="border-t border-slate-100">
+                  <td className="px-2 py-1 font-bold text-slate-700 whitespace-nowrap">{m.payMonth}月</td>
+                  <td className="px-2 py-1 text-slate-500 whitespace-nowrap">{m.srcYear}年{m.srcMonth}月分</td>
+                  <td className="px-2 py-1 w-[64px]">
+                    <input type="number" min="0" max="99" value={m.days ?? ''} onChange={set(i, 'days')} className={cell} />
+                  </td>
+                  <td className="px-2 py-1 w-[100px]">
+                    <input type="number" min="0" value={m.cash ?? ''} onChange={set(i, 'cash')} className={cell} />
+                  </td>
+                  <td className="px-2 py-1 w-[90px]">
+                    <input type="number" min="0" value={m.goods ?? ''} onChange={set(i, 'goods')} className={cell} />
+                  </td>
+                  <td className="px-2 py-1 text-right text-slate-600 whitespace-nowrap">
+                    {totals.monthTotals[i].toLocaleString()}
+                  </td>
+                  <td className="px-2 py-1 text-center whitespace-nowrap">
+                    {used
+                      ? <span className="text-[10.5px] font-bold text-emerald-700">入れる</span>
+                      : <span className="text-[10.5px] text-slate-300">外す</span>}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+          <tfoot className="bg-slate-50 border-t border-slate-200">
+            <tr>
+              <td colSpan={5} className="px-2 py-1.5 text-right text-[11px] font-bold text-slate-600">総計</td>
+              <td className="px-2 py-1.5 text-right text-[12px] font-bold text-slate-800 whitespace-nowrap">
+                {totals.total.toLocaleString()}
+              </td>
+              <td />
+            </tr>
+            <tr>
+              <td colSpan={5} className="px-2 py-1.5 text-right text-[11px] font-bold text-slate-600">平均額</td>
+              <td className="px-2 py-1.5 text-right text-[12px] font-bold text-slate-800 whitespace-nowrap">
+                {totals.average.toLocaleString()}
+              </td>
+              <td />
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+      <div className="px-3 py-2 border-t border-slate-100 text-[10px] text-slate-500 leading-relaxed">
+        {kindLabel}なので、給与計算の基礎日数が<b>{totals.threshold}日以上</b>の月だけを平均に入れます。
+        {totals.fellBackTo15 && <b className="text-amber-700">（17日以上の月が無いため15日以上に下げました）</b>}
+        {totals.usedMonths.length === 0 && (
+          <b className="block text-amber-700">
+            どの月も{totals.threshold}日に届かないため、総計と平均額は0で出ます。保険者算定になる可能性があります。
+          </b>
+        )}
+        {' '}平均額は1円未満を切り捨てています。
+      </div>
+    </div>
+  );
+}
+
 function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = [], records = {}, leaveRequests = [],
   actor, isMasterAdmin, onSaved, isDesktop }) {
   const { codec, failed: codecFailed } = useSjisCodec();
@@ -19979,13 +20107,17 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
   const [wageRowCount, setWageRowCount] = useState(13);
   const [reasonKey, setReasonKey] = useState('');
   const [reasonDetails, setReasonDetails] = useState({});
+  // 算定基礎届で使うもの
+  const [santeiYear, setSanteiYear] = useState(new Date().getFullYear());
+  const [santeiPay, setSanteiPay] = useState('nextMonth');
+  const [santeiMonths, setSanteiMonths] = useState([]);
 
   const office = useMemo(() => parseOfficeInfo(settings), [settings]);
   const employee = useMemo(
     () => (employeeAccounts || []).find((a) => a.id === employeeId) || null,
     [employeeAccounts, employeeId]
   );
-  const isNenkin = kind === 'nenkinShutoku' || kind === 'nenkinSoshitsu';
+  const isNenkin = kind === 'nenkinShutoku' || kind === 'nenkinSoshitsu' || kind === 'nenkinSantei';
 
   // 種類やスタッフを変えたら、入力中の内容と読み込んだ番号は捨てます
   useEffect(() => {
@@ -20040,8 +20172,18 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
       wageNote: '', wageNoteExtra: '',
       createdDate: todayKey(),
       situationNote: '', objection: '', leaverSignature: '',
+      // 算定基礎届
+      insuredNumberSantei: '',
+      prevHealth: employee.standardRemunerationHealth ?? '',
+      prevPension: employee.standardRemunerationPension ?? '',
+      prevRevisedMonth: '',
+      santeiKind: 'normal',
+      raiseMonth: '', raiseKind: '', retroMonth: '', retroAmount: '',
+      correctedAverage: '',
+      santeiNote2: false, santeiNote3: false, santeiNote4: false, santeiNote5: false,
+      santeiNote8: false, santeiNote: '',
     });
-    setReasonKey(''); setReasonDetails({}); setWageRows([]);
+    setReasonKey(''); setReasonDetails({}); setWageRows([]); setSanteiMonths([]);
     // settings は毎回あたらしい物になるため、必要な中身だけを見ています
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [employee?.id]);
@@ -20058,6 +20200,17 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
     // データは毎回あたらしい配列になるため、鍵になる値だけを見ています
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kind, employee?.id, leaveDateForRishoku, wageRowCount]);
+
+  // 算定基礎届の表を、年・支払い方・スタッフが決まったら作り直します
+  useEffect(() => {
+    if (kind !== 'nenkinSantei' || !employee) { setSanteiMonths([]); return; }
+    setSanteiMonths(fillSanteiMonths({
+      employee, payrollRecords, records, leaveRequests,
+      year: santeiYear, offset: SANTEI_PAY_OFFSETS[santeiPay]?.offset ?? 1,
+    }));
+    // データは毎回あたらしい配列になるため、鍵になる値だけを見ています
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kind, employee?.id, santeiYear, santeiPay]);
 
   const set = (key) => (e) => {
     setError('');
@@ -20133,6 +20286,26 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
         officeName: office.nameKanji, note: form.note || '', hwName: office.hwName,
       });
     }
+    if (kind === 'nenkinSantei') {
+      return buildNenkinSanteiFields(office, {
+        insuredNumber: form.insuredNumberSantei || '',
+        kanaName: kana, kanjiName: name, birthDate: employee.birthDate || '',
+        applyYear: santeiYear,
+        prevHealth: Number(form.prevHealth) || null,
+        prevPension: Number(form.prevPension) || null,
+        prevRevisedMonth: form.prevRevisedMonth || '',
+        raiseMonth: form.raiseMonth || '', raiseKind: form.raiseKind || '',
+        retroMonth: form.retroMonth || '',
+        retroAmount: form.retroAmount === '' ? null : Number(form.retroAmount),
+        months: santeiMonths,
+        kind: form.santeiKind || 'normal',
+        correctedAverage: form.correctedAverage === '' ? null : Number(form.correctedAverage),
+        myNumber, pensionNumber: employee.pensionBasicNumber || '',
+        note2: Boolean(form.santeiNote2), note3: Boolean(form.santeiNote3),
+        note4: Boolean(form.santeiNote4), note5: Boolean(form.santeiNote5),
+        note8: Boolean(form.santeiNote8), note: form.santeiNote || '',
+      });
+    }
     if (kind === 'hwRishoku') {
       const postal = String(employee.postalCode || '').replace(/[^0-9]/g, '');
       return buildHwRishokuFields(office, {
@@ -20182,9 +20355,10 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
   const specs =
     kind === 'nenkinShutoku' ? NENKIN_SHUTOKU_SPECS
       : kind === 'nenkinSoshitsu' ? NENKIN_SOSHITSU_SPECS
-        : kind === 'hwShutoku' ? HW_SHUTOKU_SPECS
-          : kind === 'hwRishoku' ? HW_RISHOKU_SPECS
-            : HW_SOSHITSU_SPECS;
+        : kind === 'nenkinSantei' ? NENKIN_SANTEI_SPECS
+          : kind === 'hwShutoku' ? HW_SHUTOKU_SPECS
+            : kind === 'hwRishoku' ? HW_RISHOKU_SPECS
+              : HW_SOSHITSU_SPECS;
 
   const draft = employee ? buildOne() : null;
 
@@ -20206,6 +20380,33 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
       }
       if (!employee.birthDate) out.push({ no: 10, label: '生年月日', message: 'スタッフ詳細にご登録ください' });
       if (!employee.gender) out.push({ no: 11, label: '性別', message: 'スタッフ詳細にご登録ください' });
+    }
+    if (kind === 'nenkinSantei') {
+      if (!form.insuredNumberSantei) {
+        out.push({ no: 5, label: '被保険者整理番号', message: '入力が要ります' });
+      }
+      if (!hasNumber) {
+        out.push({ no: 40, label: '個人番号', message: 'マイナンバーを読み込むか、スタッフ詳細に基礎年金番号をご登録ください' });
+      }
+      if (!employee.birthDate) out.push({ no: 9, label: '生年月日', message: 'スタッフ詳細にご登録ください' });
+      if (!Number(form.prevHealth)) {
+        out.push({ no: 13, label: '従前の標準報酬月額（健保）', message: '入力が要ります' });
+      }
+      if (!Number(form.prevPension)) {
+        out.push({ no: 14, label: '従前の標準報酬月額（厚年）', message: '入力が要ります' });
+      }
+      if (!/^\d{4}-\d{2}$/.test(String(form.prevRevisedMonth || ''))) {
+        out.push({ no: 15, label: '従前の改定月', message: '入力が要ります' });
+      }
+      const noMoney = (santeiMonths || []).every((m) => !Number(m?.cash) && !Number(m?.goods));
+      if (noMoney) {
+        out.push({ no: 28, label: '報酬の額', message: '4月・5月・6月の表に金額を入れてください' });
+      }
+      (santeiMonths || []).forEach((m, i) => {
+        if ((Number(m?.cash) || Number(m?.goods)) && m?.days == null) {
+          out.push({ no: 25, label: `${4 + i}月の給与計算の基礎日数`, message: '入力が要ります' });
+        }
+      });
     }
     if (kind === 'nenkinSoshitsu') {
       if (!form.lostDate) out.push({ no: 15, label: '資格喪失年月日', message: '入力が要ります' });
@@ -20564,6 +20765,109 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
                 <div className="sm:col-span-4 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[10.5px] text-slate-500">
                   この届出は<b>離職票を交付しない場合</b>のものです。離職票が要るときは、
                   離職証明書を添えた別の様式になります。Brown Work ではまだ作れません。
+                </div>
+              </div>
+            )}
+
+            {kind === 'nenkinSantei' && (
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                  {labeled('対象の年',
+                    <select value={String(santeiYear)} onChange={(e) => setSanteiYear(Number(e.target.value))} className={selectClass}>
+                      {[0, 1, 2].map((d) => {
+                        const y = new Date().getFullYear() - d;
+                        return <option key={y} value={y}>{y}年</option>;
+                      })}
+                    </select>,
+                    `令和${santeiYear - 2018}年9月からの標準報酬月額を決めます`)}
+                  {labeled('給与の支払い',
+                    <select value={santeiPay} onChange={(e) => setSanteiPay(e.target.value)} className={selectClass}>
+                      {Object.entries(SANTEI_PAY_OFFSETS).map(([k, v]) => (
+                        <option key={k} value={k}>{v.label}</option>
+                      ))}
+                    </select>,
+                    'どの月分の給与明細を見るかが変わります')}
+                  {labeled('被保険者整理番号',
+                    <input value={form.insuredNumberSantei ?? ''} onChange={set('insuredNumberSantei')} maxLength={6} className={inputClass} />,
+                    '資格取得確認通知書に書かれている番号')}
+                  {labeled('被保険者の区分',
+                    <select value={form.santeiKind || 'normal'} onChange={set('santeiKind')} className={selectClass}>
+                      {Object.entries(SANTEI_KINDS).map(([k, v]) => (
+                        <option key={k} value={k}>{v.label}</option>
+                      ))}
+                    </select>,
+                    '平均に入れる月のしきい値が変わります')}
+                  {labeled('従前の標準報酬月額（健保・円）',
+                    <input type="number" min="0" value={form.prevHealth ?? ''} onChange={set('prevHealth')} className={inputClass} />,
+                    form.prevHealth ? `届出には「${standardRemunerationCode(Number(form.prevHealth))}」と入ります` : '')}
+                  {labeled('従前の標準報酬月額（厚年・円）',
+                    <input type="number" min="0" value={form.prevPension ?? ''} onChange={set('prevPension')} className={inputClass} />,
+                    form.prevPension ? `届出には「${standardRemunerationCode(Number(form.prevPension))}」と入ります` : '')}
+                  {labeled('従前の改定月',
+                    <input type="month" value={form.prevRevisedMonth ?? ''} onChange={set('prevRevisedMonth')} className={inputClass} />,
+                    '前に標準報酬月額が決まった月')}
+                  {labeled('修正平均額（円）',
+                    <input type="number" min="0" value={form.correctedAverage ?? ''} onChange={set('correctedAverage')} className={inputClass} />,
+                    '保険者算定などのときだけ')}
+                </div>
+
+                {santeiMonths.length > 0 && (
+                  <SanteiMonthTable
+                    months={santeiMonths}
+                    onChange={(next) => { setError(''); setSanteiMonths(next); }}
+                    totals={santeiTotals(santeiMonths, form.santeiKind || 'normal')}
+                    wageType={employee.wageType}
+                    kindLabel={SANTEI_KINDS[form.santeiKind || 'normal'].label}
+                  />
+                )}
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                  {labeled('昇（降）給月',
+                    <select value={form.raiseMonth ?? ''} onChange={set('raiseMonth')} className={selectClass}>
+                      <option value="">なし</option>
+                      {['01', '02', '03', '04', '05', '06'].map((m) => <option key={m} value={m}>{Number(m)}月</option>)}
+                    </select>)}
+                  {labeled('昇給か降給か',
+                    <select value={form.raiseKind ?? ''} onChange={set('raiseKind')} className={selectClass}>
+                      <option value="">—</option>
+                      <option value="1">昇給</option>
+                      <option value="2">降給</option>
+                    </select>)}
+                  {labeled('遡及支払月',
+                    <select value={form.retroMonth ?? ''} onChange={set('retroMonth')} className={selectClass}>
+                      <option value="">なし</option>
+                      {['04', '05', '06'].map((m) => <option key={m} value={m}>{Number(m)}月</option>)}
+                    </select>,
+                    '4〜6月に通常給以外が支払われた月')}
+                  {labeled('遡及支払額（円）',
+                    <input type="number" min="0" value={form.retroAmount ?? ''} onChange={set('retroAmount')} className={inputClass} />)}
+                </div>
+
+                <div className="rounded-xl border border-slate-200 px-3 py-2.5 space-y-1.5">
+                  <div className="text-[11px] font-bold text-slate-600">備考欄</div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-1">
+                    {[
+                      ['santeiNote2', '二以上の事業所に勤めている'],
+                      ['santeiNote3', '月額変更の予定がある'],
+                      ['santeiNote4', '給与の対象期間の途中から資格取得した'],
+                      ['santeiNote5', '病休・育休・休職に当たる'],
+                      ['santeiNote8', '年間平均での算定を申し立てる'],
+                    ].map(([k, label]) => (
+                      <label key={k} className="flex items-center gap-1.5 text-[11.5px] text-slate-600">
+                        <input type="checkbox" checked={Boolean(form[k])} onChange={set(k)} />
+                        {label}
+                      </label>
+                    ))}
+                  </div>
+                  {labeled('備考',
+                    <input value={form.santeiNote ?? ''} onChange={set('santeiNote')} maxLength={37} className={inputClass} />,
+                    '例）５月休職、現物給与が住宅の場合は「住宅」')}
+                </div>
+
+                <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-[10.5px] text-amber-800 leading-relaxed">
+                  <b className="block">提出は7月1日から7月10日までです。</b>
+                  ここで決まった標準報酬月額は、9月分の保険料（御社の場合は9月支給の給与から控除）に使われます。
+                  賞与は入れないでください（年3回以下の賞与は報酬に含めません）。
                 </div>
               </div>
             )}
