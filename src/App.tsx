@@ -20317,7 +20317,7 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
       note3: false, note4: false, note5: false,
       certificateNeeded: '',
       // 社会保険 喪失
-      insuredNumber: '',
+      insuredNumber: employee.healthInsuranceNumber || '',
       lostDate: employee.pensionLostDate || employee.healthInsuranceLostDate || '',
       reason: '4',
       leaveDate: employee.resignationDate || '',
@@ -20347,7 +20347,7 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
       createdDate: todayKey(),
       situationNote: '', objection: '', leaverSignature: '',
       // 算定基礎届
-      insuredNumberSantei: '',
+      insuredNumberSantei: employee.healthInsuranceNumber || '',
       prevHealth: employee.standardRemunerationHealth ?? '',
       prevPension: employee.standardRemunerationPension ?? '',
       prevRevisedMonth: '',
@@ -20357,11 +20357,11 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
       santeiNote2: false, santeiNote3: false, santeiNote4: false, santeiNote5: false,
       santeiNote8: false, santeiNote: '',
       // 賞与支払届
-      insuredNumberBonus: '',
+      insuredNumberBonus: employee.healthInsuranceNumber || '',
       bonusCash: '', bonusGoods: '0',
       bonusNote1: false, bonusNote2: false, bonusFirstPayDay: '',
       // 月額変更届
-      insuredNumberGegaku: '',
+      insuredNumberGegaku: employee.healthInsuranceNumber || '',
       raiseYm: '', gegakuKind: 'normal',
       gegakuPrevHealth: employee.standardRemunerationHealth ?? '',
       gegakuPrevPension: employee.standardRemunerationPension ?? '',
@@ -20656,7 +20656,7 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
     }
     if (kind === 'nenkinGegaku') {
       if (!form.insuredNumberGegaku) {
-        out.push({ no: 5, label: '被保険者整理番号', message: '入力が要ります' });
+        out.push({ no: 5, label: '被保険者整理番号', message: 'スタッフ詳細にご登録いただくか、ここに入れてください' });
       }
       if (!employee.birthDate) out.push({ no: 9, label: '生年月日', message: 'スタッフ詳細にご登録ください' });
       if (!form.raiseYm) {
@@ -20690,7 +20690,7 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
     }
     if (kind === 'nenkinBonus') {
       if (!form.insuredNumberBonus) {
-        out.push({ no: 5, label: '被保険者整理番号', message: '入力が要ります' });
+        out.push({ no: 5, label: '被保険者整理番号', message: 'スタッフ詳細にご登録いただくか、ここに入れてください' });
       }
       if (!employee.birthDate) out.push({ no: 9, label: '生年月日', message: 'スタッフ詳細にご登録ください' });
       if (!form.bonusPaymentDate) {
@@ -20706,7 +20706,7 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
     }
     if (kind === 'nenkinSantei') {
       if (!form.insuredNumberSantei) {
-        out.push({ no: 5, label: '被保険者整理番号', message: '入力が要ります' });
+        out.push({ no: 5, label: '被保険者整理番号', message: 'スタッフ詳細にご登録いただくか、ここに入れてください' });
       }
       if (!hasNumber) {
         out.push({ no: 40, label: '個人番号', message: 'マイナンバーを読み込むか、スタッフ詳細に基礎年金番号をご登録ください' });
@@ -20732,6 +20732,9 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
       });
     }
     if (kind === 'nenkinSoshitsu') {
+      if (!form.insuredNumber) {
+        out.push({ no: 6, label: '被保険者整理番号', message: 'スタッフ詳細にご登録いただくか、ここに入れてください' });
+      }
       if (!form.lostDate) out.push({ no: 15, label: '資格喪失年月日', message: '入力が要ります' });
       if ((form.reason === '4' || form.reason === '5') && !form.leaveDate) {
         out.push({ no: 18, label: '退職日・死亡日', message: '退職・死亡のときは入力が要ります' });
@@ -20786,7 +20789,9 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
     return out;
   })();
 
-  const issues = [...(draft && codec ? checkFields(draft, specs, codec) : []), ...extraIssues];
+  // 知らせは8件までしか出さないので、人が直しやすいもの（どこに何を入れるか
+  // 書いてあるもの）を先に並べます。桁数や文字の決まりは、そのあとに出します。
+  const issues = [...extraIssues, ...(draft && codec ? checkFields(draft, specs, codec) : [])];
   const missingOffice = missingOfficeFields(office, isNenkin ? OFFICE_REQUIRED_NENKIN : OFFICE_REQUIRED_HW);
   const canAdd = Boolean(employee) && issues.length === 0 && missingOffice.length === 0 && Boolean(codec);
 
@@ -20923,7 +20928,10 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
                 <div><span className="text-slate-400">生年月日</span>　<b className="text-slate-700">{employee.birthDate || '未登録'}</b></div>
                 <div><span className="text-slate-400">性別</span>　<b className="text-slate-700">{employee.gender || '未登録'}</b></div>
                 {isNenkin ? (
-                  <div><span className="text-slate-400">基礎年金番号</span>　<b className="text-slate-700">{employee.pensionBasicNumber || '未登録'}</b></div>
+                  <>
+                    <div><span className="text-slate-400">基礎年金番号</span>　<b className="text-slate-700">{employee.pensionBasicNumber || '未登録'}</b></div>
+                    <div><span className="text-slate-400">被保険者整理番号</span>　<b className="text-slate-700">{employee.healthInsuranceNumber || '未登録'}</b></div>
+                  </>
                 ) : (
                   <div><span className="text-slate-400">雇用保険番号</span>　<b className="text-slate-700">{employee.employmentInsuranceNumber || '未登録'}</b></div>
                 )}
@@ -20991,7 +20999,7 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
                 {labeled('被保険者整理番号',
                   <input value={form.insuredNumber || ''} onChange={set('insuredNumber')} maxLength={6} className={inputClass} />,
-                  '資格取得確認通知書に書かれている番号')}
+                  'スタッフ詳細の「被保険者整理番号」から入れています')}
                 {labeled('資格喪失年月日',
                   <input type="date" value={form.lostDate || ''} onChange={set('lostDate')} className={inputClass} />,
                   '退職の場合は退職日の翌日')}
@@ -21115,7 +21123,8 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
                       ))}
                     </select>)}
                   {labeled('被保険者整理番号',
-                    <input value={form.insuredNumberGegaku ?? ''} onChange={set('insuredNumberGegaku')} maxLength={6} className={inputClass} />)}
+                    <input value={form.insuredNumberGegaku ?? ''} onChange={set('insuredNumberGegaku')} maxLength={6} className={inputClass} />,
+                    'スタッフ詳細の「被保険者整理番号」から入れています')}
                   {labeled('被保険者の区分',
                     <select value={form.gegakuKind || 'normal'} onChange={set('gegakuKind')} className={selectClass}>
                       {Object.entries(GEGAKU_KINDS).map(([k, v]) => (
@@ -21235,7 +21244,7 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
                       myBonuses.length === 0 ? 'この方の賞与はまだ登録されていません' : '選ぶと支払日と金額が入ります')}
                     {labeled('被保険者整理番号',
                       <input value={form.insuredNumberBonus ?? ''} onChange={set('insuredNumberBonus')} maxLength={6} className={inputClass} />,
-                      '資格取得確認通知書に書かれている番号')}
+                      'スタッフ詳細の「被保険者整理番号」から入れています')}
                   </div>
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
                     {labeled('賞与支払年月日',
@@ -21311,7 +21320,7 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
                     'どの月分の給与明細を見るかが変わります')}
                   {labeled('被保険者整理番号',
                     <input value={form.insuredNumberSantei ?? ''} onChange={set('insuredNumberSantei')} maxLength={6} className={inputClass} />,
-                    '資格取得確認通知書に書かれている番号')}
+                    'スタッフ詳細の「被保険者整理番号」から入れています')}
                   {labeled('被保険者の区分',
                     <select value={form.santeiKind || 'normal'} onChange={set('santeiKind')} className={selectClass}>
                       {Object.entries(SANTEI_KINDS).map(([k, v]) => (
