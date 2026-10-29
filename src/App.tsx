@@ -17,6 +17,7 @@ import {
   SANTEI_KINDS, EMPTY_SANTEI_MONTH,
   buildNenkinBonusFields, NENKIN_BONUS_SPECS, bonusAmounts,
   buildNenkinGegakuFields, NENKIN_GEGAKU_SPECS, gegakuTotals, addMonthsToYm, GEGAKU_KINDS,
+  buildNenkinSanzenFields, NENKIN_SANZEN_SPECS, buildNenkinIkujiFields, NENKIN_IKUJI_SPECS,
 } from './denshiShinsei';
 
 // ---- constants ----
@@ -1292,7 +1293,7 @@ function ToastView({ toast }) {
 // 以降のコンポーネント（LoginScreenなど）は一切変更していません。
 // ============================================================
 
-const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, employeeAttendanceSchedules: {}, leaveGrants: [], leaveGrantsReady: true, announcements: [], yearEndAdjustments: [], commuteExpenseClaims: [], resignationReasons: [], monthlyConfirmations: [], shiftPeriods: [], shiftRequests: [], shiftTablesReady: true, bonusRecords: [], bonusTableReady: true, shiftAssignments: [], shiftAssignmentReady: true, shiftImportLogs: [], shiftNameAliases: [], shiftChanges: [], loginAttempts: [], settings: {} };
+const EMPTY_DATA = { accounts: [], records: {}, corrections: [], notifications: [], leaveRequests: [], leaveBalances: {}, payrollRecords: [], auditLogs: [], profileUpdateRequests: [], groupLeaveSchedules: {}, employeeAttendanceSchedules: {}, leaveGrants: [], leaveGrantsReady: true, announcements: [], yearEndAdjustments: [], commuteExpenseClaims: [], resignationReasons: [], monthlyConfirmations: [], shiftPeriods: [], shiftRequests: [], shiftTablesReady: true, bonusRecords: [], bonusTableReady: true, leavePeriods: [], leavePeriodsReady: true, shiftAssignments: [], shiftAssignmentReady: true, shiftImportLogs: [], shiftNameAliases: [], shiftChanges: [], loginAttempts: [], settings: {} };
 
 // 管理者宛の通知メールの送信先（app_settings の key）
 const SETTING_ADMIN_NOTIFY_EMAIL = 'admin_notify_email';
@@ -2097,6 +2098,28 @@ const rowToImportLog = (row) => ({
   importedAt: row.imported_at,
 });
 
+// 産前産後休業・育児休業の記録（87番のSQL）
+const rowToLeavePeriod = (row) => ({
+  id: row.id,
+  employeeId: row.employee_id,
+  kind: row.kind,                                   // 'maternity' | 'childcare'
+  startDate: row.start_date || '',
+  plannedEndDate: row.planned_end_date || '',
+  actualEndDate: row.actual_end_date || '',
+  dueDate: row.due_date || '',
+  birthDate: row.birth_date || '',
+  multipleBirth: !!row.multiple_birth,
+  childName: row.child_name || '',
+  childFurigana: row.child_furigana || '',
+  childBirthDate: row.child_birth_date || '',
+  childRelation: row.child_relation || '',
+  careStartDate: row.care_start_date || '',
+  leaveDays: row.leave_days != null ? Number(row.leave_days) : null,
+  workDays: row.work_days != null ? Number(row.work_days) : null,
+  papaMamaPlus: !!row.papa_mama_plus,
+  note: row.note || '',
+});
+
 const rowToBonus = (row) => ({
   id: row.id,
   employeeId: row.employee_id,
@@ -2168,6 +2191,7 @@ async function fetchAllData() {
     shiftChangeRes,
     loginAttemptRes,
     leaveGrantRes,
+    leavePeriodRes,
   ] = await Promise.all([
     // 個人情報（住所・生年月日・口座・賃金など）は本人とマスター管理者にしか
     // 返らない。管理者には null で返る。詳しくは supabase/71_employee_sensitive_fields.sql
@@ -2197,6 +2221,8 @@ async function fetchAllData() {
     supabase.from('login_attempts').select('*').order('occurred_at', { ascending: false }).limit(100),
     // 有休の付与レコード（引き継ぎ・手動分。法定付与は入職日から導く）
     supabase.from('employee_leave_grants').select('*').order('grant_date', { ascending: true }),
+    // 産前産後休業・育児休業の記録（87番のSQL。未実行でも画面は動きます）
+    supabase.from('employee_leave_periods').select('*').order('start_date', { ascending: false }),
   ]);
 
   for (const res of [employeesRes, recordsRes, correctionsRes, leaveRes, notifRes, payrollRes, auditRes, profileReqRes, groupLeaveRes, employeeAttendanceRes, announcementsRes, yearEndRes, commuteClaimsRes]) {
@@ -2224,6 +2250,10 @@ async function fetchAllData() {
   const shiftImportLogs = importLogRes?.error ? [] : (importLogRes?.data || []).map(rowToImportLog);
   const shiftNameAliases = aliasRes?.error ? [] : (aliasRes?.data || []).map(rowToShiftAlias);
   const shiftChanges = shiftChangeRes?.error ? [] : (shiftChangeRes?.data || []).map(rowToShiftChange);
+
+  // 休業の記録（SQL未実行でも画面が落ちないよう、エラー時は空扱いにする）
+  const leavePeriods = leavePeriodRes?.error ? [] : (leavePeriodRes?.data || []).map(rowToLeavePeriod);
+  const leavePeriodsReady = !leavePeriodRes?.error;
 
   // ログイン失敗の記録（管理者以外はRLSで0件、SQL未実行ならエラー→空扱い）
   const loginAttempts = loginAttemptRes?.error ? [] : (loginAttemptRes?.data || []).map(rowToLoginAttempt);
@@ -2284,6 +2314,8 @@ async function fetchAllData() {
     shiftRequests,
     shiftTablesReady,
     bonusRecords,
+    leavePeriods,
+    leavePeriodsReady,
     bonusTableReady,
     shiftAssignments,
     shiftAssignmentReady,
@@ -5830,6 +5862,18 @@ function AttendanceApp() {
                 isDesktop={isDesktop}
               />
             )}
+            {/* 休業の記録。出産予定日や子の氏名が入るため、マスター管理者だけに出す */}
+            {!showStaffScreens && session.role === 'master_admin' && (
+              <LeavePeriodsTab
+                employeeAccounts={employeeAccounts}
+                leavePeriods={data.leavePeriods}
+                ready={data.leavePeriodsReady}
+                actor={session}
+                isMasterAdmin={session.role === 'master_admin'}
+                onSaved={refreshData}
+                isDesktop={isDesktop}
+              />
+            )}
             {/* 電子申請のCSV出力。マイナンバーと賃金を扱うため、マスター管理者だけに出す */}
             {!showStaffScreens && session.role === 'master_admin' && (
               <DenshiShinseiTab
@@ -5839,6 +5883,7 @@ function AttendanceApp() {
                 records={data.records}
                 leaveRequests={data.leaveRequests}
                 bonusRecords={data.bonusRecords}
+                leavePeriods={data.leavePeriods}
                 actor={session}
                 isMasterAdmin={session.role === 'master_admin'}
                 onSaved={refreshData}
@@ -19451,6 +19496,347 @@ function GroupWorkHoursSettings({ settings, employeeAccounts = [], actor, isMast
   );
 }
 
+
+// ============================================================
+// 産前産後休業・育児休業の記録
+//
+//   これまで Brown Work には休業を記録する場所がありませんでした。
+//   休暇申請（有休・振休・代休・特別休暇）はどれも日単位で、
+//   数か月にわたる休業は入れられないためです。
+//
+//   ここで記録したものから、年金事務所に出す
+//   「産前産後休業取得者申出書」と「育児休業等取得者申出書」を作ります。
+//
+//   いまのところ、勤怠と給与には反映していません。
+//   休業中の社会保険料の免除と、勤怠の扱いは別途入れます。
+// ============================================================
+
+const LEAVE_PERIOD_KINDS = {
+  maternity: { label: '産前産後休業', short: '産休' },
+  childcare: { label: '育児休業等', short: '育休' },
+};
+
+const emptyLeavePeriod = (employeeId) => ({
+  id: null, employeeId, kind: 'maternity',
+  startDate: '', plannedEndDate: '', actualEndDate: '',
+  dueDate: '', birthDate: '', multipleBirth: false,
+  childName: '', childFurigana: '', childBirthDate: '',
+  childRelation: '実子', careStartDate: '',
+  leaveDays: null, workDays: null, papaMamaPlus: false, note: '',
+});
+
+// 保存する（マスター管理者のみ。RLSでも止めています）
+async function saveLeavePeriod(row, actor = null) {
+  const payload = {
+    employee_id: row.employeeId,
+    kind: row.kind,
+    start_date: row.startDate || null,
+    planned_end_date: row.plannedEndDate || null,
+    actual_end_date: row.actualEndDate || null,
+    due_date: row.dueDate || null,
+    birth_date: row.birthDate || null,
+    multiple_birth: !!row.multipleBirth,
+    child_name: row.childName || null,
+    child_furigana: row.childFurigana || null,
+    child_birth_date: row.childBirthDate || null,
+    child_relation: row.childRelation || null,
+    care_start_date: row.careStartDate || null,
+    leave_days: row.leaveDays === '' || row.leaveDays == null ? null : Number(row.leaveDays),
+    work_days: row.workDays === '' || row.workDays == null ? null : Number(row.workDays),
+    papa_mama_plus: !!row.papaMamaPlus,
+    note: row.note || null,
+    updated_by: actor?.id || null,
+  };
+  const { error } = row.id
+    ? await supabase.from('employee_leave_periods').update(payload).eq('id', row.id)
+    : await supabase.from('employee_leave_periods').insert({ ...payload, created_by: actor?.id || null });
+  if (error) {
+    console.error('休業の記録の保存に失敗しました', error);
+    return { ok: false, message: error.message || '' };
+  }
+  await logAudit(actor, row.id ? '休業の記録を更新' : '休業の記録を追加',
+    `${LEAVE_PERIOD_KINDS[row.kind]?.label || row.kind} ／ ${row.startDate}〜${row.plannedEndDate}`);
+  return { ok: true };
+}
+
+async function deleteLeavePeriod(row, actor = null) {
+  const { error } = await supabase.from('employee_leave_periods').delete().eq('id', row.id);
+  if (error) {
+    console.error('休業の記録の削除に失敗しました', error);
+    return { ok: false, message: error.message || '' };
+  }
+  await logAudit(actor, '休業の記録を削除',
+    `${LEAVE_PERIOD_KINDS[row.kind]?.label || row.kind} ／ ${row.startDate}〜${row.plannedEndDate}`);
+  return { ok: true };
+}
+
+// 育児休業等取得日数は「開始日と終了予定日の翌日が同じ月に入る」ときだけ
+// 設定する決まりです（仕様書 ４．１３．１ 項番25）。
+function ikujiSameMonth(startDate, endDate) {
+  if (!startDate || !endDate) return false;
+  const next = addDays(endDate, 1);
+  return Boolean(next) && startDate.slice(0, 7) === next.slice(0, 7);
+}
+
+function LeavePeriodsTab({ employeeAccounts = [], leavePeriods = [], ready = true,
+  actor, isMasterAdmin, onSaved, isDesktop }) {
+  const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState(null);   // 編集中の行（null なら閉じている）
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [done, setDone] = useState('');
+
+  if (!isMasterAdmin) return null;
+
+  const nameOf = (id) => employeeAccounts.find((a) => a.id === id)?.name || '（退職・不明）';
+  const rows = leavePeriods.slice().sort((a, b) => String(b.startDate).localeCompare(String(a.startDate)));
+
+  const set = (key) => (e) => {
+    setError(''); setDone('');
+    const v = e?.target ? (e.target.type === 'checkbox' ? e.target.checked : e.target.value) : e;
+    setEditing((prev) => ({ ...prev, [key]: v }));
+  };
+
+  const save = async () => {
+    setError(''); setDone('');
+    if (!editing.employeeId) { setError('スタッフを選んでください。'); return; }
+    if (!editing.startDate || !editing.plannedEndDate) {
+      setError('休業の開始日と終了予定日を入れてください。'); return;
+    }
+    if (editing.plannedEndDate < editing.startDate) {
+      setError('終了予定日は開始日より後にしてください。'); return;
+    }
+    if (editing.actualEndDate && editing.actualEndDate < editing.startDate) {
+      setError('実際に終わった日は開始日より後にしてください。'); return;
+    }
+    if (editing.kind === 'maternity' && !editing.dueDate) {
+      setError('出産予定日を入れてください。'); return;
+    }
+    if (editing.kind === 'childcare' && (!editing.childName || !editing.childBirthDate)) {
+      setError('養育する子の氏名と生年月日を入れてください。'); return;
+    }
+    if (editing.kind === 'childcare' && editing.childRelation === 'その他' && !editing.careStartDate) {
+      setError('実子以外のときは、養育を始めた日を入れてください。'); return;
+    }
+    setSaving(true);
+    const res = await saveLeavePeriod(editing, actor);
+    setSaving(false);
+    if (!res.ok) { setError(`保存できませんでした。${res.message}`); return; }
+    setDone('休業の記録を保存しました。');
+    setEditing(null);
+    if (onSaved) await onSaved();
+  };
+
+  const remove = async (row) => {
+    setError(''); setDone('');
+    setSaving(true);
+    const res = await deleteLeavePeriod(row, actor);
+    setSaving(false);
+    if (!res.ok) { setError(`消せませんでした。${res.message}`); return; }
+    setDone('休業の記録を消しました。');
+    if (onSaved) await onSaved();
+  };
+
+  const inputClass = 'w-full border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px]';
+  const selectClass = `${inputClass} bg-white`;
+  const field = (label, node, hint) => (
+    <label className="block">
+      <span className="block text-[10.5px] font-bold text-slate-500 mb-0.5">{label}</span>
+      {node}
+      {hint && <span className="block text-[10px] text-slate-400 pt-0.5">{hint}</span>}
+    </label>
+  );
+
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="w-full px-4 sm:px-5 py-3 border-b border-slate-100 flex items-center gap-2 flex-wrap text-left"
+      >
+        <Palmtree size={15} className="text-slate-400 shrink-0" />
+        <span className="text-[13px] font-bold text-slate-700">産前産後休業・育児休業</span>
+        <span className="text-[10.5px] text-slate-400">
+          {ready ? `${rows.length}件` : 'SQL未適用'}
+        </span>
+        <span className="ml-auto text-[11px] font-bold text-slate-500">{open ? '閉じる' : '開く'}</span>
+      </button>
+
+      {open && (
+        <div className="px-4 sm:px-5 py-4 space-y-3">
+          {!ready && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-[11px] text-amber-800">
+              <b className="block">87番のSQLがまだ適用されていません。</b>
+              supabase/87_leave_periods.sql を実行すると使えるようになります。
+            </div>
+          )}
+          {error && <div className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-700">{error}</div>}
+          {done && <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-[11px] text-emerald-700">{done}</div>}
+
+          <div className="text-[10.5px] text-slate-500 leading-relaxed">
+            ここで記録した休業から、年金事務所に出す申出書を作れます（電子申請の画面）。
+            <b className="block pt-0.5">
+              いまのところ、勤怠と給与には反映していません。休業中の社会保険料の免除と
+              勤怠の扱いは、別途入れます。
+            </b>
+          </div>
+
+          {rows.length > 0 && (
+            <div className="overflow-x-auto">
+              <table className="w-full text-[11.5px] min-w-[620px]">
+                <thead className="bg-slate-50 text-slate-500">
+                  <tr className="text-left">
+                    <th className="px-2.5 py-1.5 font-medium whitespace-nowrap">スタッフ</th>
+                    <th className="px-2.5 py-1.5 font-medium whitespace-nowrap">種類</th>
+                    <th className="px-2.5 py-1.5 font-medium whitespace-nowrap">期間</th>
+                    <th className="px-2.5 py-1.5 font-medium whitespace-nowrap">実際の終了</th>
+                    <th className="px-2.5 py-1.5 font-medium" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r) => (
+                    <tr key={r.id} className="border-t border-slate-100">
+                      <td className="px-2.5 py-1.5 font-bold text-slate-700 whitespace-nowrap">{nameOf(r.employeeId)}</td>
+                      <td className="px-2.5 py-1.5 whitespace-nowrap">
+                        <span className={`rounded px-1.5 py-0.5 text-[10.5px] font-bold ${
+                          r.kind === 'maternity' ? 'bg-rose-50 text-rose-700' : 'bg-sky-50 text-sky-700'}`}>
+                          {LEAVE_PERIOD_KINDS[r.kind]?.short || r.kind}
+                        </span>
+                      </td>
+                      <td className="px-2.5 py-1.5 text-slate-600 whitespace-nowrap">
+                        {r.startDate}〜{r.plannedEndDate}
+                      </td>
+                      <td className="px-2.5 py-1.5 text-slate-600 whitespace-nowrap">{r.actualEndDate || '—'}</td>
+                      <td className="px-2.5 py-1.5 text-right whitespace-nowrap">
+                        <button onClick={() => { setError(''); setDone(''); setEditing({ ...r }); }}
+                          className="text-slate-400 hover:text-slate-700 mr-2" title="直す">
+                          <Pencil size={13} />
+                        </button>
+                        <button onClick={() => remove(r)} disabled={saving}
+                          className="text-slate-300 hover:text-rose-600 disabled:opacity-40" title="消す">
+                          <Trash2 size={13} />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {!editing && (
+            <button
+              onClick={() => { setError(''); setDone(''); setEditing(emptyLeavePeriod('')); }}
+              disabled={!ready}
+              className="px-4 py-2 rounded-lg border border-slate-200 text-[12px] font-bold text-slate-600 disabled:opacity-40"
+            >
+              休業を記録する
+            </button>
+          )}
+
+          {editing && (
+            <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 space-y-2.5">
+              <div className="text-[11px] font-bold text-slate-600">
+                {editing.id ? '休業の記録を直す' : '休業を記録する'}
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                {field('スタッフ',
+                  <select value={editing.employeeId || ''} onChange={set('employeeId')} className={selectClass}>
+                    <option value="">選んでください</option>
+                    {employeeAccounts.filter((a) => a.role !== 'master_admin').map((a) => (
+                      <option key={a.id} value={a.id}>{a.name}</option>
+                    ))}
+                  </select>)}
+                {field('種類',
+                  <select value={editing.kind} onChange={set('kind')} className={selectClass}>
+                    {Object.entries(LEAVE_PERIOD_KINDS).map(([k, v]) => (
+                      <option key={k} value={k}>{v.label}</option>
+                    ))}
+                  </select>)}
+                {field('休業の開始日',
+                  <input type="date" value={editing.startDate} onChange={set('startDate')} className={inputClass} />)}
+                {field('終了予定日',
+                  <input type="date" value={editing.plannedEndDate} onChange={set('plannedEndDate')} className={inputClass} />)}
+                {field('実際に終わった日',
+                  <input type="date" value={editing.actualEndDate} onChange={set('actualEndDate')} className={inputClass} />,
+                  '予定より早く終わったときだけ')}
+              </div>
+
+              {editing.kind === 'maternity' && (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                  {field('出産予定日',
+                    <input type="date" value={editing.dueDate} onChange={set('dueDate')} className={inputClass} />)}
+                  {field('出産日',
+                    <input type="date" value={editing.birthDate} onChange={set('birthDate')} className={inputClass} />,
+                    '出産後に申し出るときだけ')}
+                  <label className="flex items-center gap-1.5 text-[11.5px] text-slate-600 self-end pb-2">
+                    <input type="checkbox" checked={editing.multipleBirth} onChange={set('multipleBirth')} />
+                    多胎（双子以上）
+                  </label>
+                </div>
+              )}
+
+              {editing.kind === 'childcare' && (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                  {field('養育する子の氏名',
+                    <input value={editing.childName} onChange={set('childName')} maxLength={12}
+                      placeholder="例）年金 正明" className={inputClass} />)}
+                  {field('同（ふりがな）',
+                    <input value={editing.childFurigana} onChange={set('childFurigana')} maxLength={25}
+                      placeholder="例）ねんきん まさあき" className={inputClass} />)}
+                  {field('子の生年月日',
+                    <input type="date" value={editing.childBirthDate} onChange={set('childBirthDate')} className={inputClass} />)}
+                  {field('子の区分',
+                    <select value={editing.childRelation} onChange={set('childRelation')} className={selectClass}>
+                      <option value="実子">実子</option>
+                      <option value="その他">その他（養子など）</option>
+                    </select>)}
+                  {editing.childRelation === 'その他' && field('養育を始めた日',
+                    <input type="date" value={editing.careStartDate} onChange={set('careStartDate')} className={inputClass} />)}
+                  {ikujiSameMonth(editing.startDate, editing.actualEndDate || editing.plannedEndDate) && (
+                    <>
+                      {field('育児休業等取得日数',
+                        <input type="number" min="0" max="99" value={editing.leaveDays ?? ''} onChange={set('leaveDays')} className={inputClass} />,
+                        '14〜30で入れます')}
+                      {field('就業予定日数',
+                        <input type="number" min="0" max="99" value={editing.workDays ?? ''} onChange={set('workDays')} className={inputClass} />,
+                        '0〜16で入れます')}
+                    </>
+                  )}
+                  <label className="flex items-center gap-1.5 text-[11.5px] text-slate-600 self-end pb-2">
+                    <input type="checkbox" checked={editing.papaMamaPlus} onChange={set('papaMamaPlus')} />
+                    パパママ育休プラス
+                  </label>
+                </div>
+              )}
+
+              {editing.kind === 'childcare' && ikujiSameMonth(editing.startDate, editing.actualEndDate || editing.plannedEndDate) && (
+                <div className="rounded-lg border border-sky-200 bg-sky-50 px-2.5 py-1.5 text-[10.5px] text-sky-800">
+                  開始日と終了予定日の翌日が同じ月に入っています。
+                  この場合は「育児休業等取得日数」と「就業予定日数」を入れる決まりです。
+                </div>
+              )}
+
+              {field('備考',
+                <input value={editing.note} onChange={set('note')} maxLength={37} className={inputClass} />)}
+
+              <div className="flex gap-2">
+                <button onClick={save} disabled={saving}
+                  className="px-4 py-2 rounded-lg bg-slate-800 text-white text-[12px] font-bold disabled:opacity-40">
+                  {saving ? '保存中…' : '保存する'}
+                </button>
+                <button onClick={() => { setEditing(null); setError(''); }}
+                  className="px-4 py-2 rounded-lg border border-slate-200 text-[12px] font-bold text-slate-500">
+                  やめる
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ============================================================
 // 電子申請（CSV出力）
 //
@@ -19744,9 +20130,12 @@ const SHINSEI_KINDS = {
   nenkinSantei: { label: '健康保険・厚生年金保険 被保険者報酬月額算定基礎届', where: '年金事務所' },
   nenkinBonus: { label: '健康保険・厚生年金保険 被保険者賞与支払届', where: '年金事務所' },
   nenkinGegaku: { label: '健康保険・厚生年金保険 被保険者報酬月額変更届（随時改定）', where: '年金事務所' },
+  nenkinSanzen: { label: '産前産後休業取得者申出書／変更（終了）届', where: '年金事務所' },
+  nenkinIkuji: { label: '育児休業等取得者申出書（新規・延長）／終了届', where: '年金事務所' },
 };
 const SHINSEI_KIND_ORDER = [
   'nenkinShutoku', 'nenkinSoshitsu', 'nenkinSantei', 'nenkinGegaku', 'nenkinBonus',
+  'nenkinSanzen', 'nenkinIkuji',
   'hwShutoku', 'hwSoshitsu', 'hwRishoku',
 ];
 
@@ -20260,7 +20649,7 @@ function GegakuMonthTable({ months, onChange, totals, wageType, kindLabel }) {
 }
 
 function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = [], records = {},
-  leaveRequests = [], bonusRecords = [],
+  leaveRequests = [], bonusRecords = [], leavePeriods = [],
   actor, isMasterAdmin, onSaved, isDesktop }) {
   const { codec, failed: codecFailed } = useSjisCodec();
   const [kind, setKind] = useState('nenkinShutoku');
@@ -20284,6 +20673,8 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
   const [bonusId, setBonusId] = useState('');
   // 月額変更届で使うもの
   const [gegakuMonths, setGegakuMonths] = useState([]);
+  // 休業の届出で使うもの
+  const [leavePeriodId, setLeavePeriodId] = useState('');
 
   const office = useMemo(() => parseOfficeInfo(settings), [settings]);
   const employee = useMemo(
@@ -20291,7 +20682,8 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
     [employeeAccounts, employeeId]
   );
   const isNenkin = kind === 'nenkinShutoku' || kind === 'nenkinSoshitsu'
-    || kind === 'nenkinSantei' || kind === 'nenkinBonus' || kind === 'nenkinGegaku';
+    || kind === 'nenkinSantei' || kind === 'nenkinBonus' || kind === 'nenkinGegaku'
+    || kind === 'nenkinSanzen' || kind === 'nenkinIkuji';
 
   // 種類やスタッフを変えたら、入力中の内容と読み込んだ番号は捨てます
   useEffect(() => {
@@ -20369,8 +20761,11 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
       gegakuRaiseKind: '1', gegakuRetroMonth: '', gegakuRetroAmount: '',
       gegakuCorrectedAverage: '', gegakuReason: '',
       gegakuNote1: false, gegakuNote2: false, gegakuNote5: false, gegakuNote: '',
+      // 休業の届出
+      insuredNumberKyugyo: employee.healthInsuranceNumber || '',
+      kyugyoNote: '',
     });
-    setBonusId(''); setGegakuMonths([]);
+    setBonusId(''); setGegakuMonths([]); setLeavePeriodId('');
     setReasonKey(''); setReasonDetails({}); setWageRows([]); setSanteiMonths([]);
     // settings は毎回あたらしい物になるため、必要な中身だけを見ています
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -20432,6 +20827,21 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
     return { before: a, after: b, changed: a !== b, labels };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kind, employee?.id, form.raiseYm, santeiPay, settings, payrollRecords]);
+
+  // その方の休業の一覧（新しい順）。届出の種類にあわせて絞ります
+  const myLeavePeriods = useMemo(() => {
+    const want = kind === 'nenkinSanzen' ? 'maternity' : kind === 'nenkinIkuji' ? 'childcare' : null;
+    if (!want) return [];
+    return (leavePeriods || [])
+      .filter((x) => x.employeeId === employee?.id && x.kind === want)
+      .slice()
+      .sort((a, b) => String(b.startDate).localeCompare(String(a.startDate)));
+  }, [leavePeriods, employee?.id, kind]);
+
+  const leavePeriod = myLeavePeriods.find((x) => x.id === leavePeriodId) || null;
+
+  // 届出の種類やスタッフを変えたら、選んでいた休業は外します
+  useEffect(() => { setLeavePeriodId(''); }, [kind, employee?.id]);
 
   // その方の賞与の一覧（新しい順）
   const myBonuses = useMemo(() => (bonusRecords || [])
@@ -20522,6 +20932,44 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
         contractStart: employee.contractStart || '', contractEnd: employee.contractEnd || '',
         contractRenewal: form.contractRenewal || '',
         officeName: office.nameKanji, note: form.note || '', hwName: office.hwName,
+      });
+    }
+    if (kind === 'nenkinSanzen') {
+      const lp = leavePeriod;
+      return buildNenkinSanzenFields(office, {
+        insuredNumber: form.insuredNumberKyugyo || '',
+        kanaName: kana, kanjiName: name, birthDate: employee.birthDate || '',
+        myNumber, pensionNumber: employee.pensionBasicNumber || '',
+        dueDate: lp?.dueDate || '',
+        multipleBirth: Boolean(lp?.multipleBirth),
+        startDate: lp?.startDate || '',
+        plannedEndDate: lp?.plannedEndDate || '',
+        childBirthDate: lp?.birthDate || '',
+        note: form.kyugyoNote || '',
+        actualEndDate: lp?.actualEndDate || '',
+      });
+    }
+    if (kind === 'nenkinIkuji') {
+      const lp = leavePeriod;
+      const end = lp?.actualEndDate || lp?.plannedEndDate || '';
+      return buildNenkinIkujiFields(office, {
+        insuredNumber: form.insuredNumberKyugyo || '',
+        kanaName: kana, kanjiName: name, birthDate: employee.birthDate || '',
+        gender: employee.gender || '',
+        myNumber, pensionNumber: employee.pensionBasicNumber || '',
+        childKana: lp?.childFurigana || '', childKanji: lp?.childName || '',
+        childBirthDate: lp?.childBirthDate || '',
+        childRelation: lp?.childRelation === 'その他' ? '2' : '1',
+        careStartDate: lp?.childRelation === 'その他' ? (lp?.careStartDate || '') : '',
+        startDate: lp?.startDate || '',
+        plannedEndDate: lp?.plannedEndDate || '',
+        leaveDays: lp?.leaveDays ?? null,
+        workDays: lp?.workDays ?? null,
+        papaMamaPlus: Boolean(lp?.papaMamaPlus),
+        note: form.kyugyoNote || '',
+        actualEndDate: lp?.actualEndDate || '',
+        newLeaveDays2: lp?.actualEndDate && ikujiSameMonth(lp?.startDate, end)
+          ? (lp?.leaveDays ?? null) : null,
       });
     }
     if (kind === 'nenkinGegaku') {
@@ -20629,9 +21077,11 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
         : kind === 'nenkinSantei' ? NENKIN_SANTEI_SPECS
           : kind === 'nenkinBonus' ? NENKIN_BONUS_SPECS
             : kind === 'nenkinGegaku' ? NENKIN_GEGAKU_SPECS
-              : kind === 'hwShutoku' ? HW_SHUTOKU_SPECS
-                : kind === 'hwRishoku' ? HW_RISHOKU_SPECS
-                  : HW_SOSHITSU_SPECS;
+              : kind === 'nenkinSanzen' ? NENKIN_SANZEN_SPECS
+                : kind === 'nenkinIkuji' ? NENKIN_IKUJI_SPECS
+                  : kind === 'hwShutoku' ? HW_SHUTOKU_SPECS
+                    : kind === 'hwRishoku' ? HW_RISHOKU_SPECS
+                      : HW_SOSHITSU_SPECS;
 
   const draft = employee ? buildOne() : null;
 
@@ -20653,6 +21103,26 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
       }
       if (!employee.birthDate) out.push({ no: 10, label: '生年月日', message: 'スタッフ詳細にご登録ください' });
       if (!employee.gender) out.push({ no: 11, label: '性別', message: 'スタッフ詳細にご登録ください' });
+    }
+    if (kind === 'nenkinSanzen' || kind === 'nenkinIkuji') {
+      if (!form.insuredNumberKyugyo) {
+        out.push({ no: 5, label: '被保険者整理番号', message: 'スタッフ詳細にご登録いただくか、ここに入れてください' });
+      }
+      if (!employee.birthDate) out.push({ no: 11, label: '生年月日', message: 'スタッフ詳細にご登録ください' });
+      if (!hasNumber) {
+        out.push({ no: 8, label: '個人番号', message: 'マイナンバーを読み込むか、スタッフ詳細に基礎年金番号をご登録ください' });
+      }
+      if (!leavePeriod) {
+        out.push({
+          no: 16, label: '休業',
+          message: myLeavePeriods.length === 0
+            ? '「産前産後休業・育児休業」の欄に記録してから選んでください'
+            : 'どの休業の届出かを選んでください',
+        });
+      }
+      if (kind === 'nenkinIkuji' && !employee.gender) {
+        out.push({ no: 13, label: '性別', message: 'スタッフ詳細にご登録ください' });
+      }
     }
     if (kind === 'nenkinGegaku') {
       if (!form.insuredNumberGegaku) {
@@ -21096,6 +21566,81 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
                 <div className="sm:col-span-4 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[10.5px] text-slate-500">
                   この届出は<b>離職票を交付しない場合</b>のものです。離職票が要るときは、
                   離職証明書を添えた別の様式になります。Brown Work ではまだ作れません。
+                </div>
+              </div>
+            )}
+
+            {(kind === 'nenkinSanzen' || kind === 'nenkinIkuji') && (
+              <div className="space-y-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  {labeled('どの休業か',
+                    <select value={leavePeriodId} onChange={(e) => { setError(''); setLeavePeriodId(e.target.value); }} className={selectClass}>
+                      <option value="">選んでください</option>
+                      {myLeavePeriods.map((x) => (
+                        <option key={x.id} value={x.id}>
+                          {x.startDate}〜{x.plannedEndDate}
+                          {x.actualEndDate ? `（${x.actualEndDate} に終了）` : ''}
+                        </option>
+                      ))}
+                    </select>,
+                    myLeavePeriods.length === 0
+                      ? '労務タブの「産前産後休業・育児休業」に記録してください'
+                      : '記録した休業から選びます')}
+                  {labeled('被保険者整理番号',
+                    <input value={form.insuredNumberKyugyo ?? ''} onChange={set('insuredNumberKyugyo')} maxLength={6} className={inputClass} />,
+                    'スタッフ詳細の「被保険者整理番号」から入れています')}
+                </div>
+
+                {leavePeriod && (
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 space-y-1">
+                    <div className="text-[11px] font-bold text-slate-600">記録されている内容</div>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-3 gap-y-1 text-[11.5px]">
+                      <div><span className="text-slate-400">休業期間</span>　<b className="text-slate-700">{leavePeriod.startDate}〜{leavePeriod.plannedEndDate}</b></div>
+                      <div><span className="text-slate-400">実際の終了</span>　<b className="text-slate-700">{leavePeriod.actualEndDate || '—'}</b></div>
+                      {kind === 'nenkinSanzen' ? (
+                        <>
+                          <div><span className="text-slate-400">出産予定日</span>　<b className="text-slate-700">{leavePeriod.dueDate || '未登録'}</b></div>
+                          <div><span className="text-slate-400">出産日</span>　<b className="text-slate-700">{leavePeriod.birthDate || '—'}</b></div>
+                          <div><span className="text-slate-400">出産種別</span>　<b className="text-slate-700">{leavePeriod.multipleBirth ? '多胎' : '単胎'}</b></div>
+                        </>
+                      ) : (
+                        <>
+                          <div><span className="text-slate-400">子の氏名</span>　<b className="text-slate-700">{leavePeriod.childName || '未登録'}</b></div>
+                          <div><span className="text-slate-400">子の生年月日</span>　<b className="text-slate-700">{leavePeriod.childBirthDate || '未登録'}</b></div>
+                          <div><span className="text-slate-400">子の区分</span>　<b className="text-slate-700">{leavePeriod.childRelation || '—'}</b></div>
+                          <div><span className="text-slate-400">取得日数</span>　<b className="text-slate-700">{leavePeriod.leaveDays ?? '—'}</b></div>
+                          <div><span className="text-slate-400">就業予定日数</span>　<b className="text-slate-700">{leavePeriod.workDays ?? '—'}</b></div>
+                          <div><span className="text-slate-400">パパママ育休プラス</span>　<b className="text-slate-700">{leavePeriod.papaMamaPlus ? '該当' : '—'}</b></div>
+                        </>
+                      )}
+                    </div>
+                    <div className="text-[10px] text-slate-400">
+                      ここが違う場合は、労務タブの「産前産後休業・育児休業」で直してください。
+                      {leavePeriod.actualEndDate && <b className="block text-slate-500">実際に終わった日が入っているので、届出の「終了欄」にも入ります。</b>}
+                    </div>
+                  </div>
+                )}
+
+                {labeled('備考',
+                  <input value={form.kyugyoNote ?? ''} onChange={set('kyugyoNote')} maxLength={37} className={inputClass} />)}
+
+                <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-[10.5px] text-amber-800 leading-relaxed">
+                  {kind === 'nenkinSanzen' ? (
+                    <>
+                      <b className="block">産前産後休業の期間中は、健康保険・厚生年金保険の保険料が免除されます。</b>
+                      申出は休業期間中または終了日から1か月以内に行います。
+                      出産予定日と実際の出産日がずれた場合は、改めて変更の届出が要ります。
+                    </>
+                  ) : (
+                    <>
+                      <b className="block">育児休業等の期間中も、健康保険・厚生年金保険の保険料が免除されます。</b>
+                      終了予定日を延ばすときは延長の届出、予定より早く終わったときは終了の届出が要ります。
+                    </>
+                  )}
+                  <b className="block pt-0.5">
+                    Brown Work では、休業中の保険料免除と勤怠の扱いにはまだ反映していません。
+                    給与計算のときはご注意ください。
+                  </b>
                 </div>
               </div>
             )}

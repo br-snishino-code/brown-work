@@ -2592,3 +2592,278 @@ export function buildNenkinGegakuFields(office: OfficeInfo, p: NenkinGegakuInput
 export function buildNenkinGegaku(office: OfficeInfo, p: NenkinGegakuInput): string {
   return join(buildNenkinGegakuFields(office, p));
 }
+
+// ============================================================
+// 産前産後休業取得者申出書／変更（終了）届
+//   仕様書 ４．１２．１（年金事務所提出・33項目）
+//
+//   出産（予定）日や終了予定日を変えるときは「変更欄」も、
+//   予定より早く終わったときは「終了欄」も入れます。
+// ============================================================
+
+export const NENKIN_SANZEN_FORM_CODE = '2273700';
+
+export const NENKIN_SANZEN_SPECS: FieldSpec[] = [
+  { no: 1, label: '様式コード', kind: 'num', min: 7, max: 7 },
+  { no: 2, label: '都道府県コード', kind: 'num', min: 2, max: 2 },
+  { no: 3, label: '郡市区符号', kind: 'num', min: 2, max: 2 },
+  { no: 4, label: '事業所記号', kind: 'kana', min: 1, max: 4 },
+  { no: 5, label: '被保険者整理番号', kind: 'num', min: 0, max: 6 },
+  { no: 6, label: '被保険者氏名（カナ）', kind: 'kana', min: 1, max: 25 },
+  { no: 7, label: '被保険者氏名（漢字）', kind: 'kanji', min: 0, max: 12 },
+  { no: 8, label: '被保険者の個人番号', kind: 'num', min: 0, max: 12 },
+  { no: 9, label: '課所符号', kind: 'num', min: 0, max: 4 },
+  { no: 10, label: '一連番号', kind: 'num', min: 0, max: 6 },
+  { no: 11, label: '元号（被保険者生年月日）', kind: 'num', min: 1, max: 1 },
+  { no: 12, label: '被保険者生年月日', kind: 'num', min: 6, max: 6 },
+  { no: 13, label: '元号（出産予定年月日）', kind: 'num', min: 1, max: 1 },
+  { no: 14, label: '出産予定年月日', kind: 'num', min: 6, max: 6 },
+  { no: 15, label: '出産種別', kind: 'num', min: 1, max: 1 },
+  { no: 16, label: '元号（産前産後休業開始年月日）', kind: 'num', min: 1, max: 1 },
+  { no: 17, label: '産前産後休業開始年月日', kind: 'num', min: 6, max: 6 },
+  { no: 18, label: '元号（産前産後休業終了予定年月日）', kind: 'num', min: 1, max: 1 },
+  { no: 19, label: '産前産後休業終了予定年月日', kind: 'num', min: 6, max: 6 },
+  { no: 20, label: '予備1', kind: 'kana', min: 0, max: 25 },
+  { no: 21, label: '予備2', kind: 'kanji', min: 0, max: 12 },
+  { no: 22, label: '元号（出産年月日）', kind: 'num', min: 0, max: 1 },
+  { no: 23, label: '出産年月日', kind: 'num', min: 0, max: 6 },
+  { no: 24, label: '備考', kind: 'mixed', min: 0, max: 37, maxHalf: 75 },
+  { no: 25, label: '元号（変更後の出産（予定）年月日）', kind: 'num', min: 0, max: 1 },
+  { no: 26, label: '変更後の出産（予定）年月日', kind: 'num', min: 0, max: 6 },
+  { no: 27, label: '変更後の出産種別', kind: 'num', min: 0, max: 1 },
+  { no: 28, label: '元号（変更後の産前産後休業開始年月日）', kind: 'num', min: 0, max: 1 },
+  { no: 29, label: '変更後の産前産後休業開始年月日', kind: 'num', min: 0, max: 6 },
+  { no: 30, label: '元号（変更後の産前産後休業終了予定年月日）', kind: 'num', min: 0, max: 1 },
+  { no: 31, label: '変更後の産前産後休業終了予定年月日', kind: 'num', min: 0, max: 6 },
+  { no: 32, label: '元号（産前産後休業終了年月日）', kind: 'num', min: 0, max: 1 },
+  { no: 33, label: '産前産後休業終了年月日', kind: 'num', min: 0, max: 6 },
+];
+
+/** 出産種別（仕様書 項番15）。双子以上は多胎 */
+export const BIRTH_TYPES = [
+  { code: '0', label: '単胎（お一人）' },
+  { code: '1', label: '多胎（双子以上）' },
+];
+
+export type NenkinSanzenInput = {
+  insuredNumber: string;
+  kanaName: string;
+  kanjiName: string;
+  birthDate: string;          // 被保険者の生年月日
+  myNumber: string;
+  pensionNumber: string;
+  dueDate: string;            // 出産予定日
+  multipleBirth: boolean;     // 多胎かどうか
+  startDate: string;          // 産前産後休業開始年月日
+  plannedEndDate: string;     // 産前産後休業終了予定年月日
+  childBirthDate: string;     // 出産年月日（産後に出す場合）
+  note: string;
+  // 変更欄
+  newDueDate?: string;
+  newMultipleBirth?: boolean | null;
+  newStartDate?: string;
+  newPlannedEndDate?: string;
+  // 終了欄
+  actualEndDate?: string;
+};
+
+/** 和暦の「元号コード・YYMMDD」を2つ並べて返す。日付が無ければ空2つ */
+function warekiPair(iso: string): [string, string] {
+  const w = toWareki(iso);
+  return w ? [String(w.code), w.yymmdd] : ['', ''];
+}
+
+/** 産前産後休業取得者申出書／変更（終了）届 データレコード（33項目） */
+export function buildNenkinSanzenFields(office: OfficeInfo, p: NenkinSanzenInput): string[] {
+  const my = digits(p.myNumber);
+  const pn = digits(p.pensionNumber);
+  const birth = warekiPair(p.birthDate);
+  const due = warekiPair(p.dueDate);
+  const start = warekiPair(p.startDate);
+  const planned = warekiPair(p.plannedEndDate);
+  const born = warekiPair(p.childBirthDate);
+  const newDue = warekiPair(p.newDueDate || '');
+  const newStart = warekiPair(p.newStartDate || '');
+  const newPlanned = warekiPair(p.newPlannedEndDate || '');
+  const actual = warekiPair(p.actualEndDate || '');
+  return [
+    NENKIN_SANZEN_FORM_CODE,
+    office.prefCode, office.cityCode, office.officeSymbol,
+    digits(p.insuredNumber),
+    normalizeKanaName(p.kanaName),
+    normalizeKanjiName(p.kanjiName),
+    my,
+    // この様式の課所符号・一連番号は「個人番号が空欄の場合省略不可」とされており、
+    // 個人番号があっても省略しなければならない欄ではありません
+    //（仕様書 項番9・10）。仕様書の作成例も両方が入っています。
+    pn.slice(0, 4), pn.slice(4, 10),
+    birth[0], birth[1],
+    due[0], due[1],
+    p.multipleBirth ? '1' : '0',
+    start[0], start[1],
+    planned[0], planned[1],
+    '', '',                               // 予備1・予備2
+    born[0], born[1],
+    String(p.note || ''),
+    newDue[0], newDue[1],
+    p.newMultipleBirth == null ? '' : (p.newMultipleBirth ? '1' : '0'),
+    newStart[0], newStart[1],
+    newPlanned[0], newPlanned[1],
+    actual[0], actual[1],
+  ];
+}
+
+export function buildNenkinSanzen(office: OfficeInfo, p: NenkinSanzenInput): string {
+  return join(buildNenkinSanzenFields(office, p));
+}
+
+// ============================================================
+// 育児休業等取得者申出書（新規・延長）／終了届
+//   仕様書 ４．１３．１（年金事務所提出・56項目）
+//
+//   終了予定日を延ばすときは「延長欄」、予定より早く終わったときは
+//   「終了欄」も入れます。開始日と終了予定日の翌日が同じ月に入り、
+//   かつ複数回取るときは「育休等取得内訳欄」（①〜④）も入れます。
+// ============================================================
+
+export const NENKIN_IKUJI_FORM_CODE = '2263700';
+
+export const NENKIN_IKUJI_SPECS: FieldSpec[] = [
+  { no: 1, label: '様式コード', kind: 'num', min: 7, max: 7 },
+  { no: 2, label: '都道府県コード', kind: 'num', min: 2, max: 2 },
+  { no: 3, label: '郡市区符号', kind: 'num', min: 2, max: 2 },
+  { no: 4, label: '事業所記号', kind: 'kana', min: 1, max: 4 },
+  { no: 5, label: '被保険者整理番号', kind: 'num', min: 0, max: 6 },
+  { no: 6, label: '被保険者氏名（カナ）', kind: 'kana', min: 1, max: 25 },
+  { no: 7, label: '被保険者氏名（漢字）', kind: 'kanji', min: 0, max: 12 },
+  { no: 8, label: '被保険者の個人番号', kind: 'num', min: 0, max: 12 },
+  { no: 9, label: '課所符号', kind: 'num', min: 0, max: 4 },
+  { no: 10, label: '一連番号', kind: 'num', min: 0, max: 6 },
+  { no: 11, label: '元号（被保険者生年月日）', kind: 'num', min: 1, max: 1 },
+  { no: 12, label: '被保険者生年月日', kind: 'num', min: 6, max: 6 },
+  { no: 13, label: '被保険者の性別', kind: 'num', min: 1, max: 1 },
+  { no: 14, label: '養育する子の氏名（カナ）', kind: 'kana', min: 1, max: 25 },
+  { no: 15, label: '養育する子の氏名（漢字）', kind: 'kanji', min: 1, max: 12 },
+  { no: 16, label: '元号（養育する子の生年月日）', kind: 'num', min: 1, max: 1 },
+  { no: 17, label: '養育する子の生年月日', kind: 'num', min: 6, max: 6 },
+  { no: 18, label: '区分（実子かその他か）', kind: 'num', min: 1, max: 1 },
+  { no: 19, label: '元号（養育開始年月日（実子以外））', kind: 'num', min: 0, max: 1 },
+  { no: 20, label: '養育開始年月日（実子以外）', kind: 'num', min: 0, max: 6 },
+  { no: 21, label: '元号（育児休業等開始年月日）', kind: 'num', min: 1, max: 1 },
+  { no: 22, label: '育児休業等開始年月日', kind: 'num', min: 6, max: 6 },
+  { no: 23, label: '元号（育児休業等終了（予定）年月日）', kind: 'num', min: 1, max: 1 },
+  { no: 24, label: '育児休業等終了（予定）年月日', kind: 'num', min: 6, max: 6 },
+  { no: 25, label: '育児休業等取得日数', kind: 'num', min: 0, max: 2 },
+  { no: 26, label: '就業予定日数', kind: 'num', min: 0, max: 2 },
+  { no: 27, label: 'パパママ育休プラス該当区分', kind: 'num', min: 0, max: 1 },
+  { no: 28, label: '備考', kind: 'mixed', min: 0, max: 37, maxHalf: 75 },
+  { no: 29, label: '元号（育児休業等終了（予定）年月日（変更後））', kind: 'num', min: 0, max: 1 },
+  { no: 30, label: '育児休業等終了（予定）年月日（変更後）', kind: 'num', min: 0, max: 6 },
+  { no: 31, label: '育児休業等取得日数（変更後）①', kind: 'num', min: 0, max: 2 },
+  { no: 32, label: '元号（育児休業等終了年月日）', kind: 'num', min: 0, max: 1 },
+  { no: 33, label: '育児休業等終了年月日', kind: 'num', min: 0, max: 6 },
+  { no: 34, label: '育児休業等取得日数（変更後）②', kind: 'num', min: 0, max: 2 },
+  { no: 35, label: '元号（育児休業等開始年月日①）', kind: 'num', min: 0, max: 1 },
+  { no: 36, label: '育児休業等開始年月日①', kind: 'num', min: 0, max: 6 },
+  { no: 37, label: '元号（育児休業等終了（予定）年月日①）', kind: 'num', min: 0, max: 1 },
+  { no: 38, label: '育児休業等終了（予定）年月日①', kind: 'num', min: 0, max: 6 },
+  { no: 39, label: '育児休業等取得日数①', kind: 'num', min: 0, max: 2 },
+  { no: 40, label: '就業予定日数①', kind: 'num', min: 0, max: 2 },
+  { no: 41, label: '元号（育児休業等開始年月日②）', kind: 'num', min: 0, max: 1 },
+  { no: 42, label: '育児休業等開始年月日②', kind: 'num', min: 0, max: 6 },
+  { no: 43, label: '元号（育児休業等終了（予定）年月日②）', kind: 'num', min: 0, max: 1 },
+  { no: 44, label: '育児休業等終了（予定）年月日②', kind: 'num', min: 0, max: 6 },
+  { no: 45, label: '育児休業等取得日数②', kind: 'num', min: 0, max: 2 },
+  { no: 46, label: '就業予定日数②', kind: 'num', min: 0, max: 2 },
+  { no: 47, label: '元号（育児休業等開始年月日③）', kind: 'num', min: 0, max: 1 },
+  { no: 48, label: '育児休業等開始年月日③', kind: 'num', min: 0, max: 6 },
+  { no: 49, label: '元号（育児休業等終了（予定）年月日③）', kind: 'num', min: 0, max: 1 },
+  { no: 50, label: '育児休業等終了（予定）年月日③', kind: 'num', min: 0, max: 6 },
+  { no: 51, label: '育児休業等取得日数③', kind: 'num', min: 0, max: 2 },
+  { no: 52, label: '元号（育児休業等開始年月日④）', kind: 'num', min: 0, max: 1 },
+  { no: 53, label: '育児休業等開始年月日④', kind: 'num', min: 0, max: 6 },
+  { no: 54, label: '元号（育児休業等終了（予定）年月日④）', kind: 'num', min: 0, max: 1 },
+  { no: 55, label: '育児休業等終了（予定）年月日④', kind: 'num', min: 0, max: 6 },
+  { no: 56, label: '育児休業等取得日数④', kind: 'num', min: 0, max: 2 },
+];
+
+/** 養育する子の区分（仕様書 項番18） */
+export const CHILD_RELATIONS = [
+  { code: '1', label: '実子' },
+  { code: '2', label: 'その他（養子など）' },
+];
+
+export type NenkinIkujiInput = {
+  insuredNumber: string;
+  kanaName: string;
+  kanjiName: string;
+  birthDate: string;
+  gender: string;
+  myNumber: string;
+  pensionNumber: string;
+  childKana: string;
+  childKanji: string;
+  childBirthDate: string;
+  childRelation: string;      // 1=実子 2=その他
+  careStartDate: string;      // 養育開始年月日（実子以外）
+  startDate: string;          // 育児休業等開始年月日
+  plannedEndDate: string;     // 育児休業等終了（予定）年月日
+  leaveDays: number | null;   // 育児休業等取得日数（同一月内のときだけ）
+  workDays: number | null;    // 就業予定日数（同上）
+  papaMamaPlus: boolean;
+  note: string;
+  // 延長欄
+  newPlannedEndDate?: string;
+  newLeaveDays1?: number | null;
+  // 終了欄
+  actualEndDate?: string;
+  newLeaveDays2?: number | null;
+};
+
+/** 育児休業等取得者申出書（新規・延長）／終了届 データレコード（56項目） */
+export function buildNenkinIkujiFields(office: OfficeInfo, p: NenkinIkujiInput): string[] {
+  const my = digits(p.myNumber);
+  const pn = digits(p.pensionNumber);
+  const birth = warekiPair(p.birthDate);
+  const childBirth = warekiPair(p.childBirthDate);
+  const care = warekiPair(p.careStartDate || '');
+  const start = warekiPair(p.startDate);
+  const planned = warekiPair(p.plannedEndDate);
+  const newPlanned = warekiPair(p.newPlannedEndDate || '');
+  const actual = warekiPair(p.actualEndDate || '');
+  const dayCount = (v: number | null | undefined) =>
+    (v == null || !Number.isFinite(Number(v))) ? '' : pad2(Math.max(0, Math.min(99, Math.round(Number(v)))));
+  return [
+    NENKIN_IKUJI_FORM_CODE,
+    office.prefCode, office.cityCode, office.officeSymbol,
+    digits(p.insuredNumber),
+    normalizeKanaName(p.kanaName),
+    normalizeKanjiName(p.kanjiName),
+    my,
+    // 産前産後と同じく、個人番号があっても省略しなければならない欄ではありません
+    pn.slice(0, 4), pn.slice(4, 10),
+    birth[0], birth[1],
+    genderCode(p.gender),
+    normalizeKanaName(p.childKana),
+    normalizeKanjiName(p.childKanji),
+    childBirth[0], childBirth[1],
+    String(p.childRelation || ''),
+    care[0], care[1],
+    start[0], start[1],
+    planned[0], planned[1],
+    dayCount(p.leaveDays), dayCount(p.workDays),
+    flag(p.papaMamaPlus),
+    String(p.note || ''),
+    newPlanned[0], newPlanned[1], dayCount(p.newLeaveDays1),
+    actual[0], actual[1], dayCount(p.newLeaveDays2),
+    // 育休等取得内訳欄①〜④（項番35〜56）。Brown Work ではまだ使いません
+    '', '', '', '', '', '',
+    '', '', '', '', '', '',
+    '', '', '', '', '',
+    '', '', '', '', '',
+  ];
+}
+
+export function buildNenkinIkuji(office: OfficeInfo, p: NenkinIkujiInput): string {
+  return join(buildNenkinIkujiFields(office, p));
+}
