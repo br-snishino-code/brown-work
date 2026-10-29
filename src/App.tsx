@@ -3,6 +3,15 @@ import { createPortal } from 'react-dom';
 import * as XLSX from 'xlsx';
 import { Clock, MapPin, CheckCircle2, XCircle, AlertTriangle, LogIn, LogOut, FileEdit, Users, Bell, Calendar, Mail, LogOut as LogoutIcon, UserPlus, Lock, User, Monitor, Smartphone, Palmtree, Plus, Pencil, CalendarDays, ListChecks, ClipboardList, MessageSquare, Coffee, BarChart3, Home, Download, ChevronRight, LayoutGrid, Wallet, Briefcase, UserCog, Construction, Megaphone, Paperclip, FileText, Pin, Trash2, Key, ShieldCheck, ShieldAlert, HelpCircle, ChevronDown, ChevronLeft, Settings, RefreshCw, X } from 'lucide-react';
 import { supabase, CLOUD_ENABLED, INITIAL_URL, usernameToEmail } from './supabaseClient';
+import {
+  OFFICE_INFO_DEFAULTS, OFFICE_FIELD_LABELS, OFFICE_REQUIRED_NENKIN, OFFICE_REQUIRED_HW,
+  missingOfficeFields, makeSjisCodec, checkFields, PREF_CODES,
+  buildNenkinShutokuFields, buildNenkinSoshitsuFields, buildHwShutokuFields, buildHwSoshitsuFields,
+  buildNenkinCsv, buildHwCsv, NENKIN_FILE_NAME, HW_FILE_SHUTOKU, HW_FILE_SOSHITSU,
+  NENKIN_SHUTOKU_SPECS, NENKIN_SOSHITSU_SPECS, HW_SHUTOKU_SPECS, HW_SOSHITSU_SPECS,
+  NENKIN_SOSHITSU_REASONS, HW_ACQUIRE_REASONS, HW_WAGE_FORMS, HW_EMPLOYMENT_TYPES,
+  HW_JOB_CATEGORIES, HW_JOB_ROUTES, HW_LOSS_REASONS, csvSizeWarning,
+} from './denshiShinsei';
 
 // ---- constants ----
 const SCHEDULED_START = '09:00';
@@ -5812,6 +5821,17 @@ function AttendanceApp() {
               <TurnoverAnalysisTab
                 employeeAccounts={employeeAccounts}
                 resignationReasons={data.resignationReasons}
+                isDesktop={isDesktop}
+              />
+            )}
+            {/* 電子申請のCSV出力。マイナンバーと賃金を扱うため、マスター管理者だけに出す */}
+            {!showStaffScreens && session.role === 'master_admin' && (
+              <DenshiShinseiTab
+                settings={data.settings}
+                employeeAccounts={employeeAccounts}
+                actor={session}
+                isMasterAdmin={session.role === 'master_admin'}
+                onSaved={refreshData}
                 isDesktop={isDesktop}
               />
             )}
@@ -19388,6 +19408,913 @@ function GroupWorkHoursSettings({ settings, employeeAccounts = [], actor, isMast
     </div>
   );
 }
+
+// ============================================================
+// 電子申請（CSV出力）
+//
+// 社会保険（年金事務所）と雇用保険（ハローワーク）の資格取得届・資格喪失届を、
+// 届書作成プログラム／電子申請に読み込めるCSVにして出します。
+//
+// 項目の並び・桁数・コードは、すべて仕様書に書いてあるとおりです。
+// 作り方は src/denshiShinsei.ts にまとめてあり、仕様書に載っている
+// 作成例と1文字も違わないことをテストで確かめています。
+//
+// 出すだけで、送信はしません。できたCSVは総務担当が
+// 届書作成プログラムまたはe-Govに読み込ませてください。
+// ============================================================
+
+const SETTING_OFFICE_INFO = 'office_info';
+
+// 事業所の情報を読みます。壊れていても画面は動かします。
+function parseOfficeInfo(settings) {
+  let raw = null;
+  try {
+    const v = JSON.parse(settings?.[SETTING_OFFICE_INFO] || 'null');
+    if (v && typeof v === 'object' && !Array.isArray(v)) raw = v;
+  } catch (_) { raw = null; }
+  const out = { ...OFFICE_INFO_DEFAULTS };
+  if (!raw) return out;
+  Object.keys(OFFICE_INFO_DEFAULTS).forEach((k) => {
+    if (k === 'mediaSeq') {
+      const n = Number(raw[k]);
+      out.mediaSeq = Number.isFinite(n) && n >= 1 && n <= 999 ? Math.floor(n) : 1;
+    } else if (typeof raw[k] === 'string') {
+      out[k] = raw[k];
+    }
+  });
+  return out;
+}
+
+// 保存する（マスター管理者のみ）
+async function saveOfficeInfo(values, actor = null) {
+  const slim = { ...OFFICE_INFO_DEFAULTS };
+  Object.keys(OFFICE_INFO_DEFAULTS).forEach((k) => {
+    if (k === 'mediaSeq') {
+      const n = Number(values?.[k]);
+      slim.mediaSeq = Number.isFinite(n) && n >= 1 && n <= 999 ? Math.floor(n) : 1;
+    } else {
+      slim[k] = String(values?.[k] ?? '').trim();
+    }
+  });
+  const { error } = await supabase.from('app_settings').upsert(
+    {
+      key: SETTING_OFFICE_INFO,
+      value: JSON.stringify(slim),
+      updated_by: actor?.id || null,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: 'key' }
+  );
+  if (error) {
+    console.error('事業所情報の保存に失敗しました', error);
+    return { ok: false, message: error.message || '' };
+  }
+  await logAudit(actor, '事業所情報を変更', `${slim.prefCode}-${slim.cityCode}-${slim.officeSymbol} ／ 媒体通番${slim.mediaSeq}`);
+  return { ok: true };
+}
+
+// シフトJISの変換表は大きいので、この画面を開いたときだけ読み込みます。
+function useSjisCodec() {
+  const [codec, setCodec] = useState(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    import('xlsx/dist/cpexcel.full.mjs')
+      .then((m) => { if (alive) setCodec(makeSjisCodec(m)); })
+      .catch((e) => {
+        console.error('文字コード表を読み込めませんでした', e);
+        if (alive) setFailed(true);
+      });
+    return () => { alive = false; };
+  }, []);
+  return { codec, failed };
+}
+
+// できたCSVをシフトJISで保存させます
+function downloadSjisCsv(codec, text, fileName) {
+  const bytes = codec.encode(text);
+  const blob = new Blob([bytes], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+const OFFICE_FIELD_HINTS = {
+  prefCode: '「納入告知書 納付書・領収証書」の事業所整理記号から',
+  cityCode: '事業所整理記号の上2桁',
+  officeSymbol: '事業所整理記号の上2桁以外（例：ケイト→ｹｲﾄ）',
+  officeNumber: '「納入告知書 納付書・領収証書」の事業所番号',
+  eiOffice: '「雇用保険適用事業所設置届事業主控」の番号',
+  hwName: '例）京都西陣（「公共職業安定所」は書かない）',
+  mediaSeq: '出すたびに1ずつ増やします。999の次は1に戻します',
+};
+
+function OfficeInfoSettings({ settings, actor, isMasterAdmin, onSaved, codec }) {
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState(() => parseOfficeInfo(settings));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [done, setDone] = useState('');
+
+  const savedJson = settings?.[SETTING_OFFICE_INFO] || '';
+  useEffect(() => {
+    setForm(parseOfficeInfo(settings));
+    // settings は毎回あたらしい物になるため、中身の文字列を見ています
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savedJson]);
+
+  if (!isMasterAdmin) return null;
+
+  const set = (key) => (e) => {
+    setError(''); setDone('');
+    const v = e?.target ? e.target.value : e;
+    setForm((prev) => ({ ...prev, [key]: v }));
+  };
+
+  const missingNenkin = missingOfficeFields(form, OFFICE_REQUIRED_NENKIN);
+  const missingHw = missingOfficeFields(form, OFFICE_REQUIRED_HW);
+
+  // 届出に使えない文字が入っていないかを先に知らせます
+  const charIssues = !codec ? [] : ['officeSymbol', 'addressKanji', 'nameKanji', 'ownerKanji', 'hwName']
+    .map((k) => {
+      const r = codec.check(String(form[k] || ''));
+      return r.ok ? null : { label: OFFICE_FIELD_LABELS[k], bad: r.bad.join('') };
+    })
+    .filter(Boolean);
+
+  const save = async () => {
+    setError(''); setDone('');
+    if (charIssues.length > 0) {
+      setError('この届出で使えない文字が入っています。別の字かカナに直してください。');
+      return;
+    }
+    setSaving(true);
+    const res = await saveOfficeInfo(form, actor);
+    setSaving(false);
+    if (!res.ok) { setError(`保存できませんでした。${res.message}`); return; }
+    setDone('事業所情報を保存しました。');
+    if (onSaved) await onSaved();
+  };
+
+  const field = (key, { type = 'text', width = 'w-full', maxLength = null } = {}) => (
+    <label className="block">
+      <span className="block text-[10.5px] font-bold text-slate-500 mb-0.5">{OFFICE_FIELD_LABELS[key]}</span>
+      <input
+        type={type}
+        value={form[key] ?? ''}
+        onChange={set(key)}
+        maxLength={maxLength || undefined}
+        className={`${width} border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px]`}
+      />
+      {OFFICE_FIELD_HINTS[key] && (
+        <span className="block text-[10px] text-slate-400 pt-0.5">{OFFICE_FIELD_HINTS[key]}</span>
+      )}
+    </label>
+  );
+
+  return (
+    <div className="rounded-xl border border-slate-200 overflow-hidden">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="w-full px-3.5 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center gap-2 flex-wrap text-left"
+      >
+        <span className="text-[12px] font-bold text-slate-600">事業所情報</span>
+        <span className="text-[11px] text-slate-400">
+          {form.nameKanji ? form.nameKanji : '未登録'}
+        </span>
+        {(missingNenkin.length > 0 || missingHw.length > 0) && (
+          <span className="text-[10.5px] font-bold text-amber-700">
+            未入力 {new Set([...missingNenkin, ...missingHw]).size}項目
+          </span>
+        )}
+        <span className="ml-auto text-[11px] font-bold text-slate-500">{open ? '閉じる' : '開く'}</span>
+      </button>
+
+      {open && (
+        <div className="px-3.5 py-3 space-y-3">
+          {error && <div className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-700">{error}</div>}
+          {done && <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-[11px] text-emerald-700">{done}</div>}
+
+          <div className="text-[10.5px] text-slate-500 leading-relaxed">
+            届出のCSVに入れる事業所の情報です。届出の種類によって要る項目が違います。
+            <b className="block pt-0.5">社会保険は「事業所整理記号」と「事業所番号」、雇用保険は「雇用保険適用事業所番号」と「あて先」が要ります。</b>
+          </div>
+
+          {charIssues.length > 0 && (
+            <div className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-2 text-[11px] text-rose-700 space-y-0.5">
+              <div className="font-bold">この届出で使えない文字が入っています</div>
+              {charIssues.map((c) => (
+                <div key={c.label}>{c.label}：{c.bad}</div>
+              ))}
+              <div className="text-[10px] pt-0.5">
+                届出に使えるのは、常用漢字などJIS第一水準・第二水準の字だけです。
+                別の字（例：髙→高）に直すか、カナでご入力ください。
+              </div>
+            </div>
+          )}
+
+          <div className="space-y-2.5">
+            <div className="text-[11px] font-bold text-slate-600 border-l-[3px] border-slate-300 pl-2">社会保険（年金事務所）</div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+              <label className="block">
+                <span className="block text-[10.5px] font-bold text-slate-500 mb-0.5">{OFFICE_FIELD_LABELS.prefCode}</span>
+                <select
+                  value={form.prefCode || ''}
+                  onChange={set('prefCode')}
+                  className="w-full border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white"
+                >
+                  <option value="">選んでください</option>
+                  {PREF_CODES.map((p) => (
+                    <option key={p.code} value={p.code}>{p.code}　{p.name}</option>
+                  ))}
+                </select>
+                <span className="block text-[10px] text-slate-400 pt-0.5">年金機構の番号です（京都府は54）</span>
+              </label>
+              {field('cityCode', { maxLength: 2 })}
+              {field('officeSymbol', { maxLength: 4 })}
+              {field('officeNumber', { maxLength: 5 })}
+            </div>
+
+            <div className="text-[11px] font-bold text-slate-600 border-l-[3px] border-slate-300 pl-2 pt-1">雇用保険（ハローワーク）</div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+              {field('eiOffice', { maxLength: 4 })}
+              {field('eiSerial', { maxLength: 6 })}
+              {field('eiCheck', { maxLength: 1 })}
+              {field('hwName', { maxLength: 10 })}
+            </div>
+
+            <div className="text-[11px] font-bold text-slate-600 border-l-[3px] border-slate-300 pl-2 pt-1">どちらにも使うもの</div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+              {field('postalParent', { maxLength: 3 })}
+              {field('postalChild', { maxLength: 4 })}
+              {field('tel1', { maxLength: 5 })}
+              {field('tel2', { maxLength: 4 })}
+              {field('tel3', { maxLength: 5 })}
+              {field('mediaSeq', { type: 'number' })}
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+              {field('addressKanji', { maxLength: 37 })}
+              {field('nameKanji', { maxLength: 25 })}
+              {field('ownerKanji', { maxLength: 12 })}
+            </div>
+          </div>
+
+          {missingNenkin.length > 0 && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[10.5px] text-amber-800">
+              社会保険の届出に足りない項目：{missingNenkin.join('、')}
+            </div>
+          )}
+          {missingHw.length > 0 && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[10.5px] text-amber-800">
+              雇用保険の届出に足りない項目：{missingHw.join('、')}
+            </div>
+          )}
+
+          <button
+            onClick={save}
+            disabled={saving}
+            className="px-4 py-2 rounded-lg bg-slate-800 text-white text-[12px] font-bold disabled:opacity-40"
+          >
+            {saving ? '保存中…' : '保存する'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// 届出の種類
+const SHINSEI_KINDS = {
+  nenkinShutoku: { label: '健康保険・厚生年金保険 被保険者資格取得届', where: '年金事務所' },
+  nenkinSoshitsu: { label: '健康保険・厚生年金保険 被保険者資格喪失届', where: '年金事務所' },
+  hwShutoku: { label: '雇用保険被保険者資格取得届', where: 'ハローワーク' },
+  hwSoshitsu: { label: '雇用保険被保険者資格喪失届（離職票交付なし）', where: 'ハローワーク' },
+};
+const SHINSEI_KIND_ORDER = ['nenkinShutoku', 'nenkinSoshitsu', 'hwShutoku', 'hwSoshitsu'];
+
+// 1週間の所定労働時間を、所定勤務時間と週の勤務日数から出します。
+// どちらかが未登録のときは null（画面で入れてもらいます）。
+function weeklyWorkMinutesOf(employee, settings) {
+  const days = Number(employee?.scheduledWeeklyDays);
+  if (!Number.isFinite(days) || days <= 0) return null;
+  const hours = groupWorkHoursFor(employee, settings);
+  if (!hours || !isHHMM(hours.start) || !isHHMM(hours.end)) return null;
+  const daily = Math.max(0, toMinutes(hours.end) - toMinutes(hours.start) - BREAK_MINUTES_DEFAULT);
+  if (daily <= 0) return null;
+  return Math.round(daily * days);
+}
+
+// 給与形態から、雇用保険の「賃金の支払の態様」を選びます
+function hwWageFormOf(wageType) {
+  if (wageType === 'monthly') return '1';
+  if (wageType === 'daily') return '3';
+  if (wageType === 'hourly') return '4';
+  return '';
+}
+
+function DenshiShinseiTab({ settings, employeeAccounts = [], actor, isMasterAdmin, onSaved, isDesktop }) {
+  const { codec, failed: codecFailed } = useSjisCodec();
+  const [kind, setKind] = useState('nenkinShutoku');
+  const [employeeId, setEmployeeId] = useState('');
+  const [form, setForm] = useState({});
+  const [rows, setRows] = useState([]);           // 出力に入れた届出
+  const [myNumber, setMyNumber] = useState('');
+  const [myNumberState, setMyNumberState] = useState('idle'); // idle | loading | done | error
+  const [myNumberError, setMyNumberError] = useState('');
+  const [error, setError] = useState('');
+
+  const office = useMemo(() => parseOfficeInfo(settings), [settings]);
+  const employee = useMemo(
+    () => (employeeAccounts || []).find((a) => a.id === employeeId) || null,
+    [employeeAccounts, employeeId]
+  );
+  const isNenkin = kind === 'nenkinShutoku' || kind === 'nenkinSoshitsu';
+
+  // 種類やスタッフを変えたら、入力中の内容と読み込んだ番号は捨てます
+  useEffect(() => {
+    setRows([]);
+    setError('');
+  }, [kind]);
+  useEffect(() => {
+    setMyNumber(''); setMyNumberState('idle'); setMyNumberError('');
+    setError('');
+  }, [employeeId, kind]);
+
+  // スタッフを選んだら、Brown Work にある値で入力欄を埋めます
+  useEffect(() => {
+    if (!employee) { setForm({}); return; }
+    const weekly = weeklyWorkMinutesOf(employee, settings);
+    setForm({
+      // 社会保険 取得
+      acquireKind: '1',
+      acquiredDate: employee.pensionAcquiredDate || employee.healthInsuranceAcquiredDate || '',
+      hasDependent: (employee.familyMembers || []).length > 0 || employee.spouseStatus === '有',
+      cashAmount: '',
+      goodsAmount: '0',
+      note3: false, note4: false, note5: false,
+      certificateNeeded: '',
+      // 社会保険 喪失
+      insuredNumber: '',
+      lostDate: employee.pensionLostDate || employee.healthInsuranceLostDate || '',
+      reason: '4',
+      leaveDate: employee.resignationDate || '',
+      returned: '', notReturned: '',
+      // 雇用保険 取得
+      hwAcquireKind: '1',
+      hwAcquiredDate: employee.employmentInsuranceAcquiredDate || '',
+      hwReason: '2',
+      wageForm: hwWageFormOf(employee.wageType),
+      wageMonthly: '',
+      employmentType: '',
+      jobCategory: '',
+      jobRoute: '',
+      weeklyHours: weekly != null ? String(Math.floor(weekly / 60)) : '',
+      weeklyMinutes: weekly != null ? String(weekly % 60) : '',
+      hasContractPeriod: Boolean(employee.contractStart && employee.contractEnd),
+      contractRenewal: '',
+      // 雇用保険 喪失
+      hwLeaveDate: employee.employmentInsuranceLostDate || employee.resignationDate || '',
+      hwReasonLoss: '2',
+      leaveReasonText: '',
+      note: '',
+    });
+    // settings は毎回あたらしい物になるため、必要な中身だけを見ています
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [employee?.id]);
+
+  const set = (key) => (e) => {
+    setError('');
+    const v = e?.target ? (e.target.type === 'checkbox' ? e.target.checked : e.target.value) : e;
+    setForm((prev) => ({ ...prev, [key]: v }));
+  };
+
+  const loadMyNumber = async () => {
+    if (!employee) return;
+    setMyNumberState('loading'); setMyNumberError('');
+    const res = await callMyNumberFunction({ action: 'read', employeeId: employee.id });
+    if (res?.error) {
+      setMyNumberState('error');
+      setMyNumberError(res.error);
+      return;
+    }
+    setMyNumber(String(res?.number || ''));
+    setMyNumberState('done');
+    if (!res?.number) setMyNumberError('この方のマイナンバーはまだ登録されていません。');
+  };
+
+  // いまの入力から1件ぶんのデータレコードを作ります
+  const buildOne = () => {
+    if (!employee) return null;
+    const kana = employee.furigana || '';
+    const name = employee.name || '';
+    if (kind === 'nenkinShutoku') {
+      return buildNenkinShutokuFields(office, {
+        kanaName: kana, kanjiName: name,
+        birthDate: employee.birthDate || '', gender: employee.gender || '',
+        acquireKind: form.acquireKind || '1',
+        myNumber, pensionNumber: employee.pensionBasicNumber || '',
+        acquiredDate: form.acquiredDate || '',
+        hasDependent: Boolean(form.hasDependent),
+        cashAmount: Number(form.cashAmount) || 0,
+        goodsAmount: Number(form.goodsAmount) || 0,
+        note3: Boolean(form.note3), note4: Boolean(form.note4), note5: Boolean(form.note5),
+        note: form.note || '',
+        postalParent: String(employee.postalCode || '').replace(/[^0-9]/g, '').slice(0, 3),
+        postalChild: String(employee.postalCode || '').replace(/[^0-9]/g, '').slice(3, 7),
+        addressKanji: employee.address || '',
+        certificateNeeded: form.certificateNeeded || '',
+      });
+    }
+    if (kind === 'nenkinSoshitsu') {
+      return buildNenkinSoshitsuFields(office, {
+        insuredNumber: form.insuredNumber || '',
+        kanaName: kana, kanjiName: name,
+        birthDate: employee.birthDate || '',
+        myNumber, pensionNumber: employee.pensionBasicNumber || '',
+        lostDate: form.lostDate || '', reason: form.reason || '4',
+        leaveDate: form.leaveDate || '',
+        note: form.note || '',
+        returned: Number(form.returned) || 0,
+        notReturned: Number(form.notReturned) || 0,
+      });
+    }
+    if (kind === 'hwShutoku') {
+      return buildHwShutokuFields(office, {
+        myNumber, insuranceNumber: employee.employmentInsuranceNumber || '',
+        acquireKind: form.hwAcquireKind || '1',
+        kanjiName: name, kanaName: kana,
+        gender: employee.gender || '', birthDate: employee.birthDate || '',
+        acquiredDate: form.hwAcquiredDate || '', reason: form.hwReason || '',
+        wageForm: form.wageForm || '', wageMonthly: Number(form.wageMonthly) || 0,
+        employmentType: form.employmentType || '', jobCategory: form.jobCategory || '',
+        jobRoute: form.jobRoute || '',
+        weeklyHours: Number(form.weeklyHours) || 0,
+        weeklyMinutes: Number(form.weeklyMinutes) || 0,
+        hasContractPeriod: Boolean(form.hasContractPeriod),
+        contractStart: employee.contractStart || '', contractEnd: employee.contractEnd || '',
+        contractRenewal: form.contractRenewal || '',
+        officeName: office.nameKanji, note: form.note || '', hwName: office.hwName,
+      });
+    }
+    return buildHwSoshitsuFields(office, {
+      myNumber, insuranceNumber: employee.employmentInsuranceNumber || '',
+      acquiredDate: employee.employmentInsuranceAcquiredDate || '',
+      leaveDate: form.hwLeaveDate || '', reason: form.hwReasonLoss || '',
+      kanaName: kana, kanjiName: name,
+      gender: employee.gender || '', birthDate: employee.birthDate || '',
+      address: employee.address || '', officeName: office.nameKanji,
+      leaveReasonText: form.leaveReasonText || '',
+      weeklyHours: Number(form.weeklyHours) || 0,
+      weeklyMinutes: Number(form.weeklyMinutes) || 0,
+      hwName: office.hwName,
+    });
+  };
+
+  const specs =
+    kind === 'nenkinShutoku' ? NENKIN_SHUTOKU_SPECS
+      : kind === 'nenkinSoshitsu' ? NENKIN_SOSHITSU_SPECS
+        : kind === 'hwShutoku' ? HW_SHUTOKU_SPECS
+          : HW_SOSHITSU_SPECS;
+
+  const draft = employee ? buildOne() : null;
+
+  // 項目の決まり（桁数・使える文字）だけでは拾えないものを、ここで見ます。
+  // たとえば報酬月額は、未入力でも0円として通ってしまうため、別に確かめます。
+  const extraIssues = (() => {
+    if (!employee) return [];
+    const out = [];
+    const hasNumber = Boolean(String(myNumber || '').replace(/[^0-9]/g, ''))
+      || Boolean(String(employee.pensionBasicNumber || '').replace(/[^0-9]/g, ''));
+    if (kind === 'nenkinShutoku') {
+      if (!form.acquiredDate) out.push({ no: 19, label: '資格取得年月日', message: '入力が要ります' });
+      const total = (Number(form.cashAmount) || 0) + (Number(form.goodsAmount) || 0);
+      if (total <= 0) {
+        out.push({ no: 21, label: '報酬月額', message: '資格取得時に見込まれる1か月の報酬を入れてください' });
+      }
+      if (!hasNumber) {
+        out.push({ no: 13, label: '個人番号', message: 'マイナンバーを読み込むか、スタッフ詳細に基礎年金番号をご登録ください' });
+      }
+      if (!employee.birthDate) out.push({ no: 10, label: '生年月日', message: 'スタッフ詳細にご登録ください' });
+      if (!employee.gender) out.push({ no: 11, label: '性別', message: 'スタッフ詳細にご登録ください' });
+    }
+    if (kind === 'nenkinSoshitsu') {
+      if (!form.lostDate) out.push({ no: 15, label: '資格喪失年月日', message: '入力が要ります' });
+      if ((form.reason === '4' || form.reason === '5') && !form.leaveDate) {
+        out.push({ no: 18, label: '退職日・死亡日', message: '退職・死亡のときは入力が要ります' });
+      }
+      if (!hasNumber) {
+        out.push({ no: 11, label: '個人番号', message: 'マイナンバーを読み込むか、スタッフ詳細に基礎年金番号をご登録ください' });
+      }
+    }
+    if (kind === 'hwShutoku') {
+      if (!form.hwAcquiredDate) out.push({ no: 20, label: '資格取得年月日', message: '入力が要ります' });
+      if (form.hwAcquireKind === '2' && !employee.employmentInsuranceNumber) {
+        out.push({ no: 4, label: '被保険者番号', message: '再取得のときは要ります。スタッフ詳細にご登録ください' });
+      }
+      if (form.hasContractPeriod && !(employee.contractStart && employee.contractEnd)) {
+        out.push({ no: 35, label: '契約期間', message: 'スタッフ詳細に契約の開始日と終了日をご登録ください' });
+      }
+    }
+    if (kind === 'hwSoshitsu') {
+      if (!form.hwLeaveDate) out.push({ no: 14, label: '離職等年月日', message: '入力が要ります' });
+      if (!employee.employmentInsuranceAcquiredDate) {
+        out.push({ no: 10, label: '資格取得年月日', message: 'スタッフ詳細に雇用保険の資格取得年月日をご登録ください' });
+      }
+    }
+    return out;
+  })();
+
+  const issues = [...(draft && codec ? checkFields(draft, specs, codec) : []), ...extraIssues];
+  const missingOffice = missingOfficeFields(office, isNenkin ? OFFICE_REQUIRED_NENKIN : OFFICE_REQUIRED_HW);
+  const canAdd = Boolean(employee) && issues.length === 0 && missingOffice.length === 0 && Boolean(codec);
+
+  const addRow = () => {
+    if (!canAdd || !draft) return;
+    const line = draft.join(',');
+    if (rows.some((r) => r.line === line)) { setError('同じ内容がすでに入っています。'); return; }
+    setRows((prev) => [...prev, { id: `${employee.id}-${Date.now()}`, name: employee.name, line }]);
+    setEmployeeId('');
+  };
+
+  const removeRow = (id) => setRows((prev) => prev.filter((r) => r.id !== id));
+
+  const csvText = useMemo(() => {
+    if (rows.length === 0) return '';
+    const now = new Date();
+    const lines = rows.map((r) => r.line);
+    if (isNenkin) return buildNenkinCsv(office, lines, now);
+    return buildHwCsv(office, kind === 'hwShutoku' ? 'shutoku' : 'soshitsu', lines, now);
+  }, [rows, office, isNenkin, kind]);
+
+  const fileName = isNenkin
+    ? NENKIN_FILE_NAME
+    : (kind === 'hwShutoku' ? HW_FILE_SHUTOKU : HW_FILE_SOSHITSU);
+
+  const sizeWarning = codec && csvText ? csvSizeWarning(codec.encode(csvText).length, rows.length) : '';
+
+  const download = async () => {
+    if (!codec || !csvText) return;
+    downloadSjisCsv(codec, csvText, fileName);
+    await logAudit(actor, '電子申請のCSVを出力',
+      `${SHINSEI_KINDS[kind].label} ／ ${rows.length}件 ／ 媒体通番${office.mediaSeq}`);
+    // 媒体通番は出すたびに1つ進めます（仕様書 ４．１．１ 項番4）
+    const next = office.mediaSeq >= 999 ? 1 : Number(office.mediaSeq || 1) + 1;
+    await saveOfficeInfo({ ...office, mediaSeq: next }, actor);
+    if (onSaved) await onSaved();
+    setRows([]);
+  };
+
+  const candidates = (employeeAccounts || []).filter((a) => a && a.role !== 'master_admin');
+
+  // フックはすべて呼び終えてから出し分けます（呼ぶ順番を毎回そろえるため）
+  if (!isMasterAdmin) return null;
+
+  const labeled = (label, node, hint) => (
+    <label className="block">
+      <span className="block text-[10.5px] font-bold text-slate-500 mb-0.5">{label}</span>
+      {node}
+      {hint && <span className="block text-[10px] text-slate-400 pt-0.5">{hint}</span>}
+    </label>
+  );
+  const inputClass = 'w-full border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px]';
+  const selectClass = `${inputClass} bg-white`;
+
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden">
+      <div className="px-4 sm:px-5 py-3 border-b border-slate-100 flex items-center gap-2 flex-wrap">
+        <FileText size={15} className="text-slate-400 shrink-0" />
+        <span className="text-[13px] font-bold text-slate-700">電子申請（CSV出力）</span>
+        <span className="text-[10.5px] text-slate-400">届書作成プログラム・e-Gov に読み込ませる形で出します</span>
+      </div>
+
+      <div className="px-4 sm:px-5 py-4 space-y-4">
+        <OfficeInfoSettings
+          settings={settings}
+          actor={actor}
+          isMasterAdmin={isMasterAdmin}
+          onSaved={onSaved}
+          codec={codec}
+        />
+
+        {codecFailed && (
+          <div className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-2 text-[11px] text-rose-700">
+            文字コードの表を読み込めませんでした。ページを読み込み直してからもう一度お試しください。
+          </div>
+        )}
+
+        <div className="space-y-2">
+          <div className="text-[11px] font-bold text-slate-600">届出の種類</div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {SHINSEI_KIND_ORDER.map((k) => (
+              <button
+                key={k}
+                onClick={() => setKind(k)}
+                className={`text-left px-3 py-2 rounded-lg border text-[12px] leading-snug ${
+                  kind === k
+                    ? 'border-slate-800 bg-slate-800 text-white font-bold'
+                    : 'border-slate-200 bg-white text-slate-600'
+                }`}
+              >
+                <span className="block">{SHINSEI_KINDS[k].label}</span>
+                <span className={`block text-[10px] pt-0.5 ${kind === k ? 'text-slate-300' : 'text-slate-400'}`}>
+                  提出先：{SHINSEI_KINDS[k].where}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {missingOffice.length > 0 && (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-[11px] text-amber-800">
+            <div className="font-bold mb-0.5">事業所情報に足りない項目があります</div>
+            {missingOffice.join('、')}
+            <div className="text-[10px] pt-0.5">上の「事業所情報」を開いてご登録ください。</div>
+          </div>
+        )}
+
+        <div className="space-y-2">
+          <div className="text-[11px] font-bold text-slate-600">対象のスタッフ</div>
+          <select
+            value={employeeId}
+            onChange={(e) => setEmployeeId(e.target.value)}
+            className={`${selectClass} sm:max-w-[320px]`}
+          >
+            <option value="">選んでください</option>
+            {candidates.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.name}{a.resignationDate ? '（退職）' : ''}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {employee && (
+          <div className="space-y-3">
+            <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 space-y-1.5">
+              <div className="text-[11px] font-bold text-slate-600">Brown Work に登録されている内容</div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-3 gap-y-1 text-[11.5px]">
+                <div><span className="text-slate-400">氏名</span>　<b className="text-slate-700">{employee.name || '未登録'}</b></div>
+                <div><span className="text-slate-400">ふりがな</span>　<b className="text-slate-700">{employee.furigana || '未登録'}</b></div>
+                <div><span className="text-slate-400">生年月日</span>　<b className="text-slate-700">{employee.birthDate || '未登録'}</b></div>
+                <div><span className="text-slate-400">性別</span>　<b className="text-slate-700">{employee.gender || '未登録'}</b></div>
+                {isNenkin ? (
+                  <div><span className="text-slate-400">基礎年金番号</span>　<b className="text-slate-700">{employee.pensionBasicNumber || '未登録'}</b></div>
+                ) : (
+                  <div><span className="text-slate-400">雇用保険番号</span>　<b className="text-slate-700">{employee.employmentInsuranceNumber || '未登録'}</b></div>
+                )}
+                <div><span className="text-slate-400">住所</span>　<b className="text-slate-700">{employee.address || '未登録'}</b></div>
+              </div>
+              <div className="text-[10px] text-slate-400">
+                ここが違う場合は、スタッフ詳細で直してから出してください。
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-slate-200 px-3 py-2.5 space-y-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-[11px] font-bold text-slate-600">マイナンバー</span>
+                {myNumberState === 'done' && myNumber && (
+                  <span className="text-[11px] font-mono text-slate-700">{`${myNumber.slice(0, 4)}********`}</span>
+                )}
+                <button
+                  onClick={loadMyNumber}
+                  disabled={myNumberState === 'loading'}
+                  className="ml-auto px-3 py-1 rounded-lg border border-slate-200 text-[11px] font-bold text-slate-600 disabled:opacity-40"
+                >
+                  {myNumberState === 'loading' ? '読み込み中…' : myNumber ? '読み直す' : '読み込む'}
+                </button>
+              </div>
+              {myNumberError && (
+                <div className="text-[10.5px] text-amber-700">{myNumberError}</div>
+              )}
+              <div className="text-[10px] text-slate-400 leading-relaxed">
+                届出に入れるには読み込みが要ります。読み込んだことは監査ログに残ります。
+                {isNenkin && ' マイナンバーが無いときは、基礎年金番号が入ります。'}
+              </div>
+            </div>
+
+            {kind === 'nenkinShutoku' && (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                {labeled('資格取得年月日',
+                  <input type="date" value={form.acquiredDate || ''} onChange={set('acquiredDate')} className={inputClass} />)}
+                {labeled('報酬月額（通貨によるもの）',
+                  <input type="number" min="0" value={form.cashAmount ?? ''} onChange={set('cashAmount')} className={inputClass} />,
+                  '資格取得時に見込まれる1か月の報酬')}
+                {labeled('報酬月額（現物によるもの）',
+                  <input type="number" min="0" value={form.goodsAmount ?? ''} onChange={set('goodsAmount')} className={inputClass} />,
+                  '無ければ0')}
+                {labeled('被扶養者の有無',
+                  <select value={form.hasDependent ? '1' : '0'} onChange={(e) => set('hasDependent')(e.target.value === '1')} className={selectClass}>
+                    <option value="0">無</option>
+                    <option value="1">有</option>
+                  </select>)}
+                <label className="flex items-center gap-1.5 text-[11.5px] text-slate-600 sm:col-span-2">
+                  <input type="checkbox" checked={Boolean(form.note3)} onChange={set('note3')} />
+                  特定適用事業所の短時間労働者
+                </label>
+                <label className="flex items-center gap-1.5 text-[11.5px] text-slate-600 sm:col-span-2">
+                  <input type="checkbox" checked={Boolean(form.note4)} onChange={set('note4')} />
+                  退職後の継続再雇用
+                </label>
+                <label className="flex items-center gap-1.5 text-[11.5px] text-slate-600 sm:col-span-4">
+                  <input type="checkbox" checked={Boolean(form.note5)} onChange={set('note5')} />
+                  最低賃金の減額特例を受けている（特定減額特例対象者。令和8年10月から）
+                </label>
+              </div>
+            )}
+
+            {kind === 'nenkinSoshitsu' && (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                {labeled('被保険者整理番号',
+                  <input value={form.insuredNumber || ''} onChange={set('insuredNumber')} maxLength={6} className={inputClass} />,
+                  '資格取得確認通知書に書かれている番号')}
+                {labeled('資格喪失年月日',
+                  <input type="date" value={form.lostDate || ''} onChange={set('lostDate')} className={inputClass} />,
+                  '退職の場合は退職日の翌日')}
+                {labeled('喪失の原因',
+                  <select value={form.reason || '4'} onChange={set('reason')} className={selectClass}>
+                    {NENKIN_SOSHITSU_REASONS.map((r) => (
+                      <option key={r.code} value={r.code}>{r.label}</option>
+                    ))}
+                  </select>)}
+                {labeled('退職日・死亡日',
+                  <input type="date" value={form.leaveDate || ''} onChange={set('leaveDate')} className={inputClass} />)}
+                {labeled('資格確認書（回収した枚数）',
+                  <input type="number" min="0" max="99" value={form.returned ?? ''} onChange={set('returned')} className={inputClass} />)}
+                {labeled('資格確認書（返せなかった枚数）',
+                  <input type="number" min="0" max="99" value={form.notReturned ?? ''} onChange={set('notReturned')} className={inputClass} />)}
+              </div>
+            )}
+
+            {kind === 'hwShutoku' && (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                {labeled('取得区分',
+                  <select value={form.hwAcquireKind || '1'} onChange={set('hwAcquireKind')} className={selectClass}>
+                    <option value="1">新規</option>
+                    <option value="2">再取得</option>
+                  </select>,
+                  '再取得のときは雇用保険番号が要ります')}
+                {labeled('資格取得年月日',
+                  <input type="date" value={form.hwAcquiredDate || ''} onChange={set('hwAcquiredDate')} className={inputClass} />)}
+                {labeled('被保険者となったことの原因',
+                  <select value={form.hwReason || ''} onChange={set('hwReason')} className={selectClass}>
+                    <option value="">選んでください</option>
+                    {HW_ACQUIRE_REASONS.map((r) => <option key={r.code} value={r.code}>{r.label}</option>)}
+                  </select>)}
+                {labeled('賃金の支払の態様',
+                  <select value={form.wageForm || ''} onChange={set('wageForm')} className={selectClass}>
+                    <option value="">選んでください</option>
+                    {HW_WAGE_FORMS.map((r) => <option key={r.code} value={r.code}>{r.label}</option>)}
+                  </select>)}
+                {labeled('賃金月額（千円単位）',
+                  <input type="number" min="1" max="9999" value={form.wageMonthly ?? ''} onChange={set('wageMonthly')} className={inputClass} />,
+                  '千円未満は四捨五入。臨時の賃金と超過勤務手当は除く')}
+                {labeled('雇用形態',
+                  <select value={form.employmentType || ''} onChange={set('employmentType')} className={selectClass}>
+                    <option value="">選んでください</option>
+                    {HW_EMPLOYMENT_TYPES.map((r) => <option key={r.code} value={r.code}>{r.label}</option>)}
+                  </select>)}
+                {labeled('職種',
+                  <select value={form.jobCategory || ''} onChange={set('jobCategory')} className={selectClass}>
+                    <option value="">選んでください</option>
+                    {HW_JOB_CATEGORIES.map((r) => <option key={r.code} value={r.code}>{r.label}</option>)}
+                  </select>)}
+                {labeled('就職経路',
+                  <select value={form.jobRoute || ''} onChange={set('jobRoute')} className={selectClass}>
+                    <option value="">選んでください</option>
+                    {HW_JOB_ROUTES.map((r) => <option key={r.code} value={r.code}>{r.label}</option>)}
+                  </select>)}
+                {labeled('1週間の所定労働時間（時）',
+                  <input type="number" min="0" max="99" value={form.weeklyHours ?? ''} onChange={set('weeklyHours')} className={inputClass} />,
+                  '所定勤務時間と週の勤務日数から入れています')}
+                {labeled('1週間の所定労働時間（分）',
+                  <input type="number" min="0" max="59" value={form.weeklyMinutes ?? ''} onChange={set('weeklyMinutes')} className={inputClass} />)}
+                {labeled('契約期間の定め',
+                  <select value={form.hasContractPeriod ? '1' : '0'} onChange={(e) => set('hasContractPeriod')(e.target.value === '1')} className={selectClass}>
+                    <option value="0">無</option>
+                    <option value="1">有</option>
+                  </select>,
+                  form.hasContractPeriod ? `${employee.contractStart || '未登録'} 〜 ${employee.contractEnd || '未登録'}` : '')}
+                {form.hasContractPeriod && labeled('契約更新条項の有無',
+                  <select value={form.contractRenewal || ''} onChange={set('contractRenewal')} className={selectClass}>
+                    <option value="">選んでください</option>
+                    <option value="有">有</option>
+                    <option value="無">無</option>
+                  </select>)}
+              </div>
+            )}
+
+            {kind === 'hwSoshitsu' && (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                {labeled('離職等年月日',
+                  <input type="date" value={form.hwLeaveDate || ''} onChange={set('hwLeaveDate')} className={inputClass} />,
+                  '最後に勤めた日')}
+                {labeled('喪失原因',
+                  <select value={form.hwReasonLoss || ''} onChange={set('hwReasonLoss')} className={selectClass}>
+                    <option value="">選んでください</option>
+                    {HW_LOSS_REASONS.map((r) => <option key={r.code} value={r.code}>{r.label}</option>)}
+                  </select>)}
+                {labeled('1週間の所定労働時間（時）',
+                  <input type="number" min="0" max="99" value={form.weeklyHours ?? ''} onChange={set('weeklyHours')} className={inputClass} />)}
+                {labeled('1週間の所定労働時間（分）',
+                  <input type="number" min="0" max="59" value={form.weeklyMinutes ?? ''} onChange={set('weeklyMinutes')} className={inputClass} />)}
+                {labeled('被保険者でなくなったことの原因',
+                  <input value={form.leaveReasonText || ''} onChange={set('leaveReasonText')} maxLength={78} className={inputClass} />,
+                  '例）自己都合による退職')}
+                <div className="sm:col-span-4 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[10.5px] text-slate-500">
+                  この届出は<b>離職票を交付しない場合</b>のものです。離職票が要るときは、
+                  離職証明書を添えた別の様式になります。Brown Work ではまだ作れません。
+                </div>
+              </div>
+            )}
+
+            {issues.length > 0 && (
+              <div className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-2 text-[11px] text-rose-700 space-y-0.5">
+                <div className="font-bold">このままでは出せません</div>
+                {issues.slice(0, 8).map((x) => (
+                  <div key={`${x.no}-${x.message}`}>{x.label}：{x.message}</div>
+                ))}
+                {issues.length > 8 && <div className="text-[10px]">ほか{issues.length - 8}件</div>}
+              </div>
+            )}
+
+            {error && (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[11px] text-amber-800">{error}</div>
+            )}
+
+            <button
+              onClick={addRow}
+              disabled={!canAdd}
+              className="px-4 py-2 rounded-lg bg-slate-800 text-white text-[12px] font-bold disabled:opacity-40"
+            >
+              この内容を出力に追加する
+            </button>
+          </div>
+        )}
+
+        {rows.length > 0 && (
+          <div className="rounded-xl border border-slate-200 overflow-hidden">
+            <div className="px-3 py-2 bg-slate-50 border-b border-slate-200 text-[11px] font-bold text-slate-600">
+              出力する届出（{rows.length}件）
+            </div>
+            <div className="divide-y divide-slate-100">
+              {rows.map((r) => (
+                <div key={r.id} className="px-3 py-2 flex items-center gap-2">
+                  <span className="text-[12px] font-bold text-slate-700">{r.name}</span>
+                  <button
+                    onClick={() => removeRow(r.id)}
+                    className="ml-auto text-[11px] text-slate-400 hover:text-rose-600"
+                  >
+                    外す
+                  </button>
+                </div>
+              ))}
+            </div>
+            <div className="px-3 py-2.5 border-t border-slate-200 space-y-2">
+              {sizeWarning && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[11px] text-amber-800">{sizeWarning}</div>
+              )}
+              <div className="text-[10.5px] text-slate-500 leading-relaxed">
+                ファイル名は <b className="font-mono">{fileName}</b> です。この名前のまま
+                届書作成プログラムまたはe-Govに読み込ませてください。文字コードはシフトJISです。
+                <b className="block pt-0.5">出したあと、媒体通番は自動で1つ進みます。</b>
+              </div>
+              <button
+                onClick={download}
+                disabled={!codec || Boolean(sizeWarning)}
+                className="px-4 py-2 rounded-lg bg-emerald-600 text-white text-[12px] font-bold disabled:opacity-40 inline-flex items-center gap-1.5"
+              >
+                <Download size={14} />
+                CSVをダウンロード
+              </button>
+            </div>
+          </div>
+        )}
+
+        <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 text-[10.5px] text-slate-500 leading-relaxed space-y-1">
+          <div className="font-bold text-slate-600">ご確認ください</div>
+          <div>
+            出すのはCSVだけで、送信はしません。できたファイルは総務担当が
+            届書作成プログラムまたはe-Govに読み込ませてください。
+          </div>
+          <div>
+            届出に使えるのはJIS第一水準・第二水準の字だけです。「髙」「﨑」などは使えないため、
+            別の字かカナに直す必要があります。使えない字が入っていると、このページで知らせます。
+          </div>
+          <div>
+            令和8年10月から、資格取得届に<b>「特定減額特例対象者」</b>の欄が増えました。
+            届書作成プログラムは Ver34.00 以降をお使いください。
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 
 // ---- みなし残業の設定（給与計算画面・グループごと） ----
 // グループを一度に並べます。設定し忘れているグループがひと目で分かるようにするためです。
