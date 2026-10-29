@@ -2273,3 +2273,123 @@ export function buildNenkinSanteiFields(office: OfficeInfo, p: NenkinSanteiInput
 export function buildNenkinSantei(office: OfficeInfo, p: NenkinSanteiInput): string {
   return join(buildNenkinSanteiFields(office, p));
 }
+
+// ============================================================
+// 健康保険・厚生年金保険 被保険者賞与支払届
+//   ／厚生年金保険70歳以上被用者賞与支払届
+//   仕様書 ４．９．１（年金事務所提出・21項目）
+//
+//   対象は「三月を超える期間ごとに受けるもの」、つまり年3回以下の賞与です。
+//   年4回以上支払われるものは報酬に当たるため、この届出には入れません。
+// ============================================================
+
+export const NENKIN_BONUS_FORM_CODE = '2265700';
+
+export const NENKIN_BONUS_SPECS: FieldSpec[] = [
+  { no: 1, label: '様式コード', kind: 'num', min: 7, max: 7 },
+  { no: 2, label: '都道府県コード', kind: 'num', min: 2, max: 2 },
+  { no: 3, label: '郡市区符号', kind: 'num', min: 2, max: 2 },
+  { no: 4, label: '事業所記号', kind: 'kana', min: 1, max: 4 },
+  { no: 5, label: '被保険者整理番号', kind: 'num', min: 0, max: 6 },
+  { no: 6, label: '被保険者氏名（カナ）', kind: 'kana', min: 1, max: 25 },
+  { no: 7, label: '被保険者氏名（漢字）', kind: 'kanji', min: 0, max: 12 },
+  { no: 8, label: '元号（生年月日）', kind: 'num', min: 1, max: 1 },
+  { no: 9, label: '生年月日', kind: 'num', min: 6, max: 6 },
+  { no: 10, label: '元号（賞与支払年月日）', kind: 'num', min: 1, max: 1 },
+  { no: 11, label: '賞与支払年月日', kind: 'num', min: 6, max: 6 },
+  { no: 12, label: '通貨によるものの額', kind: 'num', min: 1, max: 7 },
+  { no: 13, label: '現物によるものの額', kind: 'num', min: 1, max: 7 },
+  { no: 14, label: '合計（賞与額）', kind: 'num', min: 1, max: 7 },
+  { no: 15, label: '個人番号', kind: 'num', min: 0, max: 12 },
+  { no: 16, label: '課所符号', kind: 'num', min: 0, max: 4 },
+  { no: 17, label: '一連番号', kind: 'num', min: 0, max: 6 },
+  { no: 18, label: '備考欄項目1（70歳以上被用者）', kind: 'num', min: 0, max: 1 },
+  { no: 19, label: '備考欄項目2（二以上事業所勤務）', kind: 'num', min: 0, max: 1 },
+  { no: 20, label: '備考欄項目3（同一月内の賞与合算・初回支払日）', kind: 'num', min: 0, max: 2 },
+  { no: 21, label: '70歳以上被用者届のみ提出', kind: 'num', min: 0, max: 1 },
+];
+
+/** 賞与額の上限。これ以上は決まった値に置き換えます（仕様書 項番12〜14） */
+export const BONUS_LIMIT = 10000000;
+
+export type BonusAmounts = {
+  cash: number;      // 通貨によるものの額（届出に入れる値）
+  goods: number;     // 現物によるものの額（同上）
+  total: number;     // 合計（賞与額）
+  rawTotal: number;  // 切り捨て前の合計
+  cut: number;       // 切り捨てた額（1,000円未満）
+  capped: boolean;   // 1千万円以上で置き換えたか
+};
+
+/**
+ * 賞与額を、届出に入れる形にします（仕様書 項番12〜14）。
+ *   ・合計（賞与額）は、通貨と現物の合計から1,000円未満を切り捨てます
+ *       （例）600,870円 → 600000
+ *   ・1千万円以上のときは、仕様書のとおり決まった値に置き換えます
+ *       通貨か現物の一方だけで1千万円以上 → 合計は「9999000」
+ *       両方あって合計が1千万円以上       → 合計は「9999999」
+ *       通貨・現物それぞれが1千万円以上   → その欄は「9999999」
+ */
+export function bonusAmounts(cash: number | null, goods: number | null): BonusAmounts {
+  const c = Math.max(0, Math.round(Number(cash) || 0));
+  const g = Math.max(0, Math.round(Number(goods) || 0));
+  const sum = c + g;
+  const cashField = c >= BONUS_LIMIT ? 9999999 : c;
+  const goodsField = g >= BONUS_LIMIT ? 9999999 : g;
+  let total: number;
+  let capped = false;
+  if (sum >= BONUS_LIMIT) {
+    total = (c > 0 && g > 0) ? 9999999 : 9999000;
+    capped = true;
+  } else {
+    total = Math.floor(sum / 1000) * 1000;
+  }
+  return { cash: cashField, goods: goodsField, total, rawTotal: sum, cut: capped ? 0 : sum - total, capped };
+}
+
+export type NenkinBonusInput = {
+  insuredNumber: string;
+  kanaName: string;
+  kanjiName: string;
+  birthDate: string;
+  paymentDate: string;       // 賞与を支払った日 'YYYY-MM-DD'
+  cashAmount: number | null;
+  goodsAmount: number | null;
+  myNumber: string;
+  pensionNumber: string;
+  note1?: boolean;           // 70歳以上被用者
+  note2?: boolean;           // 二以上事業所勤務
+  firstPayDay?: string;      // 同一月内の賞与合算のときの初回支払日（'05' など）
+  over70Only?: boolean;
+};
+
+/** 賞与支払届・70歳以上被用者賞与支払届 データレコード（年金事務所提出・21項目） */
+export function buildNenkinBonusFields(office: OfficeInfo, p: NenkinBonusInput): string[] {
+  const birth = toWareki(p.birthDate);
+  const pay = toWareki(p.paymentDate);
+  const my = digits(p.myNumber);
+  const pn = digits(p.pensionNumber);
+  const a = bonusAmounts(p.cashAmount, p.goodsAmount);
+  return [
+    NENKIN_BONUS_FORM_CODE,
+    office.prefCode, office.cityCode, office.officeSymbol,
+    digits(p.insuredNumber),
+    normalizeKanaName(p.kanaName),
+    normalizeKanjiName(p.kanjiName),
+    birth ? String(birth.code) : '',
+    birth ? birth.yymmdd : '',
+    pay ? String(pay.code) : '',
+    pay ? pay.yymmdd : '',
+    String(a.cash), String(a.goods), String(a.total),
+    my,
+    my ? '' : pn.slice(0, 4),
+    my ? '' : pn.slice(4, 10),
+    flag(p.note1), flag(p.note2),
+    String(p.firstPayDay || ''),
+    flag(p.over70Only),
+  ];
+}
+
+export function buildNenkinBonus(office: OfficeInfo, p: NenkinBonusInput): string {
+  return join(buildNenkinBonusFields(office, p));
+}

@@ -15,6 +15,7 @@ import {
   HW_FILE_RISHOKU, HW_WAGE_ROWS, wagePeriodsFor, addDays, lastDayOfMonth,
   buildNenkinSanteiFields, NENKIN_SANTEI_SPECS, santeiTotals, standardRemunerationCode,
   SANTEI_KINDS, EMPTY_SANTEI_MONTH,
+  buildNenkinBonusFields, NENKIN_BONUS_SPECS, bonusAmounts,
 } from './denshiShinsei';
 
 // ---- constants ----
@@ -5836,6 +5837,7 @@ function AttendanceApp() {
                 payrollRecords={data.payrollRecords}
                 records={data.records}
                 leaveRequests={data.leaveRequests}
+                bonusRecords={data.bonusRecords}
                 actor={session}
                 isMasterAdmin={session.role === 'master_admin'}
                 onSaved={refreshData}
@@ -19707,8 +19709,12 @@ const SHINSEI_KINDS = {
   hwSoshitsu: { label: '雇用保険被保険者資格喪失届（離職票交付なし）', where: 'ハローワーク' },
   hwRishoku: { label: '雇用保険被保険者資格喪失届（離職票交付あり）＋離職証明書', where: 'ハローワーク' },
   nenkinSantei: { label: '健康保険・厚生年金保険 被保険者報酬月額算定基礎届', where: '年金事務所' },
+  nenkinBonus: { label: '健康保険・厚生年金保険 被保険者賞与支払届', where: '年金事務所' },
 };
-const SHINSEI_KIND_ORDER = ['nenkinShutoku', 'nenkinSoshitsu', 'nenkinSantei', 'hwShutoku', 'hwSoshitsu', 'hwRishoku'];
+const SHINSEI_KIND_ORDER = [
+  'nenkinShutoku', 'nenkinSoshitsu', 'nenkinSantei', 'nenkinBonus',
+  'hwShutoku', 'hwSoshitsu', 'hwRishoku',
+];
 
 // 1週間の所定労働時間を、所定勤務時間と週の勤務日数から出します。
 // どちらかが未登録のときは null（画面で入れてもらいます）。
@@ -20091,7 +20097,8 @@ function SanteiMonthTable({ months, onChange, totals, wageType, kindLabel }) {
   );
 }
 
-function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = [], records = {}, leaveRequests = [],
+function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = [], records = {},
+  leaveRequests = [], bonusRecords = [],
   actor, isMasterAdmin, onSaved, isDesktop }) {
   const { codec, failed: codecFailed } = useSjisCodec();
   const [kind, setKind] = useState('nenkinShutoku');
@@ -20111,13 +20118,16 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
   const [santeiYear, setSanteiYear] = useState(new Date().getFullYear());
   const [santeiPay, setSanteiPay] = useState('nextMonth');
   const [santeiMonths, setSanteiMonths] = useState([]);
+  // 賞与支払届で使うもの
+  const [bonusId, setBonusId] = useState('');
 
   const office = useMemo(() => parseOfficeInfo(settings), [settings]);
   const employee = useMemo(
     () => (employeeAccounts || []).find((a) => a.id === employeeId) || null,
     [employeeAccounts, employeeId]
   );
-  const isNenkin = kind === 'nenkinShutoku' || kind === 'nenkinSoshitsu' || kind === 'nenkinSantei';
+  const isNenkin = kind === 'nenkinShutoku' || kind === 'nenkinSoshitsu'
+    || kind === 'nenkinSantei' || kind === 'nenkinBonus';
 
   // 種類やスタッフを変えたら、入力中の内容と読み込んだ番号は捨てます
   useEffect(() => {
@@ -20182,7 +20192,12 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
       correctedAverage: '',
       santeiNote2: false, santeiNote3: false, santeiNote4: false, santeiNote5: false,
       santeiNote8: false, santeiNote: '',
+      // 賞与支払届
+      insuredNumberBonus: '',
+      bonusCash: '', bonusGoods: '0',
+      bonusNote1: false, bonusNote2: false, bonusFirstPayDay: '',
     });
+    setBonusId('');
     setReasonKey(''); setReasonDetails({}); setWageRows([]); setSanteiMonths([]);
     // settings は毎回あたらしい物になるため、必要な中身だけを見ています
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -20211,6 +20226,23 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
     // データは毎回あたらしい配列になるため、鍵になる値だけを見ています
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kind, employee?.id, santeiYear, santeiPay]);
+
+  // その方の賞与の一覧（新しい順）
+  const myBonuses = useMemo(() => (bonusRecords || [])
+    .filter((b) => b.employeeId === employee?.id && b.paymentDate)
+    .slice()
+    .sort((a, b) => String(b.paymentDate).localeCompare(String(a.paymentDate))),
+  [bonusRecords, employee?.id]);
+
+  // 賞与を選んだら、支払日と支給合計を入れます
+  useEffect(() => {
+    if (kind !== 'nenkinBonus' || !bonusId) return;
+    const b = myBonuses.find((x) => x.id === bonusId);
+    if (!b) return;
+    const cash = (b.paymentItems || []).reduce((sum, x) => sum + (Number(x?.amount) || 0), 0);
+    setForm((prev) => ({ ...prev, bonusPaymentDate: b.paymentDate, bonusCash: String(cash) }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kind, bonusId]);
 
   const set = (key) => (e) => {
     setError('');
@@ -20286,6 +20318,18 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
         officeName: office.nameKanji, note: form.note || '', hwName: office.hwName,
       });
     }
+    if (kind === 'nenkinBonus') {
+      return buildNenkinBonusFields(office, {
+        insuredNumber: form.insuredNumberBonus || '',
+        kanaName: kana, kanjiName: name, birthDate: employee.birthDate || '',
+        paymentDate: form.bonusPaymentDate || '',
+        cashAmount: form.bonusCash === '' ? null : Number(form.bonusCash),
+        goodsAmount: form.bonusGoods === '' ? null : Number(form.bonusGoods),
+        myNumber, pensionNumber: employee.pensionBasicNumber || '',
+        note1: Boolean(form.bonusNote1), note2: Boolean(form.bonusNote2),
+        firstPayDay: form.bonusFirstPayDay || '',
+      });
+    }
     if (kind === 'nenkinSantei') {
       return buildNenkinSanteiFields(office, {
         insuredNumber: form.insuredNumberSantei || '',
@@ -20356,9 +20400,10 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
     kind === 'nenkinShutoku' ? NENKIN_SHUTOKU_SPECS
       : kind === 'nenkinSoshitsu' ? NENKIN_SOSHITSU_SPECS
         : kind === 'nenkinSantei' ? NENKIN_SANTEI_SPECS
-          : kind === 'hwShutoku' ? HW_SHUTOKU_SPECS
-            : kind === 'hwRishoku' ? HW_RISHOKU_SPECS
-              : HW_SOSHITSU_SPECS;
+          : kind === 'nenkinBonus' ? NENKIN_BONUS_SPECS
+            : kind === 'hwShutoku' ? HW_SHUTOKU_SPECS
+              : kind === 'hwRishoku' ? HW_RISHOKU_SPECS
+                : HW_SOSHITSU_SPECS;
 
   const draft = employee ? buildOne() : null;
 
@@ -20380,6 +20425,22 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
       }
       if (!employee.birthDate) out.push({ no: 10, label: '生年月日', message: 'スタッフ詳細にご登録ください' });
       if (!employee.gender) out.push({ no: 11, label: '性別', message: 'スタッフ詳細にご登録ください' });
+    }
+    if (kind === 'nenkinBonus') {
+      if (!form.insuredNumberBonus) {
+        out.push({ no: 5, label: '被保険者整理番号', message: '入力が要ります' });
+      }
+      if (!employee.birthDate) out.push({ no: 9, label: '生年月日', message: 'スタッフ詳細にご登録ください' });
+      if (!form.bonusPaymentDate) {
+        out.push({ no: 11, label: '賞与支払年月日', message: '賞与を選ぶか、支払日を入れてください' });
+      }
+      if (!Number(form.bonusCash) && !Number(form.bonusGoods)) {
+        out.push({ no: 12, label: '賞与額', message: '入力が要ります' });
+      }
+      // 70歳以上被用者のときだけ、個人番号か基礎年金番号が要ります（仕様書 項番15）
+      if (form.bonusNote1 && !hasNumber) {
+        out.push({ no: 15, label: '個人番号', message: '70歳以上被用者はマイナンバーか基礎年金番号が要ります' });
+      }
     }
     if (kind === 'nenkinSantei') {
       if (!form.insuredNumberSantei) {
@@ -20768,6 +20829,82 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
                 </div>
               </div>
             )}
+
+            {kind === 'nenkinBonus' && (() => {
+              const a = bonusAmounts(
+                form.bonusCash === '' ? null : Number(form.bonusCash),
+                form.bonusGoods === '' ? null : Number(form.bonusGoods),
+              );
+              return (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    {labeled('どの賞与か',
+                      <select value={bonusId} onChange={(e) => { setError(''); setBonusId(e.target.value); }} className={selectClass}>
+                        <option value="">選ばずに手で入れる</option>
+                        {myBonuses.map((b) => (
+                          <option key={b.id} value={b.id}>
+                            {b.title || `${b.year}年 第${b.seq}回`}（{b.paymentDate} 支給）
+                          </option>
+                        ))}
+                      </select>,
+                      myBonuses.length === 0 ? 'この方の賞与はまだ登録されていません' : '選ぶと支払日と金額が入ります')}
+                    {labeled('被保険者整理番号',
+                      <input value={form.insuredNumberBonus ?? ''} onChange={set('insuredNumberBonus')} maxLength={6} className={inputClass} />,
+                      '資格取得確認通知書に書かれている番号')}
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                    {labeled('賞与支払年月日',
+                      <input type="date" value={form.bonusPaymentDate ?? ''} onChange={set('bonusPaymentDate')} className={inputClass} />)}
+                    {labeled('通貨によるものの額（円）',
+                      <input type="number" min="0" value={form.bonusCash ?? ''} onChange={set('bonusCash')} className={inputClass} />,
+                      '賞与明細の支給合計')}
+                    {labeled('現物によるものの額（円）',
+                      <input type="number" min="0" value={form.bonusGoods ?? ''} onChange={set('bonusGoods')} className={inputClass} />,
+                      '無ければ0')}
+                    {labeled('同一月内の賞与合算（初回支払日）',
+                      <select value={form.bonusFirstPayDay ?? ''} onChange={set('bonusFirstPayDay')} className={selectClass}>
+                        <option value="">合算しない</option>
+                        {Array.from({ length: 31 }, (_, i) => String(i + 1).padStart(2, '0')).map((d) => (
+                          <option key={d} value={d}>{Number(d)}日</option>
+                        ))}
+                      </select>,
+                      '同じ月に2回支払った分をまとめるとき')}
+                  </div>
+
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5">
+                    <div className="flex items-baseline gap-2 flex-wrap">
+                      <span className="text-[11px] font-bold text-slate-600">届出に入る合計（賞与額）</span>
+                      <span className="text-[16px] font-bold text-slate-800">{a.total.toLocaleString()}<span className="text-[11px] font-normal text-slate-500"> 円</span></span>
+                    </div>
+                    <div className="text-[10.5px] text-slate-500 pt-0.5 leading-relaxed">
+                      通貨 {a.cash.toLocaleString()}円 ＋ 現物 {a.goods.toLocaleString()}円 ＝ {a.rawTotal.toLocaleString()}円
+                      {a.capped
+                        ? <b className="text-amber-700">（1千万円以上のため、仕様書の決まりで置き換えています）</b>
+                        : a.cut > 0
+                          ? <b>（1,000円未満の{a.cut.toLocaleString()}円を切り捨て）</b>
+                          : ''}
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap gap-x-4 gap-y-1">
+                    <label className="flex items-center gap-1.5 text-[11.5px] text-slate-600">
+                      <input type="checkbox" checked={Boolean(form.bonusNote1)} onChange={set('bonusNote1')} />
+                      70歳以上被用者
+                    </label>
+                    <label className="flex items-center gap-1.5 text-[11.5px] text-slate-600">
+                      <input type="checkbox" checked={Boolean(form.bonusNote2)} onChange={set('bonusNote2')} />
+                      二以上の事業所に勤めている
+                    </label>
+                  </div>
+
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-[10.5px] text-amber-800 leading-relaxed">
+                    <b className="block">この届出に入れるのは、年3回以下の賞与だけです。</b>
+                    年4回以上支払われるものは報酬に当たるため、賞与支払届ではなく算定基礎届に入ります。
+                    提出は支払日から5日以内です。
+                  </div>
+                </div>
+              );
+            })()}
 
             {kind === 'nenkinSantei' && (
               <div className="space-y-3">
