@@ -1091,8 +1091,26 @@ function computeMonthlySummary(records, target = new Date()) {
     // 月の合計を丸めると結果が変わるため、必ず日ごとに丸めます
     //（例：遅刻14分が5日 → 日ごとなら0分、月合計70分を丸めると60分）。
     acc.unworkedMin += roundUnworkedMinutes(m.lateMin + m.earlyLeaveMin);
+    // 平日と土日祝を分けて数えます。日給制で単価が分かれている方は、
+    // 基本給も残業・深夜の割増基礎単価も「その日の単価」で出すためです。
+    // 土日祝の判定は土日祝皆勤手当と同じ（isWeekendOrHoliday）です。
+    const holiday = isWeekendOrHoliday(key);
+    if (holiday) {
+      acc.holidayDays += 1;
+      acc.holidayOvertimeMin += m.overtimeMin;
+      acc.holidayNightMin += computeNightMinutes(record);
+    } else {
+      acc.weekdayDays += 1;
+      acc.weekdayOvertimeMin += m.overtimeMin;
+      acc.weekdayNightMin += computeNightMinutes(record);
+    }
     return acc;
-  }, { days: 0, workedMin: 0, overtimeMin: 0, lateMin: 0, earlyLeaveMin: 0, nightMin: 0, unworkedMin: 0 });
+  }, {
+    days: 0, workedMin: 0, overtimeMin: 0, lateMin: 0, earlyLeaveMin: 0, nightMin: 0, unworkedMin: 0,
+    weekdayDays: 0, holidayDays: 0,
+    weekdayOvertimeMin: 0, holidayOvertimeMin: 0,
+    weekdayNightMin: 0, holidayNightMin: 0,
+  });
 }
 
 // ---- 給与明細・賞与明細の修正履歴 ----
@@ -1671,6 +1689,7 @@ const rowToAccount = (row) => ({
   emergencyContactAddress: row.emergency_contact_address || '',
   wageType: row.wage_type || 'hourly',
   dailyWage: row.daily_wage != null ? Number(row.daily_wage) : 0,
+  dailyWageHoliday: row.daily_wage_holiday != null ? Number(row.daily_wage_holiday) : 0,
   hourlyWage: row.hourly_wage != null ? Number(row.hourly_wage) : 0,
   monthlySalary: row.monthly_salary != null ? Number(row.monthly_salary) : 0,
   birthDate: row.birth_date || '',
@@ -4535,6 +4554,7 @@ function AttendanceApp() {
       emergencyContactAddress: 'emergency_contact_address',
       wageType: 'wage_type',
       dailyWage: 'daily_wage',
+      dailyWageHoliday: 'daily_wage_holiday',
       hourlyWage: 'hourly_wage',
       monthlySalary: 'monthly_salary',
       birthDate: 'birth_date',
@@ -5429,6 +5449,7 @@ function AttendanceApp() {
         month: payload.month,
         wage_type: payload.wageType,
         daily_wage: payload.dailyWage ?? null,
+        daily_wage_holiday: payload.dailyWageHoliday ?? null,
         wage_rate: payload.wageRate,
         worked_minutes: payload.workedMinutes,
         overtime_minutes: payload.overtimeMinutes,
@@ -15358,7 +15379,7 @@ function roundUnworkedMinutes(minutes) {
 //   overtime  … 残業手当
 //   allowance … 通勤手当
 // 渡されなかったときは、これまでどおり基本給と残業手当は切り上げ、通勤手当は四捨五入です。
-function computePayrollPreview({ wageType, hourlyWage, monthlySalary, dailyWage = 0, dailyStandardMinutes = null, workedMinutes, overtimeMinutes, commuteAllowance = 0, attendanceDays = null, actualDays = 0, monthlyStandardHours = MONTHLY_STANDARD_HOURS, deemedOvertimeMinutes = 0, nightMinutes = 0, rounding = null, overtimeRate = OVERTIME_MULTIPLIER, nightRate = NIGHT_MULTIPLIER, premiumBaseAllowance = 0 }) {
+function computePayrollPreview({ wageType, hourlyWage, monthlySalary, dailyWage = 0, dailyWageHoliday = 0, dailyStandardMinutes = null, weekdayDays = 0, holidayDays = 0, weekdayOvertimeMinutes = 0, holidayOvertimeMinutes = 0, weekdayNightMinutes = 0, holidayNightMinutes = 0, workedMinutes, overtimeMinutes, commuteAllowance = 0, attendanceDays = null, actualDays = 0, monthlyStandardHours = MONTHLY_STANDARD_HOURS, deemedOvertimeMinutes = 0, nightMinutes = 0, rounding = null, overtimeRate = OVERTIME_MULTIPLIER, nightRate = NIGHT_MULTIPLIER, premiumBaseAllowance = 0 }) {
   const rBase = rounding?.base || 'ceil';
   const rOver = rounding?.overtime || 'ceil';
   const rAllow = rounding?.allowance || 'round';
@@ -15372,6 +15393,9 @@ function computePayrollPreview({ wageType, hourlyWage, monthlySalary, dailyWage 
   let overtimeAmount = 0;
   let wageRate = 0;
   let wageRateHourly = 0;
+  // 日給制で平日と土日祝の単価が分かれているとき用
+  let weekdayHourly = 0;
+  let holidayHourly = 0;
   let prorated = false;
   // 支給項目の金額は1円未満を切り上げ（賃金規程）
   if (wageType === 'hourly') {
@@ -15380,18 +15404,48 @@ function computePayrollPreview({ wageType, hourlyWage, monthlySalary, dailyWage 
     baseAmount = roundYenBy((regularMinutes / 60) * wageRate, rBase);
     overtimeAmount = roundYenBy((paidOvertimeMinutes / 60) * wageRate * overtimeRate, rOver);
   } else if (wageType === 'daily') {
-    // 日給制の基本給は「日額 × 実出勤日数」です（御社に確認済み）。
+    // 日給制の基本給は「日額 × 出勤日数」です（御社に確認済み）。
     // 休んだ日はそもそも数えないため、欠勤控除は使いません。
-    wageRate = Number(dailyWage) || 0;
-    baseAmount = roundYenBy(wageRate * Math.max(0, Number(actualDays) || 0), rBase);
-    // 割増基礎単価は「日額 ÷ 1日の所定労働時間」
+    //
+    // 平日と土日祝で日額が分かれている方は、その日の単価で出します。
+    // 土日祝の日額が未登録（0円）なら、平日の日額を土日祝にも使います
+    //（単価が分かれていない方の設定を増やさないため）。
+    const weekdayRate = Math.max(0, Number(dailyWage) || 0);
+    const holidayRate = Number(dailyWageHoliday) > 0 ? Number(dailyWageHoliday) : weekdayRate;
+    const wd = Math.max(0, Number(weekdayDays) || 0);
+    const hd = Math.max(0, Number(holidayDays) || 0);
+    // 日種別の内訳が渡っていない月は、これまでどおり実出勤日数 × 平日の日額で出します
+    const split = (wd + hd) > 0;
+    baseAmount = split
+      ? roundYenBy(weekdayRate * wd + holidayRate * hd, rBase)
+      : roundYenBy(weekdayRate * Math.max(0, Number(actualDays) || 0), rBase);
+    // 画面の「区分」に出す代表の日額。単価が分かれていれば平日のほうを出します
+    wageRate = weekdayRate;
+
+    // 割増基礎単価は「その日の日額 ÷ 1日の所定労働時間」
     //（労働基準法施行規則第19条第1項第2号）。
     // 1日の所定労働時間は給与規定グループの所定勤務時間から出します。
     // 設定が無いときは割増基礎単価を出せないので0にします
     //（0円のまま残業手当を払わないより、画面で未設定だと知らせる作りにしています）。
     const dailyMin = Number(dailyStandardMinutes) > 0 ? Number(dailyStandardMinutes) : 0;
-    wageRateHourly = dailyMin > 0 ? wageRate / (dailyMin / 60) : 0;
-    overtimeAmount = roundYenBy((paidOvertimeMinutes / 60) * wageRateHourly * overtimeRate, rOver);
+    const hours = dailyMin > 0 ? dailyMin / 60 : 0;
+    weekdayHourly = hours > 0 ? weekdayRate / hours : 0;
+    holidayHourly = hours > 0 ? holidayRate / hours : 0;
+
+    // みなし残業は日給制には当てないため（deemedOvertimeFor が0を返す）、
+    // paidOvertimeMinutes は残業時間そのものです。平日と土日祝に分けて払います。
+    const wom = Math.max(0, Number(weekdayOvertimeMinutes) || 0);
+    const hom = Math.max(0, Number(holidayOvertimeMinutes) || 0);
+    if (wom + hom > 0) {
+      overtimeAmount = roundYenBy(
+        (wom / 60) * weekdayHourly * overtimeRate + (hom / 60) * holidayHourly * overtimeRate,
+        rOver,
+      );
+    } else {
+      overtimeAmount = roundYenBy((paidOvertimeMinutes / 60) * weekdayHourly * overtimeRate, rOver);
+    }
+    // 画面に出す代表の割増基礎単価。実際の支払いは上のとおり日ごとの単価で出しています
+    wageRateHourly = weekdayHourly;
   } else {
     wageRate = Number(monthlySalary) || 0;
     // 月給制の基本給は月給そのものです。休んだぶんは「欠勤控除」で引きます（御社に確認済み）。
@@ -15418,14 +15472,30 @@ function computePayrollPreview({ wageType, hourlyWage, monthlySalary, dailyWage 
     const stdHours = Number(monthlyStandardHours) > 0 ? Number(monthlyStandardHours) : MONTHLY_STANDARD_HOURS;
     premiumAllowanceHourly = premiumAllowance / stdHours;
     wageRateHourly += premiumAllowanceHourly;
-    overtimeAmount = roundYenBy((paidOvertimeMinutes / 60) * wageRateHourly * overtimeRate, rOver);
+    if (wageType === 'daily') {
+      // 日給制は平日・土日祝のどちらの単価にも同じだけ足します
+      weekdayHourly += premiumAllowanceHourly;
+      holidayHourly += premiumAllowanceHourly;
+      const wom2 = Math.max(0, Number(weekdayOvertimeMinutes) || 0);
+      const hom2 = Math.max(0, Number(holidayOvertimeMinutes) || 0);
+      overtimeAmount = (wom2 + hom2 > 0)
+        ? roundYenBy((wom2 / 60) * weekdayHourly * overtimeRate + (hom2 / 60) * holidayHourly * overtimeRate, rOver)
+        : roundYenBy((paidOvertimeMinutes / 60) * weekdayHourly * overtimeRate, rOver);
+    } else {
+      overtimeAmount = roundYenBy((paidOvertimeMinutes / 60) * wageRateHourly * overtimeRate, rOver);
+    }
   }
 
   const allowanceAmount = roundYenBy(Number(commuteAllowance) || 0, rAllow);
   // 深夜手当は割増の0.25だけ。働いた時間ぶんの賃金は基本給・残業手当に入っています。
   // みなし残業は当てません（みなし残業が覆うのは時間外の割増で、深夜の割増は別のため）。
   const nightMin = Math.max(0, Math.round(Number(nightMinutes) || 0));
-  const nightAmount = roundYenBy((nightMin / 60) * wageRateHourly * nightRate, rNight);
+  // 日給制で平日と土日祝の単価が分かれているときは、深夜もその日の単価で出します
+  const wnm = Math.max(0, Number(weekdayNightMinutes) || 0);
+  const hnm = Math.max(0, Number(holidayNightMinutes) || 0);
+  const nightAmount = (wageType === 'daily' && wnm + hnm > 0)
+    ? roundYenBy((wnm / 60) * weekdayHourly * nightRate + (hnm / 60) * holidayHourly * nightRate, rNight)
+    : roundYenBy((nightMin / 60) * wageRateHourly * nightRate, rNight);
   // wageRateHourly        … 割増基礎単価（1時間あたり）
   // deemedOvertimeMinutes  … 当てたみなし残業の分数
   // paidOvertimeMinutes    … 実際に残業手当を払う分数（残業 − みなし残業）
@@ -15438,6 +15508,15 @@ function computePayrollPreview({ wageType, hourlyWage, monthlySalary, dailyWage 
     // 日給制で1日の所定労働時間が分からないと、割増基礎単価が0になって
     // 残業手当・深夜手当が0円になります。画面で知らせるために返します。
     dailyStandardMinutes: wageType === 'daily' ? (Number(dailyStandardMinutes) || 0) : null,
+    // 日給制の、平日と土日祝それぞれの割増基礎単価と出勤日数（画面の根拠に使います）
+    weekdayHourly: wageType === 'daily' ? weekdayHourly : null,
+    holidayHourly: wageType === 'daily' ? holidayHourly : null,
+    weekdayDays: wageType === 'daily' ? Math.max(0, Number(weekdayDays) || 0) : null,
+    holidayDays: wageType === 'daily' ? Math.max(0, Number(holidayDays) || 0) : null,
+    dailyWageWeekday: wageType === 'daily' ? Math.max(0, Number(dailyWage) || 0) : null,
+    dailyWageHoliday: wageType === 'daily'
+      ? (Number(dailyWageHoliday) > 0 ? Number(dailyWageHoliday) : Math.max(0, Number(dailyWage) || 0))
+      : null,
     // 使った割増率。画面に根拠を出すために返します
     overtimeRate, nightRate,
     // 割増基礎単価に足した手当。画面に根拠を出すために返します
@@ -18298,7 +18377,10 @@ function NightAndLateNote({ preview, lateDeduction, isPublished, premiumBasePart
   const hourlySkipped = lateDeduction
     && lateDeduction.reason === 'hourlyNotApplicable'
     && lateDeduction.unworkedMinutes > 0;
-  if (!night && !late && !premium && !hourlySkipped) return null;
+  // 日給制で平日と土日祝の単価が分かれているとき。どちらの単価でいくら出したのかを出します
+  const splitDaily = preview.weekdayHourly != null
+    && preview.dailyWageWeekday !== preview.dailyWageHoliday;
+  if (!night && !late && !premium && !hourlySkipped && !splitDaily) return null;
   const hm = (min) => {
     const m = Math.max(0, Math.round(Number(min) || 0));
     return `${Math.floor(m / 60)}時間${m % 60}分`;
@@ -18306,8 +18388,21 @@ function NightAndLateNote({ preview, lateDeduction, isPublished, premiumBasePart
   const tone = isPublished ? 'border-slate-200 bg-slate-50 text-slate-500' : 'border-teal-200 bg-teal-50 text-teal-900';
   return (
     <div className={`rounded-xl border px-3.5 py-2.5 text-[11.5px] leading-relaxed space-y-1.5 ${tone}`}>
-      {premium && (
+      {splitDaily && (
         <div>
+          <div className="font-bold">平日と土日祝で日額が分かれています</div>
+          平日 {formatYen(preview.dailyWageWeekday)} × {preview.weekdayDays}日
+          ＋ 土日祝 {formatYen(preview.dailyWageHoliday)} × {preview.holidayDays}日
+          ＝ 基本給 {formatYen(preview.baseAmount)}。
+          <div className="text-[10.5px] pt-0.5 opacity-80">
+            割増基礎単価は、平日 {formatYen(Math.round(preview.weekdayHourly))}／時、
+            土日祝 {formatYen(Math.round(preview.holidayHourly))}／時。
+            残業手当・深夜手当・有給休暇手当も、その日が平日か土日祝かでそれぞれの単価から出しています。
+          </div>
+        </div>
+      )}
+      {premium && (
+        <div className={splitDaily ? 'pt-1.5 border-t border-current/15' : ''}>
           <div className="font-bold">割増基礎単価 {formatYen(Math.round(preview.wageRateHourly))}（手当を足しています）</div>
           基本給ぶん {formatYen(Math.round(preview.wageRateHourly - preview.premiumBaseAllowanceHourly))}
           ＋ 手当ぶん {formatYen(Math.round(preview.premiumBaseAllowanceHourly))}。
@@ -18324,7 +18419,7 @@ function NightAndLateNote({ preview, lateDeduction, isPublished, premiumBasePart
         </div>
       )}
       {night && (
-        <div className={premium ? 'pt-1.5 border-t border-current/15' : ''}>
+        <div className={(premium || splitDaily) ? 'pt-1.5 border-t border-current/15' : ''}>
           <div className="font-bold">深夜手当 {formatYen(preview.nightAmount)}</div>
           割増基礎単価 {formatYen(Math.round(preview.wageRateHourly))} × 深夜 {hm(preview.nightMinutes)} × {preview.nightRate}。
           深夜は22時から翌5時までです。働いた時間ぶんの賃金は基本給・残業手当に入っているため、
@@ -18337,7 +18432,7 @@ function NightAndLateNote({ preview, lateDeduction, isPublished, premiumBasePart
         </div>
       )}
       {hourlySkipped && (
-        <div className={(night || premium) ? 'pt-1.5 border-t border-current/15' : ''}>
+        <div className={(night || premium || splitDaily) ? 'pt-1.5 border-t border-current/15' : ''}>
           <div className="font-bold">遅刻早退 {hm(lateDeduction.unworkedMinutes)}（控除はしません）</div>
           時給制の基本給は「時給 ×（実働時間 − 残業時間）」で出すため、
           遅刻・早退したぶんは<b>すでに基本給から引かれています</b>。
@@ -18348,7 +18443,7 @@ function NightAndLateNote({ preview, lateDeduction, isPublished, premiumBasePart
         </div>
       )}
       {late && (
-        <div className={(night || premium) ? 'pt-1.5 border-t border-current/15' : ''}>
+        <div className={(night || premium || splitDaily) ? 'pt-1.5 border-t border-current/15' : ''}>
           <div className="font-bold">遅刻早退控除 {formatYen(lateDeduction.amount)}</div>
           {lateDeduction.wageType === 'daily' ? (
             <>
@@ -20567,6 +20662,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
   const [hourlyWage, setHourlyWage] = useState('0');
   const [monthlySalary, setMonthlySalary] = useState('0');
   const [dailyWage, setDailyWage] = useState('0');
+  const [dailyWageHoliday, setDailyWageHoliday] = useState('0');
   // 「いまの設定で作り直す」の確認。開いているときだけ中身が入ります
   const [rebuild, setRebuild] = useState(null);
   const [paymentItems, setPaymentItems] = useState([]);
@@ -20600,6 +20696,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     setHourlyWage(String(employee.hourlyWage || 0));
     setMonthlySalary(String(employee.monthlySalary || 0));
     setDailyWage(String(employee.dailyWage || 0));
+    setDailyWageHoliday(String(employee.dailyWageHoliday || 0));
   }, [employeeId]);
 
   // スタッフの固定支給・控除項目、通勤経路を取得（毎月同じ内容を自動で候補に出すため）
@@ -20703,7 +20800,14 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     hourlyWage,
     monthlySalary,
     dailyWage,
+    dailyWageHoliday,
     dailyStandardMinutes,
+    weekdayDays: monthly.weekdayDays,
+    holidayDays: monthly.holidayDays,
+    weekdayOvertimeMinutes: monthly.weekdayOvertimeMin,
+    holidayOvertimeMinutes: monthly.holidayOvertimeMin,
+    weekdayNightMinutes: monthly.weekdayNightMin,
+    holidayNightMinutes: monthly.holidayNightMin,
     workedMinutes: monthly.workedMin,
     overtimeMinutes: monthly.overtimeMin,
     commuteAllowance: commuteRouteTotal > 0 ? commuteRouteTotal : (employee.commuteAllowance || 0),
@@ -20988,6 +21092,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
       hourlyWage: wageType === 'hourly' ? Number(hourlyWage) : employee.hourlyWage,
       monthlySalary: wageType === 'monthly' ? Number(monthlySalary) : employee.monthlySalary,
       dailyWage: wageType === 'daily' ? Number(dailyWage) : employee.dailyWage,
+      dailyWageHoliday: wageType === 'daily' ? Number(dailyWageHoliday) : employee.dailyWageHoliday,
     });
   };
 
@@ -21102,9 +21207,20 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
             </Field>
           )}
           {wageType === 'daily' && (
-            <Field label="日額（円）">
-              <input type="number" value={dailyWage} onChange={(e) => setDailyWage(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px] bg-white" />
-            </Field>
+            <>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="平日の日額（円）">
+                  <input type="number" value={dailyWage} onChange={(e) => setDailyWage(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px] bg-white" />
+                </Field>
+                <Field label="土日祝の日額（円）">
+                  <input type="number" value={dailyWageHoliday} onChange={(e) => setDailyWageHoliday(e.target.value)} placeholder="平日と同じ" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px] bg-white" />
+                </Field>
+              </div>
+              <div className="text-[10.5px] text-slate-500 leading-relaxed">
+                土日祝の日額が未登録（0円）のときは、平日の日額を土日祝にも使います。
+                残業手当・深夜手当・有給休暇手当も、その日が平日か土日祝かでそれぞれの日額から出します。
+              </div>
+            </>
           )}
           {wageType === 'monthly' && (
             <Field label="月給（円）">
@@ -21117,7 +21233,9 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
 
         {/* 日給制。基本給の出し方と、残業の割増基礎単価の根拠を必ず見せます。 */}
         {wageType === 'daily' && (
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <PayrollMetric label="平日の出勤" value={`${monthly.weekdayDays}日`} />
+            <PayrollMetric label="土日祝の出勤" value={`${monthly.holidayDays}日`} />
             <PayrollMetric label="実出勤日数" value={`${monthly.days}日`} />
             <PayrollMetric
               label="1日の所定労働時間"
