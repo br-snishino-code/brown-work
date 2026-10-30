@@ -6146,7 +6146,6 @@ function AttendanceApp() {
                 items={payrollTabItems}
                 activeKey={activePayrollTab}
                 onSelect={setPayrollTab}
-                isDesktop={isDesktop}
               />
               {/* 給与明細・賞与明細はマスター管理者だけが扱う
                   （supabase/72_payslip_master_only.sql）。
@@ -24489,11 +24488,14 @@ function PayrollItemsEditor({ title, items, onChange, addLabel = '項目を追�
 
 // ---- 給与タブのサブタブ ----
 // 給与タブのサブタブバー。勤怠タブのサブタブと同じ見た目にそろえています。
-function PayrollSubTabBar({ items = [], activeKey, onSelect, isDesktop }) {
+function PayrollSubTabBar({ items = [], activeKey, onSelect }) {
   if (!items.length) return null;
-  const width = items.length > 1 ? 'max-w-lg' : 'max-w-[160px]';
+  // 項目ごとに文字の長さが違い、数も多いため、均等割りにすると
+  // 「給与」と「源泉徴収票」が同じ幅になって窮屈になります。
+  // 一つひとつを文字の長さぶんの幅にし、入りきらないときは折り返します。
+  // 枠は中身の幅にとどめます（画面いっぱいに伸びると勤怠タブと見た目が揃わないため）。
   return (
-    <div className={`flex items-center bg-white rounded-2xl border border-slate-200 p-1.5 text-[12.5px] font-bold shadow-sm ${isDesktop ? width : ''}`}>
+    <div className="w-fit max-w-full flex flex-wrap items-center gap-1 bg-white rounded-2xl border border-slate-200 p-1.5 text-[12.5px] font-bold shadow-sm">
       {items.map((t) => {
         const Icon = t.icon;
         const on = activeKey === t.key;
@@ -24502,13 +24504,11 @@ function PayrollSubTabBar({ items = [], activeKey, onSelect, isDesktop }) {
             key={t.key}
             onClick={() => onSelect?.(t.key)}
             aria-current={on ? 'page' : undefined}
-            className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl transition-colors whitespace-nowrap ${
+            className={`flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl transition-colors whitespace-nowrap ${
               on ? 'bg-slate-950 text-white' : 'text-slate-500 hover:bg-slate-50'
             }`}
           >
-            {/* 「給与の設定」は字数が多く、狭い画面ではアイコンと並べると
-                2行に折れてしまうため、スマホではアイコンを出しません。 */}
-            {Icon ? <Icon size={14} className={`hidden sm:block shrink-0 ${on ? 'text-white' : 'text-slate-400'}`} /> : null}
+            {Icon ? <Icon size={14} className={`shrink-0 ${on ? 'text-white' : 'text-slate-400'}`} /> : null}
             {t.label}
           </button>
         );
