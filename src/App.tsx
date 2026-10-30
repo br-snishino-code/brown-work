@@ -42,20 +42,28 @@ const monthKeyLabel = (yearMonth) => {
   const [y, m] = yearMonth.split('-').map(Number);
   return `${y}年${m}月`;
 };
-const CLOCK_IN_STATUS_LABEL = {
-  early_confirmed: '早出（10:00で記録）',
-  early_manual: '早出（実打刻で記録）',
-  forgot_corrected: '打刻漏れ（10:00に自動修正）',
-  late: '遅刻',
-  event: 'イベント',
+// 打刻の区分名。
+// 時刻を書く区分は、その日に記録された規定時刻を入れます（規定勤怠時間は
+// 方ごと・月ごとに違うため、決め打ちにすると実際と合わなくなります）。
+// 規定時刻が残っていない古い記録では、時刻を書かず言葉で表します。
+const clockInStatusLabel = (status, scheduledStart) => {
+  const t = scheduledStart || '規定の開始時刻';
+  if (status === 'early_confirmed') return `早出（${t}で記録）`;
+  if (status === 'early_manual') return '早出（実打刻で記録）';
+  if (status === 'forgot_corrected') return `打刻漏れ（${t}に自動修正）`;
+  if (status === 'late') return '遅刻';
+  if (status === 'event') return 'イベント';
+  return null;
 };
-const CLOCK_OUT_STATUS_LABEL = {
-  overtime: '残業',
-  forgot_corrected_out: '打刻漏れ（19:00に自動修正）',
-  early_event: '早退（イベント・研修）',
-  early_personal: '早退（自己都合）',
-  early_other: '早退（その他）',
-  early_leave: '早退', // 旧バージョンのデータ用
+const clockOutStatusLabel = (status, scheduledEnd) => {
+  const t = scheduledEnd || '規定の退勤時刻';
+  if (status === 'overtime') return '残業';
+  if (status === 'forgot_corrected_out') return `打刻漏れ（${t}に自動修正）`;
+  if (status === 'early_event') return '早退（イベント・研修）';
+  if (status === 'early_personal') return '早退（自己都合）';
+  if (status === 'early_other') return '早退（その他）';
+  if (status === 'early_leave') return '早退'; // 旧バージョンのデータ用
+  return null;
 };
 const CLOCK_OUT_NEEDS_APPROVAL_STATUSES = ['overtime', 'early_event', 'early_personal', 'early_other'];
 const APPROVAL_STATE_LABEL = { pending: '承認待ち', approved: '承認済み', rejected: '却下済み' };
@@ -1797,6 +1805,10 @@ const rowToRecord = (row) => ({
   clockOutLocation: row.clock_out_location,
   scheduledStart: row.scheduled_start || SCHEDULED_START,
   scheduledEnd: row.scheduled_end || SCHEDULED_END,
+  // 規定時刻が実際に記録されているかどうか。上の2つは既定値で埋めてしまうため、
+  // 区分名に時刻を書いてよいかの判断にはこちらを使います。
+  scheduledStartRaw: row.scheduled_start || null,
+  scheduledEndRaw: row.scheduled_end || null,
   clockInActual: row.clock_in_actual,
   clockInStatus: row.clock_in_status,
   clockInNote: row.clock_in_note,
@@ -4198,7 +4210,7 @@ function AttendanceApp() {
     }
     const needsApproval = NEEDS_APPROVAL_STATUSES.includes(confirm.status);
     if (needsApproval) {
-      const reasonLabel = CLOCK_IN_STATUS_LABEL[confirm.status] || confirm.status;
+      const reasonLabel = clockInStatusLabel(confirm.status, scheduledStartForClockIn) || confirm.status;
       await notifyAdmin(
         `【出勤確認】${session.name} - ${reasonLabel}の承認待ち`,
         `${session.name}さんが「${reasonLabel}」として出勤を記録しました（${confirm.note ? `メモ：${confirm.note}` : 'メモなし'}）。内容をご確認のうえ、勤怠一覧上部の「承認待ちの出勤」から承認してください。`,
@@ -4245,7 +4257,7 @@ function AttendanceApp() {
     await refreshData();
     const needsApproval = CLOCK_OUT_NEEDS_APPROVAL_STATUSES.includes(confirm.status);
     if (needsApproval) {
-      const reasonLabel = CLOCK_OUT_STATUS_LABEL[confirm.status] || confirm.status;
+      const reasonLabel = clockOutStatusLabel(confirm.status, existing.scheduledEndRaw) || confirm.status;
       await notifyAdmin(
         `【退勤確認】${session.name} - ${reasonLabel}の承認待ち`,
         `${session.name}さんが「${reasonLabel}」として退勤を記録しました（${confirm.note ? `メモ：${confirm.note}` : 'メモなし'}）。内容をご確認のうえ承認してください。`,
@@ -8635,11 +8647,13 @@ function EmployeeView({ now, todayRecord, todayShift = null, onClockIn, onClockO
     const dayInfo = formatAdminDate(dateKey);
     const hasRecord = !!(r && (r.clockIn || r.clockOut));
     const notes = [];
-    if (r?.clockInStatus && CLOCK_IN_STATUS_LABEL[r.clockInStatus]) {
-      notes.push({ tone: 'text-blue-600', text: `出勤：${CLOCK_IN_STATUS_LABEL[r.clockInStatus]}${r.clockInActual && r.clockInActual !== r.clockIn ? `（実打刻 ${hhmm(new Date(r.clockInActual))}）` : ''}${r.clockInNote ? `・${r.clockInNote}` : ''}` });
+    const clockInLabel = r?.clockInStatus ? clockInStatusLabel(r.clockInStatus, r.scheduledStartRaw) : null;
+    const clockOutLabel = r?.clockOutStatus ? clockOutStatusLabel(r.clockOutStatus, r.scheduledEndRaw) : null;
+    if (clockInLabel) {
+      notes.push({ tone: 'text-blue-600', text: `出勤：${clockInLabel}${r.clockInActual && r.clockInActual !== r.clockIn ? `（実打刻 ${hhmm(new Date(r.clockInActual))}）` : ''}${r.clockInNote ? `・${r.clockInNote}` : ''}` });
     }
-    if (r?.clockOutStatus && CLOCK_OUT_STATUS_LABEL[r.clockOutStatus]) {
-      notes.push({ tone: 'text-purple-600', text: `退勤：${CLOCK_OUT_STATUS_LABEL[r.clockOutStatus]}${r.clockOutActual && r.clockOutActual !== r.clockOut ? `（実打刻 ${hhmm(new Date(r.clockOutActual))}）` : ''}${r.clockOutNote ? `・${r.clockOutNote}` : ''}` });
+    if (clockOutLabel) {
+      notes.push({ tone: 'text-purple-600', text: `退勤：${clockOutLabel}${r.clockOutActual && r.clockOutActual !== r.clockOut ? `（実打刻 ${hhmm(new Date(r.clockOutActual))}）` : ''}${r.clockOutNote ? `・${r.clockOutNote}` : ''}` });
     }
     if (r?.clockInPayDeduction) notes.push({ tone: 'text-rose-600 font-bold', text: `減給あり（出勤）${r.clockInPayDeductionNote ? `・${r.clockInPayDeductionNote}` : ''}` });
     if (r?.clockOutPayDeduction) notes.push({ tone: 'text-rose-600 font-bold', text: `減給あり（退勤）${r.clockOutPayDeductionNote ? `・${r.clockOutPayDeductionNote}` : ''}` });
@@ -13332,8 +13346,10 @@ function AttendanceLedgerTab({ employeeAccounts, records, isDesktop }) {
       const r = mine[key];
       const m = computeMetrics(r);
       const notes = [];
-      if (r?.clockInStatus && CLOCK_IN_STATUS_LABEL[r.clockInStatus]) notes.push(`出勤：${CLOCK_IN_STATUS_LABEL[r.clockInStatus]}`);
-      if (r?.clockOutStatus && CLOCK_OUT_STATUS_LABEL[r.clockOutStatus]) notes.push(`退勤：${CLOCK_OUT_STATUS_LABEL[r.clockOutStatus]}`);
+      const inLabel = r?.clockInStatus ? clockInStatusLabel(r.clockInStatus, r.scheduledStartRaw) : null;
+      const outLabel = r?.clockOutStatus ? clockOutStatusLabel(r.clockOutStatus, r.scheduledEndRaw) : null;
+      if (inLabel) notes.push(`出勤：${inLabel}`);
+      if (outLabel) notes.push(`退勤：${outLabel}`);
       if (r?.breakMinutesOverride != null) notes.push(`休憩を${r.breakMinutesOverride}分に調整`);
       if (r?.clockIn && !r.clockOut) notes.push('退勤打刻なし');
       out.push({
@@ -25585,7 +25601,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
           employeeName: acc.name,
           date: record.date,
           dateShort: formatAdminDate(record.date).label,
-          statusLabel: CLOCK_IN_STATUS_LABEL[record.clockInStatus] || record.clockInStatus,
+          statusLabel: clockInStatusLabel(record.clockInStatus, record.scheduledStartRaw) || record.clockInStatus,
           clockIn: record.clockIn ? hhmm(new Date(record.clockIn)) : '',
           clockInActual: record.clockInActual ? hhmm(new Date(record.clockInActual)) : '',
           note: record.clockInNote || '',
@@ -25598,7 +25614,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
           employeeName: acc.name,
           date: record.date,
           dateShort: formatAdminDate(record.date).label,
-          statusLabel: CLOCK_OUT_STATUS_LABEL[record.clockOutStatus] || record.clockOutStatus,
+          statusLabel: clockOutStatusLabel(record.clockOutStatus, record.scheduledEndRaw) || record.clockOutStatus,
           clockIn: record.clockOut ? hhmm(new Date(record.clockOut)) : '',
           clockInActual: record.clockOutActual ? hhmm(new Date(record.clockOutActual)) : '',
           note: record.clockOutNote || '',
@@ -25634,9 +25650,9 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
       lateMin: metrics?.lateMin ?? 0,
       earlyLeaveMin: metrics?.earlyLeaveMin ?? 0,
       status: computeDayStatus(record).label,
-      clockInStatusLabel: record?.clockInStatus ? (CLOCK_IN_STATUS_LABEL[record.clockInStatus] || '') : '',
+      clockInStatusLabel: (record?.clockInStatus && clockInStatusLabel(record.clockInStatus, record.scheduledStartRaw)) || '',
       clockInActual: record?.clockInActual && record.clockInActual !== record.clockIn ? hhmm(new Date(record.clockInActual)) : '',
-      clockOutStatusLabel: record?.clockOutStatus ? (CLOCK_OUT_STATUS_LABEL[record.clockOutStatus] || '') : '',
+      clockOutStatusLabel: (record?.clockOutStatus && clockOutStatusLabel(record.clockOutStatus, record.scheduledEndRaw)) || '',
       clockOutActual: record?.clockOutActual && record.clockOutActual !== record.clockOut ? hhmm(new Date(record.clockOutActual)) : '',
       needsApproval: record?.clockInApproval === 'pending' || record?.clockOutApproval === 'pending',
       clockInApproval: record?.clockInApproval || null,
@@ -26002,8 +26018,8 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
           return found?.confirmed ? found : null;
         })(),
         needsApproval: record?.clockInApproval === 'pending' || record?.clockOutApproval === 'pending',
-        clockInStatusLabel: record?.clockInStatus ? (CLOCK_IN_STATUS_LABEL[record.clockInStatus] || '') : '',
-        clockOutStatusLabel: record?.clockOutStatus ? (CLOCK_OUT_STATUS_LABEL[record.clockOutStatus] || '') : '',
+        clockInStatusLabel: (record?.clockInStatus && clockInStatusLabel(record.clockInStatus, record.scheduledStartRaw)) || '',
+        clockOutStatusLabel: (record?.clockOutStatus && clockOutStatusLabel(record.clockOutStatus, record.scheduledEndRaw)) || '',
         clockInApproval: record?.clockInApproval || null,
         clockOutApproval: record?.clockOutApproval || null,
         clockInPayDeduction: record?.clockInPayDeduction || false,
