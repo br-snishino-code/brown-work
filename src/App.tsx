@@ -18251,6 +18251,196 @@ async function savePayrollFormulas(values, actor = null) {
   return { ok: true };
 }
 
+// ---- 法定休日 ----
+//
+// 労働基準法第35条は「毎週少なくとも1回」または「4週間を通じて4日以上」の
+// 休日を定めています。この休日に働かせた時間には35%以上の割増が要ります
+// （第37条）。所定休日（会社が決めた休み）に働いても、法定休日が別に
+// 確保されていれば35%は要りません。
+//
+// 御社の就業規則（お伺いした内容）
+//   40条1項 … 休日は日曜・土曜・国民の祝日・年末年始（12/31〜1/1）
+//   40条2項 … 土日祝が必須出勤日の正社員は1か月単位の変形労働時間制。
+//             休日はシフト表で定め、月の初日を起算日とする4週間に4日以上。
+//             法定休日の曜日は特定しない。
+//
+// 曜日を特定していないため、どの日が法定休日かは働き方から決まります。
+// 決め方は会社によって違うので、設定で選べるようにしています。
+const SETTING_STATUTORY_HOLIDAY = 'statutory_holiday';
+
+const WEEKDAY_LABELS = ['日', '月', '火', '水', '木', '金', '土'];
+
+const STATUTORY_HOLIDAY_MODES = {
+  off: '判定しない',
+  weekday: '曜日を決める',
+  weekly: '週に1日（所定休日すべてに出勤した週だけ）',
+  fourWeek: '4週4休（4週間で休日が4日に満たないとき）',
+};
+
+const STATUTORY_HOLIDAY_MODE_DESC = {
+  off: '法定休日労働を判定しません。いまと同じです。',
+  weekday: '毎週この曜日が法定休日です。就業規則で曜日を特定している会社向けです。',
+  weekly: '所定休日（土日祝・12/31）すべてに出勤した週だけ、その週の最後の所定休日に働いた分を法定休日労働とします。曜日を特定していない場合の行政解釈（改正労働基準法に係る質疑応答・平成21年10月5日）に沿った決め方です。',
+  fourWeek: 'シフト表の休みを数え、月の初日を起算日とする4週間（28日）で休日が4日に満たないときだけ、法定休日が確保できなかったものとします。',
+};
+
+// 4週4休で休日が足りなかったとき、どの日の労働を法定休日労働とするか。
+// 確立した通達が見当たらないため、既定は「知らせるだけ」にしています。
+const STATUTORY_SHORTFALL_MODES = {
+  notify: '知らせるだけ（金額は出さない）',
+  lastWorkday: 'その4週間の最後の労働日から不足日数ぶん',
+};
+
+const STATUTORY_HOLIDAY_DEFAULT = {
+  mode: 'off',
+  weekday: 0,        // 0=日曜
+  weekStart: 0,      // 暦週の起算曜日。0=日曜
+  shortfall: 'notify',
+};
+
+const normalizeStatutoryRule = (raw) => {
+  const r = raw && typeof raw === 'object' ? raw : {};
+  const mode = Object.prototype.hasOwnProperty.call(STATUTORY_HOLIDAY_MODES, r.mode)
+    ? r.mode : STATUTORY_HOLIDAY_DEFAULT.mode;
+  const num = (v, min, max, fallback) => {
+    const n = Number(v);
+    return Number.isInteger(n) && n >= min && n <= max ? n : fallback;
+  };
+  return {
+    mode,
+    weekday: num(r.weekday, 0, 6, STATUTORY_HOLIDAY_DEFAULT.weekday),
+    weekStart: num(r.weekStart, 0, 6, STATUTORY_HOLIDAY_DEFAULT.weekStart),
+    shortfall: Object.prototype.hasOwnProperty.call(STATUTORY_SHORTFALL_MODES, r.shortfall)
+      ? r.shortfall : STATUTORY_HOLIDAY_DEFAULT.shortfall,
+  };
+};
+
+// 保存してある設定を読みます。壊れていても画面は動かします。
+function parseStatutoryHoliday(settings) {
+  let raw = null;
+  try { raw = JSON.parse(settings?.[SETTING_STATUTORY_HOLIDAY] || 'null'); } catch { raw = null; }
+  const o = raw && typeof raw === 'object' ? raw : {};
+  const byStaffType = {};
+  if (o.byStaffType && typeof o.byStaffType === 'object') {
+    Object.entries(o.byStaffType).forEach(([k, v]) => {
+      if (k) byStaffType[k] = normalizeStatutoryRule(v);
+    });
+  }
+  return { base: normalizeStatutoryRule(o.base), byStaffType };
+}
+
+// その方に当てる決め方。スタッフ種別の設定があればそちらが勝ちます。
+function statutoryRuleFor(settings, employee) {
+  const { base, byStaffType } = parseStatutoryHoliday(settings);
+  const t = String(employee?.staffType || '').trim();
+  return (t && byStaffType[t]) || base;
+}
+
+async function saveStatutoryHoliday(value, actor = null) {
+  const { error } = await supabase.from('app_settings').upsert(
+    { key: SETTING_STATUTORY_HOLIDAY, value: JSON.stringify(value) },
+    { onConflict: 'key' },
+  );
+  if (error) {
+    console.error('法定休日の設定の保存に失敗しました', error);
+    return false;
+  }
+  await logAudit(actor, '法定休日の設定を変更', '');
+  return true;
+}
+
+// 就業規則40条1項の所定休日。
+// 元日は国民の祝日として入るため、ここで足すのは12/31だけです。
+function isCalendarRestDay(dateKey) {
+  if (isWeekendOrHoliday(dateKey)) return true;
+  return String(dateKey).slice(5) === '12-31';
+}
+
+const addDaysKey = (dateKey, delta) => {
+  const [y, m, d] = String(dateKey).split('-').map(Number);
+  const dt = new Date(y, m - 1, d + delta);
+  return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}`;
+};
+const weekdayOfKey = (dateKey) => {
+  const [y, m, d] = String(dateKey).split('-').map(Number);
+  return new Date(y, m - 1, d).getDay();
+};
+
+// その月のうち、どの日の労働が法定休日労働かを出します。
+//
+//   rule     … statutoryRuleFor で決めた決め方
+//   hasWork  … (dateKey) => その日に出勤の打刻があるか
+//   shiftOf  … (dateKey) => { kind: 'ok'|'off'|'paid' } | null（確定シフト）
+//
+// 戻り値
+//   dates  … 法定休日労働に当たる日（この月のぶんだけ）
+//   notes  … 画面に出す知らせ（判定できない・休日が足りない など）
+function statutoryHolidayWorkDays({ rule, year, month, hasWork, shiftOf = () => null }) {
+  const r = normalizeStatutoryRule(rule);
+  const first = `${year}-${pad(month)}-01`;
+  const lastDay = new Date(year, month, 0).getDate();
+  const last = `${year}-${pad(month)}-${pad(lastDay)}`;
+  const inMonth = (k) => k >= first && k <= last;
+  const dates = [];
+  const notes = [];
+
+  if (r.mode === 'off') return { dates, notes, mode: r.mode };
+
+  if (r.mode === 'weekday') {
+    for (let d = 1; d <= lastDay; d += 1) {
+      const k = `${year}-${pad(month)}-${pad(d)}`;
+      if (weekdayOfKey(k) === r.weekday && hasWork(k)) dates.push(k);
+    }
+    return { dates, notes, mode: r.mode };
+  }
+
+  if (r.mode === 'weekly') {
+    // 月に重なる暦週をすべて見ます。週は月をまたぐので、前後の月の日も見ます。
+    let cur = first;
+    while (weekdayOfKey(cur) !== r.weekStart) cur = addDaysKey(cur, -1);
+    for (; cur <= last; cur = addDaysKey(cur, 7)) {
+      const rest = [];
+      for (let i = 0; i < 7; i += 1) {
+        const k = addDaysKey(cur, i);
+        if (isCalendarRestDay(k)) rest.push(k);
+      }
+      if (rest.length === 0) continue;
+      // 所定休日すべてに出勤した週だけ、法定休日が確保できなかったことになります
+      if (!rest.every((k) => hasWork(k))) continue;
+      const target = rest[rest.length - 1];   // 後順の休日
+      if (inMonth(target)) dates.push(target);
+    }
+    return { dates, notes, mode: r.mode };
+  }
+
+  // 4週4休。月の初日を起算日とする28日間を見ます。
+  const windowDays = [];
+  for (let i = 0; i < 28; i += 1) windowDays.push(addDaysKey(first, i));
+  let rest = 0;
+  let unknown = 0;
+  windowDays.forEach((k) => {
+    const sh = shiftOf(k);
+    if (!sh) { unknown += 1; return; }
+    // 有給は労働日に休むものなので、休日には数えません
+    if (sh.kind === 'off') rest += 1;
+  });
+  if (unknown > 0) {
+    notes.push(`確定シフトが入っていない日が${unknown}日あります（${windowDays[0]}からの4週間）。休日の数を数えられないため、法定休日労働は判定していません。`);
+    return { dates, notes, mode: r.mode, restDays: rest, unknown };
+  }
+  const missing = Math.max(0, 4 - rest);
+  if (missing === 0) return { dates, notes, mode: r.mode, restDays: rest, unknown };
+
+  notes.push(`${windowDays[0]}からの4週間の休日が${rest}日で、4日に${missing}日足りません。`);
+  if (r.shortfall === 'lastWorkday') {
+    const worked = windowDays.filter((k) => hasWork(k));
+    worked.slice(-missing).forEach((k) => { if (inMonth(k)) dates.push(k); });
+  } else {
+    notes.push('どの日を法定休日労働とするかは設定で「知らせるだけ」にしています。金額には入れていません。');
+  }
+  return { dates, notes, mode: r.mode, restDays: rest, unknown, missing };
+}
+
 // ---- グループごとの所定勤務時間 ----
 // 遅刻・早退は「打刻の時刻 − その日の記録に入っている所定の始業・終業」で出します。
 // 所定の時刻は、出勤打刻をしたその瞬間に記録へ書き込まれます（あとから規定を
@@ -19326,6 +19516,189 @@ function PremiumBaseSettings({ settings, actor, isMasterAdmin, onSaved }) {
 // ---- 計算のきまりの設定（給与の設定・全社共通） ----
 // 割増率と、控除単価の出し方。どちらも賃金そのものを変えるため、
 // 何がどう変わるかを数式で見せたうえで保存してもらいます。
+function StatutoryHolidaySettings({ settings, employeeAccounts = [], actor, isMasterAdmin, onSaved }) {
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState(() => parseStatutoryHoliday(settings));
+  const [saving, setSaving] = useState(false);
+  const [done, setDone] = useState('');
+  const [error, setError] = useState('');
+
+  const savedJson = settings?.[SETTING_STATUTORY_HOLIDAY] || '';
+  useEffect(() => {
+    setForm(parseStatutoryHoliday(settings));
+    // settings は毎回あたらしい物になるため、中身の文字列を見ています
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savedJson]);
+
+  // 在籍している方のスタッフ種別だけ並べます
+  const staffTypes = useMemo(() => {
+    const live = (employeeAccounts || []).filter((a) => !a.resignationDate);
+    const found = [...new Set(live.map((a) => String(a.staffType || '').trim()).filter(Boolean))];
+    // 設定だけ残っている種別も消さずに出します
+    Object.keys(form.byStaffType).forEach((t) => { if (!found.includes(t)) found.push(t); });
+    return found.sort((a, b) => STAFF_TYPES.indexOf(a) - STAFF_TYPES.indexOf(b));
+  }, [employeeAccounts, form.byStaffType]);
+
+  if (!isMasterAdmin) return null;
+
+  const setBase = (patch) => {
+    setDone(''); setError('');
+    setForm((prev) => ({ ...prev, base: { ...prev.base, ...patch } }));
+  };
+  const setType = (t, patch) => {
+    setDone(''); setError('');
+    setForm((prev) => ({
+      ...prev,
+      byStaffType: { ...prev.byStaffType, [t]: { ...(prev.byStaffType[t] || prev.base), ...patch } },
+    }));
+  };
+  const clearType = (t) => {
+    setDone(''); setError('');
+    setForm((prev) => {
+      const next = { ...prev.byStaffType };
+      delete next[t];
+      return { ...prev, byStaffType: next };
+    });
+  };
+
+  const save = async () => {
+    setSaving(true); setError(''); setDone('');
+    const ok = await saveStatutoryHoliday(form, actor);
+    setSaving(false);
+    if (!ok) { setError('保存できませんでした。'); return; }
+    setDone('法定休日の決め方を保存しました。勤怠一覧の表示に使われます（給与にはまだ反映しません）。');
+    if (onSaved) await onSaved();
+  };
+
+  const overrideCount = Object.keys(form.byStaffType).length;
+
+  // 決め方ひとつぶんの入力欄
+  const ruleFields = (rule, onPatch) => (
+    <div className="space-y-2">
+      <select
+        value={rule.mode}
+        onChange={(e) => onPatch({ mode: e.target.value })}
+        className="w-full border border-slate-200 rounded-lg px-2.5 py-2 text-[12.5px] bg-white"
+      >
+        {Object.entries(STATUTORY_HOLIDAY_MODES).map(([k, label]) => (
+          <option key={k} value={k}>{label}</option>
+        ))}
+      </select>
+      <div className="text-[10.5px] text-slate-500 leading-relaxed">
+        {STATUTORY_HOLIDAY_MODE_DESC[rule.mode]}
+      </div>
+      {rule.mode === 'weekday' && (
+        <Field label="法定休日の曜日">
+          <select
+            value={rule.weekday}
+            onChange={(e) => onPatch({ weekday: Number(e.target.value) })}
+            className="w-full border border-slate-200 rounded-lg px-2.5 py-2 text-[12.5px] bg-white"
+          >
+            {WEEKDAY_LABELS.map((w, i) => <option key={w} value={i}>{w}曜日</option>)}
+          </select>
+        </Field>
+      )}
+      {rule.mode === 'weekly' && (
+        <Field label="週の起算曜日">
+          <select
+            value={rule.weekStart}
+            onChange={(e) => onPatch({ weekStart: Number(e.target.value) })}
+            className="w-full border border-slate-200 rounded-lg px-2.5 py-2 text-[12.5px] bg-white"
+          >
+            {WEEKDAY_LABELS.map((w, i) => <option key={w} value={i}>{w}曜日</option>)}
+          </select>
+        </Field>
+      )}
+      {rule.mode === 'fourWeek' && (
+        <Field label="休日が4日に足りなかったとき">
+          <select
+            value={rule.shortfall}
+            onChange={(e) => onPatch({ shortfall: e.target.value })}
+            className="w-full border border-slate-200 rounded-lg px-2.5 py-2 text-[12.5px] bg-white"
+          >
+            {Object.entries(STATUTORY_SHORTFALL_MODES).map(([k, label]) => (
+              <option key={k} value={k}>{label}</option>
+            ))}
+          </select>
+        </Field>
+      )}
+    </div>
+  );
+
+  return (
+    <div className="rounded-xl border border-slate-200 overflow-hidden">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="w-full px-3.5 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center gap-2 flex-wrap text-left"
+      >
+        <span className="text-[12px] font-bold text-slate-600">法定休日の決め方</span>
+        <span className="text-[11px] text-slate-400">{STATUTORY_HOLIDAY_MODES[form.base.mode]}</span>
+        {overrideCount > 0 && (
+          <span className="text-[10.5px] font-bold text-amber-700">スタッフ種別{overrideCount}件で別の決め方</span>
+        )}
+        <span className="ml-auto text-[11px] font-bold text-slate-500">{open ? '閉じる' : '開く'}</span>
+      </button>
+
+      {open && (
+        <div className="px-3.5 py-3 space-y-4">
+          {error && <div className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-700">{error}</div>}
+          {done && <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-[11px] text-emerald-700">{done}</div>}
+
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-[10.5px] text-amber-800 leading-relaxed">
+            <b className="block">いまは勤怠一覧に出すだけで、給与には反映しません。</b>
+            判定が実際の運用と合っているか確かめてから、休日手当（35%）を入れます。
+            どの決め方にするかは就業規則と合わせる必要があるので、社労士にご確認ください。
+          </div>
+
+          <div className="space-y-2">
+            <div className="text-[11.5px] font-bold text-slate-600">全スタッフ共通</div>
+            {ruleFields(form.base, setBase)}
+          </div>
+
+          <div className="space-y-2 pt-1 border-t border-slate-100">
+            <div className="text-[11.5px] font-bold text-slate-600 pt-2">スタッフ種別ごとに変える</div>
+            <div className="text-[10.5px] text-slate-500 leading-relaxed">
+              設定していない種別は、上の「全スタッフ共通」のとおりになります。
+            </div>
+            <div className="space-y-2">
+              {staffTypes.map((t) => {
+                const own = form.byStaffType[t];
+                return (
+                  <div key={t} className="border border-slate-200 rounded-lg p-2.5 space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-[11.5px] font-bold text-slate-600">{t}</div>
+                      {own ? (
+                        <button onClick={() => clearType(t)} className="text-[10.5px] font-bold text-slate-500 border border-slate-200 rounded-lg px-2 py-1">
+                          共通に戻す
+                        </button>
+                      ) : (
+                        <button onClick={() => setType(t, {})} className="text-[10.5px] font-bold text-amber-600 border border-amber-200 rounded-lg px-2 py-1">
+                          この種別だけ変える
+                        </button>
+                      )}
+                    </div>
+                    {own
+                      ? ruleFields(own, (patch) => setType(t, patch))
+                      : <div className="text-[10.5px] text-slate-400">共通どおり（{STATUTORY_HOLIDAY_MODES[form.base.mode]}）</div>}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <button
+            onClick={save}
+            disabled={saving}
+            className="w-full py-2.5 rounded-lg bg-slate-800 disabled:bg-slate-200 text-white text-[12.5px] font-bold"
+          >
+            {saving ? '保存中…' : '法定休日の決め方を保存する'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PayrollFormulaSettings({ settings, actor, isMasterAdmin, onSaved }) {
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(() => parsePayrollFormulas(settings));
@@ -23770,6 +24143,13 @@ function PayrollSettingsTab({ settings, employeeAccounts = [], groupAttendanceSc
         isMasterAdmin={isMasterAdmin}
         onSaved={onRefresh}
       />
+      <StatutoryHolidaySettings
+        settings={settings}
+        employeeAccounts={employeeAccounts}
+        actor={session}
+        isMasterAdmin={isMasterAdmin}
+        onSaved={onRefresh}
+      />
       <PremiumBaseSettings
         settings={settings}
         actor={session}
@@ -26091,6 +26471,24 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
     recordedDays.filter((r) => r.scheduledStart && r.scheduledEnd).map((r) => `${r.scheduledStart}〜${r.scheduledEnd}`)
   ));
 
+  // 法定休日労働の判定。いまは画面に出すだけで、給与には入れていません。
+  const statutory = (() => {
+    const employee = (data.accounts || []).find((a) => a.id === employeeId) || null;
+    const rule = statutoryRuleFor(data.settings, employee);
+    const mine = data.records[employeeId] || {};
+    return statutoryHolidayWorkDays({
+      rule,
+      year: y,
+      month: m,
+      hasWork: (k) => !!mine[k]?.clockIn,
+      shiftOf: (k) => {
+        const found = shiftForDate(data.shiftRequests, employeeId, k, data.shiftAssignments);
+        return found?.confirmed ? found : null;
+      },
+    });
+  })();
+  const statutoryDates = new Set(statutory.dates);
+
   const saveAll = async () => {
     setSavingAll(true);
     const changes = Object.entries(edits).map(([dateStr, patch]) => ({ employeeId, date: dateStr, patch }));
@@ -26140,6 +26538,29 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
         <StatMini label="総残業" value={minutesToHHMM(totalOvertime)} />
         <StatMini label="遅刻・早退" value={`${totalLate}分`} />
       </div>
+
+      {/* 法定休日労働。いまは知らせるだけで、給与には入れていません。 */}
+      {(statutory.dates.length > 0 || statutory.notes.length > 0) && (
+        <div className="bg-white rounded-2xl border border-rose-200 shadow-sm px-5 py-3.5 space-y-1.5">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-[12.5px] font-bold text-rose-700">法定休日労働</span>
+            <span className="text-[11px] text-slate-500">
+              決め方：{STATUTORY_HOLIDAY_MODES[statutory.mode]}
+            </span>
+          </div>
+          {statutory.dates.length > 0 && (
+            <div className="text-[11.5px] text-slate-700">
+              {statutory.dates.length}日（{statutory.dates.map((k) => formatAdminDate(k).label).join('、')}）
+            </div>
+          )}
+          {statutory.notes.map((n, i) => (
+            <div key={i} className="text-[11px] text-amber-700">{n}</div>
+          ))}
+          <div className="text-[10.5px] text-slate-400">
+            いまは画面に出すだけで、給与には反映していません。決め方は「給与」→「給与の設定」→「法定休日の決め方」で変えられます。
+          </div>
+        </div>
+      )}
 
       {/* 所定の始業・終業。遅刻・早退はこの時刻との差で出るため、
           規定勤怠時間の登録漏れで違う時刻が入っていると遅刻が付いてしまいます。
@@ -26230,6 +26651,9 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
                     <tr key={r.date} className={`border-b border-slate-100 last:border-0 ${r.needsApproval ? 'bg-amber-50/60' : r.isToday ? 'bg-sky-50/70' : r.isFuture ? 'bg-slate-50/60' : ''}`}>
                       <td className="px-3 py-2 whitespace-nowrap">
                         <div className={`font-mono font-semibold ${r.textClass}`}>{r.label}</div>
+                        {statutoryDates.has(r.date) && (
+                          <div className="mt-0.5 inline-block rounded px-1.5 py-0.5 bg-rose-50 text-rose-700 text-[9.5px] font-bold">法定休日労働</div>
+                        )}
                         {r.shift && <div className="mt-0.5"><ShiftBadge shift={r.shift} compact /></div>}
                       </td>
                       <td className="px-3 py-2">
@@ -26300,6 +26724,9 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-1.5">
                       <div className={`font-mono text-[13px] font-semibold ${r.textClass}`}>{r.label}</div>
+                      {statutoryDates.has(r.date) && (
+                        <span className="rounded px-1.5 py-0.5 bg-rose-50 text-rose-700 text-[9.5px] font-bold">法定休日労働</span>
+                      )}
                       <ShiftBadge shift={r.shift} />
                     </div>
                     {isMasterAdmin && r.hasRecord && (
