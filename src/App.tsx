@@ -3561,6 +3561,43 @@ function AttendanceApp() {
     await notify(subject, body, relatedId, targetEmployeeId, 'employee');
   };
 
+  // スタッフコードでのログイン。
+  //   true    … 入れた（セッションを受け取って設定済み）
+  //   false   … 入れなかった
+  //   'blocked' … 失敗が続いたため止められた
+  // コードが無い場合もパスワード違いも、Edge Function は同じ文言を返す。
+  // どちらなのかが分かると、コードの存在を試せてしまうため。
+  const loginByStaffCode = async (staffCode, password) => {
+    try {
+      const { data, error } = await supabase.functions.invoke('login-by-staff-code', {
+        body: { staffCode, password },
+      });
+      if (error || !data?.access_token || !data?.refresh_token) {
+        // 止められたのか、ただ入れなかったのかを見分ける。
+        // 2xx 以外のときは data が空になるため、本文は error.context から読む
+        //（create-employee などと同じやり方）。
+        let detail = data?.error || '';
+        if (!detail && error?.context) {
+          try {
+            const body = await error.context.json();
+            detail = body?.error || body?.message || '';
+          } catch (_) {
+            try { detail = await error.context.text(); } catch (__) { /* noop */ }
+          }
+        }
+        return String(detail).includes('お待ちください') ? 'blocked' : false;
+      }
+      const { error: setError } = await supabase.auth.setSession({
+        access_token: data.access_token,
+        refresh_token: data.refresh_token,
+      });
+      return !setError;
+    } catch (e) {
+      console.error('スタッフコードでのログインに失敗しました', e);
+      return false;
+    }
+  };
+
   const handleLogin = async (username, password) => {
     try {
       const { error } = await supabase.auth.signInWithPassword({
@@ -3568,14 +3605,39 @@ function AttendanceApp() {
         password,
       });
       if (error) {
+        // メールアドレス（ログインID）では入れなかった。
+        // 「@」が無ければスタッフコードかもしれないので、そちらで試す。
+        // コードでの照会は認証前なので、ブラウザからは引けない。
+        // Edge Function の中で照会とログインを続けて行い、
+        // 外には入れたかどうかだけが返る（supabase/functions/login-by-staff-code）。
+        if (!username.includes('@')) {
+          const byCode = await loginByStaffCode(username, password);
+          if (byCode === 'blocked') {
+            show('ログインの失敗が続いたため、しばらくお待ちください', 'warn');
+            return false;
+          }
+          if (byCode) {
+            if (await needsMfaChallenge()) {
+              setMfaPending(true);
+              return 'mfa';
+            }
+            await loadSessionAndData();
+            show('おかえりなさい', 'success');
+            return true;
+          }
+        }
         // 失敗を記録する（管理画面の監査ログで確認できる）。
         // パスワードは送らない。記録に失敗してもログイン画面の動きは変えない。
-        supabase.functions
-          .invoke('record-login-attempt', {
-            body: { username, reason: 'ユーザー名またはパスワードが違います' },
-          })
-          .catch(() => undefined);
-        show('ユーザー名またはパスワードが違います', 'warn');
+        // スタッフコードで試した分は Edge Function 側が記録しているため、
+        // ここでは「@」を含む入力のときだけ記録する（二重に残さない）。
+        if (username.includes('@')) {
+          supabase.functions
+            .invoke('record-login-attempt', {
+              body: { username, reason: 'ログインIDまたはパスワードが違います' },
+            })
+            .catch(() => undefined);
+        }
+        show('ログインIDまたはパスワードが違います', 'warn');
         return false;
       }
       // 2段階認証を設定している場合、ここではまだ aal1。
@@ -6457,14 +6519,14 @@ function LoginScreen({ onLogin, toast, linkError = '', onClearLinkError }) {
           <>
             <form onSubmit={submit} className="bg-white rounded-2xl p-6 space-y-4 border-2 border-slate-200 shadow-lg">
               <div>
-                <label className="block text-[12.5px] font-bold text-slate-800 mb-1.5">ユーザー名（メールアドレスでも可）</label>
+                <label className="block text-[12.5px] font-bold text-slate-800 mb-1.5">メールアドレスまたはスタッフコード</label>
                 <div className="flex items-center border-2 border-slate-200 rounded-xl px-3.5 gap-2 focus-within:border-slate-900 transition-colors">
                   <User size={16} className="text-slate-400 shrink-0" />
                   <input
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
                     className="w-full py-3 text-[15px] outline-none bg-transparent text-slate-800"
-                    placeholder="ユーザー名またはメールアドレス"
+                    placeholder="メールアドレスまたはスタッフコード"
                     autoCapitalize="none"
                     autoFocus
                     required
@@ -6523,7 +6585,7 @@ function LoginScreen({ onLogin, toast, linkError = '', onClearLinkError }) {
                     value={forgotInput}
                     onChange={(e) => setForgotInput(e.target.value)}
                     className="w-full border-2 border-slate-200 rounded-xl px-3.5 py-3 text-[15px] outline-none focus:border-slate-900"
-                    placeholder="ユーザー名またはメールアドレス"
+                    placeholder="メールアドレスまたはスタッフコード"
                     autoCapitalize="none"
                     autoFocus
                     required
