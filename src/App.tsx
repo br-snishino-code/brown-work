@@ -360,6 +360,7 @@ function buildInviteMail({ name, email, tempPassword, requireProfileSetup = true
 // 以前の値で登録されている方は supabase/84_staff_type_rename.sql でまとめて
 // 「正社員」に変えています。
 const STAFF_TYPES = [
+  '役員',
   '正社員',
   'スポット',
   '外部',
