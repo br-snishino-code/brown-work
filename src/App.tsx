@@ -1182,6 +1182,7 @@ const EMPLOYEE_SENSITIVE_COLUMNS = [
   'spouse_status', 'spouse_annual_income', 'spouse_monthly_income',
   'family_members',
   'resident_tax_municipality_code', 'resident_tax_municipality',
+  'resident_tax_payment_municipality_code', 'resident_tax_payment_municipality',
   'resident_tax_collection_method',
   'tax_table_type', 'is_non_resident',
   'disability_classification', 'is_working_student',
@@ -1768,6 +1769,8 @@ const rowToAccount = (row) => ({
   familyMembers: Array.isArray(row.family_members) ? row.family_members : [],
   residentTaxMunicipalityCode: row.resident_tax_municipality_code || '',
   residentTaxMunicipality: row.resident_tax_municipality || '',
+  residentTaxPaymentMunicipalityCode: row.resident_tax_payment_municipality_code || '',
+  residentTaxPaymentMunicipality: row.resident_tax_payment_municipality || '',
   residentTaxCollectionMethod: row.resident_tax_collection_method || '特別徴収',
   taxTableType: row.tax_table_type || '甲欄',
   isNonResident: !!row.is_non_resident,
@@ -4693,6 +4696,8 @@ function AttendanceApp() {
       familyMembers: 'family_members',
       residentTaxMunicipalityCode: 'resident_tax_municipality_code',
       residentTaxMunicipality: 'resident_tax_municipality',
+      residentTaxPaymentMunicipalityCode: 'resident_tax_payment_municipality_code',
+      residentTaxPaymentMunicipality: 'resident_tax_payment_municipality',
       residentTaxCollectionMethod: 'resident_tax_collection_method',
       taxTableType: 'tax_table_type',
       isNonResident: 'is_non_resident',
@@ -6931,6 +6936,69 @@ const loadZenginBranches = () => {
   }
   return zenginCache.branchesPromise;
 };
+
+// ---- 市区町村マスター（総務省の全国地方公共団体コード）----
+// public/citycode/municipalities.json を、必要になった時だけ読み込む。
+// 住民税の納付先・給与支払報告書の提出先を選ぶのに使う。
+const municipalityCache = { data: null, promise: null };
+
+const loadMunicipalities = () => {
+  if (municipalityCache.data) return Promise.resolve(municipalityCache.data);
+  if (!municipalityCache.promise) {
+    municipalityCache.promise = fetch('/citycode/municipalities.json')
+      .then((r) => (r.ok ? r.json() : { prefs: [], cities: [] }))
+      .then((j) => {
+        const data = {
+          source: j.source || '',
+          prefs: j.prefs || [],
+          // [コード, 都道府県名, 市区町村名, カナ]
+          cities: j.cities || [],
+        };
+        municipalityCache.data = data;
+        return data;
+      })
+      .catch(() => ({ source: '', prefs: [], cities: [] }));
+  }
+  return municipalityCache.promise;
+};
+
+// 市区町村名の表示。都道府県名を付けた形にそろえます
+//（「福知山市」だけだと、同じ名前の市区町村と見分けがつかないため）。
+const municipalityLabel = (c) => (c ? `${c[1]}${c[2]}` : '');
+
+// 入力された名前から市区町村を1件に決めます。
+// 「京都府福知山市」でも「福知山市」でも探せますが、
+// 同じ名前が複数あるとき（府中市・伊達市など）は決めません。
+function findMunicipalityByName(cities, input) {
+  const key = String(input || '').replace(/[\s　]/g, '');
+  if (!key) return null;
+  const full = cities.filter((c) => municipalityLabel(c) === key);
+  if (full.length === 1) return full[0];
+  const bare = cities.filter((c) => c[2] === key);
+  return bare.length === 1 ? bare[0] : null;
+}
+
+// 住所の先頭から市区町村を読み取ります。
+// 「京都府京都市中京区…」のように区まで続く住所でも、市までで止めます
+// （住民税の納付先・提出先は市区町村なので、政令指定都市は市が単位です）。
+function findMunicipalityInAddress(cities, address) {
+  const a = String(address || '').replace(/[\s　]/g, '');
+  if (!a) return null;
+  // 都道府県から書かれている住所。いちばん長く一致したものを採ります
+  let best = null;
+  let bestLen = 0;
+  for (const c of cities) {
+    const full = municipalityLabel(c);
+    if (a.startsWith(full) && full.length > bestLen) { best = c; bestLen = full.length; }
+  }
+  if (best) return best;
+  // 都道府県が書かれていない住所。市区町村名だけで探し、1件に決まるときだけ採ります
+  const hits = cities.filter((c) => a.startsWith(c[2]));
+  if (hits.length === 0) return null;
+  const maxLen = Math.max(...hits.map((c) => c[2].length));
+  const longest = hits.filter((c) => c[2].length === maxLen);
+  return longest.length === 1 ? longest[0] : null;
+}
 
 // 表記ゆれを吸収して比較するためのキー（全角半角・空白・株式会社の有無）
 const bankKey = (v) => String(v || '').normalize('NFKC').replace(/[\s　]/g, '').replace(/^株式会社/, '').replace(/株式会社$/, '').toLowerCase();
@@ -31032,6 +31100,118 @@ function WithholdingDependentsPanel({ employee, actor, isMasterAdmin, taxTableTy
   );
 }
 
+// 住民税の納付先・給与支払報告書の提出先を選ぶ欄。
+// コードと名称のどちらを入れても、もう一方が自動で入ります。
+// 住所から取ることもできますが、住所は手入力なので当たらないことがあります。
+// そのときは候補から選び直してください（間違ったまま保存しないよう、
+// 一致していない間は赤字で知らせます）。
+function MunicipalityField({
+  listId, title, code, name, onChange,
+  address = '', residentAddress = '', disabled = false,
+}) {
+  const [data, setData] = useState(null);
+  const [notice, setNotice] = useState('');
+  useEffect(() => { loadMunicipalities().then(setData); }, []);
+  const cities = data ? data.cities : [];
+
+  const matched = useMemo(() => {
+    if (!cities.length) return null;
+    const c = String(code || '').trim();
+    return c ? cities.find((x) => x[0] === c) || null : null;
+  }, [cities, code]);
+
+  const set = (c) => {
+    setNotice('');
+    onChange({ code: c[0], name: municipalityLabel(c) });
+  };
+
+  const onCode = (raw) => {
+    const v = onlyDigits(raw).slice(0, 6);
+    const hit = cities.find((x) => x[0] === v);
+    setNotice('');
+    onChange({ code: v, name: hit ? municipalityLabel(hit) : name });
+  };
+
+  const onName = (raw) => {
+    const hit = findMunicipalityByName(cities, raw);
+    setNotice('');
+    onChange({ code: hit ? hit[0] : code, name: raw });
+  };
+
+  const fromAddress = (src, label) => {
+    const hit = findMunicipalityInAddress(cities, src);
+    if (!hit) {
+      setNotice(src
+        ? `${label}から市区町村を読み取れませんでした。下の欄から選んでください。`
+        : `${label}が登録されていません。`);
+      return;
+    }
+    set(hit);
+  };
+
+  // コードと名称が食い違っていないか
+  const mismatch = !!(matched && String(name || '').replace(/[\s　]/g, '')
+    && municipalityLabel(matched) !== String(name || '').replace(/[\s　]/g, ''));
+  const unknownCode = !!(String(code || '').trim() && cities.length > 0 && !matched);
+
+  return (
+    <div className="border border-slate-200 rounded-xl p-3 space-y-2">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="text-[11.5px] font-bold text-slate-500">{title}</div>
+        <div className="flex gap-1.5 flex-wrap">
+          <button
+            type="button" disabled={disabled}
+            onClick={() => fromAddress(residentAddress, '住民票の住所')}
+            className="text-[11px] font-bold text-slate-500 border border-slate-200 rounded-lg px-2.5 py-1.5 disabled:text-slate-300"
+          >
+            住民票の住所から
+          </button>
+          <button
+            type="button" disabled={disabled}
+            onClick={() => fromAddress(address, '現住所')}
+            className="text-[11px] font-bold text-slate-500 border border-slate-200 rounded-lg px-2.5 py-1.5 disabled:text-slate-300"
+          >
+            現住所から
+          </button>
+        </div>
+      </div>
+      <div className="grid grid-cols-[7.5rem_1fr] gap-2">
+        <Field label="コード">
+          <input
+            value={code} onChange={(e) => onCode(e.target.value)} disabled={disabled}
+            inputMode="numeric" placeholder="262013"
+            className="w-full min-w-0 border border-slate-200 rounded-lg px-2.5 py-2 font-mono text-[13px]"
+          />
+        </Field>
+        <Field label="市区町村名">
+          <input
+            list={listId} value={name} onChange={(e) => onName(e.target.value)} disabled={disabled}
+            autoComplete="off" placeholder="京都府福知山市"
+            className="w-full min-w-0 border border-slate-200 rounded-lg px-2.5 py-2 text-[13px]"
+          />
+        </Field>
+      </div>
+      <datalist id={listId}>
+        {cities.map((c) => <option key={c[0]} value={municipalityLabel(c)} />)}
+      </datalist>
+      {notice && <div className="text-[11px] text-amber-700">{notice}</div>}
+      {unknownCode && (
+        <div className="text-[11px] text-rose-600">
+          このコードは一覧にありません。打ち間違いか、合併などで変わった可能性があります。
+        </div>
+      )}
+      {mismatch && (
+        <div className="text-[11px] text-rose-600">
+          コード {code} は「{municipalityLabel(matched)}」です。名称と合っていません。
+        </div>
+      )}
+      {data && data.source && (
+        <div className="text-[10px] text-slate-400">出どころ：{data.source}</div>
+      )}
+    </div>
+  );
+}
+
 function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSaveMyNumber, isMasterAdmin, knownGroups = [], groupAttendanceSchedules = {}, employeeAttendanceSchedule = {}, onSaveEmployeeAttendance, resignationReasons = [], settings = {}, payrollItemOverride = null, actor = null, leaveGrants = [], leaveRequests = [], onLeaveGrantsChanged, isDesktop }) {
   const [activeTab, setActiveTab] = useState('basic');
   const containerRef = useRef(null);
@@ -31281,6 +31461,8 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
     spouseAnnualIncome: account.spouseAnnualIncome != null ? String(account.spouseAnnualIncome) : '',
     spouseMonthlyIncome: account.spouseMonthlyIncome != null ? String(account.spouseMonthlyIncome) : '',
     familyMembers: account.familyMembers || [],
+    residentTaxPaymentMunicipalityCode: account.residentTaxPaymentMunicipalityCode || '',
+    residentTaxPaymentMunicipality: account.residentTaxPaymentMunicipality || '',
     residentTaxMunicipalityCode: account.residentTaxMunicipalityCode || '',
     residentTaxMunicipality: account.residentTaxMunicipality || '',
     residentTaxCollectionMethod: account.residentTaxCollectionMethod || '特別徴収',
@@ -32093,9 +32275,35 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
           <div ref={(el) => (sectionRefs.current.tax = el)} className="space-y-4 pt-1">
             <div className="text-[12px] font-bold text-slate-500 border-b border-slate-100 pb-2">住民税・税区分</div>
               <div className="text-[11px] font-bold text-slate-400">住民税</div>
-              <div className="grid grid-cols-2 gap-3">
-                <Field label="給与支払報告書提出先 市区町村コード"><input value={form.residentTaxMunicipalityCode} onChange={set('residentTaxMunicipalityCode')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px]" /></Field>
-                <Field label="提出先 市区町村"><input value={form.residentTaxMunicipality} onChange={set('residentTaxMunicipality')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px]" /></Field>
+              <MunicipalityField
+                listId="resident-tax-payment-municipalities"
+                title="納付先市区町村（特別徴収の納付先）"
+                code={form.residentTaxPaymentMunicipalityCode}
+                name={form.residentTaxPaymentMunicipality}
+                onChange={({ code, name }) => setForm((f) => ({
+                  ...f,
+                  residentTaxPaymentMunicipalityCode: code,
+                  residentTaxPaymentMunicipality: name,
+                }))}
+                address={form.address}
+                residentAddress={form.residentAddress}
+              />
+              <MunicipalityField
+                listId="resident-tax-report-municipalities"
+                title="給与支払報告書提出先市区町村"
+                code={form.residentTaxMunicipalityCode}
+                name={form.residentTaxMunicipality}
+                onChange={({ code, name }) => setForm((f) => ({
+                  ...f,
+                  residentTaxMunicipalityCode: code,
+                  residentTaxMunicipality: name,
+                }))}
+                address={form.address}
+                residentAddress={form.residentAddress}
+              />
+              <div className="text-[10.5px] text-slate-400 -mt-1">
+                住民税は1月1日に住んでいた市区町村が課税します。
+                納付先と提出先は同じになることが多いですが、別々に登録できます。
               </div>
               <Field label="住民税徴収方法">
                 <select value={form.residentTaxCollectionMethod} onChange={set('residentTaxCollectionMethod')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white">
