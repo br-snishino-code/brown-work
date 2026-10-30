@@ -5,7 +5,7 @@ import { Clock, MapPin, CheckCircle2, XCircle, AlertTriangle, LogIn, LogOut, Fil
 import { supabase, CLOUD_ENABLED, INITIAL_URL, usernameToEmail } from './supabaseClient';
 import {
   OFFICE_INFO_DEFAULTS, OFFICE_FIELD_LABELS, OFFICE_REQUIRED_NENKIN, OFFICE_REQUIRED_HW,
-  missingOfficeFields, makeSjisCodec, checkFields, PREF_CODES,
+  missingOfficeFields, makeSjisCodec, checkFields, PREF_CODES, toHalfKana,
   buildNenkinShutokuFields, buildNenkinSoshitsuFields, buildHwShutokuFields, buildHwSoshitsuFields,
   buildNenkinCsv, buildHwCsv, NENKIN_FILE_NAME, HW_FILE_SHUTOKU, HW_FILE_SOSHITSU,
   NENKIN_SHUTOKU_SPECS, NENKIN_SOSHITSU_SPECS, HW_SHUTOKU_SPECS, HW_SOSHITSU_SPECS,
@@ -19,6 +19,9 @@ import {
   buildNenkinGegakuFields, NENKIN_GEGAKU_SPECS, gegakuTotals, addMonthsToYm, GEGAKU_KINDS,
   buildNenkinSanzenFields, NENKIN_SANZEN_SPECS, buildNenkinIkujiFields, NENKIN_IKUJI_SPECS,
 } from './denshiShinsei';
+import {
+  ZENGIN_KINDS, ZENGIN_ACCOUNT_TYPES, badChars, toZenginText, buildZengin,
+} from './zengin';
 
 // ---- constants ----
 const SCHEDULED_START = '09:00';
@@ -6085,6 +6088,17 @@ function AttendanceApp() {
                   この画面では交通費精算の確認のみ行えます。給与・賞与の内容について確認が必要なときは、
                   総務担当へご依頼ください。ご自身の明細は「自分の勤怠」に切り替えるとご覧になれます。
                 </div>
+              )}
+              {session.role === 'master_admin' && activePayrollTab === 'transfer' && (
+                <PayrollTransferTab
+                  employeeAccounts={employeeAccounts}
+                  payrollRecords={data.payrollRecords}
+                  bonusRecords={data.bonusRecords}
+                  settings={data.settings}
+                  actor={session}
+                  onRefresh={refreshData}
+                  isDesktop={isDesktop}
+                />
               )}
               {session.role === 'master_admin' && activePayrollTab === 'payroll' && (
               <PayrollAdminTab
@@ -15808,11 +15822,12 @@ const floorYen = (n) => {
 const PAYROLL_SUBTABS = {
   payroll: { label: '給与', icon: Wallet },
   bonus: { label: '賞与', icon: Briefcase },
+  transfer: { label: '振込', icon: Download },
   commute: { label: '交通費', icon: MapPin },
   settings: { label: '給与の設定', icon: Settings },
 };
-const PAYROLL_SUBTAB_ORDER = ['payroll', 'bonus', 'commute', 'settings'];
-const PAYROLL_SUBTABS_MASTER_ONLY = ['payroll', 'bonus', 'settings'];
+const PAYROLL_SUBTAB_ORDER = ['payroll', 'bonus', 'transfer', 'commute', 'settings'];
+const PAYROLL_SUBTABS_MASTER_ONLY = ['payroll', 'bonus', 'transfer', 'settings'];
 
 // その権限で出せるサブタブの並び
 function payrollSubTabKeys(role) {
@@ -24414,6 +24429,419 @@ function PayrollSubTabBar({ items = [], activeKey, onSelect, isDesktop }) {
 // サブタブ「給与の設定」の中身。支給・控除項目一覧と、みなし残業の時間数。
 // どちらも全スタッフ共通の設定で、毎月触るものではないため、
 // 給与計算の画面とは別のサブタブに分けています。
+// ---- 給与振込データ（全銀協規定形式）----
+//
+// 振込元（委託者）の情報は銀行から渡されるもので、スタッフの情報からは
+// 作れません。設定として持ちます。
+const SETTING_TRANSFER_PAYER = 'transfer_payer';
+// 銀行名・支店名のカナ。全銀フォーマットに要りますが、手元の金融機関
+// マスターは漢字しか持っていないため、使っている分だけ登録してもらいます。
+const SETTING_BANK_KANA = 'bank_kana';
+
+const TRANSFER_PAYER_DEFAULTS = {
+  consignorCode: '', consignorName: '',
+  bankCode: '', bankKana: '', branchCode: '', branchKana: '',
+  accountType: '普通', accountNumber: '',
+};
+const TRANSFER_PAYER_LABELS = {
+  consignorCode: '委託者コード（10桁）',
+  consignorName: '振込依頼人名（カナ）',
+  bankCode: '銀行コード（4桁）',
+  bankKana: '銀行名（カナ）',
+  branchCode: '支店コード（3桁）',
+  branchKana: '支店名（カナ）',
+  accountType: '預金種目',
+  accountNumber: '口座番号（7桁）',
+};
+const TRANSFER_PAYER_HINTS = {
+  consignorCode: '取引銀行から知らされている番号です。推測せず、銀行の書面でお確かめください。',
+  consignorName: '銀行に届け出ている名義のカナです。',
+};
+
+function parseTransferPayer(settings) {
+  let raw = null;
+  try { raw = JSON.parse(settings?.[SETTING_TRANSFER_PAYER] || 'null'); } catch { raw = null; }
+  const o = raw && typeof raw === 'object' ? raw : {};
+  const out = { ...TRANSFER_PAYER_DEFAULTS };
+  Object.keys(TRANSFER_PAYER_DEFAULTS).forEach((k) => {
+    if (typeof o[k] === 'string') out[k] = o[k];
+  });
+  return out;
+}
+
+async function saveTransferPayer(values, actor = null) {
+  const { error } = await supabase.from('app_settings').upsert(
+    { key: SETTING_TRANSFER_PAYER, value: JSON.stringify(values) },
+    { onConflict: 'key' },
+  );
+  if (error) { console.error('振込元の設定の保存に失敗しました', error); return false; }
+  await logAudit(actor, '振込元の設定を変更', '');
+  return true;
+}
+
+// { "0158": "ｷﾖｳﾄ", "0158-123": "ｶﾒｵｶ" } の形で持ちます
+function parseBankKana(settings) {
+  let raw = null;
+  try { raw = JSON.parse(settings?.[SETTING_BANK_KANA] || 'null'); } catch { raw = null; }
+  const o = raw && typeof raw === 'object' ? raw : {};
+  const out = {};
+  Object.entries(o).forEach(([k, v]) => { if (typeof v === 'string') out[k] = v; });
+  return out;
+}
+
+async function saveBankKana(map, actor = null) {
+  const { error } = await supabase.from('app_settings').upsert(
+    { key: SETTING_BANK_KANA, value: JSON.stringify(map) },
+    { onConflict: 'key' },
+  );
+  if (error) { console.error('銀行名カナの保存に失敗しました', error); return false; }
+  await logAudit(actor, '銀行名・支店名のカナを変更', '');
+  return true;
+}
+
+const bankKanaKey = (bankCode) => String(bankCode || '');
+const branchKanaKey = (bankCode, branchCode) => `${bankCode || ''}-${branchCode || ''}`;
+
+// できた振込データをシフトJISで保存させます（全銀は半角のみなので1文字1バイト）
+function downloadZenginFile(codec, body, fileName) {
+  const bytes = codec.encode(body);
+  const blob = new Blob([bytes], { type: 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function TransferPayerSettings({ settings, actor, onSaved }) {
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState(() => parseTransferPayer(settings));
+  const [saving, setSaving] = useState(false);
+  const [done, setDone] = useState('');
+  const savedJson = settings?.[SETTING_TRANSFER_PAYER] || '';
+  useEffect(() => {
+    setForm(parseTransferPayer(settings));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savedJson]);
+
+  const set = (k) => (e) => { setDone(''); setForm((p) => ({ ...p, [k]: e.target.value })); };
+  const missing = Object.keys(TRANSFER_PAYER_DEFAULTS).filter((k) => !String(form[k] || '').trim());
+
+  const save = async () => {
+    setSaving(true);
+    const ok = await saveTransferPayer(form, actor);
+    setSaving(false);
+    setDone(ok ? '振込元の情報を保存しました。' : '保存できませんでした。');
+    if (ok && onSaved) await onSaved();
+  };
+
+  return (
+    <div className="rounded-xl border border-slate-200 overflow-hidden">
+      <button onClick={() => setOpen((v) => !v)} className="w-full px-3.5 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center gap-2 flex-wrap text-left">
+        <span className="text-[12px] font-bold text-slate-600">振込元（委託者）の情報</span>
+        {missing.length > 0
+          ? <span className="text-[10.5px] font-bold text-amber-700">未登録{missing.length}件</span>
+          : <span className="text-[10.5px] text-slate-400">登録済み</span>}
+        <span className="ml-auto text-[11px] font-bold text-slate-500">{open ? '閉じる' : '開く'}</span>
+      </button>
+      {open && (
+        <div className="px-3.5 py-3 space-y-3">
+          {done && <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-[11px] text-emerald-700">{done}</div>}
+          <div className="text-[10.5px] text-slate-500 leading-relaxed">
+            取引銀行から知らされている内容をそのまま入れてください。
+            こちらで推測して入れることはできません。
+          </div>
+          {Object.keys(TRANSFER_PAYER_DEFAULTS).map((k) => (
+            <Field key={k} label={TRANSFER_PAYER_LABELS[k]}>
+              {k === 'accountType' ? (
+                <select value={form[k]} onChange={set(k)} className="w-full border border-slate-200 rounded-lg px-2.5 py-2 text-[12.5px] bg-white">
+                  {Object.keys(ZENGIN_ACCOUNT_TYPES).map((t) => <option key={t} value={t}>{t}</option>)}
+                </select>
+              ) : (
+                <>
+                  <input
+                    value={form[k]} onChange={set(k)}
+                    className={`w-full min-w-0 border border-slate-200 rounded-lg px-2.5 py-2 text-[12.5px] ${/Code|Number/.test(k) ? 'font-mono' : ''}`}
+                  />
+                  {TRANSFER_PAYER_HINTS[k] && (
+                    <div className="mt-1 text-[10px] text-slate-400">{TRANSFER_PAYER_HINTS[k]}</div>
+                  )}
+                  {/Kana|Name/.test(k) && badChars(toZenginText(form[k], toHalfKana)).length > 0 && (
+                    <div className="mt-1 text-[10.5px] text-rose-600">
+                      使えない文字があります（{badChars(toZenginText(form[k], toHalfKana)).join('')}）。半角カナ・英大文字・数字で入れてください。
+                    </div>
+                  )}
+                </>
+              )}
+            </Field>
+          ))}
+          <button onClick={save} disabled={saving} className="w-full py-2.5 rounded-lg bg-slate-800 disabled:bg-slate-200 text-white text-[12.5px] font-bold">
+            {saving ? '保存中…' : '振込元の情報を保存する'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PayrollTransferTab({ employeeAccounts = [], payrollRecords = [], bonusRecords = [], settings = {}, actor, onRefresh, isDesktop }) {
+  const now = new Date();
+  const defaultTarget = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const [year, setYear] = useState(defaultTarget.getFullYear());
+  const [month, setMonth] = useState(defaultTarget.getMonth() + 1);
+  const [kind, setKind] = useState('salary');
+  // 振込指定日。給与は翌月25日が既定（当月末締め・翌月25日払い）
+  const [payDate, setPayDate] = useState('');
+  const [kanaEdits, setKanaEdits] = useState({});
+  const [savingKana, setSavingKana] = useState(false);
+  // 銀行名・支店名を空欄のまま出すことを、人が確かめたか。
+  // 空欄でよいかは銀行によって違うため、こちらでは決めません。
+  const [kanaAck, setKanaAck] = useState(false);
+  const { codec, failed: codecFailed } = useSjisCodec();
+
+  const payer = parseTransferPayer(settings);
+  const savedKana = parseBankKana(settings);
+  const kanaOf = (key) => (kanaEdits[key] !== undefined ? kanaEdits[key] : (savedKana[key] || ''));
+
+  const defaultPayDate = useMemo(() => {
+    if (kind === 'bonus') return '';
+    const y = month === 12 ? year + 1 : year;
+    const m = month === 12 ? 1 : month + 1;
+    return `${y}-${pad(m)}-25`;
+  }, [kind, year, month]);
+  const effectivePayDate = payDate || defaultPayDate;
+
+  // 対象。公開済みの明細だけを振り込みます（下書きの金額で振り込まないため）
+  const slips = useMemo(() => {
+    const list = kind === 'bonus' ? (bonusRecords || []) : (payrollRecords || []);
+    return list.filter((p) => p.year === year && p.month === month && p.status === 'published');
+  }, [kind, payrollRecords, bonusRecords, year, month]);
+
+  const rows = useMemo(() => slips.map((p) => {
+    const acc = (employeeAccounts || []).find((a) => a.id === p.employeeId) || null;
+    const bankCode = String(acc?.bankCode || '');
+    const branchCode = String(acc?.branchCode || '');
+    return {
+      slip: p,
+      account: acc,
+      name: acc?.name || p.employeeName || '',
+      bankCode,
+      branchCode,
+      bankName: acc?.bankName || '',
+      branchName: acc?.branchName || '',
+      bankKana: kanaOf(bankKanaKey(bankCode)),
+      branchKana: kanaOf(branchKanaKey(bankCode, branchCode)),
+      accountType: ZENGIN_ACCOUNT_TYPES[acc?.accountType || '普通'] || '1',
+      accountNumber: String(acc?.accountNumber || ''),
+      holderKana: toZenginText(acc?.accountHolder || '', toHalfKana),
+      amount: Number(p.totalAmount) || 0,
+      staffNumber: toZenginText(acc?.staffNumber || '', toHalfKana),
+    };
+    // kanaEdits を見るため
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [slips, employeeAccounts, kanaEdits, savedKana]);
+
+  // カナが未登録の銀行・支店
+  const missingKana = useMemo(() => {
+    const seen = new Map();
+    rows.forEach((r) => {
+      if (r.bankCode && !r.bankKana) {
+        seen.set(bankKanaKey(r.bankCode), { key: bankKanaKey(r.bankCode), label: `${r.bankName || r.bankCode}（銀行）`, code: r.bankCode });
+      }
+      if (r.bankCode && r.branchCode && !r.branchKana) {
+        const k = branchKanaKey(r.bankCode, r.branchCode);
+        seen.set(k, { key: k, label: `${r.bankName || r.bankCode} ${r.branchName || r.branchCode}（支店）`, code: r.branchCode });
+      }
+    });
+    return [...seen.values()];
+  }, [rows]);
+
+  const built = useMemo(() => {
+    const [py, pm, pd] = String(effectivePayDate || '').split('-').map(Number);
+    if (!pm || !pd) {
+      return { text: '', count: rows.length, total: rows.reduce((s, r) => s + r.amount, 0), issues: [{ where: '振込指定日', message: '振込指定日を入れてください。' }] };
+    }
+    return buildZengin(
+      { ...payer, accountType: ZENGIN_ACCOUNT_TYPES[payer.accountType] || '1' },
+      rows.map((r) => ({
+        bankCode: r.bankCode, bankKana: r.bankKana, branchCode: r.branchCode, branchKana: r.branchKana,
+        accountType: r.accountType, accountNumber: r.accountNumber,
+        holderKana: r.holderKana, amount: r.amount, staffNumber: r.staffNumber,
+      })),
+      kind,
+      { month: pm, day: pd },
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows, payer, kind, effectivePayDate]);
+
+  const saveKana = async () => {
+    setSavingKana(true);
+    const next = { ...savedKana };
+    Object.entries(kanaEdits).forEach(([k, v]) => {
+      const s = toZenginText(v, toHalfKana).trim();
+      if (s) next[k] = s; else delete next[k];
+    });
+    const ok = await saveBankKana(next, actor);
+    setSavingKana(false);
+    if (ok) { setKanaEdits({}); if (onRefresh) await onRefresh(); }
+  };
+
+  const download = () => {
+    if (!codec || !built.text) return;
+    const stamp = `${year}${pad(month)}`;
+    downloadZenginFile(codec, built.text, `${kind === 'bonus' ? '賞与' : '給与'}振込_${stamp}.txt`);
+  };
+
+  const years = [now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1];
+
+  return (
+    <div className="space-y-5">
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
+        <h2 className="font-bold text-[14px] text-slate-800 flex items-center gap-2">
+          <Download size={16} className="text-slate-400" />振込データの出力
+        </h2>
+        <p className="text-[12px] text-slate-500 leading-relaxed">
+          全銀協規定形式（120バイト固定長・シフトJIS）の振込データを作ります。
+          公開済みの明細の差引支給額を振込金額にします。
+        </p>
+        <div className="rounded-lg bg-amber-50 border border-amber-200 px-4 py-3 text-[11.5px] text-amber-800 leading-relaxed">
+          <b className="block">はじめて出すときは、必ず取引銀行にご確認ください。</b>
+          銀行によって細かい決まりが違うことがあります（改行の有無、銀行名・支店名を
+          空けてよいか、使える記号など）。いきなり本番で流さず、テストデータで
+          受け付けられるか確かめてください。
+        </div>
+
+        <TransferPayerSettings settings={settings} actor={actor} onSaved={onRefresh} />
+
+        <div className={`grid gap-3 ${isDesktop ? 'grid-cols-4' : 'grid-cols-2'}`}>
+          <Field label="種別">
+            <select value={kind} onChange={(e) => { setKind(e.target.value); setPayDate(''); }} className="w-full border border-slate-200 rounded-lg px-2.5 py-2 text-[13px] bg-white">
+              {Object.entries(ZENGIN_KINDS).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+            </select>
+          </Field>
+          <Field label="年">
+            <select value={year} onChange={(e) => { setYear(Number(e.target.value)); setPayDate(''); }} className="w-full border border-slate-200 rounded-lg px-2.5 py-2 text-[13px] bg-white">
+              {years.map((y) => <option key={y} value={y}>{y}年</option>)}
+            </select>
+          </Field>
+          <Field label="月">
+            <select value={month} onChange={(e) => { setMonth(Number(e.target.value)); setPayDate(''); }} className="w-full border border-slate-200 rounded-lg px-2.5 py-2 text-[13px] bg-white">
+              {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => <option key={m} value={m}>{m}月</option>)}
+            </select>
+          </Field>
+          <Field label="振込指定日">
+            <input type="date" value={effectivePayDate} onChange={(e) => setPayDate(e.target.value)} className="w-full border border-slate-200 rounded-lg px-2.5 py-2 font-mono text-[13px]" />
+          </Field>
+        </div>
+        <div className="text-[10.5px] text-slate-400 -mt-1">
+          振込指定日は銀行営業日にしてください。データには月日（MMDD）だけが入ります。
+        </div>
+
+        {missingKana.length > 0 && (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-3.5 py-3 space-y-2">
+            <div className="text-[12px] font-bold text-amber-800">銀行名・支店名のカナが未登録です（{missingKana.length}件）</div>
+            <div className="text-[10.5px] text-amber-800 leading-relaxed">
+              全銀フォーマットはカナで入れる決まりです。登録している金融機関の一覧は漢字しか
+              持っていないため、使っている分だけここで登録してください。一度入れれば次回から使われます。
+              <span className="block pt-0.5">
+                空欄のままでも、コードから銀行側で補う扱いの銀行もあります。
+                空欄で出してよいかは取引銀行にお確かめください。
+              </span>
+            </div>
+            {missingKana.map((m) => (
+              <Field key={m.key} label={m.label}>
+                <input
+                  value={kanaOf(m.key)}
+                  onChange={(e) => setKanaEdits((p) => ({ ...p, [m.key]: e.target.value }))}
+                  placeholder="ｷﾖｳﾄ"
+                  className="w-full min-w-0 border border-slate-200 rounded-lg px-2.5 py-2 font-mono text-[12.5px] bg-white"
+                />
+              </Field>
+            ))}
+            <button onClick={saveKana} disabled={savingKana || Object.keys(kanaEdits).length === 0} className="w-full py-2 rounded-lg bg-amber-600 disabled:bg-slate-200 text-white text-[12px] font-bold">
+              {savingKana ? '保存中…' : 'カナを保存する'}
+            </button>
+            <label className="flex items-start gap-2 text-[11px] text-amber-800 cursor-pointer">
+              <input type="checkbox" checked={kanaAck} onChange={(e) => setKanaAck(e.target.checked)} className="mt-0.5" />
+              <span>取引銀行に確認済みです。銀行名・支店名を空欄のまま出力します。</span>
+            </label>
+          </div>
+        )}
+
+        {rows.length === 0 ? (
+          <div className="rounded-lg bg-slate-50 border border-slate-200 px-4 py-3 text-[12.5px] text-slate-500">
+            公開済みの{ZENGIN_KINDS[kind].label.replace('振込', '')}明細がありません。先に明細を作って公開してください。
+          </div>
+        ) : (
+          <>
+            <div className="grid grid-cols-2 gap-3">
+              <StatMini label="件数" value={`${built.count}件`} />
+              <StatMini label="合計金額" value={formatYen(built.total)} />
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-[11.5px]">
+                <thead><tr className="text-left text-[10px] text-slate-400 border-b border-slate-100">
+                  {['氏名', '銀行', '支店', '種目', '口座番号', '口座名義（カナ）', '金額'].map((h) => (
+                    <th key={h} className="px-2 py-2 font-medium whitespace-nowrap">{h}</th>
+                  ))}
+                </tr></thead>
+                <tbody>{rows.map((r) => (
+                  <tr key={r.slip.id || r.name} className="border-b border-slate-100 last:border-0">
+                    <td className="px-2 py-2 whitespace-nowrap">{r.name}</td>
+                    <td className="px-2 py-2 whitespace-nowrap font-mono">{r.bankCode || '—'} {r.bankKana}</td>
+                    <td className="px-2 py-2 whitespace-nowrap font-mono">{r.branchCode || '—'} {r.branchKana}</td>
+                    <td className="px-2 py-2 whitespace-nowrap">{r.account?.accountType || ''}</td>
+                    <td className="px-2 py-2 whitespace-nowrap font-mono">{r.accountNumber || '—'}</td>
+                    <td className="px-2 py-2 whitespace-nowrap font-mono">{r.holderKana || '—'}</td>
+                    <td className="px-2 py-2 whitespace-nowrap font-mono text-right">{formatYen(r.amount)}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+
+            {built.issues.length > 0 && (
+              <div className="rounded-lg border border-rose-200 bg-rose-50 px-3.5 py-3 space-y-1">
+                <div className="text-[12px] font-bold text-rose-700">
+                  出せません（{built.issues.length}件）。直してから出力してください。
+                </div>
+                {built.issues.slice(0, 12).map((x, i) => (
+                  <div key={i} className="text-[11px] text-rose-700">・{x.where}：{x.message}</div>
+                ))}
+                {built.issues.length > 12 && (
+                  <div className="text-[11px] text-rose-700">…ほか{built.issues.length - 12}件</div>
+                )}
+              </div>
+            )}
+
+            {codecFailed && (
+              <div className="rounded-lg border border-rose-200 bg-rose-50 px-3.5 py-3 text-[11.5px] text-rose-700">
+                文字コード表を読み込めませんでした。画面を読み込み直してください。
+              </div>
+            )}
+
+            <button
+              onClick={download}
+              disabled={!codec || built.issues.length > 0 || !built.text || (missingKana.length > 0 && !kanaAck)}
+              className="w-full py-2.5 rounded-lg bg-slate-800 disabled:bg-slate-200 text-white text-[13px] font-bold flex items-center justify-center gap-2"
+            >
+              <Download size={15} />
+              {!codec
+                ? '文字コード表を読み込んでいます…'
+                : (missingKana.length > 0 && !kanaAck)
+                  ? 'カナを登録するか、上の確認にチェックしてください'
+                  : '振込データを出力する'}
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function PayrollSettingsTab({ settings, employeeAccounts = [], groupAttendanceSchedules = {},
   payrollItemOverrides = {}, payrollItemOverridesReady = true,
   session, isMasterAdmin = false, onRefresh, isDesktop }) {
