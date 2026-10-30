@@ -25,6 +25,10 @@ import {
 import {
   buildWithholding, withholdingWarnings, WITHHOLDING_SOCIAL_LABELS,
 } from './withholding';
+import {
+  fiscalYearOfMonth, fiscalYearRange, buildLaborInsurance,
+  laborInsurancePremiums, laborInsuranceWarnings,
+} from './laborInsurance';
 
 // ---- constants ----
 const SCHEDULED_START = '09:00';
@@ -6091,6 +6095,17 @@ function AttendanceApp() {
                   この画面では交通費精算の確認のみ行えます。給与・賞与の内容について確認が必要なときは、
                   総務担当へご依頼ください。ご自身の明細は「自分の勤怠」に切り替えるとご覧になれます。
                 </div>
+              )}
+              {session.role === 'master_admin' && activePayrollTab === 'laborins' && (
+                <LaborInsuranceTab
+                  employeeAccounts={employeeAccounts}
+                  payrollRecords={data.payrollRecords}
+                  bonusRecords={data.bonusRecords}
+                  settings={data.settings}
+                  actor={session}
+                  onRefresh={refreshData}
+                  isDesktop={isDesktop}
+                />
               )}
               {session.role === 'master_admin' && activePayrollTab === 'withholding' && (
                 <WithholdingTab
@@ -15836,11 +15851,12 @@ const PAYROLL_SUBTABS = {
   bonus: { label: '賞与', icon: Briefcase },
   transfer: { label: '振込', icon: Download },
   withholding: { label: '源泉徴収票', icon: FileText },
+  laborins: { label: '労働保険', icon: ShieldCheck },
   commute: { label: '交通費', icon: MapPin },
   settings: { label: '給与の設定', icon: Settings },
 };
-const PAYROLL_SUBTAB_ORDER = ['payroll', 'bonus', 'transfer', 'withholding', 'commute', 'settings'];
-const PAYROLL_SUBTABS_MASTER_ONLY = ['payroll', 'bonus', 'transfer', 'withholding', 'settings'];
+const PAYROLL_SUBTAB_ORDER = ['payroll', 'bonus', 'transfer', 'withholding', 'laborins', 'commute', 'settings'];
+const PAYROLL_SUBTABS_MASTER_ONLY = ['payroll', 'bonus', 'transfer', 'withholding', 'laborins', 'settings'];
 
 // その権限で出せるサブタブの並び
 function payrollSubTabKeys(role) {
@@ -25150,6 +25166,358 @@ function WithholdingTab({ employeeAccounts = [], payrollRecords = [], bonusRecor
 
           <button onClick={exportExcel} className="w-full py-2.5 rounded-lg bg-slate-800 text-white text-[13px] font-bold flex items-center justify-center gap-2">
             <Download size={15} />一覧と内訳をExcelで出力する
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ---- 労働保険の年度更新 ----
+//
+// ⚠ 保険料率はこちらでは決められません。
+//   労災保険率は事業の種類ごと（54業種）、雇用保険率も事業の種類で違います。
+//   設定として登録してもらい、未登録のときは保険料を出しません。
+const SETTING_LABOR_INSURANCE = 'labor_insurance';
+
+const LABOR_INSURANCE_DEFAULTS = {
+  insuranceNumber: '',   // 労働保険番号
+  businessType: '',      // 事業の種類
+  rousaiRate: '',        // 労災保険率（1000分の）
+  koyouRate: '',         // 雇用保険率（1000分の・事業主＋被保険者）
+  ippanRate: '0.02',     // 一般拠出金率（1000分の）
+};
+const LABOR_INSURANCE_LABELS = {
+  insuranceNumber: '労働保険番号',
+  businessType: '事業の種類',
+  rousaiRate: '労災保険率（1000分の）',
+  koyouRate: '雇用保険率（1000分の・事業主＋被保険者）',
+  ippanRate: '一般拠出金率（1000分の）',
+};
+const LABOR_INSURANCE_HINTS = {
+  businessType: '労災保険率表の事業の種類です（例：その他の各種事業）。',
+  rousaiRate: '事業の種類ごとに決まっています。労働局の労災保険率表でお確かめください。',
+  koyouRate: '事業の種類（一般／農林水産・清酒製造／建設）で違います。事業主負担と被保険者負担の合計を入れてください。',
+  ippanRate: '石綿健康被害救済法の一般拠出金です。変わることがあるので、年度更新の案内でお確かめください。',
+};
+
+function parseLaborInsurance(settings) {
+  let raw = null;
+  try { raw = JSON.parse(settings?.[SETTING_LABOR_INSURANCE] || 'null'); } catch { raw = null; }
+  const o = raw && typeof raw === 'object' ? raw : {};
+  const out = { ...LABOR_INSURANCE_DEFAULTS };
+  Object.keys(LABOR_INSURANCE_DEFAULTS).forEach((k) => {
+    if (typeof o[k] === 'string') out[k] = o[k];
+  });
+  return out;
+}
+
+const rateOrNull = (v) => {
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 && String(v).trim() !== '' ? n : null;
+};
+
+async function saveLaborInsurance(values, actor = null) {
+  const { error } = await supabase.from('app_settings').upsert(
+    { key: SETTING_LABOR_INSURANCE, value: JSON.stringify(values) },
+    { onConflict: 'key' },
+  );
+  if (error) { console.error('労働保険の設定の保存に失敗しました', error); return false; }
+  await logAudit(actor, '労働保険の設定を変更', '');
+  return true;
+}
+
+function LaborInsuranceSettings({ settings, actor, onSaved }) {
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState(() => parseLaborInsurance(settings));
+  const [saving, setSaving] = useState(false);
+  const [done, setDone] = useState('');
+  const savedJson = settings?.[SETTING_LABOR_INSURANCE] || '';
+  useEffect(() => {
+    setForm(parseLaborInsurance(settings));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savedJson]);
+
+  const set = (k) => (e) => { setDone(''); setForm((p) => ({ ...p, [k]: e.target.value })); };
+  const missing = ['rousaiRate', 'koyouRate', 'ippanRate'].filter((k) => rateOrNull(form[k]) == null);
+
+  const save = async () => {
+    setSaving(true);
+    const ok = await saveLaborInsurance(form, actor);
+    setSaving(false);
+    setDone(ok ? '労働保険の設定を保存しました。' : '保存できませんでした。');
+    if (ok && onSaved) await onSaved();
+  };
+
+  return (
+    <div className="rounded-xl border border-slate-200 overflow-hidden">
+      <button onClick={() => setOpen((v) => !v)} className="w-full px-3.5 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center gap-2 flex-wrap text-left">
+        <span className="text-[12px] font-bold text-slate-600">労働保険の設定（番号と保険料率）</span>
+        {missing.length > 0
+          ? <span className="text-[10.5px] font-bold text-amber-700">率が未登録{missing.length}件</span>
+          : <span className="text-[10.5px] text-slate-400">登録済み</span>}
+        <span className="ml-auto text-[11px] font-bold text-slate-500">{open ? '閉じる' : '開く'}</span>
+      </button>
+      {open && (
+        <div className="px-3.5 py-3 space-y-3">
+          {done && <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-[11px] text-emerald-700">{done}</div>}
+          <div className="text-[10.5px] text-slate-500 leading-relaxed">
+            保険料率は事業の種類ごとに決まっています。こちらで決めることはできないので、
+            労働局の料率表や年度更新の案内のとおりに入れてください。
+          </div>
+          {Object.keys(LABOR_INSURANCE_DEFAULTS).map((k) => (
+            <Field key={k} label={LABOR_INSURANCE_LABELS[k]}>
+              <input
+                value={form[k]} onChange={set(k)}
+                inputMode={k.endsWith('Rate') ? 'decimal' : undefined}
+                className={`w-full min-w-0 border border-slate-200 rounded-lg px-2.5 py-2 text-[12.5px] ${k.endsWith('Rate') || k === 'insuranceNumber' ? 'font-mono' : ''}`}
+              />
+              {LABOR_INSURANCE_HINTS[k] && <div className="mt-1 text-[10px] text-slate-400">{LABOR_INSURANCE_HINTS[k]}</div>}
+            </Field>
+          ))}
+          <button onClick={save} disabled={saving} className="w-full py-2.5 rounded-lg bg-slate-800 disabled:bg-slate-200 text-white text-[12.5px] font-bold">
+            {saving ? '保存中…' : '労働保険の設定を保存する'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LaborInsuranceTab({ employeeAccounts = [], payrollRecords = [], bonusRecords = [], settings = {}, actor, onRefresh, isDesktop }) {
+  const now = new Date();
+  // 年度更新は6月。既定は直前に終わった年度
+  const defaultFy = now.getMonth() + 1 >= 4 ? now.getFullYear() - 1 : now.getFullYear() - 2;
+  const [fy, setFy] = useState(defaultFy);
+  const conf = parseLaborInsurance(settings);
+  const flags = parsePaymentItemFlags(settings);
+  const rates = {
+    rousai: rateOrNull(conf.rousaiRate),
+    koyou: rateOrNull(conf.koyouRate),
+    ippan: rateOrNull(conf.ippanRate),
+  };
+
+  // 労働保険の賃金に含める支給額の合計。項目ごとの ei の設定を使います
+  const wageOf = (items) => (items || []).reduce(
+    (s, it) => s + (paymentItemFlag(it.label, flags).ei ? (Number(it.amount) || 0) : 0), 0,
+  );
+
+  const people = useMemo(() => (employeeAccounts || []).map((a) => ({
+    employeeId: a.id,
+    name: a.name,
+    employmentInsured: String(a.employmentInsuranceStatus || '') === '加入',
+    // 役員は労働者ではないため、労災保険の賃金総額から外します。
+    // 兼務役員は対象になることがあるので、画面で知らせます。
+    excludedFromRousai: String(a.staffType || '') === '役員',
+  })), [employeeAccounts]);
+
+  const slips = useMemo(() => {
+    const out = [];
+    (payrollRecords || []).filter((p) => p.status === 'published').forEach((p) => {
+      out.push({
+        employeeId: p.employeeId,
+        kind: 'salary',
+        label: `${p.year}年${p.month}月分`,
+        // 締め日ベース。対象月がそのまま年度の区切りになります
+        fiscalYear: fiscalYearOfMonth(p.year, p.month),
+        wage: wageOf(p.paymentItems),
+      });
+    });
+    (bonusRecords || []).filter((b) => b.status === 'published').forEach((b) => {
+      // 賞与は締め日が無いので支給日で年度を決めます
+      const d = String(b.paymentDate || '');
+      const y = d ? Number(d.slice(0, 4)) : b.year;
+      const m = d ? Number(d.slice(5, 7)) : 12;
+      out.push({
+        employeeId: b.employeeId,
+        kind: 'bonus',
+        label: `${b.title || '賞与'}（${d || '支払日未登録'}）`,
+        fiscalYear: fiscalYearOfMonth(y, m),
+        wage: wageOf(b.paymentItems),
+      });
+    });
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [payrollRecords, bonusRecords, settings]);
+
+  const totals = useMemo(() => buildLaborInsurance(people, slips, fy), [people, slips, fy]);
+  const premiums = useMemo(() => laborInsurancePremiums(totals, rates), [totals, rates.rousai, rates.koyou, rates.ippan]);
+  const warnings = useMemo(() => laborInsuranceWarnings(totals, rates), [totals, rates.rousai, rates.koyou, rates.ippan]);
+  const range = fiscalYearRange(fy);
+
+  const years = [now.getFullYear() - 3, now.getFullYear() - 2, now.getFullYear() - 1, now.getFullYear()];
+  const yenOrDash = (v) => (v == null ? '—' : formatYen(v));
+
+  const exportExcel = () => {
+    const wb = XLSX.utils.book_new();
+    const about = [
+      ['労働保険 年度更新（集計）'],
+      [],
+      ['対象年度', `${fy}年度（${range.from}〜${range.to}）`],
+      ['出力日', todayKey()],
+      ['労働保険番号', conf.insuranceNumber || '（未登録）'],
+      ['事業の種類', conf.businessType || '（未登録）'],
+      [],
+      ['■ 集計の決まり'],
+      ['・賃金は「支払が確定した」もので数えています（締め日ベース）。'],
+      ['　当月末締め・翌月25日払いのため、2026年度は2026年4月分〜2027年3月分の給与です'],
+      ['　（支払は2026年5月〜2027年4月）。'],
+      ['・賞与は締め日が無いため、支給日が年度内のもので数えています。'],
+      ['・労働保険の賃金には通勤手当も含みます（所得税で非課税でも含みます）。'],
+      ['　どの項目を含めるかは「支給・控除項目一覧」の設定に従っています。'],
+      ['・労災保険はスタッフ種別が「役員」の方を除いた全員、雇用保険は加入している方だけです。'],
+      ['・公開済みの明細だけを集計しています。下書きは入りません。'],
+      [],
+      ['■ 端数'],
+      ['・保険料算定基礎額（賃金総額）は1,000円未満を切り捨てています。'],
+      ['・保険料は率をかけたあと1円未満を切り捨てています。'],
+      [],
+      ['■ この集計に含まれていないもの'],
+      ['・概算保険料は出していません（当年度の見込み賃金総額が要るためです）。'],
+      ['　原則は前年度の確定額と同額なので、この表の確定額をお使いください。'],
+      ['・労働保険料の申告書そのものではありません。数字を転記してお使いください。'],
+      ['・兼務役員の扱いは判定していません。役員として外した方は下の一覧でご確認ください。'],
+      ...(warnings.length > 0 ? [[''], ['■ 確かめてください'], ...warnings.map((w) => [`・${w.message}`])] : []),
+    ];
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(about), 'この集計について');
+
+    const summary = [
+      [`労働保険 確定保険料（${fy}年度）`],
+      [],
+      ['区分', '賃金総額', '算定基礎額（千円未満切捨）', '保険料率（1000分の）', '保険料'],
+      ['労災保険', totals.rousaiWage, premiums.rousai.base, rates.rousai ?? '（未登録）', premiums.rousai.amount ?? '（率が未登録）'],
+      ['雇用保険', totals.koyouWage, premiums.koyou.base, rates.koyou ?? '（未登録）', premiums.koyou.amount ?? '（率が未登録）'],
+      ['一般拠出金', totals.rousaiWage, premiums.ippan.base, rates.ippan ?? '（未登録）', premiums.ippan.amount ?? '（率が未登録）'],
+      [],
+      ['労働保険料（労災＋雇用）', '', '', '', premiums.laborTotal ?? '（率が未登録）'],
+      ['合計（労働保険料＋一般拠出金）', '', '', '', premiums.grandTotal ?? '（率が未登録）'],
+      [],
+      ['対象人数（労災）', totals.counts.rousai],
+      ['対象人数（雇用保険）', totals.counts.koyou],
+    ];
+    const ws = XLSX.utils.aoa_to_sheet(summary);
+    ws['!cols'] = [{ wch: 30 }, { wch: 14 }, { wch: 24 }, { wch: 20 }, { wch: 16 }];
+    XLSX.utils.book_append_sheet(wb, ws, '確定保険料');
+
+    const list = [
+      [`スタッフ別の賃金（${fy}年度）`],
+      [],
+      ['氏名', '労災の対象', '雇用保険の対象', '給与の賃金', '賞与の賃金', '合計', '給与の回数', '賞与の回数'],
+      ...totals.people.map((p) => [
+        p.name,
+        p.excludedFromRousai ? '対象外（役員）' : '対象',
+        p.employmentInsured ? '対象' : '対象外',
+        p.salaryWage, p.bonusWage, p.wage, p.counts.salary, p.counts.bonus,
+      ]),
+      [],
+      ['労災の賃金総額', '', '', '', '', totals.rousaiWage],
+      ['雇用保険の賃金総額', '', '', '', '', totals.koyouWage],
+    ];
+    const ws2 = XLSX.utils.aoa_to_sheet(list);
+    ws2['!cols'] = [{ wch: 16 }, { wch: 16 }, { wch: 15 }, { wch: 13 }, { wch: 13 }, { wch: 13 }, { wch: 11 }, { wch: 11 }];
+    XLSX.utils.book_append_sheet(wb, ws2, 'スタッフ別');
+
+    XLSX.writeFile(wb, `労働保険年度更新_${fy}年度.xlsx`);
+  };
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
+      <h2 className="font-bold text-[14px] text-slate-800 flex items-center gap-2">
+        <ShieldCheck size={16} className="text-slate-400" />労働保険の年度更新
+      </h2>
+      <p className="text-[12px] text-slate-500 leading-relaxed">
+        年度（4月1日〜翌年3月31日）の賃金総額を集計し、確定保険料を出します。
+        公開済みの明細だけを使います。
+      </p>
+
+      <div className="rounded-lg bg-amber-50 border border-amber-200 px-4 py-3 text-[11.5px] text-amber-800 leading-relaxed">
+        <b className="block">申告書そのものではありません。</b>
+        数字を転記してお使いください。概算保険料は出していません（当年度の見込み賃金総額が
+        要るためです）。原則は前年度の確定額と同額なので、この画面の確定額をお使いください。
+      </div>
+
+      <LaborInsuranceSettings settings={settings} actor={actor} onSaved={onRefresh} />
+
+      <div className={`grid gap-3 ${isDesktop ? 'grid-cols-2' : 'grid-cols-1'}`}>
+        <Field label="対象年度">
+          <select value={fy} onChange={(e) => setFy(Number(e.target.value))} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white">
+            {years.map((y) => <option key={y} value={y}>{y}年度（{y}年4月〜{y + 1}年3月）</option>)}
+          </select>
+        </Field>
+      </div>
+      <div className="text-[10.5px] text-slate-400 -mt-1">
+        賃金は締め日で数えます。当月末締め・翌月25日払いなので、{fy}年度は{fy}年4月分〜{fy + 1}年3月分の給与（支払は{fy}年5月〜{fy + 1}年4月）です。
+      </div>
+
+      {totals.people.length === 0 ? (
+        <div className="rounded-lg bg-slate-50 border border-slate-200 px-4 py-3 text-[12.5px] text-slate-500">
+          {fy}年度に公開済みの明細がありません。
+        </div>
+      ) : (
+        <>
+          <div className="overflow-x-auto">
+            <table className="w-full text-[12px]">
+              <thead><tr className="text-left text-[10px] text-slate-400 border-b border-slate-100">
+                {['区分', '賃金総額', '算定基礎額', '率（1000分の）', '保険料'].map((h) => (
+                  <th key={h} className="px-2 py-2 font-medium whitespace-nowrap">{h}</th>
+                ))}
+              </tr></thead>
+              <tbody>
+                {[
+                  { label: `労災保険（${totals.counts.rousai}名）`, wage: totals.rousaiWage, p: premiums.rousai },
+                  { label: `雇用保険（${totals.counts.koyou}名）`, wage: totals.koyouWage, p: premiums.koyou },
+                  { label: '一般拠出金', wage: totals.rousaiWage, p: premiums.ippan },
+                ].map((x) => (
+                  <tr key={x.label} className="border-b border-slate-100">
+                    <td className="px-2 py-2 whitespace-nowrap">{x.label}</td>
+                    <td className="px-2 py-2 whitespace-nowrap font-mono text-right">{formatYen(x.wage)}</td>
+                    <td className="px-2 py-2 whitespace-nowrap font-mono text-right">{formatYen(x.p.base)}</td>
+                    <td className="px-2 py-2 whitespace-nowrap font-mono text-right">{x.p.rate == null ? '未登録' : x.p.rate}</td>
+                    <td className="px-2 py-2 whitespace-nowrap font-mono text-right font-bold">{yenOrDash(x.p.amount)}</td>
+                  </tr>
+                ))}
+                <tr className="border-b border-slate-100 bg-slate-50">
+                  <td className="px-2 py-2 font-bold" colSpan={4}>労働保険料（労災＋雇用）</td>
+                  <td className="px-2 py-2 font-mono text-right font-bold">{yenOrDash(premiums.laborTotal)}</td>
+                </tr>
+                <tr className="bg-slate-50">
+                  <td className="px-2 py-2 font-bold" colSpan={4}>合計（労働保険料＋一般拠出金）</td>
+                  <td className="px-2 py-2 font-mono text-right font-bold">{yenOrDash(premiums.grandTotal)}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          {warnings.length > 0 && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3.5 py-3 space-y-1">
+              <div className="text-[12px] font-bold text-amber-800">確かめてください</div>
+              {warnings.map((w, i) => <div key={i} className="text-[11px] text-amber-800">・{w.message}</div>)}
+            </div>
+          )}
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-[11.5px]">
+              <thead><tr className="text-left text-[10px] text-slate-400 border-b border-slate-100">
+                {['氏名', '労災', '雇用保険', '給与', '賞与', '合計', '回数'].map((h) => (
+                  <th key={h} className="px-2 py-2 font-medium whitespace-nowrap">{h}</th>
+                ))}
+              </tr></thead>
+              <tbody>{totals.people.map((p) => (
+                <tr key={p.employeeId} className="border-b border-slate-100 last:border-0">
+                  <td className="px-2 py-2 whitespace-nowrap">{p.name}</td>
+                  <td className="px-2 py-2 whitespace-nowrap">{p.excludedFromRousai ? <span className="text-slate-400">対象外</span> : '対象'}</td>
+                  <td className="px-2 py-2 whitespace-nowrap">{p.employmentInsured ? '対象' : <span className="text-slate-400">対象外</span>}</td>
+                  <td className="px-2 py-2 whitespace-nowrap font-mono text-right">{formatYen(p.salaryWage)}</td>
+                  <td className="px-2 py-2 whitespace-nowrap font-mono text-right">{formatYen(p.bonusWage)}</td>
+                  <td className="px-2 py-2 whitespace-nowrap font-mono text-right">{formatYen(p.wage)}</td>
+                  <td className="px-2 py-2 whitespace-nowrap text-right text-slate-500">給与{p.counts.salary}／賞与{p.counts.bonus}</td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+
+          <button onClick={exportExcel} className="w-full py-2.5 rounded-lg bg-slate-800 text-white text-[13px] font-bold flex items-center justify-center gap-2">
+            <Download size={15} />集計をExcelで出力する
           </button>
         </>
       )}
