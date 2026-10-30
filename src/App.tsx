@@ -22,6 +22,9 @@ import {
 import {
   ZENGIN_KINDS, ZENGIN_ACCOUNT_TYPES, badChars, toZenginText, buildZengin,
 } from './zengin';
+import {
+  buildWithholding, withholdingWarnings, WITHHOLDING_SOCIAL_LABELS,
+} from './withholding';
 
 // ---- constants ----
 const SCHEDULED_START = '09:00';
@@ -6088,6 +6091,15 @@ function AttendanceApp() {
                   この画面では交通費精算の確認のみ行えます。給与・賞与の内容について確認が必要なときは、
                   総務担当へご依頼ください。ご自身の明細は「自分の勤怠」に切り替えるとご覧になれます。
                 </div>
+              )}
+              {session.role === 'master_admin' && activePayrollTab === 'withholding' && (
+                <WithholdingTab
+                  employeeAccounts={employeeAccounts}
+                  payrollRecords={data.payrollRecords}
+                  bonusRecords={data.bonusRecords}
+                  settings={data.settings}
+                  isDesktop={isDesktop}
+                />
               )}
               {session.role === 'master_admin' && activePayrollTab === 'transfer' && (
                 <PayrollTransferTab
@@ -15823,11 +15835,12 @@ const PAYROLL_SUBTABS = {
   payroll: { label: '給与', icon: Wallet },
   bonus: { label: '賞与', icon: Briefcase },
   transfer: { label: '振込', icon: Download },
+  withholding: { label: '源泉徴収票', icon: FileText },
   commute: { label: '交通費', icon: MapPin },
   settings: { label: '給与の設定', icon: Settings },
 };
-const PAYROLL_SUBTAB_ORDER = ['payroll', 'bonus', 'transfer', 'commute', 'settings'];
-const PAYROLL_SUBTABS_MASTER_ONLY = ['payroll', 'bonus', 'transfer', 'settings'];
+const PAYROLL_SUBTAB_ORDER = ['payroll', 'bonus', 'transfer', 'withholding', 'commute', 'settings'];
+const PAYROLL_SUBTABS_MASTER_ONLY = ['payroll', 'bonus', 'transfer', 'withholding', 'settings'];
 
 // その権限で出せるサブタブの並び
 function payrollSubTabKeys(role) {
@@ -24838,6 +24851,308 @@ function PayrollTransferTab({ employeeAccounts = [], payrollRecords = [], bonusR
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+// ---- 源泉徴収票 ----
+//
+// ⚠ 年末調整の計算はしていません。
+//   「給与所得控除後の金額」「所得控除の額の合計額」は年末調整をした場合だけ
+//   記入する欄なので、空欄にして摘要に「年調未済」と入れます。
+//   年末調整を別で行う場合は、その結果とあわせてお使いください。
+//
+// 支払った年でまとめます。御社は当月末締め・翌月25日払いなので、
+// 2025年12月分の給与は2026年1月25日払い＝2026年の源泉徴収票に入ります。
+function printWithholdingSlip({ account, result, year, office, warnings }) {
+  const win = window.open('', '_blank', 'width=720,height=900');
+  if (!win) return;
+  const row = (label, value, note = '') =>
+    `<tr><td class="label">${label}</td><td class="value">${value}</td><td class="note">${note}</td></tr>`;
+  const socialRows = WITHHOLDING_SOCIAL_LABELS
+    .filter((k) => (result.socialParts[k] || 0) > 0)
+    .map((k) => `${k} ${formatYen(result.socialParts[k])}`)
+    .join('　');
+  const html = `<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><title>源泉徴収票 ${year}年分 ${account.name}</title>
+<style>
+  body { font-family: -apple-system, "Hiragino Sans", sans-serif; padding: 28px; color: #1e293b; }
+  h1 { font-size: 17px; margin: 0 0 4px; }
+  .sub { font-size: 12px; color: #64748b; margin-bottom: 16px; }
+  table { width: 100%; border-collapse: collapse; margin-bottom: 14px; }
+  td { border: 1px solid #cbd5e1; padding: 7px 10px; font-size: 12.5px; vertical-align: top; }
+  td.label { width: 34%; background: #f8fafc; }
+  td.value { width: 26%; text-align: right; font-variant-numeric: tabular-nums; }
+  td.note { color: #64748b; font-size: 11px; }
+  .warn { border: 1px solid #fbbf24; background: #fffbeb; color: #92400e; padding: 10px 12px; font-size: 11.5px; line-height: 1.7; margin-bottom: 14px; }
+  .foot { font-size: 11px; color: #94a3b8; line-height: 1.8; margin-top: 18px; }
+  @media print { .noprint { display: none; } body { padding: 0; } }
+</style></head>
+<body>
+  <h1>給与所得の源泉徴収票（${year}年分）</h1>
+  <div class="sub">${year}年中に支払った給与・賞与をまとめたものです。</div>
+
+  <div class="warn">
+    <b>年末調整はしていません（年調未済）。</b><br>
+    「給与所得控除後の金額」と「所得控除の額の合計額」は空欄です。
+    年末調整をしていない方は、ご自身で確定申告をしていただく必要があります。
+  </div>
+
+  <table>
+    ${row('支払を受ける者', account.name, account.staffNumber ? `社員番号 ${account.staffNumber}` : '')}
+    ${row('住所', account.address || '（未登録）', '')}
+    ${row('種別', '給料・賞与', `給与${result.counts.salary}回／賞与${result.counts.bonus}回`)}
+    ${row('支払金額', formatYen(result.paymentTotal), `給与 ${formatYen(result.salaryTotal)}／賞与 ${formatYen(result.bonusTotal)}`)}
+    ${row('給与所得控除後の金額', '—', '年末調整をしていないため空欄')}
+    ${row('所得控除の額の合計額', '—', '年末調整をしていないため空欄')}
+    ${row('源泉徴収税額', formatYen(result.incomeTax), '毎月・賞与から差し引いた所得税の合計')}
+    ${row('社会保険料等の金額', formatYen(result.socialInsurance), socialRows)}
+    ${row('摘要', '年調未済', result.nonTaxableTotal > 0 ? `非課税の支給額 ${formatYen(result.nonTaxableTotal)}（支払金額には含めていません）` : '')}
+  </table>
+
+  <table>
+    ${row('支払者　所在地', office.addressKanji || '（未登録）', '')}
+    ${row('支払者　名称', office.nameKanji || '（未登録）', '')}
+  </table>
+
+  ${warnings && warnings.length > 0 ? `<div class="warn"><b>確かめてください</b><br>${warnings.map((w) => `・${w.message}`).join('<br>')}</div>` : ''}
+
+  <div class="foot">
+    この用紙は Brown Work が集計した内容です。税務署へ提出する法定調書の様式ではありません。<br>
+    出力日：${todayKey()}
+  </div>
+  <div class="noprint" style="margin-top:20px"><button onclick="window.print()">印刷する</button></div>
+</body></html>`;
+  win.document.write(html);
+  win.document.close();
+}
+
+function WithholdingTab({ employeeAccounts = [], payrollRecords = [], bonusRecords = [], settings = {}, isDesktop }) {
+  const now = new Date();
+  const [year, setYear] = useState(now.getFullYear());
+  const office = parseOfficeInfo(settings);
+  const flags = parsePaymentItemFlags(settings);
+
+  // 公開済みの明細だけを使います（下書きの金額で源泉徴収票を作らないため）
+  const slipsOf = (employeeId) => {
+    const out = [];
+    (payrollRecords || [])
+      .filter((p) => p.employeeId === employeeId && p.status === 'published')
+      .forEach((p) => {
+        const { paymentYear, paymentMonth } = payrollPaymentMonthFor(p.year, p.month, settings);
+        out.push({
+          kind: 'salary',
+          label: `${paymentYear}年${paymentMonth}月払い（${p.year}年${p.month}月分）`,
+          paymentYear,
+          payments: (p.paymentItems || []).map((it) => ({
+            label: it.label,
+            amount: Number(it.amount) || 0,
+            taxable: paymentItemFlag(it.label, flags).tax,
+          })),
+          deductions: (p.deductionItems || []).map((it) => ({ label: it.label, amount: Number(it.amount) || 0 })),
+        });
+      });
+    (bonusRecords || [])
+      .filter((b) => b.employeeId === employeeId && b.status === 'published')
+      .forEach((b) => {
+        // 賞与は支払日そのものが入っています
+        const py = b.paymentDate ? Number(String(b.paymentDate).slice(0, 4)) : b.year;
+        out.push({
+          kind: 'bonus',
+          label: `${b.title || '賞与'}（${b.paymentDate || '支払日未登録'}）`,
+          paymentYear: py,
+          payments: (b.paymentItems || []).map((it) => ({
+            label: it.label,
+            amount: Number(it.amount) || 0,
+            taxable: paymentItemFlag(it.label, flags).tax,
+          })),
+          deductions: (b.deductionItems || []).map((it) => ({ label: it.label, amount: Number(it.amount) || 0 })),
+        });
+      });
+    return out;
+  };
+
+  // その年に支払いがあった方だけ
+  const rows = useMemo(() => (employeeAccounts || []).map((a) => {
+    const result = buildWithholding(slipsOf(a.id), year);
+    // 入社・退職の月に合わせて、給与の件数の目安を出します
+    const expected = (() => {
+      let n = 12;
+      const hire = String(a.hireDate || '');
+      const quit = String(a.resignationDate || '');
+      if (hire && hire.slice(0, 4) === String(year)) n -= Math.max(0, Number(hire.slice(5, 7)) - 1);
+      if (quit && quit.slice(0, 4) === String(year)) n -= Math.max(0, 12 - Number(quit.slice(5, 7)));
+      return Math.max(0, n);
+    })();
+    return { account: a, result, warnings: withholdingWarnings(result, { expectedSalaryCount: expected }) };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }).filter((r) => r.result.counts.salary > 0 || r.result.counts.bonus > 0),
+  [employeeAccounts, payrollRecords, bonusRecords, settings, year]);
+
+  const officeMissing = !office.addressKanji || !office.nameKanji;
+  const years = [now.getFullYear() - 2, now.getFullYear() - 1, now.getFullYear()];
+
+  const exportExcel = () => {
+    const wb = XLSX.utils.book_new();
+    const about = [
+      ['源泉徴収票（集計）'],
+      [],
+      ['対象年', `${year}年`],
+      ['出力日', todayKey()],
+      ['対象人数', `${rows.length}名`],
+      [],
+      ['■ 年末調整はしていません（年調未済）'],
+      ['「給与所得控除後の金額」「所得控除の額の合計額」は年末調整をした場合だけ記入する欄です。'],
+      ['Brown Work は年末調整の計算を持っていないため、これらは空欄です。'],
+      [],
+      ['■ 集計の決まり'],
+      ['・支払った年でまとめています。対象月ではありません。'],
+      ['　当月末締め・翌月25日払いのため、2025年12月分の給与は2026年1月払い＝2026年に入ります。'],
+      ['・支払金額は、所得税の課税対象になる支給額の合計です。'],
+      ['　通勤手当など非課税の項目は含めていません（項目ごとの設定で決まります）。'],
+      ['・社会保険料等の金額は、健康保険料・介護保険料・厚生年金保険料・雇用保険料の合計です。'],
+      ['・源泉徴収税額は、所得税の控除額の合計です。住民税は入りません。'],
+      ['・公開済みの明細だけを集計しています。下書きは入りません。'],
+      [],
+      ['■ この集計に含まれていないもの'],
+      ['・通勤手当の非課税の限度額を見ていません。限度を超える方は支払金額に入れる必要があります。'],
+      ['・生命保険料控除・地震保険料控除・住宅借入金等特別控除などは入っていません。'],
+      ['・税務署へ提出する法定調書の様式ではありません。'],
+    ];
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(about), 'この集計について');
+
+    const list = [
+      [`源泉徴収票 集計（${year}年分）`],
+      [],
+      ['氏名', '社員番号', '支払金額', '源泉徴収税額', '社会保険料等の金額', '給与の回数', '賞与の回数', '非課税（参考）', '確かめること'],
+      ...rows.map((r) => [
+        r.account.name,
+        r.account.staffNumber || '',
+        r.result.paymentTotal,
+        r.result.incomeTax,
+        r.result.socialInsurance,
+        r.result.counts.salary,
+        r.result.counts.bonus,
+        r.result.nonTaxableTotal,
+        r.warnings.map((w) => w.message).join(' / '),
+      ]),
+    ];
+    const ws = XLSX.utils.aoa_to_sheet(list);
+    ws['!cols'] = [{ wch: 16 }, { wch: 10 }, { wch: 12 }, { wch: 13 }, { wch: 17 }, { wch: 10 }, { wch: 10 }, { wch: 13 }, { wch: 60 }];
+    XLSX.utils.book_append_sheet(wb, ws, '一覧');
+
+    const used = new Set(['この集計について', '一覧']);
+    rows.forEach((r) => {
+      const aoa = [
+        ['源泉徴収票（集計）'],
+        ['氏名', r.account.name, '', '社員番号', r.account.staffNumber || ''],
+        ['対象年', `${year}年`],
+        [],
+        ['支払金額', r.result.paymentTotal],
+        ['源泉徴収税額', r.result.incomeTax],
+        ['社会保険料等の金額', r.result.socialInsurance],
+        ...WITHHOLDING_SOCIAL_LABELS
+          .filter((k) => (r.result.socialParts[k] || 0) > 0)
+          .map((k) => [`　${k}`, r.result.socialParts[k]]),
+        ['非課税の支給額（参考）', r.result.nonTaxableTotal],
+        [],
+        ['明細ごとの内訳'],
+        ['区分', '明細', '課税の支給額', '非課税の支給額', '社会保険料等', '所得税'],
+        ...r.result.rows.map((x) => [
+          x.kind === 'bonus' ? '賞与' : '給与',
+          x.label, x.taxablePayment, x.nonTaxablePayment, x.socialInsurance, x.incomeTax,
+        ]),
+      ];
+      const ws2 = XLSX.utils.aoa_to_sheet(aoa);
+      ws2['!cols'] = [{ wch: 22 }, { wch: 30 }, { wch: 14 }, { wch: 15 }, { wch: 14 }, { wch: 11 }];
+      XLSX.utils.book_append_sheet(wb, ws2, toSheetName(r.account.name, used));
+    });
+    XLSX.writeFile(wb, `源泉徴収票_${year}年分.xlsx`);
+  };
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
+      <h2 className="font-bold text-[14px] text-slate-800 flex items-center gap-2">
+        <FileText size={16} className="text-slate-400" />源泉徴収票
+      </h2>
+      <p className="text-[12px] text-slate-500 leading-relaxed">
+        その年に支払った給与・賞与をまとめます。公開済みの明細だけを使います。
+      </p>
+
+      <div className="rounded-lg bg-amber-50 border border-amber-200 px-4 py-3 text-[11.5px] text-amber-800 leading-relaxed">
+        <b className="block">年末調整の計算はしていません（年調未済）。</b>
+        「給与所得控除後の金額」「所得控除の額の合計額」は空欄になります。
+        年末調整を別で行う場合は、その結果とあわせてお使いください。
+        税務署へ提出する法定調書の様式ではありません。
+      </div>
+
+      <div className={`grid gap-3 ${isDesktop ? 'grid-cols-2' : 'grid-cols-1'}`}>
+        <Field label="対象年（支払った年）">
+          <select value={year} onChange={(e) => setYear(Number(e.target.value))} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white">
+            {years.map((y) => <option key={y} value={y}>{y}年</option>)}
+          </select>
+        </Field>
+      </div>
+      <div className="text-[10.5px] text-slate-400 -mt-1">
+        当月末締め・翌月25日払いのため、{year - 1}年12月分の給与は{year}年1月払いとしてこの年に入ります。
+      </div>
+
+      {officeMissing && (
+        <div className="rounded-lg bg-amber-50 border border-amber-200 px-4 py-3 text-[12px] text-amber-800">
+          支払者（事業所）の所在地・名称が未登録です。「各種申請」→「電子申請」の事業所情報で登録すると、印刷に出ます。
+        </div>
+      )}
+
+      {rows.length === 0 ? (
+        <div className="rounded-lg bg-slate-50 border border-slate-200 px-4 py-3 text-[12.5px] text-slate-500">
+          {year}年に支払った公開済みの明細がありません。
+        </div>
+      ) : (
+        <>
+          <div className="overflow-x-auto">
+            <table className="w-full text-[11.5px]">
+              <thead><tr className="text-left text-[10px] text-slate-400 border-b border-slate-100">
+                {['氏名', '支払金額', '源泉徴収税額', '社会保険料等', '給与', '賞与', ''].map((h, i) => (
+                  <th key={h + i} className="px-2 py-2 font-medium whitespace-nowrap">{h}</th>
+                ))}
+              </tr></thead>
+              <tbody>{rows.map((r) => (
+                <React.Fragment key={r.account.id}>
+                  <tr className="border-b border-slate-100">
+                    <td className="px-2 py-2 whitespace-nowrap">{r.account.name}</td>
+                    <td className="px-2 py-2 whitespace-nowrap font-mono text-right">{formatYen(r.result.paymentTotal)}</td>
+                    <td className="px-2 py-2 whitespace-nowrap font-mono text-right">{formatYen(r.result.incomeTax)}</td>
+                    <td className="px-2 py-2 whitespace-nowrap font-mono text-right">{formatYen(r.result.socialInsurance)}</td>
+                    <td className="px-2 py-2 whitespace-nowrap text-right">{r.result.counts.salary}回</td>
+                    <td className="px-2 py-2 whitespace-nowrap text-right">{r.result.counts.bonus}回</td>
+                    <td className="px-2 py-2 whitespace-nowrap">
+                      <button
+                        onClick={() => printWithholdingSlip({ account: r.account, result: r.result, year, office, warnings: r.warnings })}
+                        className="text-[11px] font-bold text-slate-600 border border-slate-200 rounded-lg px-2.5 py-1.5"
+                      >
+                        印刷
+                      </button>
+                    </td>
+                  </tr>
+                  {r.warnings.length > 0 && (
+                    <tr className="border-b border-slate-100">
+                      <td colSpan={7} className="px-2 pb-2 -mt-1">
+                        {r.warnings.map((w, i) => (
+                          <div key={i} className="text-[10.5px] text-amber-700">・{w.message}</div>
+                        ))}
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              ))}</tbody>
+            </table>
+          </div>
+
+          <button onClick={exportExcel} className="w-full py-2.5 rounded-lg bg-slate-800 text-white text-[13px] font-bold flex items-center justify-center gap-2">
+            <Download size={15} />一覧と内訳をExcelで出力する
+          </button>
+        </>
+      )}
     </div>
   );
 }
