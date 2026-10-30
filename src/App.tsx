@@ -5896,6 +5896,18 @@ function AttendanceApp() {
                 isDesktop={isDesktop}
               />
             )}
+            {/* 賃金台帳には賃金の額が載るため、マスター管理者だけに出します */}
+            {!showStaffScreens && session.role === 'master_admin' && (
+              <WageLedgerTab
+                employeeAccounts={employeeAccounts}
+                records={data.records}
+                payrollRecords={data.payrollRecords}
+                settings={data.settings}
+                shiftRequests={data.shiftRequests}
+                shiftAssignments={data.shiftAssignments}
+                isDesktop={isDesktop}
+              />
+            )}
             {!showStaffScreens && (
               <TurnoverAnalysisTab
                 employeeAccounts={employeeAccounts}
@@ -13383,6 +13395,296 @@ function toSheetName(name, used) {
   }
   used.add(candidate);
   return candidate;
+}
+
+// ---- 賃金台帳の出力（労務タブ）----
+//
+// 労働基準法第108条で、事業場ごとに賃金台帳を調製し、賃金を支払うつど
+// 遅滞なく記入することが義務づけられています。
+// 記載事項は労働基準法施行規則第54条第1項の8つです。
+//   一 氏名
+//   二 性別
+//   三 賃金計算期間
+//   四 労働日数
+//   五 労働時間数
+//   六 時間外労働時間数・休日労働時間数・深夜労働時間数
+//   七 基本給、手当その他賃金の種類ごとにその額
+//   八 賃金の一部を控除した場合は、その額
+// 保存期間は第109条で5年、附則第143条第1項の経過措置により当分の間3年です。
+//
+// 作れない欄があるときは空欄にせず、なぜ出せないかを帳簿に書きます。
+// 空欄のまま出すと、記入漏れなのか対象外なのか分からなくなるためです。
+function WageLedgerTab({ employeeAccounts, records, payrollRecords = [], settings = {}, shiftRequests = [], shiftAssignments = [], isDesktop }) {
+  const now = new Date();
+  // 給与は当月末締め・翌月25日払いのため、既定は前月分
+  const defaultTarget = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const [year, setYear] = useState(defaultTarget.getFullYear());
+  const [month, setMonth] = useState(defaultTarget.getMonth() + 1);
+  const [targetId, setTargetId] = useState('all');
+
+  const lastDay = lastDayOfMonth(year, month);
+  const monthStart = `${year}-${pad(month)}-01`;
+  const monthEnd = `${year}-${pad(month)}-${pad(lastDay)}`;
+  const period = `${year}年${month}月1日〜${year}年${month}月${lastDay}日`;
+
+  // その月に在籍していた人だけを対象にする
+  const targets = useMemo(
+    () => (employeeAccounts || []).filter(
+      (a) => (!a.hireDate || a.hireDate <= monthEnd)
+        && (!a.resignationDate || a.resignationDate >= monthStart),
+    ),
+    [employeeAccounts, monthStart, monthEnd],
+  );
+  const selected = targetId === 'all' ? targets : targets.filter((a) => a.id === targetId);
+
+  // 1人分をまとめる
+  const buildOne = (account) => {
+    const mine = records[account.id] || {};
+    const slip = (payrollRecords || []).find(
+      (p) => p.employeeId === account.id && p.year === year && p.month === month,
+    ) || null;
+
+    // 勤怠（労働日数・労働時間数・深夜労働時間数）
+    const summary = computeMonthlySummary(mine, new Date(year, month - 1, 1));
+
+    // 休日労働時間数。法定休日の決め方が未設定のときは出しません。
+    const rule = statutoryRuleFor(settings, account);
+    const statutory = statutoryHolidayWorkDays({
+      rule,
+      year,
+      month,
+      hasWork: (k) => !!mine[k]?.clockIn,
+      shiftOf: (k) => {
+        const found = shiftForDate(shiftRequests, account.id, k, shiftAssignments);
+        return found?.confirmed ? found : null;
+      },
+    });
+    const holidayMin = statutory.dates.reduce((acc, k) => {
+      const m = computeMetrics(mine[k]);
+      return acc + (m ? m.workedMin : 0);
+    }, 0);
+
+    // 法定休日の労働は時間外労働ではないため、時間外から外します。
+    // いまの残業時間は「その日の所定を超えた分」なので、法定休日に当たる日の
+    // ぶんを引きます。
+    const holidayOvertimeMin = statutory.dates.reduce((acc, k) => {
+      const m = computeMetrics(mine[k]);
+      return acc + (m ? m.overtimeMin : 0);
+    }, 0);
+
+    return {
+      account,
+      slip,
+      days: summary.days,
+      workedMin: summary.workedMin,
+      overtimeMin: Math.max(0, summary.overtimeMin - holidayOvertimeMin),
+      nightMin: summary.nightMin,
+      holidayMin,
+      holidayDates: statutory.dates,
+      statutoryMode: statutory.mode,
+      statutoryNotes: statutory.notes,
+    };
+  };
+
+  const preview = selected.map(buildOne);
+  const noSlip = preview.filter((p) => !p.slip);
+  const unpublished = preview.filter((p) => p.slip && p.slip.status !== 'published');
+  const statutoryOff = preview.some((p) => p.statutoryMode === 'off');
+
+  const exportExcel = () => {
+    const wb = XLSX.utils.book_new();
+
+    // --- この帳簿について ---
+    const about = [
+      ['賃金台帳'],
+      [],
+      ['対象期間（賃金計算期間）', period],
+      ['出力日', todayKey()],
+      ['対象人数', `${selected.length}名`],
+      [],
+      ['■ 根拠'],
+      ['労働基準法第108条（賃金台帳）／同施行規則第54条第1項（記載事項）'],
+      ['保存期間は労働基準法第109条で5年。附則第143条第1項の経過措置により当分の間3年です。'],
+      [],
+      ['■ 賃金計算期間'],
+      ['当月1日から当月末日まで（当月末締め）。支払日は翌月25日です。'],
+      [],
+      ['■ 数字の前提（必ずお読みください）'],
+      ['・労働時間は、終業時刻から始業時刻と休憩を差し引いた時間です。1分単位で集計しています。'],
+      ['・休憩は固定60分で計算しています。実際に休憩を取った時刻は記録していません。'],
+      ['・時間外労働時間数は、1日の所定労働時間を超えた分です。'],
+      ['　週40時間を超えた分は含まれていません。'],
+      ['・深夜労働時間数は、22時から翌5時までの時間帯と勤務時間の重なりです。'],
+      ['　休憩がこの時間帯にかかる場合は差し引けません。'],
+      ['・日をまたぐ勤務には対応していません（夜勤の運用がないため）。'],
+      [],
+      ['■ 休日労働時間数について'],
+      ...(statutoryOff
+        ? [
+          ['法定休日の決め方が未設定のため、休日労働時間数は出していません。'],
+          ['「給与」→「給与の設定」→「法定休日の決め方」で設定すると、この欄が埋まります。'],
+        ]
+        : [
+          ['法定休日に当たる日の労働時間を集計しています。決め方は設定に従います。'],
+          ['法定休日の労働は時間外労働ではないため、時間外労働時間数からは除いています。'],
+        ]),
+      [],
+      ['■ この帳簿に含まれていないもの'],
+      ['・週40時間を超えた分の時間外労働は含まれていません。1日の所定を超えた分のみです。'],
+      ['・管理監督者（労働基準法第41条各号）に該当する方は、労働時間数・時間外等の記入が'],
+      ['　免除されます（施行規則第54条第5項）が、システムで該当者を区別していないため'],
+      ['　全員分を出力しています。'],
+      ...(noSlip.length > 0
+        ? [[''], [`・給与明細が作られていない方が${noSlip.length}名います。賃金の額の欄は空欄です。`]]
+        : []),
+      ...(unpublished.length > 0
+        ? [[`・給与明細が下書きのままの方が${unpublished.length}名います。確定前の金額です。`]]
+        : []),
+    ];
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(about), 'この帳簿について');
+
+    // --- 一覧 ---
+    const listRows = [
+      [`賃金台帳 一覧（${period}）`],
+      [],
+      ['氏名', '性別', '社員番号', '労働日数', '労働時間', '時間外労働時間', '休日労働時間', '深夜労働時間', '支給合計', '控除合計', '差引支給額', '明細の状態'],
+      ...preview.map((p) => [
+        p.account.name,
+        p.account.gender || '',
+        p.account.staffNumber || '',
+        p.days,
+        minutesToHHMM(p.workedMin),
+        minutesToHHMM(p.overtimeMin),
+        p.statutoryMode === 'off' ? '未設定' : minutesToHHMM(p.holidayMin),
+        minutesToHHMM(p.nightMin),
+        p.slip ? sumItems(p.slip.paymentItems || []) : '',
+        p.slip ? sumItems(p.slip.deductionItems || []) : '',
+        p.slip ? p.slip.totalAmount : '',
+        p.slip ? (p.slip.status === 'published' ? '公開済み' : '下書き') : '未作成',
+      ]),
+    ];
+    const listWs = XLSX.utils.aoa_to_sheet(listRows);
+    listWs['!cols'] = [{ wch: 16 }, { wch: 5 }, { wch: 10 }, { wch: 9 }, { wch: 10 }, { wch: 13 }, { wch: 12 }, { wch: 12 }, { wch: 11 }, { wch: 11 }, { wch: 12 }, { wch: 11 }];
+    XLSX.utils.book_append_sheet(wb, listWs, '一覧');
+
+    // --- 1人1シート ---
+    const used = new Set(['この帳簿について', '一覧']);
+    preview.forEach((p) => {
+      const pay = p.slip?.paymentItems || [];
+      const ded = p.slip?.deductionItems || [];
+      const aoa = [
+        ['賃金台帳'],
+        [],
+        ['氏名', p.account.name, '', '性別', p.account.gender || '（未登録）'],
+        ['社員番号', p.account.staffNumber || '', '', '雇用形態', p.account.staffType || ''],
+        ['賃金計算期間', period],
+        ['賃金支払日', `${month === 12 ? year + 1 : year}年${month === 12 ? 1 : month + 1}月25日`],
+        [],
+        ['■ 労働時間（施行規則第54条第1項第四号〜第六号）'],
+        ['労働日数', p.days, '日'],
+        ['労働時間数', minutesToHHMM(p.workedMin)],
+        ['時間外労働時間数', minutesToHHMM(p.overtimeMin)],
+        ['休日労働時間数',
+          p.statutoryMode === 'off' ? '未設定' : minutesToHHMM(p.holidayMin),
+          p.statutoryMode === 'off'
+            ? '法定休日の決め方が未設定のため出していません'
+            : (p.holidayDates.length > 0 ? `法定休日：${p.holidayDates.join('、')}` : '')],
+        ['深夜労働時間数', minutesToHHMM(p.nightMin)],
+        ...(p.statutoryNotes.length > 0 ? [['', '', p.statutoryNotes.join(' ')]] : []),
+        [],
+        ['■ 賃金の種類ごとの額（第七号）'],
+        ...(p.slip
+          ? pay.map((it) => [it.label, Number(it.amount) || 0])
+          : [['給与明細が作られていないため出せません']]),
+        ...(p.slip ? [['支給合計', sumItems(pay)]] : []),
+        [],
+        ['■ 控除（第八号）'],
+        ...(p.slip
+          ? ded.map((it) => [it.label, Number(it.amount) || 0])
+          : [['給与明細が作られていないため出せません']]),
+        ...(p.slip ? [['控除合計', sumItems(ded)]] : []),
+        [],
+        ...(p.slip ? [['差引支給額', p.slip.totalAmount]] : []),
+        ['明細の状態', p.slip ? (p.slip.status === 'published' ? '公開済み' : '下書き（確定前の金額です）') : '未作成'],
+      ];
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      ws['!cols'] = [{ wch: 20 }, { wch: 14 }, { wch: 40 }, { wch: 10 }, { wch: 14 }];
+      XLSX.utils.book_append_sheet(wb, ws, toSheetName(p.account.name, used));
+    });
+
+    const who = targetId === 'all' ? '全員' : (selected[0]?.name || '');
+    XLSX.writeFile(wb, `賃金台帳_${year}年${pad(month)}月_${who}.xlsx`);
+  };
+
+  const years = [now.getFullYear() - 2, now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1];
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
+      <h2 className="font-bold text-[14px] text-slate-800 flex items-center gap-2">
+        <ClipboardList size={16} className="text-slate-400" />賃金台帳の出力
+      </h2>
+      <p className="text-[12px] text-slate-500 leading-relaxed">
+        労働基準法第108条で、事業場ごとに賃金台帳を作り、賃金を支払うつど記入することが
+        義務づけられています。勤怠の記録と、その月の給与明細から作ります。
+      </p>
+
+      <div className={`grid gap-3 ${isDesktop ? 'grid-cols-3' : 'grid-cols-1'}`}>
+        <Field label="年">
+          <select value={year} onChange={(e) => setYear(Number(e.target.value))} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white">
+            {years.map((y) => <option key={y} value={y}>{y}年</option>)}
+          </select>
+        </Field>
+        <Field label="月">
+          <select value={month} onChange={(e) => setMonth(Number(e.target.value))} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white">
+            {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => <option key={m} value={m}>{m}月</option>)}
+          </select>
+        </Field>
+        <Field label="対象">
+          <select value={targetId} onChange={(e) => setTargetId(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white">
+            <option value="all">全員（{targets.length}名）</option>
+            {targets.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+          </select>
+        </Field>
+      </div>
+
+      {selected.length === 0 ? (
+        <div className="rounded-lg bg-slate-50 border border-slate-200 px-4 py-3 text-[12.5px] text-slate-500">
+          この月に在籍していた方がいません。
+        </div>
+      ) : (
+        <>
+          {noSlip.length > 0 && (
+            <div className="rounded-lg bg-amber-50 border border-amber-200 px-4 py-3 text-[12px] text-amber-800 leading-relaxed">
+              <b className="block">給与明細が作られていない方が{noSlip.length}名います。</b>
+              賃金の額の欄が空欄になります（{noSlip.slice(0, 5).map((p) => p.account.name).join('、')}
+              {noSlip.length > 5 ? ' ほか' : ''}）。
+            </div>
+          )}
+          {unpublished.length > 0 && (
+            <div className="rounded-lg bg-amber-50 border border-amber-200 px-4 py-3 text-[12px] text-amber-800 leading-relaxed">
+              給与明細が下書きのままの方が{unpublished.length}名います。確定前の金額で出力されます。
+            </div>
+          )}
+          {statutoryOff && (
+            <div className="rounded-lg bg-amber-50 border border-amber-200 px-4 py-3 text-[12px] text-amber-800 leading-relaxed">
+              <b className="block">休日労働時間数は出せません。</b>
+              法定休日の決め方が未設定のためです。「給与」→「給与の設定」→「法定休日の決め方」で
+              設定すると、この欄が埋まります。
+            </div>
+          )}
+          <div className="rounded-lg bg-slate-50 border border-slate-200 px-4 py-3 text-[11.5px] text-slate-500 leading-relaxed">
+            <div className="font-bold text-slate-600">この帳簿に含まれないもの</div>
+            週40時間を超えた分の時間外は含まれません（1日の所定を超えた分のみ）。
+            前提と限界はExcelの1枚目「この帳簿について」に記載しています。
+          </div>
+
+          <button onClick={exportExcel} className="w-full py-2.5 rounded-lg bg-slate-800 text-white text-[13px] font-bold flex items-center justify-center gap-2">
+            <Download size={15} />賃金台帳をExcelで出力する
+          </button>
+        </>
+      )}
+    </div>
+  );
 }
 
 function AttendanceLedgerTab({ employeeAccounts, records, isDesktop }) {
