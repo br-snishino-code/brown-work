@@ -23621,7 +23621,7 @@ function PayrollItemsEditor({ title, items, onChange, addLabel = '項目を追�
               value={it.label}
               onChange={(e) => update(i, 'label', e.target.value)}
               placeholder="項目名"
-              className="flex-1 border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white"
+              className="flex-1 min-w-0 border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white"
             />
             <input
               type="number"
@@ -29433,7 +29433,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
       </Field>
       <Field label={`仮パスワード（${PASSWORD_RULE_TEXT}）`}>
         <div className="flex gap-2">
-          <input type="text" value={password} onChange={(e) => setPassword(e.target.value)} className="flex-1 border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" placeholder="仮パスワードを入力" />
+          <input type="text" value={password} onChange={(e) => setPassword(e.target.value)} className="flex-1 min-w-0 border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" placeholder="仮パスワードを入力" />
           <button type="button" onClick={() => setPassword(generateTempPassword())} className="shrink-0 text-[12px] font-bold text-slate-500 border border-slate-200 rounded-lg px-3">自動生成</button>
         </div>
         <div className="text-[10.5px] text-slate-400 mt-1">初回ログイン時に、本人がパスワードを変更します。</div>
@@ -31841,7 +31841,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                   return (
                     <div key={i} className="flex items-center gap-2">
                       {/* 候補から選べるようにして、表記のぶれを防ぎます（自由に打つこともできます） */}
-                      <input list="payment-allowance-presets" value={it.label} onChange={(e) => updateSalaryItem(i, 'label', e.target.value)} placeholder="項目名（例：資格手当）" className="flex-1 border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px]" />
+                      <input list="payment-allowance-presets" value={it.label} onChange={(e) => updateSalaryItem(i, 'label', e.target.value)} placeholder="項目名（例：資格手当）" className="flex-1 min-w-0 border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px]" />
                       <input type="number" value={it.amount} onChange={(e) => updateSalaryItem(i, 'amount', e.target.value)} className="w-28 border border-slate-200 rounded-lg px-2.5 py-1.5 font-mono text-[12.5px] text-right" />
                       <button onClick={() => removeSalaryItem(i)} className="text-slate-300 hover:text-rose-500 shrink-0"><Trash2 size={14} /></button>
                     </div>
@@ -31882,7 +31882,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                   const i = salaryItems.indexOf(it);
                   return (
                     <div key={i} className="flex items-center gap-2">
-                      <input list="deduction-item-presets" value={it.label} onChange={(e) => updateSalaryItem(i, 'label', e.target.value)} placeholder="項目名（例：社宅費控除）" className="flex-1 border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px]" />
+                      <input list="deduction-item-presets" value={it.label} onChange={(e) => updateSalaryItem(i, 'label', e.target.value)} placeholder="項目名（例：社宅費控除）" className="flex-1 min-w-0 border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px]" />
                       <input type="number" value={it.amount} onChange={(e) => updateSalaryItem(i, 'amount', e.target.value)} className="w-28 border border-slate-200 rounded-lg px-2.5 py-1.5 font-mono text-[12.5px] text-right" />
                       <button onClick={() => removeSalaryItem(i)} className="text-slate-300 hover:text-rose-500 shrink-0"><Trash2 size={14} /></button>
                     </div>
@@ -32077,7 +32077,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                         <input value={m.relation} onChange={(e) => updateFamilyMember(i, 'relation', e.target.value)} placeholder="続柄（例：子）" className="border border-slate-200 rounded-md px-2 py-1.5 text-[12.5px]" />
                       </div>
                       <div className="flex items-center gap-2">
-                        <input type="date" value={m.birthDate} onChange={(e) => updateFamilyMember(i, 'birthDate', e.target.value)} className="flex-1 border border-slate-200 rounded-md px-2 py-1.5 font-mono text-[12.5px]" />
+                        <input type="date" value={m.birthDate} onChange={(e) => updateFamilyMember(i, 'birthDate', e.target.value)} className="flex-1 min-w-0 border border-slate-200 rounded-md px-2 py-1.5 font-mono text-[12.5px]" />
                         <button onClick={() => removeFamilyMember(i)} className="text-slate-300 hover:text-rose-500"><Trash2 size={14} /></button>
                       </div>
                     </div>
@@ -32220,7 +32220,7 @@ function MyNumberSection({ account, onFetch, onSave }) {
                 type={revealed ? 'text' : 'password'}
                 value={number}
                 onChange={(e) => setNumber(e.target.value.replace(/[^0-9]/g, '').slice(0, 12))}
-                className="flex-1 border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]"
+                className="flex-1 min-w-0 border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]"
                 placeholder="123456789012"
               />
               <button onClick={() => setRevealed((v) => !v)} className="text-[11px] font-bold text-slate-500 border border-slate-200 rounded-lg px-2.5 py-2">
