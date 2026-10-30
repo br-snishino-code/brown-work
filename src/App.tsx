@@ -21690,8 +21690,9 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
       situationNote: '', objection: '', leaverSignature: '',
       // 算定基礎届
       insuredNumberSantei: employee.healthInsuranceNumber || '',
-      prevHealth: employee.standardRemunerationHealth ?? '',
-      prevPension: employee.standardRemunerationPension ?? '',
+      // 従前の標準報酬月額は、下の useEffect が月ごとの記録から入れます
+      prevHealth: '',
+      prevPension: '',
       prevRevisedMonth: '',
       santeiKind: 'normal',
       raiseMonth: '', raiseKind: '', retroMonth: '', retroAmount: '',
@@ -21705,8 +21706,9 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
       // 月額変更届
       insuredNumberGegaku: employee.healthInsuranceNumber || '',
       raiseYm: '', gegakuKind: 'normal',
-      gegakuPrevHealth: employee.standardRemunerationHealth ?? '',
-      gegakuPrevPension: employee.standardRemunerationPension ?? '',
+      // 従前の標準報酬月額は、下の useEffect が月ごとの記録から入れます
+      gegakuPrevHealth: '',
+      gegakuPrevPension: '',
       gegakuPrevRevisedMonth: '',
       gegakuRaiseKind: '1', gegakuRetroMonth: '', gegakuRetroAmount: '',
       gegakuCorrectedAverage: '', gegakuReason: '',
@@ -21747,6 +21749,57 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
 
   // 昇給（降給）のあった支払月から、改定年月（4か月目）を出します
   const gegakuRevisedMonth = form.raiseYm ? addMonthsToYm(form.raiseYm, 3) : '';
+
+  // ---- 従前の標準報酬月額 ----
+  // 「従前」は、改定する前に効いていた金額です。
+  // スタッフ詳細の「標準報酬月額（給与計算に使う）」から、改定年月の前月に
+  // 効いていた記録を引いてきます。2か所に同じ金額を持たせると、片方だけ
+  // 直したときに「改定前と改定後が同じ」という誤った届出になるためです。
+  //   算定基礎届 … 9月からの改定なので、8月に効いていた記録
+  //   月額変更届 … 改定年月の前月に効いていた記録
+  const prevLookupYm = kind === 'nenkinSantei'
+    ? `${santeiYear}-08`
+    : (kind === 'nenkinGegaku' && gegakuRevisedMonth ? addMonthsToYm(gegakuRevisedMonth, -1) : '');
+  // どの月の記録から入れたか（画面で根拠を出すため）。null は「記録なし」
+  const [prevRemuneration, setPrevRemuneration] = useState(null);
+  const [prevRemunerationReady, setPrevRemunerationReady] = useState(false);
+
+  useEffect(() => {
+    if (!employee || !prevLookupYm) {
+      setPrevRemuneration(null);
+      setPrevRemunerationReady(false);
+      return undefined;
+    }
+    let cancelled = false;
+    setPrevRemunerationReady(false);
+    const [ly, lm] = prevLookupYm.split('-').map(Number);
+    fetchEffectiveStandardRemuneration(employee.id, ly, lm).then((row) => {
+      if (cancelled) return;
+      setPrevRemuneration(row);
+      setPrevRemunerationReady(true);
+      const ym = row ? `${row.year}-${pad(row.month)}` : '';
+      const health = row && row.healthInsuranceAmount != null ? row.healthInsuranceAmount : '';
+      const pension = row && row.pensionAmount != null ? row.pensionAmount : '';
+      setForm((p) => (kind === 'nenkinSantei'
+        ? { ...p, prevHealth: health, prevPension: pension, prevRevisedMonth: ym }
+        : { ...p, gegakuPrevHealth: health, gegakuPrevPension: pension, gegakuPrevRevisedMonth: ym }));
+    });
+    return () => { cancelled = true; };
+    // 対象の年や昇給月が変わったときだけ引き直します
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kind, employee?.id, prevLookupYm]);
+
+  // 従前の欄の下に出す案内
+  const prevRemunerationNote = (() => {
+    if (!prevLookupYm) return '';
+    const [ly, lm] = prevLookupYm.split('-').map(Number);
+    const at = `${ly}年${lm}月`;
+    if (!prevRemunerationReady) return `${at}時点の記録を調べています…`;
+    if (!prevRemuneration) {
+      return `${at}時点の標準報酬月額の記録がありません。スタッフ詳細の「標準報酬月額（給与計算に使う）」に登録するか、手で入れてください。`;
+    }
+    return `${prevRemuneration.year}年${prevRemuneration.month}月の記録から入れました（${at}時点で効いていた金額）。違うときは直してください。`;
+  })();
 
   // 月額変更届の表を作り直します
   useEffect(() => {
@@ -22635,6 +22688,11 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
                   {labeled('従前の改定月',
                     <input type="month" value={form.gegakuPrevRevisedMonth ?? ''} onChange={set('gegakuPrevRevisedMonth')} className={inputClass} />,
                     '前に標準報酬月額が決まった月')}
+                  {prevRemunerationNote && (
+                    <div className={`col-span-2 sm:col-span-4 text-[11px] leading-relaxed ${prevRemuneration ? 'text-slate-500' : 'text-amber-700'}`}>
+                      {prevRemunerationNote}
+                    </div>
+                  )}
                   {labeled('昇給・降給の理由',
                     <input value={form.gegakuReason ?? ''} onChange={set('gegakuReason')} maxLength={37} className={inputClass} />,
                     '例）基本給の変更、家族手当の支給')}
@@ -22832,6 +22890,11 @@ function DenshiShinseiTab({ settings, employeeAccounts = [], payrollRecords = []
                   {labeled('従前の改定月',
                     <input type="month" value={form.prevRevisedMonth ?? ''} onChange={set('prevRevisedMonth')} className={inputClass} />,
                     '前に標準報酬月額が決まった月')}
+                  {prevRemunerationNote && (
+                    <div className={`col-span-2 sm:col-span-4 text-[11px] leading-relaxed ${prevRemuneration ? 'text-slate-500' : 'text-amber-700'}`}>
+                      {prevRemunerationNote}
+                    </div>
+                  )}
                   {labeled('修正平均額（円）',
                     <input type="number" min="0" value={form.correctedAverage ?? ''} onChange={set('correctedAverage')} className={inputClass} />,
                     '保険者算定などのときだけ')}
@@ -33868,17 +33931,6 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
               </div>
               <Field label="口座番号"><input value={form.accountNumber} onChange={set('accountNumber')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" /></Field>
 
-              <div className="text-[11px] font-bold text-slate-400 pt-2">従前の標準報酬月額（電子申請に使う）</div>
-              <div className="grid grid-cols-2 gap-3">
-                <Field label="健康保険（円）"><input type="number" value={form.standardRemunerationHealth} onChange={set('standardRemunerationHealth')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" /></Field>
-                <Field label="厚生年金保険（円）"><input type="number" value={form.standardRemunerationPension} onChange={set('standardRemunerationPension')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" /></Field>
-              </div>
-              <div className="text-[10.5px] text-slate-400 leading-relaxed">
-                <b>給与計算には使いません。</b>電子申請（算定基礎届・月額変更届）の「従前の標準報酬月額」の欄に、
-                初期値として入るだけです。<b>改定する前の</b>金額を入れてください。
-                給与明細の健康保険料・厚生年金保険料は、下の「標準報酬月額（給与計算に使う）」から出しています。
-              </div>
-
               {/* 通勤手当（経路） */}
               <div className="text-[11px] font-bold text-slate-400 pt-4 flex items-center justify-between">
                 <span>通勤手当（経路ごとに設定）</span>
@@ -34035,7 +34087,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                 <b>給与明細の健康保険料・介護保険料・厚生年金保険料は、ここの金額から出しています。</b>
                 対象月より前でいちばん新しい記録を使うので、毎月入れ直す必要はありません。
                 <b>金額が変わった月だけ</b>登録してください。
-                上の「従前の標準報酬月額」は電子申請だけに使うもので、ここの金額とは別に持っています。
+                電子申請（算定基礎届・月額変更届）の「従前の標準報酬月額」も、ここの記録から入ります。
               </div>
               <button onClick={() => setTablePickerOpen(true)} className="w-full py-2 rounded-lg border-2 border-slate-200 text-[12.5px] font-bold text-slate-600 flex items-center justify-center gap-1.5">
                 <FileText size={13} /> 表から選択
