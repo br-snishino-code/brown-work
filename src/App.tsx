@@ -31320,13 +31320,17 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
     // 賃金は本人とマスター管理者しか読めません（71a/71b）。
     // それ以外の方の画面には金額欄を出していないので、送らずに落とします。
     // 送ると、画面に出ていない値で上書きしてしまいます。
+    // 金額は、いま選んでいる給与形態のぶんだけ送ります。
+    // 選んでいない形態の欄は画面に出ていないので、送ると
+    // 「見えていない値で上書きする」ことになります。
+    // 送らなかった列は、いまの値のまま残ります。
     const wageFields = isMasterAdmin
       ? {
           wageType: form.wageType,
-          hourlyWage: Number(form.hourlyWage) || 0,
-          dailyWage: Number(form.dailyWage) || 0,
-          dailyWageHoliday: Number(form.dailyWageHoliday) || 0,
-          monthlySalary: Number(form.monthlySalary) || 0,
+          hourlyWage: form.wageType === 'hourly' ? (Number(form.hourlyWage) || 0) : undefined,
+          dailyWage: form.wageType === 'daily' ? (Number(form.dailyWage) || 0) : undefined,
+          dailyWageHoliday: form.wageType === 'daily' ? (Number(form.dailyWageHoliday) || 0) : undefined,
+          monthlySalary: form.wageType === 'monthly' ? (Number(form.monthlySalary) || 0) : undefined,
         }
       : {
           wageType: undefined, hourlyWage: undefined, dailyWage: undefined,
