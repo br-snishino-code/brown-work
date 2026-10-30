@@ -1161,7 +1161,11 @@ const EMPLOYEE_SENSITIVE_COLUMNS = [
   'emergency_contact_relation', 'emergency_contact_phone',
   'emergency_contact_address',
   // 賃金
+  // supabase/85・86番でデータベース側の一覧に日給の2列を足しているので、
+  // こちらにも入れておきます（無いと、画面に出ていない値を送ってしまい、
+  // データベースのトリガーに拒まれて保存そのものが失敗します）。
   'wage_type', 'hourly_wage', 'monthly_salary',
+  'daily_wage', 'daily_wage_holiday',
   'commute_allowance',
   // 口座情報
   'bank_code', 'bank_name', 'branch_code', 'branch_name',
@@ -6083,7 +6087,6 @@ function AttendanceApp() {
                 onPublish={publishPayroll}
                 onUnpublish={unpublishPayroll}
                 isMasterAdmin={session.role === 'master_admin'}
-                onUpdateWage={updateEmployeeProfile}
                 isDesktop={isDesktop}
               />
               )}
@@ -23716,16 +23719,11 @@ function PayrollSettingsTab({ settings, employeeAccounts = [], groupAttendanceSc
   );
 }
 
-function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExpenseClaims = [], monthlyConfirmations = [], groupAttendanceSchedules = {}, employeeAttendanceSchedules = {}, leaveRequests = [], settings = {}, payrollItemOverrides = {}, session = null, onSaveDraft, onPublish, onUnpublish, onRefresh, isMasterAdmin = false, onUpdateWage, isDesktop }) {
+function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExpenseClaims = [], monthlyConfirmations = [], groupAttendanceSchedules = {}, employeeAttendanceSchedules = {}, leaveRequests = [], settings = {}, payrollItemOverrides = {}, session = null, onSaveDraft, onPublish, onUnpublish, onRefresh, isMasterAdmin = false, isDesktop }) {
   const now = new Date();
   const [employeeId, setEmployeeId] = useState(employeeAccounts[0]?.id || '');
   const [year, setYear] = useState(now.getFullYear());
   const [month, setMonth] = useState(now.getMonth() + 1);
-  const [wageType, setWageType] = useState('hourly');
-  const [hourlyWage, setHourlyWage] = useState('0');
-  const [monthlySalary, setMonthlySalary] = useState('0');
-  const [dailyWage, setDailyWage] = useState('0');
-  const [dailyWageHoliday, setDailyWageHoliday] = useState('0');
   // 「いまの設定で作り直す」の確認。開いているときだけ中身が入ります
   const [rebuild, setRebuild] = useState(null);
   const [paymentItems, setPaymentItems] = useState([]);
@@ -23753,14 +23751,14 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
   const existing = payrollRecords.find((p) => p.employeeId === employeeId && p.year === year && p.month === month);
   const isPublished = !!existing && existing.status === 'published';
 
-  useEffect(() => {
-    if (!employee) return;
-    setWageType(employee.wageType || 'hourly');
-    setHourlyWage(String(employee.hourlyWage || 0));
-    setMonthlySalary(String(employee.monthlySalary || 0));
-    setDailyWage(String(employee.dailyWage || 0));
-    setDailyWageHoliday(String(employee.dailyWageHoliday || 0));
-  }, [employeeId]);
+  // 給与形態と金額はスタッフ詳細の「給与・口座」で設定します。
+  // ここでは直に読むだけにして、画面で直せないようにしています
+  // （2か所で直せると、どちらが本当か分からなくなるため）。
+  const wageType = employee?.wageType || 'hourly';
+  const hourlyWage = String(employee?.hourlyWage || 0);
+  const monthlySalary = String(employee?.monthlySalary || 0);
+  const dailyWage = String(employee?.dailyWage || 0);
+  const dailyWageHoliday = String(employee?.dailyWageHoliday || 0);
 
   // スタッフの固定支給・控除項目、通勤経路を取得（毎月同じ内容を自動で候補に出すため）
   useEffect(() => {
@@ -24170,16 +24168,6 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     setDeductionItems((prev) => applyDeductionAmounts(prev, amounts));
   };
 
-  const saveWageSettings = async () => {
-    await onUpdateWage(employeeId, {
-      wageType,
-      hourlyWage: wageType === 'hourly' ? Number(hourlyWage) : employee.hourlyWage,
-      monthlySalary: wageType === 'monthly' ? Number(monthlySalary) : employee.monthlySalary,
-      dailyWage: wageType === 'daily' ? Number(dailyWage) : employee.dailyWage,
-      dailyWageHoliday: wageType === 'daily' ? Number(dailyWageHoliday) : employee.dailyWageHoliday,
-    });
-  };
-
   // いまの勤怠と設定で組み立て直して、何が変わるかを確かめます。
   // この時点では画面を書き換えません（確認してから入れ替えます）。
   const openRebuild = () => {
@@ -24204,7 +24192,6 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
   };
 
   const generate = async () => {
-    await saveWageSettings();
     await onSaveDraft({
       employeeId,
       year,
@@ -24271,47 +24258,37 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
           </div>
         )}
 
+        {/* 給与形態はスタッフ詳細の「給与・口座」で設定します。
+            ここでは、いまの設定を見せるだけにしています。 */}
         {isMasterAdmin && (
-        <div className="bg-slate-50 rounded-xl p-4 space-y-3">
-          <div className="text-[12px] font-bold text-slate-600">給与形態（{employee.name}さん）</div>
-          <div className="flex gap-2">
-            {Object.entries(WAGE_TYPES).map(([key, label]) => (
-              <button
-                key={key}
-                onClick={() => setWageType(key)}
-                className={`flex-1 py-2 rounded-lg text-[12.5px] font-bold border-2 ${wageType === key ? 'border-slate-800 bg-white text-slate-800' : 'border-transparent text-slate-400 bg-white'}`}
-              >
-                {label}制
-              </button>
-            ))}
+        <div className="bg-slate-50 rounded-xl p-4 space-y-2">
+          <div className="flex items-baseline justify-between gap-3 flex-wrap">
+            <div className="text-[12px] font-bold text-slate-600">給与形態（{employee.name}さん）</div>
+            <div className="text-[13.5px] font-bold text-slate-800 font-mono">
+              {wageType === 'hourly' && `時給 ${formatYen(Number(hourlyWage) || 0)}`}
+              {wageType === 'monthly' && `月給 ${formatYen(Number(monthlySalary) || 0)}`}
+              {wageType === 'daily' && (
+                (Number(dailyWageHoliday) || 0) > 0
+                  ? `日給 平日 ${formatYen(Number(dailyWage) || 0)} ／ 土日祝 ${formatYen(Number(dailyWageHoliday) || 0)}`
+                  : `日給 ${formatYen(Number(dailyWage) || 0)}`
+              )}
+            </div>
           </div>
-          {wageType === 'hourly' && (
-            <Field label="時給（円）">
-              <input type="number" value={hourlyWage} onChange={(e) => setHourlyWage(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px] bg-white" />
-            </Field>
+          {wageType === 'daily' && (Number(dailyWageHoliday) || 0) <= 0 && (
+            <div className="text-[10.5px] text-slate-500 leading-relaxed">
+              土日祝の日額が未登録（0円）なので、平日の日額を土日祝にも使います。
+            </div>
           )}
-          {wageType === 'daily' && (
-            <>
-              <div className="grid grid-cols-2 gap-3">
-                <Field label="平日の日額（円）">
-                  <input type="number" value={dailyWage} onChange={(e) => setDailyWage(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px] bg-white" />
-                </Field>
-                <Field label="土日祝の日額（円）">
-                  <input type="number" value={dailyWageHoliday} onChange={(e) => setDailyWageHoliday(e.target.value)} placeholder="平日と同じ" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px] bg-white" />
-                </Field>
-              </div>
-              <div className="text-[10.5px] text-slate-500 leading-relaxed">
-                土日祝の日額が未登録（0円）のときは、平日の日額を土日祝にも使います。
-                残業手当・深夜手当・有給休暇手当も、その日が平日か土日祝かでそれぞれの日額から出します。
-              </div>
-            </>
+          {((wageType === 'hourly' && (Number(hourlyWage) || 0) <= 0)
+            || (wageType === 'monthly' && (Number(monthlySalary) || 0) <= 0)
+            || (wageType === 'daily' && (Number(dailyWage) || 0) <= 0)) && (
+            <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-[11px] text-amber-800">
+              金額が未登録です。このままだと基本給が0円で計算されます。
+            </div>
           )}
-          {wageType === 'monthly' && (
-            <Field label="月給（円）">
-              <input type="number" value={monthlySalary} onChange={(e) => setMonthlySalary(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px] bg-white" />
-            </Field>
-          )}
-          <button onClick={saveWageSettings} className="text-[11.5px] font-bold text-amber-600">この給与形態をスタッフ情報に保存</button>
+          <div className="text-[10.5px] text-slate-400">
+            変えるときは、スタッフ詳細（アカウント管理 →「詳細」）の「給与・口座」から設定してください。
+          </div>
         </div>
         )}
 
@@ -31263,6 +31240,11 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
     staffType: account.staffType || '正社員',
     mainGroup: account.mainGroup || '',
     subGroup: account.subGroup || '',
+    wageType: account.wageType || 'hourly',
+    hourlyWage: String(account.hourlyWage || 0),
+    dailyWage: String(account.dailyWage || 0),
+    dailyWageHoliday: String(account.dailyWageHoliday || 0),
+    monthlySalary: String(account.monthlySalary || 0),
     commuteAllowance: String(account.commuteAllowance || 0),
     deemedOvertimeHours: account.deemedOvertimeHours != null ? String(account.deemedOvertimeHours) : '',
     nearestStation: account.nearestStation || '',
@@ -31335,9 +31317,25 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
     const DATE_FIELDS = ['birthDate', 'resignationDate', 'contractStart', 'contractEnd', 'healthInsuranceAcquiredDate', 'healthInsuranceLostDate', 'pensionAcquiredDate', 'pensionLostDate', 'employmentInsuranceAcquiredDate', 'employmentInsuranceLostDate'];
     const normalizedDates = {};
     DATE_FIELDS.forEach((k) => { normalizedDates[k] = form[k] === '' ? null : form[k]; });
+    // 賃金は本人とマスター管理者しか読めません（71a/71b）。
+    // それ以外の方の画面には金額欄を出していないので、送らずに落とします。
+    // 送ると、画面に出ていない値で上書きしてしまいます。
+    const wageFields = isMasterAdmin
+      ? {
+          wageType: form.wageType,
+          hourlyWage: Number(form.hourlyWage) || 0,
+          dailyWage: Number(form.dailyWage) || 0,
+          dailyWageHoliday: Number(form.dailyWageHoliday) || 0,
+          monthlySalary: Number(form.monthlySalary) || 0,
+        }
+      : {
+          wageType: undefined, hourlyWage: undefined, dailyWage: undefined,
+          dailyWageHoliday: undefined, monthlySalary: undefined,
+        };
     await onSave(account.id, {
       ...form,
       ...normalizedDates,
+      ...wageFields,
       commuteAllowance: Number(form.commuteAllowance) || 0,
       deemedOvertimeHours: form.deemedOvertimeHours === '' ? null : Number(form.deemedOvertimeHours),
       leaveAdjustment: Number(form.leaveAdjustment) || 0,
@@ -31708,7 +31706,58 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
 
           <div ref={(el) => (sectionRefs.current.pay = el)} className="space-y-4 pt-1">
             <div className="text-[12px] font-bold text-slate-500 border-b border-slate-100 pb-2">給与・口座</div>
-              <div className="text-[11px] font-bold text-slate-400">口座情報（給与振込先）</div>
+
+              {/* 給与形態。賃金はマスター管理者だけが扱えるので、他の方には出しません
+                  （出すと0円で表示され、直したつもりが保存されない形になります）。 */}
+              {isMasterAdmin && (
+                <>
+                  <div className="text-[11px] font-bold text-slate-400">給与形態</div>
+                  <div className="flex gap-2">
+                    {Object.entries(WAGE_TYPES).map(([key, label]) => (
+                      <button
+                        key={key}
+                        type="button"
+                        onClick={() => setForm((f) => ({ ...f, wageType: key }))}
+                        className={`flex-1 py-2 rounded-lg text-[12.5px] font-bold border-2 ${form.wageType === key ? 'border-slate-800 bg-white text-slate-800' : 'border-slate-200 text-slate-400 bg-white'}`}
+                      >
+                        {label}制
+                      </button>
+                    ))}
+                  </div>
+                  {form.wageType === 'hourly' && (
+                    <Field label="時給（円）">
+                      <input type="number" value={form.hourlyWage} onChange={set('hourlyWage')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
+                    </Field>
+                  )}
+                  {form.wageType === 'daily' && (
+                    <>
+                      <div className="grid grid-cols-2 gap-3">
+                        <Field label="平日の日額（円）">
+                          <input type="number" value={form.dailyWage} onChange={set('dailyWage')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
+                        </Field>
+                        <Field label="土日祝の日額（円）">
+                          <input type="number" value={form.dailyWageHoliday} onChange={set('dailyWageHoliday')} placeholder="平日と同じ" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
+                        </Field>
+                      </div>
+                      <div className="text-[10.5px] text-slate-500 leading-relaxed">
+                        土日祝の日額が未登録（0円）のときは、平日の日額を土日祝にも使います。
+                        残業手当・深夜手当・有給休暇手当も、その日が平日か土日祝かでそれぞれの日額から出します。
+                      </div>
+                    </>
+                  )}
+                  {form.wageType === 'monthly' && (
+                    <Field label="月給（円）">
+                      <input type="number" value={form.monthlySalary} onChange={set('monthlySalary')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
+                    </Field>
+                  )}
+                  <div className="text-[10.5px] text-slate-400">
+                    給与タブの「給与計算」は、ここで保存した給与形態と金額を使います。
+                    下の「この内容で保存」を押すまで反映されません。
+                  </div>
+                </>
+              )}
+
+              <div className="text-[11px] font-bold text-slate-400 pt-2">口座情報（給与振込先）</div>
               <div className="grid grid-cols-2 gap-3">
                 <Field label="銀行コード"><input value={form.bankCode} onChange={set('bankCode')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" /></Field>
                 <Field label="銀行名"><input value={form.bankName} onChange={set('bankName')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px]" /></Field>
@@ -31733,7 +31782,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                 <Field label="健康保険（円）"><input type="number" value={form.standardRemunerationHealth} onChange={set('standardRemunerationHealth')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" /></Field>
                 <Field label="厚生年金保険（円）"><input type="number" value={form.standardRemunerationPension} onChange={set('standardRemunerationPension')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" /></Field>
               </div>
-              <div className="text-[10.5px] text-slate-400">実際の時給・月給・給与計算の設定は「給与」タブから行ってください。ここは社会保険の届出に使う標準報酬月額のみです。</div>
+              <div className="text-[10.5px] text-slate-400">標準報酬月額は社会保険の届出に使う金額で、上の給与形態とは別のものです。算定基礎届・月額変更届で決まった等級の金額を入れてください。</div>
 
               {/* 通勤手当（経路） */}
               <div className="text-[11px] font-bold text-slate-400 pt-4 flex items-center justify-between">
