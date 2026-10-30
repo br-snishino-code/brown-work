@@ -72,7 +72,11 @@ const approvalColorClass = (approvalState, payDeduction, normalColorClass) => {
   if (approvalState === 'approved') return payDeduction ? 'text-rose-600 font-bold' : 'text-emerald-600';
   return normalColorClass;
 };
-const NEEDS_APPROVAL_STATUSES = ['late', 'event', 'early_confirmed', 'early_manual'];
+// 出勤打刻で管理者の承認が要る区分
+// early_confirmed（規定の開始時刻に合わせて記録）は、退勤の forgot_corrected_out と同じく
+// 勤務時間が増えないので承認は要りません。
+// early_manual（実打刻のまま記録）は早出のぶん勤務時間が増えるので、残業と同じく承認が要ります。
+const NEEDS_APPROVAL_STATUSES = ['late', 'event', 'early_manual'];
 const timeStr = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 const hhmm = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 const toMinutes = (hhmmStr) => {
@@ -9016,23 +9020,30 @@ function ClockInConfirmModal({ now, standardMinutes, onClose, onConfirm }) {
             <div className="text-[12.5px] text-slate-600">
               現在の時刻は <b className="font-mono">{nowLabel}</b> です。出勤時刻を <b>{stdLabel}</b> として記録しますか？
             </div>
-            <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-[11px] text-amber-700">
-              規定時間より早い出勤のため、記録後に管理者の承認が必要になります。
+            <div className="space-y-1.5">
+              <button
+                onClick={() => run({ clockInTime: todayAt(stdHour, stdMin, now), status: 'early_confirmed' })}
+                disabled={saving}
+                className="w-full py-2.5 rounded-lg bg-amber-600 disabled:bg-slate-200 text-white text-[13.5px] font-bold"
+              >
+                はい（{stdLabel}で記録する）
+              </button>
+              <div className="bg-blue-50 border border-blue-200 rounded-lg px-3 py-2 text-[11px] text-blue-700">
+                規定の開始時刻に合わせるだけなので、管理者の承認は要りません。実際に押した時刻（{nowLabel}）は記録として残ります。
+              </div>
             </div>
-            <button
-              onClick={() => run({ clockInTime: todayAt(stdHour, stdMin, now), status: 'early_confirmed' })}
-              disabled={saving}
-              className="w-full py-2.5 rounded-lg bg-amber-600 disabled:bg-slate-200 text-white text-[13.5px] font-bold"
-            >
-              はい（{stdLabel}で記録する）
-            </button>
-            <button
-              onClick={() => run({ clockInTime: now, status: 'early_manual' })}
-              disabled={saving}
-              className="w-full py-2.5 rounded-lg border border-slate-200 text-[13.5px] font-medium text-slate-600"
-            >
-              いいえ（実際の時刻 {nowLabel} で記録する）
-            </button>
+            <div className="space-y-1.5">
+              <button
+                onClick={() => run({ clockInTime: now, status: 'early_manual' })}
+                disabled={saving}
+                className="w-full py-2.5 rounded-lg border border-slate-200 text-[13.5px] font-medium text-slate-600"
+              >
+                いいえ（実際の時刻 {nowLabel} で記録する）
+              </button>
+              <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-[11px] text-amber-700">
+                早出のぶん勤務時間が増えるため、記録後に管理者の承認が必要になります。
+              </div>
+            </div>
           </div>
         ) : (
           <div className="px-5 py-4 space-y-3">
