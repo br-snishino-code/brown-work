@@ -6951,7 +6951,7 @@ const loadMunicipalities = () => {
         const data = {
           source: j.source || '',
           prefs: j.prefs || [],
-          // [コード, 都道府県名, 市区町村名, カナ]
+          // [コード, 都道府県名, 市区町村名, カナ, 政令指定都市の行政区なら1]
           cities: j.cities || [],
         };
         municipalityCache.data = data;
@@ -6979,8 +6979,8 @@ function findMunicipalityByName(cities, input) {
 }
 
 // 住所の先頭から市区町村を読み取ります。
-// 「京都府京都市中京区…」のように区まで続く住所でも、市までで止めます
-// （住民税の納付先・提出先は市区町村なので、政令指定都市は市が単位です）。
+// 政令指定都市は行政区まで取ります（「京都府京都市中京区…」なら京都市中京区）。
+// いちばん長く一致したものを採るので、区の書かれていない住所なら市になります。
 function findMunicipalityInAddress(cities, address) {
   const a = String(address || '').replace(/[\s　]/g, '');
   if (!a) return null;
@@ -31204,6 +31204,9 @@ function MunicipalityField({
         <div className="text-[11px] text-rose-600">
           コード {code} は「{municipalityLabel(matched)}」です。名称と合っていません。
         </div>
+      )}
+      {matched && matched[4] === 1 && (
+        <div className="text-[11px] text-slate-500">政令指定都市の行政区です。</div>
       )}
       {data && data.source && (
         <div className="text-[10px] text-slate-400">出どころ：{data.source}</div>
