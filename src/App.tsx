@@ -33868,12 +33868,16 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
               </div>
               <Field label="口座番号"><input value={form.accountNumber} onChange={set('accountNumber')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" /></Field>
 
-              <div className="text-[11px] font-bold text-slate-400 pt-2">標準報酬月額（現在の基準額）</div>
+              <div className="text-[11px] font-bold text-slate-400 pt-2">従前の標準報酬月額（電子申請に使う）</div>
               <div className="grid grid-cols-2 gap-3">
                 <Field label="健康保険（円）"><input type="number" value={form.standardRemunerationHealth} onChange={set('standardRemunerationHealth')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" /></Field>
                 <Field label="厚生年金保険（円）"><input type="number" value={form.standardRemunerationPension} onChange={set('standardRemunerationPension')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" /></Field>
               </div>
-              <div className="text-[10.5px] text-slate-400">標準報酬月額は社会保険の届出に使う金額で、上の給与形態とは別のものです。算定基礎届・月額変更届で決まった等級の金額を入れてください。</div>
+              <div className="text-[10.5px] text-slate-400 leading-relaxed">
+                <b>給与計算には使いません。</b>電子申請（算定基礎届・月額変更届）の「従前の標準報酬月額」の欄に、
+                初期値として入るだけです。<b>改定する前の</b>金額を入れてください。
+                給与明細の健康保険料・厚生年金保険料は、下の「標準報酬月額（給与計算に使う）」から出しています。
+              </div>
 
               {/* 通勤手当（経路） */}
               <div className="text-[11px] font-bold text-slate-400 pt-4 flex items-center justify-between">
@@ -34021,11 +34025,17 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
 
               {/* 標準報酬月額（月別履歴） */}
               <div className="text-[11px] font-bold text-slate-400 pt-4 flex items-center justify-between">
-                <span>標準報酬月額（月ごとの記録）</span>
+                <span>標準報酬月額（給与計算に使う）</span>
                 <div className="flex items-center gap-1">
                   <input type="number" value={remunerationYear} onChange={(e) => setRemunerationYear(Number(e.target.value))} className="w-16 border border-slate-200 rounded px-1.5 py-1 font-mono text-[11px] bg-white" />年
                   <input type="number" min="1" max="12" value={remunerationMonth} onChange={(e) => setRemunerationMonth(Number(e.target.value))} className="w-12 border border-slate-200 rounded px-1.5 py-1 font-mono text-[11px] bg-white" />月
                 </div>
+              </div>
+              <div className="text-[10.5px] text-slate-400 leading-relaxed">
+                <b>給与明細の健康保険料・介護保険料・厚生年金保険料は、ここの金額から出しています。</b>
+                対象月より前でいちばん新しい記録を使うので、毎月入れ直す必要はありません。
+                <b>金額が変わった月だけ</b>登録してください。
+                上の「従前の標準報酬月額」は電子申請だけに使うもので、ここの金額とは別に持っています。
               </div>
               <button onClick={() => setTablePickerOpen(true)} className="w-full py-2 rounded-lg border-2 border-slate-200 text-[12.5px] font-bold text-slate-600 flex items-center justify-center gap-1.5">
                 <FileText size={13} /> 表から選択
