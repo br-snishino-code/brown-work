@@ -16236,7 +16236,9 @@ function printPayslip(p, employeeName, settings = null, staffCode = '') {
 <style>
   @page { size: A4 landscape; margin: 12mm; }
   * { box-sizing: border-box; }
-  body { font-family: -apple-system, "Hiragino Sans", "Yu Gothic", Meiryo, sans-serif; margin: 0; padding: 24px; color: #1e293b; }
+  /* Meiryo UI は Windows に入っているフォントです。
+     Mac やスマートフォンには無いため、無いときに使う字を後ろに並べています。 */
+  body { font-family: "Meiryo UI", Meiryo, "Hiragino Sans", "Yu Gothic", sans-serif; margin: 0; padding: 24px; color: #1e293b; }
   .sheet { border: 1px solid #cbd5e1; padding: 20px; }
   .top { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 16px; }
   .title { font-size: 16px; font-weight: bold; }
@@ -16250,15 +16252,12 @@ function printPayslip(p, employeeName, settings = null, staffCode = '') {
   table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
   td { padding: 3px 0; vertical-align: top; }
   td.l { color: #334155; word-break: break-all; }
-  td.v { text-align: right; font-family: ui-monospace, monospace; white-space: nowrap; padding-left: 8px; }
+  td.v { text-align: right; white-space: nowrap; padding-left: 8px; }
   .foot { background: #94a3b8; color: #fff; font-size: 11.5px; font-weight: bold; display: flex; justify-content: space-between; padding: 5px 10px; }
   .foot.empty { background: transparent; padding: 0; height: 0; }
-  .foot .v { font-family: ui-monospace, monospace; }
   .net { background: #475569; color: #fff; font-size: 12.5px; font-weight: bold; display: flex; justify-content: space-between; padding: 7px 10px; margin-top: 10px; }
-  .net .v { font-family: ui-monospace, monospace; }
   .remark-title { font-size: 11px; color: #475569; margin: 12px 0 4px; }
   .remark { border: 1px solid #cbd5e1; min-height: 120px; padding: 8px; font-size: 11px; white-space: pre-wrap; line-height: 1.7; }
-  .note { margin-top: 14px; font-size: 10px; color: #94a3b8; }
 </style></head>
 <body>
   <div class="sheet">
@@ -16285,7 +16284,6 @@ function printPayslip(p, employeeName, settings = null, staffCode = '') {
       </div>
     </div>
 
-    <div class="note">※内容に不明点があれば、管理者へお問い合わせください。</div>
   </div>
 </body></html>`;
   win.document.write(html);
