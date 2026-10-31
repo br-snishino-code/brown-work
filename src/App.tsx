@@ -5643,8 +5643,11 @@ function AttendanceApp() {
         year: payload.year,
         month: payload.month,
         wage_type: payload.wageType,
-        daily_wage: payload.dailyWage ?? null,
-        daily_wage_holiday: payload.dailyWageHoliday ?? null,
+        // daily_wage / daily_wage_holiday は payroll_records には無い列です。
+        // 日給制を足したとき（cebebb5）に、employees の列と取り違えて
+        // 書き込もうとしていました。渡す値も常に空で、読み出してもいません。
+        // 送るだけで保存そのものが失敗するため、外しました。
+        // 明細に日額を残すなら、支給項目か attendance_extra に入れてください。
         wage_rate: payload.wageRate,
         worked_minutes: payload.workedMinutes,
         overtime_minutes: payload.overtimeMinutes,
