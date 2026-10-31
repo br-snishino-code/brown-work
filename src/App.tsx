@@ -6177,6 +6177,7 @@ function AttendanceApp() {
                 records={data.payrollRecords.filter((p) => p.employeeId === employeeId && p.status === 'published')}
                 employeeName={session.name}
                 settings={data.settings}
+                staffCode={session.staffNumber || ''}
               />
               <BonusSlipView records={(data.bonusRecords || []).filter((b) => b.employeeId === employeeId && b.status === 'published')} employeeName={session.name} />
             </div>
@@ -16172,10 +16173,17 @@ const wageTypeLabel = (wageType) => WAGE_TYPES[wageType] || WAGE_TYPES.hourly;
 
 const formatYen = (n) => `¥${Math.round(n || 0).toLocaleString('ja-JP')}`;
 
-// settings … 支給・控除項目一覧。0円の行を出すかどうかを見るために使います。
-// 渡されなかったときは、これまでどおり保存されている行をそのまま出します。
-function printPayslip(p, employeeName, settings = null) {
-  const win = window.open('', '_blank', 'width=480,height=700');
+// 給与明細を印刷する。
+//
+// 並びはジョブカンの明細に合わせています（御社の指定）。
+//   勤怠 ／ 支給 ／ 控除 ／ 集計 の4列
+// 「所定内労働時間」と「銀行振込」の欄は、出さないと決めています。
+//
+// settings … 支給・控除項目一覧（0円の行を出すか）、事業所情報（会社名）、
+//            支給日の決まり。渡されないときは、その欄を省きます。
+// staffCode … スタッフコード。明細の右上に出します。
+function printPayslip(p, employeeName, settings = null, staffCode = '') {
+  const win = window.open('', '_blank', 'width=900,height=700');
   if (!win) return;
   const allPayment = p.paymentItems || [{ label: '基本給', amount: p.baseAmount }, ...(p.overtimeAmount ? [{ label: '残業手当', amount: p.overtimeAmount }] : [])];
   const allDeduction = p.deductionItems || [];
@@ -16185,46 +16193,100 @@ function printPayslip(p, employeeName, settings = null) {
   const deductionTotal = sumItems(allDeduction);
   const paymentItems = settings ? visiblePayslipItems(allPayment, settings, 'payment') : allPayment;
   const deductionItems = settings ? visiblePayslipItems(allDeduction, settings, 'deduction') : allDeduction;
-  const rowsHtml = (items) => items.map((it) => `<tr><td class="label">${it.label || '（項目名なし）'}</td><td class="value">${formatYen(Number(it.amount) || 0)}</td></tr>`).join('');
+
+  const esc = (v) => String(v ?? '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  // 会社名は事業所情報の「事業所名称」です。未登録のときは出しません
+  const office = settings ? parseOfficeInfo(settings) : null;
+  const payKey = settings ? payDateFor(p.year, p.month, parsePayDate(settings)) : '';
+  const payLabel = payKey
+    ? `${payKey.slice(0, 4)}年${payKey.slice(5, 7)}月${payKey.slice(8, 10)}日 支給`
+    : '';
+
+  // 勤怠欄。総労働日数は保存されている明細から読みます。
+  // 2026年10月より前に作った明細には入っていないので、そのときは出しません。
+  const workedDays = p.attendanceExtra?.workedDays;
+  const attendanceRows = [
+    workedDays != null ? ['総労働日数', `${Number(workedDays).toFixed(2)}`] : null,
+    ['総労働時間', minutesToHHMM(p.workedMinutes)],
+    ['うち残業時間', minutesToHHMM(p.overtimeMinutes)],
+    p.attendanceExtra?.absentDays ? ['欠勤日数', `${p.attendanceExtra.absentDays}日`] : null,
+    p.attendanceExtra?.paidLeaveDays ? ['有休日数', `${p.attendanceExtra.paidLeaveDays}日`] : null,
+    p.attendanceExtra?.paidLeaveHours ? ['有休時間', `${p.attendanceExtra.paidLeaveHours}時間`] : null,
+  ].filter(Boolean);
+
+  const rows = (items) => items
+    .map(([label, value]) => `<tr><td class="l">${esc(label)}</td><td class="v">${esc(value)}</td></tr>`)
+    .join('');
+  const yenRows = (items) => items
+    .map((it) => `<tr><td class="l">${esc(it.label || '（項目名なし）')}</td><td class="v">${formatYen(Number(it.amount) || 0)}</td></tr>`)
+    .join('');
+
+  // 1列ぶんの箱。見出し・中身・（あれば）いちばん下の合計
+  const column = (title, bodyHtml, footLabel, footValue) => `
+    <div class="col">
+      <div class="head">${esc(title)}</div>
+      <div class="body"><table>${bodyHtml}</table></div>
+      ${footLabel ? `<div class="foot"><span>${esc(footLabel)}</span><span class="v">${esc(footValue)}</span></div>` : '<div class="foot empty"></div>'}
+    </div>`;
+
   const html = `<!doctype html>
 <html lang="ja"><head><meta charset="utf-8"><title>給与明細 ${p.year}年${p.month}月分</title>
 <style>
-  body { font-family: -apple-system, "Hiragino Sans", sans-serif; padding: 32px; color: #1e293b; }
-  h1 { font-size: 18px; margin-bottom: 4px; }
-  .sub { color: #64748b; font-size: 12px; margin-bottom: 16px; }
-  h2 { font-size: 12.5px; color: #64748b; margin: 18px 0 4px; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  td { padding: 6px 0; border-bottom: 1px solid #e2e8f0; }
-  td.label { color: #475569; }
-  td.value { text-align: right; font-family: monospace; }
-  .subtotal td { font-weight: bold; border-top: 1px solid #94a3b8; }
-  .total td { font-weight: bold; font-size: 16px; border-top: 2px solid #1e293b; border-bottom: none; padding-top: 12px; }
-  .note { margin-top: 24px; font-size: 10.5px; color: #94a3b8; }
+  @page { size: A4 landscape; margin: 12mm; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Hiragino Sans", "Yu Gothic", Meiryo, sans-serif; margin: 0; padding: 24px; color: #1e293b; }
+  .sheet { border: 1px solid #cbd5e1; padding: 20px; }
+  .top { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 16px; }
+  .title { font-size: 16px; font-weight: bold; }
+  .paydate { font-size: 11px; color: #64748b; margin-top: 3px; }
+  .company { font-size: 13px; font-weight: bold; text-align: right; }
+  .who { font-size: 11px; color: #475569; text-align: right; margin-top: 3px; }
+  .cols { display: flex; gap: 10px; align-items: stretch; }
+  .col { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .head { background: #94a3b8; color: #fff; font-size: 11.5px; font-weight: bold; text-align: center; padding: 4px 0; }
+  .body { background: #f1f5f9; flex: 1; padding: 8px 10px; min-height: 300px; }
+  table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+  td { padding: 3px 0; vertical-align: top; }
+  td.l { color: #334155; word-break: break-all; }
+  td.v { text-align: right; font-family: ui-monospace, monospace; white-space: nowrap; padding-left: 8px; }
+  .foot { background: #94a3b8; color: #fff; font-size: 11.5px; font-weight: bold; display: flex; justify-content: space-between; padding: 5px 10px; }
+  .foot.empty { background: transparent; padding: 0; height: 0; }
+  .foot .v { font-family: ui-monospace, monospace; }
+  .net { background: #475569; color: #fff; font-size: 12.5px; font-weight: bold; display: flex; justify-content: space-between; padding: 7px 10px; margin-top: 10px; }
+  .net .v { font-family: ui-monospace, monospace; }
+  .remark-title { font-size: 11px; color: #475569; margin: 12px 0 4px; }
+  .remark { border: 1px solid #cbd5e1; min-height: 120px; padding: 8px; font-size: 11px; white-space: pre-wrap; line-height: 1.7; }
+  .note { margin-top: 14px; font-size: 10px; color: #94a3b8; }
 </style></head>
 <body>
-  <h1>給与明細</h1>
-  <div class="sub">${employeeName} 様　／　${p.year}年${p.month}月分</div>
-  <table>
-    <tr><td class="label">区分</td><td class="value">${wageTypeLabel(p.wageType)} ${formatYen(p.wageRate)}</td></tr>
-    <tr><td class="label">実働時間</td><td class="value">${minutesToHHMM(p.workedMinutes)}</td></tr>
-    <tr><td class="label">残業時間</td><td class="value">${minutesToHHMM(p.overtimeMinutes)}</td></tr>
-    ${p.attendanceExtra?.absentDays ? `<tr><td class="label">欠勤日数</td><td class="value">${p.attendanceExtra.absentDays}日</td></tr>` : ''}
-    ${p.attendanceExtra?.paidLeaveDays ? `<tr><td class="label">有休日数</td><td class="value">${p.attendanceExtra.paidLeaveDays}日</td></tr>` : ''}
-  </table>
-  <h2>支給</h2>
-  <table>
-    ${rowsHtml(paymentItems)}
-    <tr class="subtotal"><td>支給合計</td><td class="value">${formatYen(paymentTotal)}</td></tr>
-  </table>
-  ${deductionItems.length > 0 ? `<h2>控除</h2>
-  <table>
-    ${rowsHtml(deductionItems)}
-    <tr class="subtotal"><td>控除合計</td><td class="value">${formatYen(deductionTotal)}</td></tr>
-  </table>` : ''}
-  <table>
-    <tr class="total"><td>差引支給額</td><td class="value">${formatYen(p.totalAmount)}</td></tr>
-  </table>
-  <div class="note">※内容に不明点があれば、管理者へお問い合わせください。</div>
+  <div class="sheet">
+    <div class="top">
+      <div>
+        <div class="title">${p.year}年${String(p.month).padStart(2, '0')}月　給与明細</div>
+        ${payLabel ? `<div class="paydate">（${esc(payLabel)}）</div>` : ''}
+      </div>
+      <div>
+        ${office && office.nameKanji ? `<div class="company">${esc(office.nameKanji)}</div>` : ''}
+        <div class="who">${staffCode ? `スタッフコード：${esc(staffCode)}　` : ''}氏名：${esc(employeeName)}</div>
+      </div>
+    </div>
+
+    <div class="cols">
+      ${column('勤怠', rows(attendanceRows), '', '')}
+      ${column('支給', yenRows(paymentItems), '支給合計', formatYen(paymentTotal))}
+      ${column('控除', yenRows(deductionItems), '控除合計', formatYen(deductionTotal))}
+      <div class="col">
+        <div class="head">集計</div>
+        <div class="net"><span>差引支給額</span><span class="v">${formatYen(p.totalAmount)}</span></div>
+        <div class="remark-title">備考欄</div>
+        <div class="remark">${esc(p.notes || '')}</div>
+      </div>
+    </div>
+
+    <div class="note">※内容に不明点があれば、管理者へお問い合わせください。</div>
+  </div>
 </body></html>`;
   win.document.write(html);
   win.document.close();
@@ -16474,7 +16536,7 @@ function PublishSchedulePanel({ kind, year, period, draftCount, actor, isMasterA
 // ---- 給与明細の中身（管理者が一覧から開く） ----
 // スタッフ側の画面と同じ内容を出し、印刷・PDF保存もできるようにします。
 // 管理者には下書きも見えるため、公開済みかどうかを目立つ形で出しています。
-function PayslipDetailModal({ record, employeeName, onClose, settings = null }) {
+function PayslipDetailModal({ record, employeeName, onClose, settings = null, staffCode = '' }) {
   if (!record) return null;
   const p = record;
   const allPayment = p.paymentItems || [
@@ -16551,7 +16613,7 @@ function PayslipDetailModal({ record, employeeName, onClose, settings = null }) 
               閉じる
             </button>
             <button
-              onClick={() => printPayslip(p, employeeName, settings)}
+              onClick={() => printPayslip(p, employeeName, settings, staffCode)}
               className="flex-1 rounded-xl bg-slate-800 py-2.5 text-[13px] font-bold text-white flex items-center justify-center gap-1.5"
             >
               <Download size={14} /> 印刷・PDF保存
@@ -17012,7 +17074,7 @@ function BonusSlipView({ records, employeeName }) {
   );
 }
 
-function PayslipView({ records, employeeName, settings = null }) {
+function PayslipView({ records, employeeName, settings = null, staffCode = '' }) {
   const sorted = [...records].sort((a, b) => (a.year !== b.year ? b.year - a.year : b.month - a.month));
   return (
     <div className="space-y-4">
@@ -17069,7 +17131,7 @@ function PayslipView({ records, employeeName, settings = null }) {
                     <span className="font-mono text-[18px] font-bold text-slate-900">{formatYen(p.totalAmount)}</span>
                   </div>
                   <button
-                    onClick={() => printPayslip(p, employeeName, settings)}
+                    onClick={() => printPayslip(p, employeeName, settings, staffCode)}
                     className="w-full mt-2 py-2 rounded-lg border border-slate-200 text-[12px] font-bold text-slate-600 flex items-center justify-center gap-1.5"
                   >
                     <Download size={13} /> 印刷・PDF保存
@@ -18607,6 +18669,86 @@ function premiumBaseAllowanceTotal({ settings, employeeItems = [], groupItems = 
 // 割増率には法令の下限があります（労働基準法第37条・政令）。
 //   時間外 1.25 ／ 深夜 0.25 ／ 法定休日 1.35 ／ 月60時間超の時間外 1.50
 // 下限を下回る値は保存できないようにしています。上回るぶんは自由です。
+// ---- 給与の支給日 ----
+//
+// 給与明細そのものには支給日の列がありません。締め月に対する決まり
+//（当月か翌月か、何日か）を会社で1つ持ち、そこから出します。
+// 御社は当月末締め・翌月25日払いなので、それを既定にしています。
+//
+// ⚠ 支給日が土日祝のときに前倒しするかどうかは見ていません。
+//   御社の賃金規程の定めに合わせて、必要になったら足してください。
+const SETTING_PAY_DATE = 'pay_date';
+
+const PAY_DATE_MONTHS = {
+  nextMonth: { label: '翌月', offset: 1 },
+  sameMonth: { label: '当月', offset: 0 },
+};
+
+const PAY_DATE_DEFAULTS = { month: 'nextMonth', day: 25 };
+
+/** 支給日の決まりを読みます。壊れていても既定で動かします */
+function parsePayDate(settings) {
+  let raw = null;
+  try {
+    const v = JSON.parse(settings?.[SETTING_PAY_DATE] || 'null');
+    if (v && typeof v === 'object' && !Array.isArray(v)) raw = v;
+  } catch (_) { raw = null; }
+  const out = { ...PAY_DATE_DEFAULTS };
+  if (!raw) return out;
+  if (PAY_DATE_MONTHS[raw.month]) out.month = raw.month;
+  const d = Number(raw.day);
+  if (Number.isFinite(d) && d >= 1 && d <= 31) out.day = Math.floor(d);
+  return out;
+}
+
+/**
+ * 対象月（締め月）から支給日を出します。'YYYY-MM-DD' を返します。
+ * 31日など、その月に無い日を指定されたときは月末にそろえます
+ *（2月25日のような指定で、3月に送られてしまうのを防ぐためです）。
+ */
+function payDateFor(year, month, rule) {
+  const r = rule || PAY_DATE_DEFAULTS;
+  const offset = PAY_DATE_MONTHS[r.month]?.offset ?? 1;
+  const base = new Date(year, (month - 1) + offset, 1);
+  const y = base.getFullYear();
+  const m = base.getMonth() + 1;
+  const lastDay = new Date(y, m, 0).getDate();
+  const day = Math.min(Math.max(1, Number(r.day) || 1), lastDay);
+  return `${y}-${pad(m)}-${pad(day)}`;
+}
+
+/** 支給日の決まりを1行で表します（設定の見出しに出します） */
+function payDateLabel(rule) {
+  const r = rule || PAY_DATE_DEFAULTS;
+  return `${PAY_DATE_MONTHS[r.month]?.label || '翌月'}${r.day}日`;
+}
+
+async function savePayDate(values, actor = null) {
+  const v = values || {};
+  const day = Number(v.day);
+  if (!Number.isFinite(day) || day < 1 || day > 31) {
+    return { ok: false, message: '支給日は1日から31日までで入れてください。' };
+  }
+  const slim = {
+    month: PAY_DATE_MONTHS[v.month] ? v.month : PAY_DATE_DEFAULTS.month,
+    day: Math.floor(day),
+  };
+  const { error } = await supabase.from('app_settings').upsert(
+    {
+      key: SETTING_PAY_DATE,
+      value: JSON.stringify(slim),
+      updated_by: actor?.id || null,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: 'key' }
+  );
+  if (error) {
+    console.error('支給日の保存に失敗しました', error);
+    return { ok: false, message: error.message || '' };
+  }
+  return { ok: true };
+}
+
 const SETTING_PAYROLL_FORMULAS = 'payroll_formulas';
 
 // 法令の下限。これを下回ると賃金未払いになります。
@@ -25701,6 +25843,112 @@ function LaborInsuranceTab({ employeeAccounts = [], payrollRecords = [], bonusRe
 //
 // 料率はこちらでは決められません。協会けんぽの料率は都道府県支部ごとに
 // 毎年変わるため、料率表をご確認のうえ入れてください。
+// 給与の支給日（全社共通）。印刷した給与明細の頭に出します
+function PayDateSettings({ settings, actor, isMasterAdmin, onSaved }) {
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState(() => parsePayDate(settings));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [done, setDone] = useState('');
+
+  const savedJson = settings?.[SETTING_PAY_DATE] || '';
+  useEffect(() => {
+    setForm(parsePayDate(settings));
+    // settings は毎回あたらしい物になるため、中身の文字列を見ています
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savedJson]);
+
+  if (!isMasterAdmin) return null;
+
+  const set = (field, v) => { setError(''); setDone(''); setForm((prev) => ({ ...prev, [field]: v })); };
+
+  const save = async () => {
+    setError(''); setDone(''); setSaving(true);
+    const res = await savePayDate(form, actor);
+    setSaving(false);
+    if (!res.ok) { setError(res.message || '保存できませんでした。'); return; }
+    setDone('支給日を保存しました。印刷した給与明細の頭に出ます。');
+    if (onSaved) await onSaved();
+  };
+
+  // いまの決まりで、今年の例をいくつか出します（取り違えを防ぐため）
+  const thisYear = new Date().getFullYear();
+  const examples = [1, 6, 12].map((m) => {
+    const key = payDateFor(thisYear, m, form);
+    // 曜日も出します。土日に当たるかどうかが、下の注意につながるためです
+    return { month: `${m}月分`, pay: `${dateLabelY(key)}（${WEEKDAY_LABELS[new Date(`${key}T00:00:00`).getDay()]}）` };
+  });
+  const overLast = Number(form.day) > 28;
+
+  return (
+    <div className="rounded-xl border border-slate-200 overflow-hidden">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="w-full px-3.5 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center gap-2 flex-wrap text-left"
+      >
+        <span className="text-[12px] font-bold text-slate-600">給与の支給日</span>
+        <span className="text-[11px] text-slate-400">{payDateLabel(form)}</span>
+        <span className="ml-auto text-[11px] font-bold text-slate-500">{open ? '閉じる' : '開く'}</span>
+      </button>
+
+      {open && (
+        <div className="px-3.5 py-3 space-y-3">
+          {error && <div className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-700">{error}</div>}
+          {done && <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-[11px] text-emerald-700">{done}</div>}
+
+          <div className="text-[10.5px] text-slate-500 leading-relaxed">
+            締め月に対して、いつ支払うかの決まりです。
+            <b>印刷した給与明細の頭に「◯年◯月◯日 支給」として出ます。</b>
+            給与計算そのものには使いません。
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap">
+            <select
+              value={form.month}
+              onChange={(e) => set('month', e.target.value)}
+              className="border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white"
+            >
+              {Object.entries(PAY_DATE_MONTHS).map(([k, v]) => (
+                <option key={k} value={k}>{v.label}</option>
+              ))}
+            </select>
+            <input
+              type="number" min="1" max="31" value={form.day}
+              onChange={(e) => set('day', e.target.value)}
+              className="w-20 border border-slate-200 rounded-lg px-2.5 py-1.5 font-mono text-[12.5px] bg-white"
+            />
+            <span className="text-[12.5px] text-slate-500">日</span>
+          </div>
+
+          <div className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 text-[10.5px] text-slate-600 leading-relaxed">
+            <b className="block mb-0.5">この決まりだと、{thisYear}年はこうなります</b>
+            {examples.map((x) => (
+              <span key={x.month} className="block">{x.month} → {x.pay}</span>
+            ))}
+            {overLast && (
+              <span className="block pt-0.5 text-amber-700">
+                その月に無い日（2月30日など）のときは、月末にそろえます。
+              </span>
+            )}
+            <span className="block pt-0.5">
+              支給日が土日祝のときに前倒しするかどうかは見ていません。
+              賃金規程に定めがある場合は、印刷したものを手で直してください。
+            </span>
+          </div>
+
+          <button
+            onClick={save}
+            disabled={saving}
+            className="w-full py-2 rounded-lg bg-slate-800 disabled:bg-slate-300 text-white text-[12.5px] font-bold"
+          >
+            {saving ? '保存中…' : '支給日を保存'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function InsuranceRateSettings({ isMasterAdmin, onSaved }) {
   const [open, setOpen] = useState(false);
   const [rates, setRates] = useState({ healthInsuranceRate: '', nursingInsuranceRate: '', pensionInsuranceRate: '' });
@@ -25875,6 +26123,12 @@ function PayrollSettingsTab({ settings, employeeAccounts = [], groupAttendanceSc
         isMasterAdmin={isMasterAdmin}
         onSaved={onRefresh}
       />
+      <PayDateSettings
+        settings={settings}
+        actor={session}
+        isMasterAdmin={isMasterAdmin}
+        onSaved={onRefresh}
+      />
       <PremiumBaseSettings
         settings={settings}
         actor={session}
@@ -25919,6 +26173,8 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
   const [withholdingDependents, setWithholdingDependents] = useState(null);
   // 一覧から開いた明細（中身を見る・印刷する）
   const [openSlip, setOpenSlip] = useState(null);
+  // 備考。印刷した明細の集計欄に出ます。payroll_records.notes に入ります
+  const [notes, setNotes] = useState('');
 
   const employee = employeeAccounts.find((a) => a.id === employeeId);
   const existing = payrollRecords.find((p) => p.employeeId === employeeId && p.year === year && p.month === month);
@@ -26093,6 +26349,13 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     monthlyAvgDays: formulas.monthlyAvgDays,
   }) : null;
 
+  // 欠勤控除を入れたときの根拠。備考が空のときだけ、これを備考に入れます
+  const absenceNote = absenceDeduction && absenceDeduction.amount > 0 && employee
+    ? `欠勤控除：基本給 ${formatYen(absenceDeduction.baseAmount)} ÷ 出勤規定日数 ${absenceDeduction.prescribedDays}日`
+      + `（${attendanceSource === 'personal' ? 'この方だけの設定' : `${employee.mainGroup}の設定`}）`
+      + ` ＝ 1日 ${formatYen(absenceDeduction.unit)} × 欠勤 ${absenceDeduction.absentDays}日`
+    : '';
+
   // 有給休暇。取得した日を平日と土日祝に分けて数えます
   //（日給制は取得した日の単価で払うため）。
   const paidLeaveCount = employee
@@ -26254,6 +26517,13 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     };
   };
 
+  // 備考は、スタッフ・年月を変えたときだけ読み直します。
+  // 下の初期化と一緒にすると、設定を読み直すたびに入力が消えてしまいます。
+  useEffect(() => {
+    setNotes(existing?.notes || '');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [employeeId, year, month, existing?.id]);
+
   // スタッフ・年月・下書きの有無が変わったら、支給・控除項目を初期化する。
   // すでに明細がある月は、保存されている中身をそのまま出します
   //（勝手に作り直すと、手で直した金額が消えてしまうため）。
@@ -26382,17 +26652,19 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
         absentDays: Number(absentDays) || 0,
         paidLeaveDays: Number(paidLeaveDays) || 0,
         paidLeaveHours: Number(paidLeaveHours) || 0,
+        // 印刷した明細の勤怠欄に出す総労働日数。
+        // 明細を作ったときの日数を残します（あとから勤怠を直しても、
+        // 渡した明細の数字は動かさないためです）。
+        workedDays: monthly.days,
         // 空なら保存しません（自動で数えた値を使う、という意味になります）
         ...(weekendAbsentOverride === ''
           ? {}
           : { weekendAbsentOverride: Number(weekendAbsentOverride) || 0 }),
       },
-      // 欠勤控除を入れたときは、その根拠を明細のメモに残します
-      notes: absenceDeduction && absenceDeduction.amount > 0
-        ? `欠勤控除：基本給 ${formatYen(absenceDeduction.baseAmount)} ÷ 出勤規定日数 ${absenceDeduction.prescribedDays}日`
-          + `（${attendanceSource === 'personal' ? 'この方だけの設定' : `${employee.mainGroup}の設定`}）`
-          + ` ＝ 1日 ${formatYen(absenceDeduction.unit)} × 欠勤 ${absenceDeduction.absentDays}日`
-        : null,
+      // 備考。手で書いたものが優先です。
+      // 空のときだけ、これまでどおり欠勤控除の根拠を入れます
+      //（手で書いたものを消してしまわないようにするためです）。
+      notes: notes.trim() || absenceNote || null,
     });
   };
 
@@ -26621,6 +26893,26 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
           <span className="font-mono text-[20px] font-bold">{formatYen(netAmount)}</span>
         </div>
 
+        {/* 備考。印刷した明細の集計欄と、明細を開いたときに出ます */}
+        <Field label="備考（明細に出ます）">
+          <textarea
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            rows={3}
+            disabled={isPublished}
+            placeholder={absenceNote || '例）◯月◯日の振替休日の分を含みます'}
+            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[12.5px] bg-white disabled:bg-slate-50 disabled:text-slate-400"
+          />
+        </Field>
+        <div className="text-[10.5px] text-slate-400 leading-relaxed -mt-1">
+          印刷した給与明細の集計欄と、明細を開いたときに出ます。スタッフにも見えます。
+          {absenceNote && (
+            <b className="block pt-0.5">
+              空のまま保存すると、欠勤控除の根拠（{absenceNote}）が入ります。
+            </b>
+          )}
+        </div>
+
         {isPublished ? (
           // 公開済みは直接直せない。マスター管理者が公開を取り消してから修正する
           <div className="space-y-2">
@@ -26701,6 +26993,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
           employeeName={openSlip.employeeName || employeeAccounts.find((a) => a.id === openSlip.employeeId)?.name || ''}
           onClose={() => setOpenSlip(null)}
           settings={settings}
+          staffCode={employeeAccounts.find((a) => a.id === openSlip.employeeId)?.staffNumber || ''}
         />
       )}
 
