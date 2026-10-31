@@ -16298,6 +16298,17 @@ function printPayslip(p, employeeName, settings = null, staffCode = '') {
     p.attendanceExtra?.paidLeaveHours ? ['有休時間', `${p.attendanceExtra.paidLeaveHours}時間`] : null,
   ].filter(Boolean);
 
+  // 項目が多いときは行を詰めます。
+  // 列の高さは用紙に合わせて決まっているので、詰めないと下が切れて
+  // 気づかないまま出てしまいます（19行でいっぱいになります）。
+  const BODY_INNER_MM = 121.2;   // 本文に使える高さ
+  const ROW_MM = 6.3;            // ジョブカンの明細を測った行の高さ
+  const maxRows = Math.max(attendanceRows.length, paymentItems.length, deductionItems.length, 1);
+  const rowMm = Math.min(ROW_MM, BODY_INNER_MM / maxRows);
+  // 行がこれより低くなると字が重なるので、字も小さくします。
+  // 字の高さ（pt）が行の高さ（mm）に収まるよう、1mm = 2.835pt で見ています。
+  const fontPt = rowMm >= 4.2 ? 8.9 : Math.max(5, Math.min(8.9, rowMm * 2.835 * 0.78));
+
   const rows = (items) => items
     .map(([label, value]) => `<tr><td class="l">${esc(label)}</td><td class="v">${esc(value)}</td></tr>`)
     .join('');
@@ -16320,14 +16331,18 @@ function printPayslip(p, employeeName, settings = null, staffCode = '') {
 ${PRINT_FONT_LINK}
 <style>
   ${PRINT_SHEET_CSS}
-  /* --- 見出し --- */
-  .top { display: flex; justify-content: space-between; align-items: flex-start; gap: 6mm; margin-bottom: 7mm; }
+  /* --- 見出し ---
+     高さ 31.3mm は、用紙の上から 41.3mm のところに見出しの帯が来るようにした
+     ものです（ジョブカンの明細を測った位置）。 */
+  .top { height: 31.3mm; display: flex; justify-content: space-between; align-items: flex-start; gap: 6mm; }
   .title { font-size: 10.4pt; font-weight: bold; }
   .paydate { font-size: 8.9pt; margin-top: 2.6mm; }
   .company { font-size: 10.4pt; font-weight: bold; text-align: right; }
   .who { font-size: 9.65pt; text-align: right; margin-top: 2.6mm; }
-  /* --- 4つの列 --- */
-  .cols { flex: 1; min-height: 0; display: flex; gap: 2.9mm; align-items: stretch; }
+  /* --- 4つの列 ---
+     高さ 139.5mm も測った値です。用紙の下は空けたままにします
+     （紙いっぱいには伸ばしません。ジョブカンと同じ見た目にするためです）。 */
+  .cols { flex: none; height: 139.5mm; display: flex; gap: 2.9mm; align-items: stretch; }
   .col { flex: 1; display: flex; flex-direction: column; min-width: 0; }
   /* 帯の高さはジョブカンの明細を測った値です（見出し 8.15mm、合計 7.45mm）。
      勤怠の列の帯は中身が空なので、高さを決めておかないとつぶれます。 */
@@ -16337,8 +16352,10 @@ ${PRINT_FONT_LINK}
   /* 下地は左62%だけ。金額のところは白のままにします（ジョブカンと同じ） */
   .body { flex: 1; min-height: 0; padding: 2.4mm 2.3mm 0; overflow: hidden;
           background: linear-gradient(to right, #f0f0f0 62%, #fff 62%); }
-  table { width: 100%; border-collapse: collapse; font-size: 8.9pt; }
-  td { padding: 0; height: 6.3mm; vertical-align: middle; }
+  table { width: 100%; border-collapse: collapse; font-size: ${fontPt.toFixed(2)}pt; }
+  /* line-height を決めておかないと、行の高さを詰めても字の行間ぶんが
+     残ってしまい、指定した高さより高くなります（下が切れる原因になります） */
+  td { padding: 0; height: ${rowMm.toFixed(2)}mm; line-height: 1; vertical-align: middle; }
   td.l { word-break: break-all; }
   td.v { text-align: right; white-space: nowrap; padding-left: 3mm; }
   .foot { background: #aaa; color: #fff; font-size: 9.65pt; height: 7.45mm;
@@ -16348,8 +16365,11 @@ ${PRINT_FONT_LINK}
   .net { background: #aaa; color: #fff; font-size: 9.65pt; height: 7.45mm;
          display: flex; align-items: center; justify-content: space-between;
          padding: 0 2.3mm; border-radius: 0 0 1.4mm 1.4mm; }
-  .remark-title { font-size: 9.65pt; margin: 4.5mm 0 1.4mm; }
-  .remark { border: 1px solid #c8c8c8; border-radius: 1.4mm; flex: 1; min-height: 0;
+  /* 集計の列。高さはすべてジョブカンの明細を測った値です。
+     上の空いている灰色は、ジョブカンで「銀行振込1」が入るところです。 */
+  .sum { flex: none; height: 47.4mm; }
+  .remark-title { flex: none; height: 10.5mm; font-size: 9.65pt; display: flex; align-items: flex-end; padding-bottom: 1.1mm; }
+  .remark { flex: none; height: 65.9mm; border: 1px solid #c8c8c8; border-radius: 1.4mm;
             padding: 2.4mm; font-size: 8.9pt; white-space: pre-wrap; line-height: 1.7; overflow: hidden; }
 </style></head>
 <body>
@@ -16371,6 +16391,7 @@ ${PRINT_FONT_LINK}
       ${column('控除', yenRows(deductionItems), '控除合計', yen(deductionTotal))}
       <div class="col">
         <div class="head">集計</div>
+        <div class="body sum"></div>
         <div class="net"><span>差引支給額</span><span>${yen(p.totalAmount)}</span></div>
         <div class="remark-title">備考欄</div>
         <div class="remark">${esc(p.notes || '')}</div>
