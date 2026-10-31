@@ -25650,6 +25650,147 @@ function LaborInsuranceTab({ employeeAccounts = [], payrollRecords = [], bonusRe
   );
 }
 
+// 社会保険の料率（全社共通）
+//
+// 健康保険料率・介護保険料率・厚生年金保険料率は、スタッフごとではなく
+// 会社で1つです（insurance_rate_settings の 'default' 行）。
+// 以前はスタッフ詳細の中にありましたが、誰の画面で直しても全員に効くため、
+// 直す場所を給与の設定にまとめています。
+//
+// 料率はこちらでは決められません。協会けんぽの料率は都道府県支部ごとに
+// 毎年変わるため、料率表をご確認のうえ入れてください。
+function InsuranceRateSettings({ isMasterAdmin, onSaved }) {
+  const [open, setOpen] = useState(false);
+  const [rates, setRates] = useState({ healthInsuranceRate: '', nursingInsuranceRate: '', pensionInsuranceRate: '' });
+  const [ready, setReady] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [done, setDone] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const r = await fetchInsuranceRateSettings();
+      if (cancelled) return;
+      setRates({
+        healthInsuranceRate: r && r.healthInsuranceRate != null ? String(r.healthInsuranceRate) : '',
+        nursingInsuranceRate: r && r.nursingInsuranceRate != null ? String(r.nursingInsuranceRate) : '1.62',
+        pensionInsuranceRate: r && r.pensionInsuranceRate != null ? String(r.pensionInsuranceRate) : '18.3',
+      });
+      setReady(true);
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  if (!isMasterAdmin) return null;
+
+  const set = (key) => (e) => {
+    setError(''); setDone('');
+    const v = e.target.value;
+    setRates((p) => ({ ...p, [key]: v }));
+  };
+
+  // 入れ間違いを見つけるための範囲です。止めるためではありません
+  const odd = [
+    { key: 'healthInsuranceRate', label: '健康保険料率', min: 8, max: 13 },
+    { key: 'nursingInsuranceRate', label: '介護保険料率', min: 1, max: 3 },
+    { key: 'pensionInsuranceRate', label: '厚生年金料率', min: 15, max: 20 },
+  ].filter((x) => {
+    const v = rates[x.key];
+    if (v === '') return false;
+    const n = Number(v);
+    return !Number.isFinite(n) || n < x.min || n > x.max;
+  });
+
+  const missing = rates.healthInsuranceRate === '' || rates.nursingInsuranceRate === '' || rates.pensionInsuranceRate === '';
+
+  const save = async () => {
+    setError(''); setDone(''); setSaving(true);
+    const ok = await saveInsuranceRateSettings(rates);
+    setSaving(false);
+    if (!ok) { setError('保存できませんでした。通信の状態をご確認のうえ、もう一度お試しください。'); return; }
+    setDone('料率を保存しました。これから作る給与明細に使われます。すでに作ってある明細は変わりません。');
+    if (onSaved) await onSaved();
+  };
+
+  const field = (key, label, hint) => (
+    <label className="block">
+      <span className="block text-[10.5px] font-bold text-slate-500 mb-0.5">{label}</span>
+      <input
+        type="number" step="0.01" min="0" value={rates[key]} onChange={set(key)}
+        placeholder="未登録"
+        className="w-full border border-slate-200 rounded-lg px-2.5 py-1.5 font-mono text-[12.5px] bg-white"
+      />
+      {hint && <span className="block text-[10px] text-slate-400 pt-0.5">{hint}</span>}
+    </label>
+  );
+
+  return (
+    <div className="rounded-xl border border-slate-200 overflow-hidden">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="w-full px-3.5 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center gap-2 flex-wrap text-left"
+      >
+        <span className="text-[12px] font-bold text-slate-600">社会保険の料率</span>
+        <span className="text-[11px] text-slate-400">
+          {!ready ? '読み込み中…'
+            : missing ? '未登録あり'
+              : `健保 ${rates.healthInsuranceRate}％／介護 ${rates.nursingInsuranceRate}％／厚年 ${rates.pensionInsuranceRate}％`}
+        </span>
+        {ready && odd.length > 0 && (
+          <span className="text-[10.5px] font-bold text-amber-700">要確認 {odd.length}件</span>
+        )}
+        <span className="ml-auto text-[11px] font-bold text-slate-500">{open ? '閉じる' : '開く'}</span>
+      </button>
+
+      {open && (
+        <div className="px-3.5 py-3 space-y-3">
+          {error && <div className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-700">{error}</div>}
+          {done && <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-[11px] text-emerald-700">{done}</div>}
+
+          <div className="text-[10.5px] text-slate-500 leading-relaxed">
+            <b>全スタッフ共通の設定です。</b>
+            給与明細の健康保険料・介護保険料・厚生年金保険料は、
+            スタッフ詳細の「標準報酬月額（給与計算に使う）」にこの料率をかけて出しています
+            （本人負担はその半分です）。
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+            {field('healthInsuranceRate', '健康保険料率（%）', '協会けんぽ京都支部の料率')}
+            {field('nursingInsuranceRate', '介護保険料率（%）', '40歳以上65歳未満の方のみ')}
+            {field('pensionInsuranceRate', '厚生年金料率（%）', '全国一律')}
+          </div>
+
+          {odd.length > 0 && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-[10.5px] text-amber-800 leading-relaxed">
+              <b className="block">入れ間違いかもしれません</b>
+              {odd.map((x) => `${x.label}は ${x.min}〜${x.max}％ の範囲が通常です`).join('。')}。
+              <span className="block pt-0.5">料率は％で入れてください（9.89％なら「9.89」）。このまま保存することもできます。</span>
+            </div>
+          )}
+
+          <div className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 text-[10.5px] text-slate-600 leading-relaxed">
+            <b className="block">健康保険料率は協会けんぽの都道府県支部ごとに異なります。</b>
+            毎年3月分（4月納付分）から変わるため、京都支部の最新の料率表をご確認のうえ入れてください。
+            介護保険料率・厚生年金保険料率は全国一律です。
+            <span className="block pt-0.5">
+              料率を変えても、すでに作ってある給与明細の金額は変わりません。作り直しが要ります。
+            </span>
+          </div>
+
+          <button
+            onClick={save}
+            disabled={saving || !ready}
+            className="w-full py-2 rounded-lg bg-slate-800 disabled:bg-slate-300 text-white text-[12.5px] font-bold"
+          >
+            {saving ? '保存中…' : '料率を保存（全社共通）'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PayrollSettingsTab({ settings, employeeAccounts = [], groupAttendanceSchedules = {},
   payrollItemOverrides = {}, payrollItemOverridesReady = true,
   session, isMasterAdmin = false, onRefresh, isDesktop }) {
@@ -25685,6 +25826,10 @@ function PayrollSettingsTab({ settings, employeeAccounts = [], groupAttendanceSc
         settings={settings}
         employeeAccounts={employeeAccounts}
         actor={session}
+        isMasterAdmin={isMasterAdmin}
+        onSaved={onRefresh}
+      />
+      <InsuranceRateSettings
         isMasterAdmin={isMasterAdmin}
         onSaved={onRefresh}
       />
@@ -33238,8 +33383,8 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
   const [remuneration, setRemuneration] = useState({ healthInsuranceAmount: '', pensionAmount: '', healthInsurancePremium: '', nursingInsurancePremium: '', pensionPremium: '' });
   const [savingRemuneration, setSavingRemuneration] = useState(false);
   const [tablePickerOpen, setTablePickerOpen] = useState(false);
+  // 下の「自動計算する（本人負担分）」で使う料率。直すのは給与の設定の方です
   const [insuranceRates, setInsuranceRates] = useState({ healthInsuranceRate: '', nursingInsuranceRate: '1.62', pensionInsuranceRate: '18.3' });
-  const [savingInsuranceRates, setSavingInsuranceRates] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -33253,12 +33398,6 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
       }
     })();
   }, []);
-
-  const saveInsuranceRatesNow = async () => {
-    setSavingInsuranceRates(true);
-    await saveInsuranceRateSettings(insuranceRates);
-    setSavingInsuranceRates(false);
-  };
 
   useEffect(() => {
     (async () => {
@@ -34097,15 +34236,18 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                 <Field label="標準報酬月額（厚生年金）"><input type="number" value={remuneration.pensionAmount} onChange={(e) => setRemuneration((p) => ({ ...p, pensionAmount: e.target.value }))} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" /></Field>
               </div>
 
-              <div className="bg-slate-50 rounded-xl p-3 space-y-2">
-                <div className="text-[11px] font-bold text-slate-500">保険料率（全社共通の設定）</div>
-                <div className="grid grid-cols-3 gap-2">
-                  <Field label="健康保険料率（%）"><input type="number" step="0.01" value={insuranceRates.healthInsuranceRate} onChange={(e) => setInsuranceRates((p) => ({ ...p, healthInsuranceRate: e.target.value }))} placeholder="要確認" className="w-full border border-slate-200 rounded-lg px-2.5 py-1.5 font-mono text-[12.5px] bg-white" /></Field>
-                  <Field label="介護保険料率（%）"><input type="number" step="0.01" value={insuranceRates.nursingInsuranceRate} onChange={(e) => setInsuranceRates((p) => ({ ...p, nursingInsuranceRate: e.target.value }))} className="w-full border border-slate-200 rounded-lg px-2.5 py-1.5 font-mono text-[12.5px] bg-white" /></Field>
-                  <Field label="厚生年金料率（%）"><input type="number" step="0.01" value={insuranceRates.pensionInsuranceRate} onChange={(e) => setInsuranceRates((p) => ({ ...p, pensionInsuranceRate: e.target.value }))} className="w-full border border-slate-200 rounded-lg px-2.5 py-1.5 font-mono text-[12.5px] bg-white" /></Field>
+              {/* 料率は全社共通です。直すのは「給与」タブの「給与の設定」で、
+                  ここでは下の自動計算に使う値を見るだけにしています */}
+              <div className="bg-slate-50 rounded-xl p-3 space-y-1.5">
+                <div className="text-[11px] font-bold text-slate-500">いまの保険料率（全社共通）</div>
+                <div className="grid grid-cols-3 gap-2 text-[12.5px]">
+                  <div><div className="text-[10px] text-slate-400">健康保険</div><span className="font-mono">{insuranceRates.healthInsuranceRate === '' ? '未登録' : `${insuranceRates.healthInsuranceRate}%`}</span></div>
+                  <div><div className="text-[10px] text-slate-400">介護保険</div><span className="font-mono">{insuranceRates.nursingInsuranceRate === '' ? '未登録' : `${insuranceRates.nursingInsuranceRate}%`}</span></div>
+                  <div><div className="text-[10px] text-slate-400">厚生年金</div><span className="font-mono">{insuranceRates.pensionInsuranceRate === '' ? '未登録' : `${insuranceRates.pensionInsuranceRate}%`}</span></div>
                 </div>
-                <button onClick={saveInsuranceRatesNow} disabled={savingInsuranceRates} className="text-[11px] font-bold text-amber-600">{savingInsuranceRates ? '保存中…' : '料率を保存（全社共通）'}</button>
-                <div className="text-[10px] text-slate-400">健康保険料率は協会けんぽの都道府県支部ごとに異なるため、京都支部の最新の料率表をご確認のうえ入力してください。介護・厚生年金は全国一律の値を初期値にしています。</div>
+                <div className="text-[10px] text-slate-400 leading-relaxed">
+                  全スタッフ共通の設定です。直すときは「給与」タブ →「給与の設定」→「社会保険の料率」から。
+                </div>
               </div>
 
               <div className="grid grid-cols-3 gap-3">
