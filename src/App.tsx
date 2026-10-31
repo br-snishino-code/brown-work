@@ -16173,6 +16173,78 @@ const wageTypeLabel = (wageType) => WAGE_TYPES[wageType] || WAGE_TYPES.hourly;
 
 const formatYen = (n) => `¥${Math.round(n || 0).toLocaleString('ja-JP')}`;
 
+// ---- 印刷する書類の共通部分 ----
+//
+// フォントは Noto Sans JP にそろえています。Google Fonts から読み込むので、
+// Windows でも Mac でもスマートフォンでも同じ見え方になります。
+// 読み込めなかったとき（通信が無いときなど）は、下の font-family の
+// 2番目以降（Windows の Meiryo UI など）が使われます。
+const PRINT_FONT_LINK = ''
+  + '<link rel="preconnect" href="https://fonts.googleapis.com">'
+  + '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
+  + '<link rel="stylesheet" '
+  + 'href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700&display=swap">';
+
+const PRINT_FONT_FAMILY =
+  '"Noto Sans JP", "Meiryo UI", Meiryo, "Hiragino Sans", "Yu Gothic", sans-serif';
+
+/**
+ * A4横1枚にぴったり収めるための土台。
+ *
+ *   用紙 297mm × 210mm から、上下左右の余白 8mm を引いた
+ *   281mm × 194mm が中身の入る大きさです。
+ *   .sheet をその高さいっぱいにして、中の列が下まで伸びるようにしています。
+ *
+ * print-color-adjust は、見出しの灰色の帯を印刷にも出すための指定です。
+ * 既定のままだと、ブラウザが背景色を省いて白く印刷します。
+ */
+const PRINT_PAGE_MARGIN_MM = 8;
+const PRINT_SHEET_CSS = `
+  @page { size: A4 landscape; margin: ${PRINT_PAGE_MARGIN_MM}mm; }
+  * { box-sizing: border-box; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: ${PRINT_FONT_FAMILY};
+    color: #1e293b;
+    width: ${297 - PRINT_PAGE_MARGIN_MM * 2}mm;
+    /* 0.4mm だけ低くしています。ぴったりの数字にすると、ブラウザの丸めで
+       わずかにはみ出し、白紙の2枚目が出ることがあるためです。 */
+    height: ${210 - PRINT_PAGE_MARGIN_MM * 2 - 0.4}mm;
+  }
+  .sheet {
+    width: 100%; height: 100%;
+    border: 1px solid #cbd5e1;
+    padding: 5mm;
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  /* 2枚目に送られないようにします。
+     ここで height を auto に戻すと、用紙の高さいっぱいに広がらなくなります。 */
+  .sheet { page-break-inside: avoid; break-inside: avoid; }
+`;
+
+/**
+ * 組み立てたHTMLを別の窓で開き、フォントがそろってから印刷に進みます。
+ * 読み込みを待たずに印刷すると、Noto Sans JP が間に合わず
+ * 別のフォントで印刷されることがあります。
+ * 待っても来ないときのために、上限を1.5秒にしています。
+ */
+function openForPrint(win, html) {
+  win.document.write(html);
+  win.document.close();
+  win.focus();
+  const go = () => { try { win.print(); } catch (_) { /* 窓が閉じられていても止めません */ } };
+  let done = false;
+  const once = () => { if (done) return; done = true; go(); };
+  const fonts = win.document.fonts;
+  if (fonts && fonts.ready && typeof fonts.ready.then === 'function') {
+    fonts.ready.then(() => setTimeout(once, 150));
+    setTimeout(once, 1500);
+  } else {
+    setTimeout(once, 300);
+  }
+}
+
 // 給与明細を印刷する。
 //
 // 並びはジョブカンの明細に合わせています（御社の指定）。
@@ -16233,31 +16305,29 @@ function printPayslip(p, employeeName, settings = null, staffCode = '') {
 
   const html = `<!doctype html>
 <html lang="ja"><head><meta charset="utf-8"><title>給与明細 ${p.year}年${p.month}月分</title>
+${PRINT_FONT_LINK}
 <style>
-  @page { size: A4 landscape; margin: 12mm; }
-  * { box-sizing: border-box; }
-  /* Meiryo UI は Windows に入っているフォントです。
-     Mac やスマートフォンには無いため、無いときに使う字を後ろに並べています。 */
-  body { font-family: "Meiryo UI", Meiryo, "Hiragino Sans", "Yu Gothic", sans-serif; margin: 0; padding: 24px; color: #1e293b; }
-  .sheet { border: 1px solid #cbd5e1; padding: 20px; }
-  .top { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 16px; }
-  .title { font-size: 16px; font-weight: bold; }
-  .paydate { font-size: 11px; color: #64748b; margin-top: 3px; }
-  .company { font-size: 13px; font-weight: bold; text-align: right; }
-  .who { font-size: 11px; color: #475569; text-align: right; margin-top: 3px; }
-  .cols { display: flex; gap: 10px; align-items: stretch; }
+  ${PRINT_SHEET_CSS}
+  /* --- 給与明細の中身 --- */
+  .top { display: flex; justify-content: space-between; align-items: flex-start; gap: 6mm; margin-bottom: 5mm; }
+  .title { font-size: 15px; font-weight: bold; }
+  .paydate { font-size: 10.5px; color: #64748b; margin-top: 2px; }
+  .company { font-size: 12.5px; font-weight: bold; text-align: right; }
+  .who { font-size: 10.5px; color: #475569; text-align: right; margin-top: 2px; }
+  /* 4つの列。残りの高さをいっぱいに使います（A4横1枚にぴったり収めるため） */
+  .cols { flex: 1; min-height: 0; display: flex; gap: 3mm; align-items: stretch; }
   .col { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-  .head { background: #94a3b8; color: #fff; font-size: 11.5px; font-weight: bold; text-align: center; padding: 4px 0; }
-  .body { background: #f1f5f9; flex: 1; padding: 8px 10px; min-height: 300px; }
-  table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
-  td { padding: 3px 0; vertical-align: top; }
+  .head { background: #94a3b8; color: #fff; font-size: 11px; font-weight: bold; text-align: center; padding: 1mm 0; }
+  .body { background: #f1f5f9; flex: 1; min-height: 0; padding: 2mm 3mm; overflow: hidden; }
+  table { width: 100%; border-collapse: collapse; font-size: 11px; }
+  td { padding: 0.8mm 0; vertical-align: top; }
   td.l { color: #334155; word-break: break-all; }
-  td.v { text-align: right; white-space: nowrap; padding-left: 8px; }
-  .foot { background: #94a3b8; color: #fff; font-size: 11.5px; font-weight: bold; display: flex; justify-content: space-between; padding: 5px 10px; }
+  td.v { text-align: right; white-space: nowrap; padding-left: 3mm; }
+  .foot { background: #94a3b8; color: #fff; font-size: 11px; font-weight: bold; display: flex; justify-content: space-between; padding: 1.2mm 3mm; }
   .foot.empty { background: transparent; padding: 0; height: 0; }
-  .net { background: #475569; color: #fff; font-size: 12.5px; font-weight: bold; display: flex; justify-content: space-between; padding: 7px 10px; margin-top: 10px; }
-  .remark-title { font-size: 11px; color: #475569; margin: 12px 0 4px; }
-  .remark { border: 1px solid #cbd5e1; min-height: 120px; padding: 8px; font-size: 11px; white-space: pre-wrap; line-height: 1.7; }
+  .net { background: #475569; color: #fff; font-size: 12px; font-weight: bold; display: flex; justify-content: space-between; padding: 1.8mm 3mm; margin-top: 3mm; }
+  .remark-title { font-size: 10.5px; color: #475569; margin: 3mm 0 1mm; }
+  .remark { border: 1px solid #cbd5e1; flex: 1; min-height: 0; padding: 2mm; font-size: 10.5px; white-space: pre-wrap; line-height: 1.7; overflow: hidden; }
 </style></head>
 <body>
   <div class="sheet">
@@ -16286,10 +16356,7 @@ function printPayslip(p, employeeName, settings = null, staffCode = '') {
 
   </div>
 </body></html>`;
-  win.document.write(html);
-  win.document.close();
-  win.focus();
-  setTimeout(() => win.print(), 300);
+  openForPrint(win, html);
 }
 
 // ============================================================
@@ -16973,8 +17040,9 @@ function printBonusSlip(b, employeeName) {
   const rowsHtml = (items) => (items || []).map((it) => `<tr><td class="label">${it.label || '（項目名なし）'}</td><td class="value">${formatYen(Number(it.amount) || 0)}</td></tr>`).join('');
   const html = `<!doctype html>
 <html lang="ja"><head><meta charset="utf-8"><title>賞与明細 ${title}</title>
+${PRINT_FONT_LINK}
 <style>
-  body { font-family: -apple-system, "Hiragino Sans", sans-serif; padding: 32px; color: #1e293b; }
+  body { font-family: ${PRINT_FONT_FAMILY}; padding: 32px; color: #1e293b; }
   h1 { font-size: 18px; margin-bottom: 4px; }
   .sub { color: #64748b; font-size: 12px; margin-bottom: 16px; }
   h2 { font-size: 12.5px; color: #64748b; margin: 18px 0 4px; }
@@ -17003,12 +17071,8 @@ function printBonusSlip(b, employeeName) {
     <tr class="total"><td>差引支給額</td><td class="value">${formatYen(b.totalAmount)}</td></tr>
   </table>
   ${b.notes ? `<div class="note">${b.notes}</div>` : ''}
-  <div class="note">※内容に不明点があれば、管理者へお問い合わせください。</div>
 </body></html>`;
-  win.document.write(html);
-  win.document.close();
-  win.focus();
-  win.print();
+  openForPrint(win, html);
 }
 
 // スタッフ側：賞与明細の一覧
@@ -17140,7 +17204,6 @@ function PayslipView({ records, employeeName, settings = null, staffCode = '' })
           })}
         </div>
       )}
-      <div className="text-[11px] text-slate-400 px-1">※内容に不明点があれば、管理者へお問い合わせください。</div>
     </div>
   );
 }
@@ -25198,8 +25261,9 @@ function printWithholdingSlip({ account, result, year, office, warnings }) {
     .join('　');
   const html = `<!doctype html>
 <html lang="ja"><head><meta charset="utf-8"><title>源泉徴収票 ${year}年分 ${account.name}</title>
+${PRINT_FONT_LINK}
 <style>
-  body { font-family: -apple-system, "Hiragino Sans", sans-serif; padding: 28px; color: #1e293b; }
+  body { font-family: ${PRINT_FONT_FAMILY}; padding: 28px; color: #1e293b; }
   h1 { font-size: 17px; margin: 0 0 4px; }
   .sub { font-size: 12px; color: #64748b; margin-bottom: 16px; }
   table { width: 100%; border-collapse: collapse; margin-bottom: 14px; }
