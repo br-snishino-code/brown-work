@@ -16198,7 +16198,7 @@ const PRINT_FONT_FAMILY =
  * print-color-adjust は、見出しの灰色の帯を印刷にも出すための指定です。
  * 既定のままだと、ブラウザが背景色を省いて白く印刷します。
  */
-const PRINT_PAGE_MARGIN_MM = 8;
+const PRINT_PAGE_MARGIN_MM = 10;
 const PRINT_SHEET_CSS = `
   @page { size: A4 landscape; margin: ${PRINT_PAGE_MARGIN_MM}mm; }
   * { box-sizing: border-box; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
@@ -16211,10 +16211,9 @@ const PRINT_SHEET_CSS = `
        わずかにはみ出し、白紙の2枚目が出ることがあるためです。 */
     height: ${210 - PRINT_PAGE_MARGIN_MM * 2 - 0.4}mm;
   }
+  /* ジョブカンの明細に外枠は無いので、枠も内側の余白も付けません */
   .sheet {
     width: 100%; height: 100%;
-    border: 1px solid #cbd5e1;
-    padding: 5mm;
     display: flex; flex-direction: column;
     overflow: hidden;
   }
@@ -16247,15 +16246,24 @@ function openForPrint(win, html) {
 
 // 給与明細を印刷する。
 //
-// 並びはジョブカンの明細に合わせています（御社の指定）。
-//   勤怠 ／ 支給 ／ 控除 ／ 集計 の4列
-// 「所定内労働時間」と「銀行振込」の欄は、出さないと決めています。
+// 並びと寸法は、御社からいただいたジョブカンの明細（PDF）を測って合わせています。
+//   用紙 … A4横。左右の余白 10mm
+//   列  … 勤怠／支給／控除／集計 の4つ。1列 66.9mm、間は 2.9mm
+//   帯  … 見出しと合計は #aaa、本文の下地は #f0f0f0
+//          下地は列の左 62%（項目名のところ）だけで、金額のところは白です
+//   字  … 見出し・合計・氏名 9.65pt／本文・支給日 8.9pt／表題・会社名 10.4pt
+//   金額 … 円記号は付けず、3桁ごとの区切りだけ
+//
+// ジョブカンと違うところ（御社の指定）
+//   ・「所定内労働時間」と「銀行振込」の欄は出しません
+//   ・下の注意書きは出しません
+//   ・用紙の高さいっぱいに伸ばします（ジョブカンは下が空いたままです）
 //
 // settings … 支給・控除項目一覧（0円の行を出すか）、事業所情報（会社名）、
 //            支給日の決まり。渡されないときは、その欄を省きます。
 // staffCode … スタッフコード。明細の右上に出します。
 function printPayslip(p, employeeName, settings = null, staffCode = '') {
-  const win = window.open('', '_blank', 'width=900,height=700');
+  const win = window.open('', '_blank', 'width=1000,height=720');
   if (!win) return;
   const allPayment = p.paymentItems || [{ label: '基本給', amount: p.baseAmount }, ...(p.overtimeAmount ? [{ label: '残業手当', amount: p.overtimeAmount }] : [])];
   const allDeduction = p.deductionItems || [];
@@ -16268,12 +16276,14 @@ function printPayslip(p, employeeName, settings = null, staffCode = '') {
 
   const esc = (v) => String(v ?? '')
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  // ジョブカンの明細に合わせ、円記号は付けません
+  const yen = (v) => Math.round(Number(v) || 0).toLocaleString('ja-JP');
 
   // 会社名は事業所情報の「事業所名称」です。未登録のときは出しません
   const office = settings ? parseOfficeInfo(settings) : null;
   const payKey = settings ? payDateFor(p.year, p.month, parsePayDate(settings)) : '';
   const payLabel = payKey
-    ? `${payKey.slice(0, 4)}年${payKey.slice(5, 7)}月${payKey.slice(8, 10)}日 支給`
+    ? `${payKey.slice(0, 4)}年${payKey.slice(5, 7)}月${payKey.slice(8, 10)}日　支給`
     : '';
 
   // 勤怠欄。総労働日数は保存されている明細から読みます。
@@ -16292,15 +16302,17 @@ function printPayslip(p, employeeName, settings = null, staffCode = '') {
     .map(([label, value]) => `<tr><td class="l">${esc(label)}</td><td class="v">${esc(value)}</td></tr>`)
     .join('');
   const yenRows = (items) => items
-    .map((it) => `<tr><td class="l">${esc(it.label || '（項目名なし）')}</td><td class="v">${formatYen(Number(it.amount) || 0)}</td></tr>`)
+    .map((it) => `<tr><td class="l">${esc(it.label || '（項目名なし）')}</td><td class="v">${yen(it.amount)}</td></tr>`)
     .join('');
 
-  // 1列ぶんの箱。見出し・中身・（あれば）いちばん下の合計
+  // 1列ぶんの箱。見出し・中身・いちばん下の帯。
+  // 勤怠の列に合計はありませんが、帯だけは出します（ジョブカンと同じで、
+  // 4つの列の下端がそろいます）。
   const column = (title, bodyHtml, footLabel, footValue) => `
     <div class="col">
       <div class="head">${esc(title)}</div>
       <div class="body"><table>${bodyHtml}</table></div>
-      ${footLabel ? `<div class="foot"><span>${esc(footLabel)}</span><span class="v">${esc(footValue)}</span></div>` : '<div class="foot empty"></div>'}
+      <div class="foot"><span>${esc(footLabel || '')}</span><span>${footLabel ? esc(footValue) : ''}</span></div>
     </div>`;
 
   const html = `<!doctype html>
@@ -16308,26 +16320,37 @@ function printPayslip(p, employeeName, settings = null, staffCode = '') {
 ${PRINT_FONT_LINK}
 <style>
   ${PRINT_SHEET_CSS}
-  /* --- 給与明細の中身 --- */
-  .top { display: flex; justify-content: space-between; align-items: flex-start; gap: 6mm; margin-bottom: 5mm; }
-  .title { font-size: 15px; font-weight: bold; }
-  .paydate { font-size: 10.5px; color: #64748b; margin-top: 2px; }
-  .company { font-size: 12.5px; font-weight: bold; text-align: right; }
-  .who { font-size: 10.5px; color: #475569; text-align: right; margin-top: 2px; }
-  /* 4つの列。残りの高さをいっぱいに使います（A4横1枚にぴったり収めるため） */
-  .cols { flex: 1; min-height: 0; display: flex; gap: 3mm; align-items: stretch; }
+  /* --- 見出し --- */
+  .top { display: flex; justify-content: space-between; align-items: flex-start; gap: 6mm; margin-bottom: 7mm; }
+  .title { font-size: 10.4pt; font-weight: bold; }
+  .paydate { font-size: 8.9pt; margin-top: 2.6mm; }
+  .company { font-size: 10.4pt; font-weight: bold; text-align: right; }
+  .who { font-size: 9.65pt; text-align: right; margin-top: 2.6mm; }
+  /* --- 4つの列 --- */
+  .cols { flex: 1; min-height: 0; display: flex; gap: 2.9mm; align-items: stretch; }
   .col { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-  .head { background: #94a3b8; color: #fff; font-size: 11px; font-weight: bold; text-align: center; padding: 1mm 0; }
-  .body { background: #f1f5f9; flex: 1; min-height: 0; padding: 2mm 3mm; overflow: hidden; }
-  table { width: 100%; border-collapse: collapse; font-size: 11px; }
-  td { padding: 0.8mm 0; vertical-align: top; }
-  td.l { color: #334155; word-break: break-all; }
+  /* 帯の高さはジョブカンの明細を測った値です（見出し 8.15mm、合計 7.45mm）。
+     勤怠の列の帯は中身が空なので、高さを決めておかないとつぶれます。 */
+  .head { background: #aaa; color: #fff; font-size: 9.65pt; height: 8.15mm;
+          display: flex; align-items: center; justify-content: center;
+          border-radius: 1.4mm 1.4mm 0 0; }
+  /* 下地は左62%だけ。金額のところは白のままにします（ジョブカンと同じ） */
+  .body { flex: 1; min-height: 0; padding: 2.4mm 2.3mm 0; overflow: hidden;
+          background: linear-gradient(to right, #f0f0f0 62%, #fff 62%); }
+  table { width: 100%; border-collapse: collapse; font-size: 8.9pt; }
+  td { padding: 0; height: 6.3mm; vertical-align: middle; }
+  td.l { word-break: break-all; }
   td.v { text-align: right; white-space: nowrap; padding-left: 3mm; }
-  .foot { background: #94a3b8; color: #fff; font-size: 11px; font-weight: bold; display: flex; justify-content: space-between; padding: 1.2mm 3mm; }
-  .foot.empty { background: transparent; padding: 0; height: 0; }
-  .net { background: #475569; color: #fff; font-size: 12px; font-weight: bold; display: flex; justify-content: space-between; padding: 1.8mm 3mm; margin-top: 3mm; }
-  .remark-title { font-size: 10.5px; color: #475569; margin: 3mm 0 1mm; }
-  .remark { border: 1px solid #cbd5e1; flex: 1; min-height: 0; padding: 2mm; font-size: 10.5px; white-space: pre-wrap; line-height: 1.7; overflow: hidden; }
+  .foot { background: #aaa; color: #fff; font-size: 9.65pt; height: 7.45mm;
+          display: flex; align-items: center; justify-content: space-between;
+          padding: 0 2.3mm; border-radius: 0 0 1.4mm 1.4mm; }
+  /* --- 集計の列 --- */
+  .net { background: #aaa; color: #fff; font-size: 9.65pt; height: 7.45mm;
+         display: flex; align-items: center; justify-content: space-between;
+         padding: 0 2.3mm; border-radius: 0 0 1.4mm 1.4mm; }
+  .remark-title { font-size: 9.65pt; margin: 4.5mm 0 1.4mm; }
+  .remark { border: 1px solid #c8c8c8; border-radius: 1.4mm; flex: 1; min-height: 0;
+            padding: 2.4mm; font-size: 8.9pt; white-space: pre-wrap; line-height: 1.7; overflow: hidden; }
 </style></head>
 <body>
   <div class="sheet">
@@ -16338,22 +16361,21 @@ ${PRINT_FONT_LINK}
       </div>
       <div>
         ${office && office.nameKanji ? `<div class="company">${esc(office.nameKanji)}</div>` : ''}
-        <div class="who">${staffCode ? `スタッフコード：${esc(staffCode)}　` : ''}氏名：${esc(employeeName)}</div>
+        <div class="who">${staffCode ? `スタッフコード：${esc(staffCode)}　` : ''}氏名：${esc(employeeName)}様</div>
       </div>
     </div>
 
     <div class="cols">
       ${column('勤怠', rows(attendanceRows), '', '')}
-      ${column('支給', yenRows(paymentItems), '支給合計', formatYen(paymentTotal))}
-      ${column('控除', yenRows(deductionItems), '控除合計', formatYen(deductionTotal))}
+      ${column('支給', yenRows(paymentItems), '支給合計', yen(paymentTotal))}
+      ${column('控除', yenRows(deductionItems), '控除合計', yen(deductionTotal))}
       <div class="col">
         <div class="head">集計</div>
-        <div class="net"><span>差引支給額</span><span class="v">${formatYen(p.totalAmount)}</span></div>
+        <div class="net"><span>差引支給額</span><span>${yen(p.totalAmount)}</span></div>
         <div class="remark-title">備考欄</div>
         <div class="remark">${esc(p.notes || '')}</div>
       </div>
     </div>
-
   </div>
 </body></html>`;
   openForPrint(win, html);
@@ -18745,7 +18767,14 @@ const PAY_DATE_MONTHS = {
   sameMonth: { label: '当月', offset: 0 },
 };
 
-const PAY_DATE_DEFAULTS = { month: 'nextMonth', day: 25 };
+// 支給日が土日祝に当たったときの動かし方
+const PAY_DATE_SHIFTS = {
+  before: { label: '前の営業日に前倒し' },
+  after: { label: '次の営業日に後ろ倒し' },
+  none: { label: '動かさない' },
+};
+
+const PAY_DATE_DEFAULTS = { month: 'nextMonth', day: 25, holidayShift: 'before' };
 
 /** 支給日の決まりを読みます。壊れていても既定で動かします */
 function parsePayDate(settings) {
@@ -18759,15 +18788,16 @@ function parsePayDate(settings) {
   if (PAY_DATE_MONTHS[raw.month]) out.month = raw.month;
   const d = Number(raw.day);
   if (Number.isFinite(d) && d >= 1 && d <= 31) out.day = Math.floor(d);
+  if (PAY_DATE_SHIFTS[raw.holidayShift]) out.holidayShift = raw.holidayShift;
   return out;
 }
 
 /**
- * 対象月（締め月）から支給日を出します。'YYYY-MM-DD' を返します。
+ * 決まりの日そのもの（土日祝を見る前）。'YYYY-MM-DD' を返します。
  * 31日など、その月に無い日を指定されたときは月末にそろえます
- *（2月25日のような指定で、3月に送られてしまうのを防ぐためです）。
+ *（2月31日のような指定で、3月に送られてしまうのを防ぐためです）。
  */
-function payDateFor(year, month, rule) {
+function payDateBaseFor(year, month, rule) {
   const r = rule || PAY_DATE_DEFAULTS;
   const offset = PAY_DATE_MONTHS[r.month]?.offset ?? 1;
   const base = new Date(year, (month - 1) + offset, 1);
@@ -18778,10 +18808,39 @@ function payDateFor(year, month, rule) {
   return `${y}-${pad(m)}-${pad(day)}`;
 }
 
+/**
+ * 対象月（締め月）から支給日を出します。'YYYY-MM-DD' を返します。
+ *
+ * 土日祝に当たったときは、決まりに従って前後の営業日に動かします。
+ * 営業日は「土日でも祝日でもない日」です。
+ *
+ * ⚠ 1月2日・1月3日は祝日ではないため、ここでは動かしません。
+ *   銀行は休みなので、年明けの支給日を2日・3日にしている場合は
+ *   手でお確かめください（必要になったら足せます）。
+ *
+ * 動かす上限は14日です。これを超えるときは、決まりの日のまま返します
+ *（祝日の表が無い先の年で、いつまでも動き続けないようにするためです）。
+ */
+function payDateFor(year, month, rule) {
+  const r = rule || PAY_DATE_DEFAULTS;
+  const base = payDateBaseFor(year, month, r);
+  const shift = PAY_DATE_SHIFTS[r.holidayShift] ? r.holidayShift : 'none';
+  if (shift === 'none') return base;
+  const step = shift === 'before' ? -1 : 1;
+  let key = base;
+  for (let i = 0; i < 14; i += 1) {
+    if (!isWeekendOrHoliday(key)) return key;
+    key = addDaysKey(key, step);
+  }
+  return base;
+}
+
 /** 支給日の決まりを1行で表します（設定の見出しに出します） */
 function payDateLabel(rule) {
   const r = rule || PAY_DATE_DEFAULTS;
-  return `${PAY_DATE_MONTHS[r.month]?.label || '翌月'}${r.day}日`;
+  const shift = PAY_DATE_SHIFTS[r.holidayShift];
+  return `${PAY_DATE_MONTHS[r.month]?.label || '翌月'}${r.day}日`
+    + (r.holidayShift && r.holidayShift !== 'none' ? `（土日祝は${shift.label}）` : '');
 }
 
 async function savePayDate(values, actor = null) {
@@ -18793,6 +18852,7 @@ async function savePayDate(values, actor = null) {
   const slim = {
     month: PAY_DATE_MONTHS[v.month] ? v.month : PAY_DATE_DEFAULTS.month,
     day: Math.floor(day),
+    holidayShift: PAY_DATE_SHIFTS[v.holidayShift] ? v.holidayShift : PAY_DATE_DEFAULTS.holidayShift,
   };
   const { error } = await supabase.from('app_settings').upsert(
     {
@@ -25935,11 +25995,19 @@ function PayDateSettings({ settings, actor, isMasterAdmin, onSaved }) {
 
   // いまの決まりで、今年の例をいくつか出します（取り違えを防ぐため）
   const thisYear = new Date().getFullYear();
-  const examples = [1, 6, 12].map((m) => {
+  // 決まりどおりの日と、実際の支給日を並べます。
+  // 動いた月が一目で分かるようにするためです。
+  const examples = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((m) => {
+    const base = payDateBaseFor(thisYear, m, form);
     const key = payDateFor(thisYear, m, form);
-    // 曜日も出します。土日に当たるかどうかが、下の注意につながるためです
-    return { month: `${m}月分`, pay: `${dateLabelY(key)}（${WEEKDAY_LABELS[new Date(`${key}T00:00:00`).getDay()]}）` };
+    const wd = (k) => WEEKDAY_LABELS[new Date(`${k}T00:00:00`).getDay()];
+    return {
+      month: `${m}月分`,
+      pay: `${dateLabelY(key)}（${wd(key)}）`,
+      moved: key !== base ? `${dateLabelY(base)}（${wd(base)}）が土日祝のため` : '',
+    };
   });
+  const movedCount = examples.filter((x) => x.moved).length;
   const overLast = Number(form.day) > 28;
 
   return (
@@ -25982,20 +26050,42 @@ function PayDateSettings({ settings, actor, isMasterAdmin, onSaved }) {
             <span className="text-[12.5px] text-slate-500">日</span>
           </div>
 
+          <label className="block">
+            <span className="block text-[10.5px] font-bold text-slate-500 mb-0.5">その日が土日祝のとき</span>
+            <select
+              value={form.holidayShift}
+              onChange={(e) => set('holidayShift', e.target.value)}
+              className="w-full sm:max-w-[260px] border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white"
+            >
+              {Object.entries(PAY_DATE_SHIFTS).map(([k, v]) => (
+                <option key={k} value={k}>{v.label}</option>
+              ))}
+            </select>
+            <span className="block text-[10px] text-slate-400 pt-0.5">
+              見るのは土日と祝日（振替休日を含む）です。12月31日・1月2日・1月3日は
+              祝日ではないため動かしません。銀行は休みなので、年末年始に支給日が
+              来る決まりにしている場合は手でお確かめください。
+            </span>
+          </label>
+
           <div className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 text-[10.5px] text-slate-600 leading-relaxed">
-            <b className="block mb-0.5">この決まりだと、{thisYear}年はこうなります</b>
-            {examples.map((x) => (
-              <span key={x.month} className="block">{x.month} → {x.pay}</span>
-            ))}
+            <b className="block mb-1">
+              この決まりだと、{thisYear}年はこうなります
+              {movedCount > 0 && <span className="font-normal text-slate-400">（{movedCount}か月が動きます）</span>}
+            </b>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4">
+              {examples.map((x) => (
+                <span key={x.month} className="block">
+                  {x.month} → {x.pay}
+                  {x.moved && <span className="text-amber-700">　← {x.moved}</span>}
+                </span>
+              ))}
+            </div>
             {overLast && (
-              <span className="block pt-0.5 text-amber-700">
+              <span className="block pt-1 text-amber-700">
                 その月に無い日（2月30日など）のときは、月末にそろえます。
               </span>
             )}
-            <span className="block pt-0.5">
-              支給日が土日祝のときに前倒しするかどうかは見ていません。
-              賃金規程に定めがある場合は、印刷したものを手で直してください。
-            </span>
           </div>
 
           <button
