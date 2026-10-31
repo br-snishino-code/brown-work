@@ -1295,7 +1295,9 @@ function useToast() {
   const show = (msg, tone = 'default') => {
     setToast({ msg, tone });
     clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(() => setToast(null), 3200);
+    // 長い知らせは読み切る前に消えてしまうので、文の長さで出す時間を変えます
+    const ms = String(msg || '').length > 40 ? 9000 : 3200;
+    timerRef.current = setTimeout(() => setToast(null), ms);
   };
   return { toast, show };
 }
@@ -2393,6 +2395,39 @@ function resolveAdminNotifyAddresses(data) {
   const masters = accounts.filter((a) => a.role === 'master_admin').map(addressOf).filter(Boolean);
   if (masters.length > 0) return masters;
   return accounts.filter((a) => a.role === 'admin').map(addressOf).filter(Boolean);
+}
+
+// 保存に失敗したとき、画面に出す短い理由。
+// Supabase が返すエラーは英語の技術用語なので、よくあるものだけ日本語にします。
+// 当てはまらないものは、返ってきた文をそのまま出します（調べるのに要るためです）。
+function payrollErrorHint(error) {
+  const code = String(error?.code || '');
+  const message = String(error?.message || '');
+  const detail = String(error?.details || '');
+  const all = `${message} ${detail}`;
+  // RLS（行のアクセス権）に弾かれた
+  if (code === '42501' || /row-level security|violates row-level/i.test(all)) {
+    // トリガーが出した日本語の文（公開済みの明細を直そうとした、など）はそのまま出す
+    if (/[ぁ-んァ-ヶ一-龠]/.test(message)) return message;
+    return 'この操作を行う権限がありません。マスター管理者でログインしているかご確認ください';
+  }
+  // 列が無い・型が合わない
+  if (code === 'PGRST204' || /column .* does not exist/i.test(all)) {
+    return `保存先の列が見つかりません（${message}）。未適用のSQLがないかご確認ください`;
+  }
+  if (code === '22P02' || /invalid input syntax/i.test(all)) {
+    return `入力された値の形が合っていません（${message}）`;
+  }
+  if (code === '23502') return `入力されていない項目があります（${message}）`;
+  if (code === '23514') return `入力できる範囲を超えています（${message}）`;
+  // 通信そのものが届いていない
+  if (/Failed to fetch|NetworkError|network/i.test(all)) {
+    return '通信できませんでした。電波の状態をご確認のうえ、もう一度お試しください';
+  }
+  if (/JWT|token is expired|not authenticated/i.test(all)) {
+    return 'ログインの有効期限が切れています。一度ログインし直してください';
+  }
+  return message || detail || `原因不明（code: ${code || 'なし'}）`;
 }
 
 // 通知はベストエフォート（失敗してもメイン処理は止めない）
@@ -5626,7 +5661,11 @@ function AttendanceApp() {
       { onConflict: 'employee_id,year,month' }
     );
     if (error) {
-      show('給与明細の保存に失敗しました', 'warn');
+      // 何がいけなかったのかを画面にも出します。
+      // 「保存に失敗しました」だけでは、権限なのか入力なのか通信なのかが
+      // 分からず、調べようがないためです。
+      console.error('給与明細の保存に失敗しました', error);
+      show(`給与明細の保存に失敗しました：${payrollErrorHint(error)}`, 'warn');
       return;
     }
     await refreshData();
