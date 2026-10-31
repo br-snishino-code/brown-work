@@ -16465,6 +16465,8 @@ async function fetchPublishSchedule(kind, year, period) {
     publishAt: data.publish_at, status: data.status, doneAt: data.done_at,
     publishedCount: data.published_count, notifiedCount: data.notified_count,
     mailSentCount: data.mail_sent_count, lastError: data.last_error || '',
+    // 92番のSQLで足した列。未適用のときは undefined のままになります
+    skippedCount: data.skipped_count ?? null, skippedNote: data.skipped_note || '',
   };
 }
 
@@ -16523,7 +16525,7 @@ function isoToLocalInput(iso) {
 }
 
 // ---- 予約公開の設定（給与・賞与の両方で使う） ----
-function PublishSchedulePanel({ kind, year, period, draftCount, actor, isMasterAdmin, isDesktop }) {
+function PublishSchedulePanel({ kind, year, period, draftCount, unconfirmedNames = null, actor, isMasterAdmin, isDesktop }) {
   const [row, setRow] = useState(null);
   const [loading, setLoading] = useState(true);
   const [input, setInput] = useState('');
@@ -16621,6 +16623,13 @@ function PublishSchedulePanel({ kind, year, period, draftCount, actor, isMasterA
             <div className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 text-[11.5px] text-slate-600 leading-relaxed">
               {row.doneAt && `${new Date(row.doneAt).toLocaleString('ja-JP')}に実行しました。`}
               公開 {row.publishedCount ?? 0}件／お知らせ {row.notifiedCount ?? 0}件／メール {row.mailSentCount ?? 0}件。
+              {row.skippedCount > 0 && (
+                <span className="block text-amber-700 pt-0.5">
+                  勤怠の最終承認が済んでいないため、{row.skippedCount}件は公開していません
+                  {row.skippedNote && `（${row.skippedNote}）`}。
+                  勤怠を最終承認したうえで、下の一覧から公開してください。
+                </span>
+              )}
               {row.lastError && <span className="block text-rose-600 pt-0.5">うまくいかなかったもの：{row.lastError}</span>}
             </div>
           ) : (
@@ -16659,6 +16668,17 @@ function PublishSchedulePanel({ kind, year, period, draftCount, actor, isMasterA
                 {draftCount != null && `いまの下書きは${draftCount}件です。`}
                 公開までは本人の画面に出ません。きっかりその時刻ではなく、<b>15分ほどの幅</b>があります。
               </div>
+              {unconfirmedNames != null && unconfirmedNames.length > 0 && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-2 text-[10.5px] text-amber-800 leading-relaxed">
+                  <b className="block">勤怠の最終承認が済んでいない方が{unconfirmedNames.length}名います</b>
+                  {unconfirmedNames.slice(0, 10).join('、')}
+                  {unconfirmedNames.length > 10 && ` ほか${unconfirmedNames.length - 10}名`}
+                  <span className="block pt-0.5">
+                    この方の明細は、時刻になっても<b>公開されません</b>（手で公開するときと同じ決まりです）。
+                    「勤怠」→「月次確定」で最終承認まで進めてください。
+                  </span>
+                </div>
+              )}
               <div className="text-[10.5px] text-amber-700 leading-relaxed">
                 この予約が動くには、Supabase側で定時実行の設定が必要です。
                 設定前に予約しても公開されないままになります。
@@ -26424,6 +26444,20 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
 
   const commuteRouteTotal = employeeCommuteRoutes.reduce((sum, r) => sum + computeRouteMonthlyAmount(r), 0);
 
+  // 予約公開で、公開されずに残る方（勤怠の最終承認が済んでいない方）。
+  // 時刻になってから気づくのを避けるため、予約する前に知らせます。
+  const unpublishedUnconfirmedNames = useMemo(() => {
+    const key = `${year}-${pad(month)}`;
+    const confirmed = new Set(
+      (monthlyConfirmations || [])
+        .filter((c) => c.targetMonth === key && c.status === 'confirmed')
+        .map((c) => c.employeeId)
+    );
+    return (payrollRecords || [])
+      .filter((p) => p.year === year && p.month === month && p.status !== 'published' && !confirmed.has(p.employeeId))
+      .map((p) => p.employeeName || employeeAccounts.find((a) => a.id === p.employeeId)?.name || '（名前なし）');
+  }, [payrollRecords, monthlyConfirmations, employeeAccounts, year, month]);
+
   // 承認済みの交通費精算（対象月が一致するもの）の合計。給与の支給項目に自動で入れる
   const payrollMonthKey = `${year}-${pad(month)}`;
   const approvedCommuteClaims = (commuteExpenseClaims || []).filter(
@@ -27198,6 +27232,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
         year={year}
         period={month}
         draftCount={payrollRecords.filter((p) => p.year === year && p.month === month && p.status !== 'published').length}
+        unconfirmedNames={unpublishedUnconfirmedNames}
         actor={session}
         isMasterAdmin={isMasterAdmin}
         isDesktop={isDesktop}

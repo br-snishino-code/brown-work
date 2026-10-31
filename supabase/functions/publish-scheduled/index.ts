@@ -28,6 +28,10 @@
 // 【安全のための決まり】
 //   ・さかのぼって公開はしない。予約時刻をすぎた分だけを公開する。
 //   ・すでに公開済みの明細には触らない。
+//   ・給与明細は、その月の勤怠が最終承認されている方だけを公開する。
+//     手で公開するときと同じ決まりにするため（画面では、最終承認が済むまで
+//     公開ボタンが押せない）。済んでいない方は公開せずに残し、
+//     管理者にお知らせを出す。賞与は勤怠と関係ないので、この確認はしない。
 //   ・1回の実行で扱う予約は MAX_SCHEDULES 件まで。
 //   ・メールが送れなくても公開は取り消さない（お知らせはアプリ内に残る）。
 
@@ -134,6 +138,9 @@ Deno.serve(async (req) => {
     let published = 0;
     let notified = 0;
     let mailed = 0;
+    // 勤怠の最終承認が済んでおらず、公開しなかったもの
+    let skipped = 0;
+    const skippedNames: string[] = [];
     let lastError: string | null = null;
 
     try {
@@ -144,7 +151,30 @@ Deno.serve(async (req) => {
       const { data: records, error: recError } = await q;
       if (recError) throw new Error(`明細の取得に失敗: ${recError.message}`);
 
+      // ---- 勤怠の最終承認が済んでいる方を調べる（給与のみ）----
+      // 済んでいない方は公開しない。手で公開するときと同じ決まり。
+      let confirmedIds: Set<string> | null = null;
+      if (!isBonus) {
+        const targetMonth = `${s.year}-${String(s.period).padStart(2, '0')}`;
+        const { data: confirms, error: cError } = await db
+          .from('monthly_attendance_confirmations')
+          .select('employee_id')
+          .eq('target_month', targetMonth)
+          .eq('status', 'confirmed');
+        if (cError) throw new Error(`勤怠の確定状況の取得に失敗: ${cError.message}`);
+        confirmedIds = new Set((confirms || []).map((c: { employee_id: string }) => c.employee_id));
+      }
+
       for (const r of records || []) {
+        // ---- 最終承認が済んでいない方は、公開せずに残す ----
+        if (confirmedIds && !confirmedIds.has(r.employee_id)) {
+          skipped += 1;
+          const { data: who } = await db
+            .from('employees').select('name').eq('id', r.employee_id).maybeSingle();
+          if (who?.name) skippedNames.push(who.name);
+          continue;
+        }
+
         // ---- 公開する ----
         const { error: upError } = await db
           .from(table)
@@ -202,16 +232,44 @@ Deno.serve(async (req) => {
         }
       }
 
-      await db.from('publish_schedules').update({
+      // ---- 公開しなかった方がいたら、管理者にお知らせを出す ----
+      // 画面を開かないと気づけないままになるのを防ぐため。
+      if (skipped > 0) {
+        const names = skippedNames.slice(0, 10).join('、')
+          + (skippedNames.length > 10 ? ` ほか${skippedNames.length - 10}名` : '');
+        const when = `${s.year}年${s.period}月分`;
+        await db.from('notifications').insert({
+          to_employee_id: null,
+          to_role: 'admin',
+          subject: `【予約公開】${when} 公開しなかった方が${skipped}名います`,
+          body: `${when}の予約公開で、勤怠の最終承認が済んでいない${skipped}名の給与明細を公開しませんでした`
+            + `（${names}）。勤怠を最終承認したうえで、給与の画面から公開してください。`,
+          related_id: s.id,
+        }).then(() => {}, () => {});   // お知らせに失敗しても公開は取り消さない
+      }
+
+      // ---- 結果を残す ----
+      // skipped_count / skipped_note は 92番のSQLで足す列です。
+      // 未適用でも動くよう、入らなかったら無い形でもう一度入れ直します。
+      const base = {
         status: 'done',
         done_at: nowIso,
         published_count: published,
         notified_count: notified,
         mail_sent_count: mailed,
         last_error: lastError,
-      }).eq('id', s.id);
+      };
+      const note = skippedNames.length > 0
+        ? skippedNames.slice(0, 20).join('、') + (skippedNames.length > 20 ? ` ほか${skippedNames.length - 20}名` : '')
+        : null;
+      const withSkip = await db.from('publish_schedules')
+        .update({ ...base, skipped_count: skipped, skipped_note: note })
+        .eq('id', s.id);
+      if (withSkip.error) {
+        await db.from('publish_schedules').update(base).eq('id', s.id);
+      }
 
-      results.push({ id: s.id, kind: s.kind, year: s.year, period: s.period, published, notified, mailed, lastError });
+      results.push({ id: s.id, kind: s.kind, year: s.year, period: s.period, published, notified, mailed, skipped, lastError });
     } catch (e) {
       // この予約は done にせず残す。次の実行でもう一度試す。
       await db.from('publish_schedules').update({ last_error: String(e) }).eq('id', s.id);
