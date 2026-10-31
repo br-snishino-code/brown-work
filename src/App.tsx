@@ -6179,7 +6179,12 @@ function AttendanceApp() {
                 settings={data.settings}
                 staffCode={session.staffNumber || ''}
               />
-              <BonusSlipView records={(data.bonusRecords || []).filter((b) => b.employeeId === employeeId && b.status === 'published')} employeeName={session.name} />
+              <BonusSlipView
+                records={(data.bonusRecords || []).filter((b) => b.employeeId === employeeId && b.status === 'published')}
+                employeeName={session.name}
+                settings={data.settings}
+                staffCode={session.staffNumber || ''}
+              />
             </div>
           ) : (
             <div className="space-y-5">
@@ -16244,20 +16249,135 @@ function openForPrint(win, html) {
   }
 }
 
-// 給与明細を印刷する。
+// ---- 明細の紙（給与・賞与で共通）----
 //
 // 並びと寸法は、御社からいただいたジョブカンの明細（PDF）を測って合わせています。
-//   用紙 … A4横。左右の余白 10mm
-//   列  … 勤怠／支給／控除／集計 の4つ。1列 66.9mm、間は 2.9mm
+//   用紙 … A4横。左右の余白 10mm。下は空けます（紙いっぱいには伸ばしません）
 //   帯  … 見出しと合計は #aaa、本文の下地は #f0f0f0
 //          下地は列の左 62%（項目名のところ）だけで、金額のところは白です
 //   字  … 見出し・合計・氏名 9.65pt／本文・支給日 8.9pt／表題・会社名 10.4pt
 //   金額 … 円記号は付けず、3桁ごとの区切りだけ
 //
 // ジョブカンと違うところ（御社の指定）
-//   ・「所定内労働時間」と「銀行振込」の欄は出しません
+//   ・給与明細に「所定内労働時間」と「銀行振込」の欄は出しません
 //   ・下の注意書きは出しません
-//   ・用紙の高さいっぱいに伸ばします（ジョブカンは下が空いたままです）
+const SLIP_ESC = (v) => String(v ?? '')
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+// ジョブカンの明細に合わせ、円記号は付けません
+const slipYen = (v) => Math.round(Number(v) || 0).toLocaleString('ja-JP');
+
+const SLIP_BODY_INNER_MM = 121.2;   // 本文に使える高さ
+const SLIP_ROW_MM = 6.3;            // ジョブカンの明細を測った行の高さ
+
+/**
+ * 明細の紙を組み立てます。給与明細と賞与明細で中身だけ差し替えます。
+ *
+ * title     … 表題（「2026年03月　給与明細」など）
+ * subtitle  … 表題の下（「（2026年04月24日　支給）」など）。無ければ空
+ * officeName … 会社名。無ければ出しません
+ * staffCode … スタッフコード。無ければ出しません
+ * employeeName … 氏名（「様」はこちらで付けます）
+ * columns   … 左から並べる列。{ title, rows, footLabel, footValue }
+ *             rows は [ラベル, 値] の配列です
+ * netAmount … 差引支給額
+ * notes     … 備考欄の中身
+ */
+function buildSlipHtml({ docTitle, title, subtitle, officeName, staffCode, employeeName, columns, netAmount, notes }) {
+  // 項目が多いときは行を詰めます。
+  // 列の高さは用紙に合わせて決まっているので、詰めないと下が切れて
+  // 気づかないまま出てしまいます（19行でいっぱいになります）。
+  const maxRows = Math.max(...columns.map((c) => c.rows.length), 1);
+  const rowMm = Math.min(SLIP_ROW_MM, SLIP_BODY_INNER_MM / maxRows);
+  // 行がこれより低くなると字が重なるので、字も小さくします。
+  // 字の高さ（pt）が行の高さ（mm）に収まるよう、1mm = 2.835pt で見ています。
+  const fontPt = rowMm >= 4.2 ? 8.9 : Math.max(5, Math.min(8.9, rowMm * 2.835 * 0.78));
+
+  const rowsHtml = (rows) => rows
+    .map(([label, value]) => `<tr><td class="l">${SLIP_ESC(label)}</td><td class="v">${SLIP_ESC(value)}</td></tr>`)
+    .join('');
+
+  // 1列ぶんの箱。見出し・中身・いちばん下の帯。
+  // 合計の無い列（給与明細の勤怠）も帯だけは出します。4つの列の下端がそろいます。
+  const columnHtml = (c) => `
+    <div class="col">
+      <div class="head">${SLIP_ESC(c.title)}</div>
+      <div class="body"><table>${rowsHtml(c.rows)}</table></div>
+      <div class="foot"><span>${SLIP_ESC(c.footLabel || '')}</span><span>${c.footLabel ? SLIP_ESC(c.footValue) : ''}</span></div>
+    </div>`;
+
+  return `<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><title>${SLIP_ESC(docTitle)}</title>
+${PRINT_FONT_LINK}
+<style>
+  ${PRINT_SHEET_CSS}
+  /* --- 見出し ---
+     高さ 31.3mm は、用紙の上から 41.3mm のところに見出しの帯が来るようにした
+     ものです（ジョブカンの明細を測った位置）。 */
+  .top { height: 31.3mm; display: flex; justify-content: space-between; align-items: flex-start; gap: 6mm; }
+  .title { font-size: 10.4pt; font-weight: bold; }
+  .paydate { font-size: 8.9pt; margin-top: 2.6mm; }
+  .company { font-size: 10.4pt; font-weight: bold; text-align: right; }
+  .who { font-size: 9.65pt; text-align: right; margin-top: 2.6mm; }
+  /* --- 列 ---
+     高さ 139.5mm も測った値です。用紙の下は空けたままにします
+     （紙いっぱいには伸ばしません。ジョブカンと同じ見た目にするためです）。 */
+  .cols { flex: none; height: 139.5mm; display: flex; gap: 2.9mm; align-items: stretch; }
+  .col { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  /* 帯の高さはジョブカンの明細を測った値です（見出し 8.15mm、合計 7.45mm）。
+     中身が空の帯もあるので、高さを決めておかないとつぶれます。 */
+  .head { background: #aaa; color: #fff; font-size: 9.65pt; height: 8.15mm;
+          display: flex; align-items: center; justify-content: center;
+          border-radius: 1.4mm 1.4mm 0 0; }
+  /* 下地は左62%だけ。金額のところは白のままにします（ジョブカンと同じ） */
+  .body { flex: 1; min-height: 0; padding: 2.4mm 2.3mm 0; overflow: hidden;
+          background: linear-gradient(to right, #f0f0f0 62%, #fff 62%); }
+  table { width: 100%; border-collapse: collapse; font-size: ${fontPt.toFixed(2)}pt; }
+  /* line-height を決めておかないと、行の高さを詰めても字の行間ぶんが
+     残ってしまい、指定した高さより高くなります（下が切れる原因になります） */
+  td { padding: 0; height: ${rowMm.toFixed(2)}mm; line-height: 1; vertical-align: middle; }
+  td.l { word-break: break-all; }
+  td.v { text-align: right; white-space: nowrap; padding-left: 3mm; }
+  .foot { background: #aaa; color: #fff; font-size: 9.65pt; height: 7.45mm;
+          display: flex; align-items: center; justify-content: space-between;
+          padding: 0 2.3mm; border-radius: 0 0 1.4mm 1.4mm; }
+  /* 集計の列。高さはすべてジョブカンの明細を測った値です。
+     上の空いている灰色は、ジョブカンで「銀行振込1」が入るところです。 */
+  .sum { flex: none; height: 47.4mm; }
+  .net { background: #aaa; color: #fff; font-size: 9.65pt; height: 7.45mm;
+         display: flex; align-items: center; justify-content: space-between;
+         padding: 0 2.3mm; border-radius: 0 0 1.4mm 1.4mm; }
+  .remark-title { flex: none; height: 10.5mm; font-size: 9.65pt; display: flex; align-items: flex-end; padding-bottom: 1.1mm; }
+  .remark { flex: none; height: 65.9mm; border: 1px solid #c8c8c8; border-radius: 1.4mm;
+            padding: 2.4mm; font-size: 8.9pt; white-space: pre-wrap; line-height: 1.7; overflow: hidden; }
+</style></head>
+<body>
+  <div class="sheet">
+    <div class="top">
+      <div>
+        <div class="title">${SLIP_ESC(title)}</div>
+        ${subtitle ? `<div class="paydate">（${SLIP_ESC(subtitle)}）</div>` : ''}
+      </div>
+      <div>
+        ${officeName ? `<div class="company">${SLIP_ESC(officeName)}</div>` : ''}
+        <div class="who">${staffCode ? `スタッフコード：${SLIP_ESC(staffCode)}　` : ''}氏名：${SLIP_ESC(employeeName)}様</div>
+      </div>
+    </div>
+
+    <div class="cols">
+      ${columns.map(columnHtml).join('')}
+      <div class="col">
+        <div class="head">集計</div>
+        <div class="body sum"></div>
+        <div class="net"><span>差引支給額</span><span>${slipYen(netAmount)}</span></div>
+        <div class="remark-title">備考欄</div>
+        <div class="remark">${SLIP_ESC(notes || '')}</div>
+      </div>
+    </div>
+  </div>
+</body></html>`;
+}
+
+// 給与明細を印刷する。
 //
 // settings … 支給・控除項目一覧（0円の行を出すか）、事業所情報（会社名）、
 //            支給日の決まり。渡されないときは、その欄を省きます。
@@ -16273,11 +16393,6 @@ function printPayslip(p, employeeName, settings = null, staffCode = '') {
   const deductionTotal = sumItems(allDeduction);
   const paymentItems = settings ? visiblePayslipItems(allPayment, settings, 'payment') : allPayment;
   const deductionItems = settings ? visiblePayslipItems(allDeduction, settings, 'deduction') : allDeduction;
-
-  const esc = (v) => String(v ?? '')
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  // ジョブカンの明細に合わせ、円記号は付けません
-  const yen = (v) => Math.round(Number(v) || 0).toLocaleString('ja-JP');
 
   // 会社名は事業所情報の「事業所名称」です。未登録のときは出しません
   const office = settings ? parseOfficeInfo(settings) : null;
@@ -16298,108 +16413,23 @@ function printPayslip(p, employeeName, settings = null, staffCode = '') {
     p.attendanceExtra?.paidLeaveHours ? ['有休時間', `${p.attendanceExtra.paidLeaveHours}時間`] : null,
   ].filter(Boolean);
 
-  // 項目が多いときは行を詰めます。
-  // 列の高さは用紙に合わせて決まっているので、詰めないと下が切れて
-  // 気づかないまま出てしまいます（19行でいっぱいになります）。
-  const BODY_INNER_MM = 121.2;   // 本文に使える高さ
-  const ROW_MM = 6.3;            // ジョブカンの明細を測った行の高さ
-  const maxRows = Math.max(attendanceRows.length, paymentItems.length, deductionItems.length, 1);
-  const rowMm = Math.min(ROW_MM, BODY_INNER_MM / maxRows);
-  // 行がこれより低くなると字が重なるので、字も小さくします。
-  // 字の高さ（pt）が行の高さ（mm）に収まるよう、1mm = 2.835pt で見ています。
-  const fontPt = rowMm >= 4.2 ? 8.9 : Math.max(5, Math.min(8.9, rowMm * 2.835 * 0.78));
+  const toRows = (items) => items.map((it) => [it.label || '（項目名なし）', slipYen(it.amount)]);
 
-  const rows = (items) => items
-    .map(([label, value]) => `<tr><td class="l">${esc(label)}</td><td class="v">${esc(value)}</td></tr>`)
-    .join('');
-  const yenRows = (items) => items
-    .map((it) => `<tr><td class="l">${esc(it.label || '（項目名なし）')}</td><td class="v">${yen(it.amount)}</td></tr>`)
-    .join('');
-
-  // 1列ぶんの箱。見出し・中身・いちばん下の帯。
-  // 勤怠の列に合計はありませんが、帯だけは出します（ジョブカンと同じで、
-  // 4つの列の下端がそろいます）。
-  const column = (title, bodyHtml, footLabel, footValue) => `
-    <div class="col">
-      <div class="head">${esc(title)}</div>
-      <div class="body"><table>${bodyHtml}</table></div>
-      <div class="foot"><span>${esc(footLabel || '')}</span><span>${footLabel ? esc(footValue) : ''}</span></div>
-    </div>`;
-
-  const html = `<!doctype html>
-<html lang="ja"><head><meta charset="utf-8"><title>給与明細 ${p.year}年${p.month}月分</title>
-${PRINT_FONT_LINK}
-<style>
-  ${PRINT_SHEET_CSS}
-  /* --- 見出し ---
-     高さ 31.3mm は、用紙の上から 41.3mm のところに見出しの帯が来るようにした
-     ものです（ジョブカンの明細を測った位置）。 */
-  .top { height: 31.3mm; display: flex; justify-content: space-between; align-items: flex-start; gap: 6mm; }
-  .title { font-size: 10.4pt; font-weight: bold; }
-  .paydate { font-size: 8.9pt; margin-top: 2.6mm; }
-  .company { font-size: 10.4pt; font-weight: bold; text-align: right; }
-  .who { font-size: 9.65pt; text-align: right; margin-top: 2.6mm; }
-  /* --- 4つの列 ---
-     高さ 139.5mm も測った値です。用紙の下は空けたままにします
-     （紙いっぱいには伸ばしません。ジョブカンと同じ見た目にするためです）。 */
-  .cols { flex: none; height: 139.5mm; display: flex; gap: 2.9mm; align-items: stretch; }
-  .col { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-  /* 帯の高さはジョブカンの明細を測った値です（見出し 8.15mm、合計 7.45mm）。
-     勤怠の列の帯は中身が空なので、高さを決めておかないとつぶれます。 */
-  .head { background: #aaa; color: #fff; font-size: 9.65pt; height: 8.15mm;
-          display: flex; align-items: center; justify-content: center;
-          border-radius: 1.4mm 1.4mm 0 0; }
-  /* 下地は左62%だけ。金額のところは白のままにします（ジョブカンと同じ） */
-  .body { flex: 1; min-height: 0; padding: 2.4mm 2.3mm 0; overflow: hidden;
-          background: linear-gradient(to right, #f0f0f0 62%, #fff 62%); }
-  table { width: 100%; border-collapse: collapse; font-size: ${fontPt.toFixed(2)}pt; }
-  /* line-height を決めておかないと、行の高さを詰めても字の行間ぶんが
-     残ってしまい、指定した高さより高くなります（下が切れる原因になります） */
-  td { padding: 0; height: ${rowMm.toFixed(2)}mm; line-height: 1; vertical-align: middle; }
-  td.l { word-break: break-all; }
-  td.v { text-align: right; white-space: nowrap; padding-left: 3mm; }
-  .foot { background: #aaa; color: #fff; font-size: 9.65pt; height: 7.45mm;
-          display: flex; align-items: center; justify-content: space-between;
-          padding: 0 2.3mm; border-radius: 0 0 1.4mm 1.4mm; }
-  /* --- 集計の列 --- */
-  .net { background: #aaa; color: #fff; font-size: 9.65pt; height: 7.45mm;
-         display: flex; align-items: center; justify-content: space-between;
-         padding: 0 2.3mm; border-radius: 0 0 1.4mm 1.4mm; }
-  /* 集計の列。高さはすべてジョブカンの明細を測った値です。
-     上の空いている灰色は、ジョブカンで「銀行振込1」が入るところです。 */
-  .sum { flex: none; height: 47.4mm; }
-  .remark-title { flex: none; height: 10.5mm; font-size: 9.65pt; display: flex; align-items: flex-end; padding-bottom: 1.1mm; }
-  .remark { flex: none; height: 65.9mm; border: 1px solid #c8c8c8; border-radius: 1.4mm;
-            padding: 2.4mm; font-size: 8.9pt; white-space: pre-wrap; line-height: 1.7; overflow: hidden; }
-</style></head>
-<body>
-  <div class="sheet">
-    <div class="top">
-      <div>
-        <div class="title">${p.year}年${String(p.month).padStart(2, '0')}月　給与明細</div>
-        ${payLabel ? `<div class="paydate">（${esc(payLabel)}）</div>` : ''}
-      </div>
-      <div>
-        ${office && office.nameKanji ? `<div class="company">${esc(office.nameKanji)}</div>` : ''}
-        <div class="who">${staffCode ? `スタッフコード：${esc(staffCode)}　` : ''}氏名：${esc(employeeName)}様</div>
-      </div>
-    </div>
-
-    <div class="cols">
-      ${column('勤怠', rows(attendanceRows), '', '')}
-      ${column('支給', yenRows(paymentItems), '支給合計', yen(paymentTotal))}
-      ${column('控除', yenRows(deductionItems), '控除合計', yen(deductionTotal))}
-      <div class="col">
-        <div class="head">集計</div>
-        <div class="body sum"></div>
-        <div class="net"><span>差引支給額</span><span>${yen(p.totalAmount)}</span></div>
-        <div class="remark-title">備考欄</div>
-        <div class="remark">${esc(p.notes || '')}</div>
-      </div>
-    </div>
-  </div>
-</body></html>`;
-  openForPrint(win, html);
+  openForPrint(win, buildSlipHtml({
+    docTitle: `給与明細 ${p.year}年${p.month}月分`,
+    title: `${p.year}年${String(p.month).padStart(2, '0')}月　給与明細`,
+    subtitle: payLabel,
+    officeName: office && office.nameKanji ? office.nameKanji : '',
+    staffCode,
+    employeeName,
+    columns: [
+      { title: '勤怠', rows: attendanceRows },
+      { title: '支給', rows: toRows(paymentItems), footLabel: '支給合計', footValue: slipYen(paymentTotal) },
+      { title: '控除', rows: toRows(deductionItems), footLabel: '控除合計', footValue: slipYen(deductionTotal) },
+    ],
+    netAmount: p.totalAmount,
+    notes: p.notes,
+  }));
 }
 
 // ============================================================
@@ -17073,53 +17103,46 @@ function BonusAdminTab({ employeeAccounts, bonusRecords = [], tableReady = true,
   );
 }
 
-// 賞与明細の印刷・PDF保存
-function printBonusSlip(b, employeeName) {
-  const win = window.open('', '_blank', 'width=480,height=700');
+// 賞与明細の印刷・PDF保存。
+//
+// 給与明細と同じ紙です（buildSlipHtml）。
+// 賞与には勤怠の数字が無いので、支給／控除／集計の3列にしています（御社の指定）。
+//
+// settings  … 事業所情報（会社名）。渡されないときは会社名を出しません。
+//             支給・控除項目一覧は見ません（賞与は0円の行を間引かず、
+//             作ったとおりに出します）。
+// staffCode … スタッフコード。明細の右上に出します。
+function printBonusSlip(b, employeeName, settings = null, staffCode = '') {
+  const win = window.open('', '_blank', 'width=1000,height=720');
   if (!win) return;
   const title = b.title || bonusDefaultTitle(b.year, b.seq);
   const paymentTotal = sumItems(b.paymentItems || []);
   const deductionTotal = sumItems(b.deductionItems || []);
-  const rowsHtml = (items) => (items || []).map((it) => `<tr><td class="label">${it.label || '（項目名なし）'}</td><td class="value">${formatYen(Number(it.amount) || 0)}</td></tr>`).join('');
-  const html = `<!doctype html>
-<html lang="ja"><head><meta charset="utf-8"><title>賞与明細 ${title}</title>
-${PRINT_FONT_LINK}
-<style>
-  body { font-family: ${PRINT_FONT_FAMILY}; padding: 32px; color: #1e293b; }
-  h1 { font-size: 18px; margin-bottom: 4px; }
-  .sub { color: #64748b; font-size: 12px; margin-bottom: 16px; }
-  h2 { font-size: 12.5px; color: #64748b; margin: 18px 0 4px; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  td { padding: 6px 0; border-bottom: 1px solid #e2e8f0; }
-  td.label { color: #475569; }
-  td.value { text-align: right; font-family: monospace; }
-  .subtotal td { font-weight: bold; border-top: 1px solid #94a3b8; }
-  .total td { font-weight: bold; font-size: 16px; border-top: 2px solid #1e293b; border-bottom: none; padding-top: 12px; }
-  .note { margin-top: 24px; font-size: 10.5px; color: #94a3b8; }
-</style></head>
-<body>
-  <h1>賞与明細</h1>
-  <div class="sub">${employeeName} 様　／　${title}${b.paymentDate ? `　／　支給日 ${dateLabel(b.paymentDate)}` : ''}</div>
-  <h2>支給</h2>
-  <table>
-    ${rowsHtml(b.paymentItems)}
-    <tr class="subtotal"><td>支給合計</td><td class="value">${formatYen(paymentTotal)}</td></tr>
-  </table>
-  ${(b.deductionItems || []).length > 0 ? `<h2>控除</h2>
-  <table>
-    ${rowsHtml(b.deductionItems)}
-    <tr class="subtotal"><td>控除合計</td><td class="value">${formatYen(deductionTotal)}</td></tr>
-  </table>` : ''}
-  <table>
-    <tr class="total"><td>差引支給額</td><td class="value">${formatYen(b.totalAmount)}</td></tr>
-  </table>
-  ${b.notes ? `<div class="note">${b.notes}</div>` : ''}
-</body></html>`;
-  openForPrint(win, html);
+  const office = settings ? parseOfficeInfo(settings) : null;
+  // 賞与の支給日は明細そのものに入っています（給与と違い、決まりから出しません）
+  const payLabel = b.paymentDate
+    ? `${b.paymentDate.slice(0, 4)}年${b.paymentDate.slice(5, 7)}月${b.paymentDate.slice(8, 10)}日　支給`
+    : '';
+  const toRows = (items) => (items || []).map((it) => [it.label || '（項目名なし）', slipYen(it.amount)]);
+
+  openForPrint(win, buildSlipHtml({
+    docTitle: `賞与明細 ${title}`,
+    title: `${title}　賞与明細`,
+    subtitle: payLabel,
+    officeName: office && office.nameKanji ? office.nameKanji : '',
+    staffCode,
+    employeeName,
+    columns: [
+      { title: '支給', rows: toRows(b.paymentItems), footLabel: '支給合計', footValue: slipYen(paymentTotal) },
+      { title: '控除', rows: toRows(b.deductionItems), footLabel: '控除合計', footValue: slipYen(deductionTotal) },
+    ],
+    netAmount: b.totalAmount,
+    notes: b.notes,
+  }));
 }
 
 // スタッフ側：賞与明細の一覧
-function BonusSlipView({ records, employeeName }) {
+function BonusSlipView({ records, employeeName, settings = null, staffCode = '' }) {
   const sorted = [...records].sort((a, b) => (a.year !== b.year ? b.year - a.year : b.seq - a.seq));
   return (
     <div className="space-y-4">
@@ -17165,7 +17188,7 @@ function BonusSlipView({ records, employeeName }) {
                 </div>
                 {b.notes && <div className="text-[11.5px] text-slate-500 pt-1">{b.notes}</div>}
                 <button
-                  onClick={() => printBonusSlip(b, employeeName)}
+                  onClick={() => printBonusSlip(b, employeeName, settings, staffCode)}
                   className="w-full mt-2 py-2 rounded-lg border border-slate-200 text-[12px] font-bold text-slate-600 flex items-center justify-center gap-1.5"
                 >
                   <Download size={13} /> 印刷・PDF保存
