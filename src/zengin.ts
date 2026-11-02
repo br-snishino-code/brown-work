@@ -185,7 +185,9 @@ export function buildZengin(
     need(who, '口座番号', r.accountNumber);
     need(who, '口座名義（カナ）', r.holderKana);
     if (!(Math.round(r.amount) > 0)) issues.push({ where: who, message: '振込金額が0円以下です。' });
-    [['口座名義', r.holderKana], ['銀行名', r.bankKana], ['支店名', r.branchKana], ['社員番号', r.staffNumber || '']]
+    // 全銀フォーマットの項目名は「社員番号」ですが、画面では「スタッフコード」と
+    // 呼んでいるので、人に出す文言はそちらに合わせます（探す先が同じになるように）
+    [['口座名義', r.holderKana], ['銀行名', r.bankKana], ['支店名', r.branchKana], ['スタッフコード', r.staffNumber || '']]
       .forEach(([label, v]) => {
         const bad = badChars(String(v || ''));
         if (bad.length) issues.push({ where: who, message: `${label}に使えない文字があります（${bad.join('')}）。` });

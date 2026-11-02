@@ -13362,7 +13362,7 @@ function PaidLeaveLedgerTab({ employeeAccounts, leaveGrants = [], leaveRequests 
     const summaryRows = [
       [`年次有給休暇管理簿 一覧（${todayKey()}現在）`],
       [],
-      ['氏名', '社員番号', '入職日', '直近の基準日', 'いま使える日数', '取得済み', '残日数', '引き継ぎ待ち'],
+      ['氏名', 'スタッフコード', '入職日', '直近の基準日', 'いま使える日数', '取得済み', '残日数', '引き継ぎ待ち'],
       ...built.map(({ account, balance }) => {
         const latest = [...balance.live].sort((a, b) => (a.dateKey < b.dateKey ? 1 : -1))[0];
         return [
@@ -13387,7 +13387,7 @@ function PaidLeaveLedgerTab({ employeeAccounts, leaveGrants = [], leaveRequests 
       const uses = history.filter((r) => r.type === 'use');
       const aoa = [
         ['年次有給休暇管理簿'],
-        ['氏名', account.name, '', '社員番号', account.staffNumber || ''],
+        ['氏名', account.name, '', 'スタッフコード', account.staffNumber || ''],
         ['入職日', account.hireDate || '', '', '出力日', todayKey()],
         ...(account.resignationDate ? [['退職日', account.resignationDate]] : []),
         [],
@@ -13697,7 +13697,7 @@ function WageLedgerTab({ employeeAccounts, records, payrollRecords = [], setting
     const listRows = [
       [`賃金台帳 一覧（${period}）`],
       [],
-      ['氏名', '性別', '社員番号', '労働日数', '労働時間', '時間外労働時間', '休日労働時間', '深夜労働時間', '支給合計', '控除合計', '差引支給額', '明細の状態'],
+      ['氏名', '性別', 'スタッフコード', '労働日数', '労働時間', '時間外労働時間', '休日労働時間', '深夜労働時間', '支給合計', '控除合計', '差引支給額', '明細の状態'],
       ...preview.map((p) => [
         p.account.name,
         p.account.gender || '',
@@ -13726,7 +13726,7 @@ function WageLedgerTab({ employeeAccounts, records, payrollRecords = [], setting
         ['賃金台帳'],
         [],
         ['氏名', p.account.name, '', '性別', p.account.gender || '（未登録）'],
-        ['社員番号', p.account.staffNumber || '', '', '雇用形態', p.account.staffType || ''],
+        ['スタッフコード', p.account.staffNumber || '', '', '雇用形態', p.account.staffType || ''],
         ['賃金計算期間', period],
         ['賃金支払日', `${month === 12 ? year + 1 : year}年${month === 12 ? 1 : month + 1}月25日`],
         [],
@@ -13956,7 +13956,7 @@ function AttendanceLedgerTab({ employeeAccounts, records, isDesktop }) {
     const summaryRows = [
       [`出勤簿 月次集計（${period}）`],
       [],
-      ['氏名', '社員番号', '出勤日数', '労働時間', '所定外労働時間', '深夜労働時間'],
+      ['氏名', 'スタッフコード', '出勤日数', '労働時間', '所定外労働時間', '深夜労働時間'],
       ...preview.map((p) => [
         p.account.name,
         p.account.staffNumber || '',
@@ -13974,7 +13974,7 @@ function AttendanceLedgerTab({ employeeAccounts, records, isDesktop }) {
       const days = buildDays(account.id);
       const aoa = [
         ['出勤簿'],
-        ['氏名', account.name, '', '社員番号', account.staffNumber || ''],
+        ['氏名', account.name, '', 'スタッフコード', account.staffNumber || ''],
         ['対象期間', period],
         ['所定労働時間', '1日8時間・休憩60分'],
         [],
@@ -14385,7 +14385,7 @@ const HELP_STAFF = [
     category: 'アカウント',
     items: [
       { q: 'パスワードを忘れました', a: 'ログイン画面の「パスワードをお忘れですか？」から再設定できます。うまくいかない場合は管理者に連絡してください。管理者が仮パスワードを再発行します。' },
-      { q: 'スタッフコードでログインできますか', a: 'できます。ログイン画面の欄は「メールアドレスまたはスタッフコード」です。どちらを入れてもログインできます。パスワードは同じものです。ご自身のスタッフコードが分からないときは管理者にご確認ください（登録情報の画面では「スタッフナンバー」と出ています）。スタッフコードが未登録の方は、これまでどおりメールアドレスでログインしてください。' },
+      { q: 'スタッフコードでログインできますか', a: 'できます。ログイン画面の欄は「メールアドレスまたはスタッフコード」です。どちらを入れてもログインできます。パスワードは同じものです。ご自身のスタッフコードが分からないときは管理者にご確認ください。スタッフコードが未登録の方は、これまでどおりメールアドレスでログインしてください。' },
       { q: '初めてログインするときの流れは', a: '管理者から届いた案内メールのURLを開き、メールアドレスと仮パスワードでログインします。続けてご自身のパスワードを設定し、ご登録情報（ふりがな・生年月日・連絡先・郵便番号・現住所・住民票の住所・配偶者の有無・世帯主・緊急連絡先・給与振込先の口座情報・マイナンバー）を入力すると利用開始です。いずれも必須のため、通帳とマイナンバーカードをお手元にご用意ください。' },
       { q: '賞与明細はどこで見られますか', a: '「給与」タブの給与明細の下に「賞与明細」として表示されます。公開された分だけが並び、「印刷・PDF保存」からPDFとして保存できます。' },
       { q: '給与明細を印刷するときの用紙は', a: '「印刷・PDF保存」を押すと別の窓が開き、印刷の画面が出ます。A4の横向き1枚に収まる形で作っています。ブラウザの印刷画面で、用紙サイズがA4、向きが横になっていることをご確認ください。「ヘッダーとフッター」を外しておくと、日付やURLが入りません。賞与明細も同じ形です。' },
@@ -14403,7 +14403,7 @@ const HELP_ADMIN = [
       { q: '大人数をまとめて登録したい', a: 'スタッフ一覧の右上にある「CSV一括登録」を使います（マスター管理者のみ）。1行目の見出しは name,email,password,hireDate です。email はログインIDになるため、登録フォームと同じくメールアドレスでご入力ください。案内メールを送るかどうかは「ログイン案内メールを送る」のチェックで選べます（初期状態は送信しません）。送らない場合は、ログインURLと仮パスワードを別途ご本人にお伝えください。初回ログイン時のパスワード変更と個人情報の入力は、通常の登録と同じように求められます。' },
       { q: '郵便番号から住所は入りますか', a: '郵便番号を7桁まで入力すると、都道府県・市区町村・町名までが住所欄に自動で入ります。続けて番地・建物名をご入力ください。郵便番号を入れ直した場合も、番地はそのまま残して住所の前半だけが入れ替わります。住所を手入力済みの場合は自動入力されません。' },
       { q: '退職者の処理はどうしますか', a: 'スタッフの「詳細」を開き、基本タブの退職日を入力して保存します。退職日を入れたスタッフは、一覧の絞り込みで「在籍のみ」にすると非表示になります。アカウント自体は残るため、過去の勤怠や給与は参照できます。' },
-      { q: 'スタッフコードでログインできるようにするには', a: 'スタッフの「詳細」→「基本」タブの「スタッフナンバー」に値を入れると、その方はメールアドレスの代わりにそのコードでもログインできます（ログイン画面では「スタッフコード」と呼んでいます）。パスワードは同じものです。コードは1人に1つで、大文字小文字と前後の空白は区別しません（b001 と B001 は同じコードとして扱います）。すでに使われているコードは登録できません。空欄のままでも構いません。その方はこれまでどおりメールアドレスでログインします。' },
+      { q: 'スタッフコードでログインできるようにするには', a: 'スタッフの「詳細」→「基本」タブの「スタッフコード」に値を入れると、その方はメールアドレスの代わりにスタッフコードでもログインできます。パスワードは同じものです。コードは1人に1つで、大文字小文字と前後の空白は区別しません（b001 と B001 は同じコードとして扱います）。すでに使われているコードは登録できません。空欄のままでも構いません。その方はこれまでどおりメールアドレスでログインします。' },
       { q: 'ログインID（メールアドレス）を変えるには', a: 'スタッフ一覧の各行にあるメールのアイコンから変更できます（マスター管理者のみ）。新しいメールアドレスを入力すると、ログイン用のアドレスが切り替わります。パスワードは変わりません。連絡用メールアドレスも同時に変更するか、本人へお知らせメールを送るかを選べます。変更内容は監査ログに記録されます。' },
       { q: 'パスワードを再発行するには', a: 'スタッフ一覧の各行にある鍵のアイコンを押すと、仮パスワードを設定できます。設定した仮パスワードは本人に直接お伝えください。本人が次にログインした際、新しいパスワードの設定画面が表示されます。' },
       { q: 'スタッフにメールが届くのはどんなときですか', a: 'アカウントの作成（案内メール）、ログインIDの変更（送信を選んだ場合）、年末調整の入力依頼、年末調整の差し戻し、給与明細の公開、賞与明細の公開、ダッシュボードの「未提出の◯名にお知らせを送る」の6つです。月次勤怠の確定・差し戻し・確定の取り消し、交通費の承認・差し戻し・承認の取り消し、個人情報の変更申請の承認・却下、年末調整の承認は、スタッフ画面の「管理者からのお知らせ」にのみ表示され、メールは送られません。' },
@@ -25437,7 +25437,7 @@ ${PRINT_FONT_LINK}
   </div>
 
   <table>
-    ${row('支払を受ける者', account.name, account.staffNumber ? `社員番号 ${account.staffNumber}` : '')}
+    ${row('支払を受ける者', account.name, account.staffNumber ? `スタッフコード ${account.staffNumber}` : '')}
     ${row('住所', account.address || '（未登録）', '')}
     ${row('種別', '給料・賞与', `給与${result.counts.salary}回／賞与${result.counts.bonus}回`)}
     ${row('支払金額', formatYen(result.paymentTotal), `給与 ${formatYen(result.salaryTotal)}／賞与 ${formatYen(result.bonusTotal)}`)}
@@ -25562,7 +25562,7 @@ function WithholdingTab({ employeeAccounts = [], payrollRecords = [], bonusRecor
     const list = [
       [`源泉徴収票 集計（${year}年分）`],
       [],
-      ['氏名', '社員番号', '支払金額', '源泉徴収税額', '社会保険料等の金額', '給与の回数', '賞与の回数', '非課税（参考）', '確かめること'],
+      ['氏名', 'スタッフコード', '支払金額', '源泉徴収税額', '社会保険料等の金額', '給与の回数', '賞与の回数', '非課税（参考）', '確かめること'],
       ...rows.map((r) => [
         r.account.name,
         r.account.staffNumber || '',
@@ -25583,7 +25583,7 @@ function WithholdingTab({ employeeAccounts = [], payrollRecords = [], bonusRecor
     rows.forEach((r) => {
       const aoa = [
         ['源泉徴収票（集計）'],
-        ['氏名', r.account.name, '', '社員番号', r.account.staffNumber || ''],
+        ['氏名', r.account.name, '', 'スタッフコード', r.account.staffNumber || ''],
         ['対象年', `${year}年`],
         [],
         ['支払金額', r.result.paymentTotal],
@@ -34352,7 +34352,7 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
               <Field label="連絡用メールアドレス">
                 <input type="email" value={form.contactEmail} onChange={set('contactEmail')} placeholder="example@brown-kyoto.com" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px]" />
               </Field>
-              <Field label="スタッフナンバー">
+              <Field label="スタッフコード">
                 <input value={form.staffNumber} onChange={set('staffNumber')} placeholder="例）00016" className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[14px]" />
               </Field>
               <Field label="郵便番号">
