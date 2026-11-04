@@ -16523,15 +16523,16 @@ const formatYen = (n) => `¥${Math.round(n || 0).toLocaleString('ja-JP')}`;
 
 // ---- 印刷する書類の共通部分 ----
 //
-// フォントは Noto Sans JP にそろえています。Google Fonts から読み込むので、
-// Windows でも Mac でもスマートフォンでも同じ見え方になります。
-// 読み込めなかったとき（通信が無いときなど）は、下の font-family の
-// 2番目以降（Windows の Meiryo UI など）が使われます。
-const PRINT_FONT_LINK = ''
-  + '<link rel="preconnect" href="https://fonts.googleapis.com">'
-  + '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
-  + '<link rel="stylesheet" '
-  + 'href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700&display=swap">';
+// フォントは Noto Sans JP にそろえています。Windows でも Mac でも
+// スマートフォンでも同じ見え方になります。
+//
+// Google Fonts からではなく、同じサイト（public/fonts）から配っています。
+//   ・vercel.json のCSPが外部のフォントを止めているため
+//   ・明細には氏名が載るので、印刷のたびに外部へ通信を出さないため
+//   ・通信が無くても同じ見た目で印刷できるため
+// 文字の範囲ごとにファイルを分けてあるので、ブラウザは要るぶんだけ読みます。
+// 読み込めなかったときは、下の font-family の2番目以降が使われます。
+const PRINT_FONT_LINK = '<link rel="stylesheet" href="/fonts/noto-sans-jp.css">';
 
 const PRINT_FONT_FAMILY =
   '"Noto Sans JP", "Meiryo UI", Meiryo, "Hiragino Sans", "Yu Gothic", sans-serif';
@@ -16571,25 +16572,100 @@ const PRINT_SHEET_CSS = `
 `;
 
 /**
- * 組み立てたHTMLを別の窓で開き、フォントがそろってから印刷に進みます。
- * 読み込みを待たずに印刷すると、Noto Sans JP が間に合わず
- * 別のフォントで印刷されることがあります。
- * 待っても来ないときのために、上限を1.5秒にしています。
+ * 組み立てたHTMLを、フォントがそろってから印刷に出します。
+ *
+ * 【別の窓ではなく、画面の外に置いた iframe を使います】
+ *   以前は window.open で新しい窓を開き、そこへ書き込んでいました。
+ *   これには2つ困ったところがありました。
+ *     1. 新しく開いた窓は、スタイルシートの読み込みの扱いが browser ごとに
+ *        ちがいます。フォントのCSSを読み終える前に印刷が走ると、
+ *        明細だけ別のフォントで刷られてしまいます。
+ *     2. ポップアップを止める設定の方では窓が開かず、
+ *        何も起きないまま終わっていました（win が null で、そのまま戻る）。
+ *   いまの画面の中に iframe を置けば、ふつうのページと同じ扱いになります。
+ *   スタイルシートとフォントを読み終えたことを確かめてから印刷でき、
+ *   ポップアップを止めていても開きます。刷り終わったら片づけます。
+ *
+ * 【順番が大事】
+ *   先にフォントのCSS（<link>）を読み終えてから fonts.ready を待ちます。
+ *   CSSが読めていない時点では @font-face がまだ登録されていないため、
+ *   fonts.ready は「待つフォントは無い」としてすぐ解決してしまいます。
+ *   そのまま印刷に進むと、Noto Sans JP が間に合わず別のフォントで
+ *   印刷されます（この順番を間違えていて、実際そうなっていました）。
+ *
+ * 待っても来ないときのために、上限を5秒にしています。
+ * 上限に達したら、そのときのフォントで印刷に進みます（止めません）。
  */
-function openForPrint(win, html) {
+function openForPrint(html) {
+  // 画面には出しませんが、中身は描かせます。
+  // display:none や visibility:hidden にすると、browser が中身を描かず、
+  // フォントの読み込みが始まらない（＝印刷が別のフォントになる）ことがあります。
+  // そのため、位置だけ画面の外へ出します。
+  // 前に刷ったときの iframe が残っていたら、先に片づけます。
+  // afterprint が来ない browser でも、残るのは1つだけになります。
+  document.querySelectorAll('iframe[data-print-slip]').forEach((old) => {
+    try { if (old.parentNode) old.parentNode.removeChild(old); } catch (_) { /* 片づけで止めません */ }
+  });
+
+  const frame = document.createElement('iframe');
+  frame.setAttribute('aria-hidden', 'true');
+  frame.setAttribute('data-print-slip', '1');
+  frame.style.cssText = 'position:fixed;left:-10000px;top:0;width:1200px;height:900px;border:0';
+  document.body.appendChild(frame);
+
+  const cleanup = () => {
+    try { if (frame.parentNode) frame.parentNode.removeChild(frame); } catch (_) { /* 片づけで止めません */ }
+  };
+
+  const win = frame.contentWindow;
+  if (!win) {
+    // iframe が使えないとき（ふつうは起きません）は、前のとおり別の窓で開きます
+    cleanup();
+    const w = window.open('', '_blank', 'width=1000,height=720');
+    if (!w) return false;
+    w.document.write(html);
+    w.document.close();
+    w.focus();
+    setTimeout(() => { try { w.print(); } catch (_) { /* 窓が閉じられていても止めません */ } }, 800);
+    return true;
+  }
+
+  win.document.open();
   win.document.write(html);
   win.document.close();
-  win.focus();
-  const go = () => { try { win.print(); } catch (_) { /* 窓が閉じられていても止めません */ } };
+
   let done = false;
-  const once = () => { if (done) return; done = true; go(); };
-  const fonts = win.document.fonts;
-  if (fonts && fonts.ready && typeof fonts.ready.then === 'function') {
-    fonts.ready.then(() => setTimeout(once, 150));
-    setTimeout(once, 1500);
-  } else {
-    setTimeout(once, 300);
-  }
+  const go = () => {
+    if (done) return;
+    done = true;
+    // 印刷の窓を閉じたら片づけます。afterprint が来ない browser もあるので、
+    // 時間でも片づけます。印刷の間 print() が戻ってこない browser があるため、
+    // どちらも print() を呼ぶ前に仕掛けておきます。
+    try { win.addEventListener('afterprint', () => setTimeout(cleanup, 500), { once: true }); } catch (_) { /* 使えなければ時間で片づけます */ }
+    setTimeout(cleanup, 30000);
+    try { win.focus(); win.print(); } catch (_) { /* 印刷できなくても画面は止めません */ }
+  };
+  // 来ないときの上限。これを過ぎたら、そのまま印刷に進みます
+  setTimeout(go, 5000);
+
+  // 1. スタイルシートを読み終えるまで待つ
+  const sheets = Array.from(win.document.querySelectorAll('link[rel="stylesheet"]'));
+  const sheetReady = Promise.all(sheets.map((l) => new Promise((resolve) => {
+    if (l.sheet) { resolve(); return; }
+    l.addEventListener('load', resolve, { once: true });
+    l.addEventListener('error', resolve, { once: true });   // 読めなくても進みます
+  })));
+
+  // 2. そのうえで、フォントが使える状態になるまで待つ
+  sheetReady
+    .then(() => {
+      const fonts = win.document.fonts;
+      if (fonts && fonts.ready && typeof fonts.ready.then === 'function') return fonts.ready;
+      return null;
+    })
+    .then(() => setTimeout(go, 150))
+    .catch(() => go());
+  return true;
 }
 
 // ---- 明細の紙（給与・賞与で共通）----
@@ -16726,8 +16802,6 @@ ${PRINT_FONT_LINK}
 //            支給日の決まり。渡されないときは、その欄を省きます。
 // staffCode … スタッフコード。明細の右上に出します。
 function printPayslip(p, employeeName, settings = null, staffCode = '') {
-  const win = window.open('', '_blank', 'width=1000,height=720');
-  if (!win) return;
   const allPayment = p.paymentItems || [{ label: '基本給', amount: p.baseAmount }, ...(p.overtimeAmount ? [{ label: '残業手当', amount: p.overtimeAmount }] : [])];
   const allDeduction = p.deductionItems || [];
   // 合計は間引く前の全部から出します（間引くのは見た目だけなので、
@@ -16758,7 +16832,7 @@ function printPayslip(p, employeeName, settings = null, staffCode = '') {
 
   const toRows = (items) => items.map((it) => [it.label || '（項目名なし）', slipYen(it.amount)]);
 
-  openForPrint(win, buildSlipHtml({
+  openForPrint(buildSlipHtml({
     docTitle: `給与明細 ${p.year}年${p.month}月分`,
     title: `${p.year}年${String(p.month).padStart(2, '0')}月　給与明細`,
     subtitle: payLabel,
@@ -17476,8 +17550,6 @@ function BonusAdminTab({ employeeAccounts, bonusRecords = [], tableReady = true,
 //             作ったとおりに出します）。
 // staffCode … スタッフコード。明細の右上に出します。
 function printBonusSlip(b, employeeName, settings = null, staffCode = '') {
-  const win = window.open('', '_blank', 'width=1000,height=720');
-  if (!win) return;
   const title = b.title || bonusDefaultTitle(b.year, b.seq);
   const paymentTotal = sumItems(b.paymentItems || []);
   const deductionTotal = sumItems(b.deductionItems || []);
@@ -17488,7 +17560,7 @@ function printBonusSlip(b, employeeName, settings = null, staffCode = '') {
     : '';
   const toRows = (items) => (items || []).map((it) => [it.label || '（項目名なし）', slipYen(it.amount)]);
 
-  openForPrint(win, buildSlipHtml({
+  openForPrint(buildSlipHtml({
     docTitle: `賞与明細 ${title}`,
     title: `${title}　賞与明細`,
     subtitle: payLabel,
