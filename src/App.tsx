@@ -38,11 +38,11 @@ import {
   isMissingLateDeductionColumn, withoutLateDeductionCols,
 } from './lateDeduction';
 import { mergeCommuteItems } from './payslipDisplay';
+import { autoBreakMinutes, scheduledWorkMinutes } from './breakTime';
 
 // ---- constants ----
 const SCHEDULED_START = '09:00';
 const SCHEDULED_END = '18:00';
-const BREAK_MINUTES_DEFAULT = 60;
 const STANDARD_CLOCK_IN_HOUR = 10; // 出勤確認ポップアップの基準時刻（10:00）
 const STANDARD_CLOCK_OUT_HOUR = 19; // 退勤確認ポップアップの基準時刻（19:00）
 
@@ -1087,11 +1087,26 @@ function computeGpsAlertEmployees(employeeAccounts, records, threshold = 5) {
     .filter((x) => x.consecutiveCount >= threshold);
 }
 
+// その日に差し引く休憩の分数。
+//
+// 御社の決まり（ジョブカンの自動休憩と同じ）：
+//   拘束時間（出勤から退勤まで）が6時間以上の日に1時間を引く。6時間未満なら引かない。
+//   決まりは src/breakTime.ts にまとめています。
+//
+// 管理者が勤怠一覧で休憩を手入力した日は、その値をそのまま使います。
+// Brown Work には休憩の打刻が無いため、手入力は「打刻」ではなく「訂正」です。
+// ジョブカンの「どちらか大きい方を採用」は打刻がある前提の設定なので当てません。
+//
+// 退勤がまだの日は、いまの時刻までの経過で判定します。
 function getRecordedBreakMinutes(record, asOf = new Date()) {
-  if (!record) return BREAK_MINUTES_DEFAULT;
-  // 休憩は実際の打刻に関わらず、常に固定1時間（管理者による個別の手動修正がある場合のみそれに従う）
+  if (!record) return 0;
   if (record.breakMinutesOverride != null) return Number(record.breakMinutesOverride);
-  return BREAK_MINUTES_DEFAULT;
+  if (!record.clockIn) return 0;
+  const inMin = toMinutes(hhmm(new Date(record.clockIn)));
+  const endMin = record.clockOut
+    ? toMinutes(hhmm(new Date(record.clockOut)))
+    : toMinutes(hhmm(asOf instanceof Date ? asOf : new Date(asOf)));
+  return autoBreakMinutes(Math.max(0, endMin - inMin));
 }
 
 function computeMetrics(record) {
@@ -1102,7 +1117,9 @@ function computeMetrics(record) {
   const workedMin = Math.max(0, outMin - inMin - breakMin);
   const schedStart = toMinutes(record.scheduledStart || SCHEDULED_START);
   const schedEnd = toMinutes(record.scheduledEnd || SCHEDULED_END);
-  const schedWorked = Math.max(0, schedEnd - schedStart - BREAK_MINUTES_DEFAULT);
+  // 所定労働時間。所定の拘束時間にも同じ自動休憩の決まりを当てます
+  //（例：9:00〜18:00 は拘束9時間→休憩60分→所定8時間。9:00〜14:00 は拘束5時間→休憩なし→所定5時間）
+  const schedWorked = scheduledWorkMinutes(schedStart, schedEnd);
   const lateMin = Math.max(0, inMin - schedStart);
   const earlyLeaveMin = Math.max(0, schedEnd - outMin);
   const overtimeMin = Math.max(0, workedMin - schedWorked);
@@ -1280,7 +1297,7 @@ function diffAmountItems(before, after, kindLabel) {
 // ---- 法定帳簿（賃金台帳・出勤簿）用の計算 ----
 // 賃金台帳には深夜労働時間数の記載が必要（労働基準法施行規則第54条）。
 // 深夜は22時〜翌5時。日をまたぐ勤務の運用は無いため、1日の中での重なりだけを見る。
-// 休憩（固定60分）がどの時刻に取られたかは記録していないため、
+// 休憩がどの時刻に取られたかは記録していないため、
 // 休憩が深夜帯にかかる場合は差し引けない。日中に取る運用のため影響しない想定。
 const NIGHT_FROM_MIN = 22 * 60;   // 22:00
 const NIGHT_UNTIL_MIN = 5 * 60;   // 05:00
@@ -9651,7 +9668,8 @@ function ClockOutConfirmModal({ now, standardMinutes, onClose, onConfirm }) {
 function CorrectionModal({ dateKey, record, onClose, onSubmit }) {
   const [clockIn, setClockIn] = useState(record?.clockIn ? hhmm(new Date(record.clockIn)) : '');
   const [clockOut, setClockOut] = useState(record?.clockOut ? hhmm(new Date(record.clockOut)) : '');
-  const [breakMinutes, setBreakMinutes] = useState(record?.breakMinutes ?? BREAK_MINUTES_DEFAULT);
+  // 休憩の初期値。その日の記録から出します（自動休憩の決まりのとおり）
+  const [breakMinutes, setBreakMinutes] = useState(record?.breakMinutes ?? getRecordedBreakMinutes(record));
   const [reason, setReason] = useState('');
   // 送信中は押せないようにする（連打で同じ申請が何件も入るのを防ぐ）
   const [sending, setSending] = useState(false);
@@ -14809,7 +14827,7 @@ const HELP_STAFF = [
       { q: '出勤・退勤の打刻はどこからしますか', a: '「勤怠」タブを開くと、画面の中央に大きな打刻ボタンが表示されます。出勤時は「出勤」、退勤時は「退勤」を押してください。押した時刻がそのまま記録されます。' },
       { q: '打刻を忘れてしまいました', a: '「勤怠」タブの「勤怠一覧」から、該当する日付を選んで修正申請を出してください。正しい時刻と理由を入力して送信すると、管理者の承認後に記録が修正されます。当日中に気づいた場合も同じ手順です。' },
       { q: '打刻の時刻を間違えました', a: '打刻をやり直すことはできませんが、修正申請を出せば直せます。手順は打刻忘れと同じで、「勤怠一覧」から該当日の修正申請を出してください。' },
-      { q: '休憩時間はどう記録されますか', a: '休憩は原則1時間として自動的に差し引かれます。実際の休憩時間が大きく異なる場合は、管理者にご相談ください。' },
+      { q: '休憩時間はどう記録されますか', a: '休憩の打刻はありません。出勤から退勤までが6時間以上の日に、1時間の休憩が自動で差し引かれます。6時間未満の日は差し引きません。実際の休憩時間が大きく異なる場合は、管理者にご相談ください。管理者が個別に直せます。' },
       { q: '定時より早く帰る／遅くまで残る場合は', a: '退勤打刻時に理由を選ぶ画面が出ます。残業の場合は「残業」を選んでください。管理者の承認が必要になります。早退の場合も、該当する理由を選択してください。' },
       { q: '遅刻・早退をすると給与は引かれますか', a: '月給制・日給制の方は、遅刻・早退した時間に応じて「遅刻早退控除」が引かれます（時給制の方は、基本給が実働時間で出るため引きません）。ただし打刻のときに選んだ区分によって、引かない場合があります。出勤で「イベント（会議・研修など）」、退勤で「イベント・研修」を選んだ日は引きません。「遅刻」「自己都合」「その他」は引きます。出勤で「打刻漏れ」（本当は所定の時刻に出勤していた、という選択肢）を選んだ日は、時刻そのものが所定に直るため遅刻0分になります。引くか引かないかは管理者が承認するときに1件ずつ決められるので、最終的な扱いは「勤怠履歴」の各日のメモでご確認ください。控除しない日は「遅刻◯分は控除しません」と出ます。' },
       { q: '遅刻早退控除はどう計算されますか', a: '1時間あたりの単価に、遅刻・早退の時間をかけて出します。時間は1時間未満の端数を15分単位で切り捨てます（00〜14分は0分、15〜29分は15分、30〜44分は30分、45〜59分は45分）。切り捨ては月の合計ではなく日ごとに行うため、たとえば14分の遅刻が5日あった場合は0分です。控除しない区分の分は、切り捨てる前に差し引いてから数えます。' },
@@ -14880,6 +14898,7 @@ const HELP_ADMIN = [
       { q: '管理者が直接勤怠を修正できますか', a: 'できます。「勤怠」→「勤怠一覧」で対象のスタッフと日付を選び、時刻を直接編集してください。給与に反映させない修正の場合は、控除対象外のフラグを設定できます。' },
       { q: '遅刻・早退を承認するときに決めることは', a: '「勤怠」→「勤怠一覧」の上に「承認待ちの出勤」が出ます。各件に「引く」「引かない」の2つのボタンがあり、遅刻早退控除を引くかどうかをその場で決めます。初めは打刻の区分どおりの既定が選ばれています。出勤の「イベント（会議・研修など）」と退勤の「イベント・研修」は「引かない」、「遅刻」「自己都合」「その他」は「引く」が既定です。既定と違う選び方をすると、その旨が画面に出ます。メモ欄に理由を残せます。却下した場合は控除を引く扱いになります。遅刻・早退が0分の日は決めることがないため、ボタンは出ません。' },
       { q: '遅刻早退控除から外した時間はどこで分かりますか', a: '3か所で分かります。①「勤怠」→「勤怠一覧」の「遅刻/早退」の欄に「控除なし ◯分」と出ます。②「給与」タブで対象月を開くと、集計に「控除から外した遅刻・早退」が出て、根拠の説明にも理由が出ます。③スタッフ側の「勤怠履歴」の各日のメモに「遅刻◯分は控除しません」と出ます。なお勤怠一覧の「遅刻/早退」に出る分数は実際の遅刻・早退（事実）で、控除から外しても変わりません。CSVにも「控除から外した(分)」の列が入ります。' },
+      { q: '休憩時間はどう決まりますか', a: 'ジョブカンの自動休憩と同じ決まりです。出勤から退勤までの拘束時間が6時間以上の日に1時間を差し引き、6時間未満の日は差し引きません。休憩の打刻はありません。所定勤務時間からも同じように差し引くため、所定が9時から18時の方は所定労働時間が8時間、9時から14時の方は5時間（休憩なし）になります。個別に直したいときは勤怠一覧から休憩の分数を手で入力してください。手で入れた値がそのまま使われます。なお休憩を何時に取ったかは記録していないため、深夜帯からは差し引きません（ジョブカンの「普通勤務優先」と同じ扱いです）。' },
       { q: '打刻漏れはどこで分かりますか', a: '「勤怠」→「勤怠修正」を開くと、上部に赤い枠で日付とスタッフ名が表示されます。各行の「この日の勤怠を修正する」を押すと、その日のそのスタッフに絞り込んだ勤怠一覧へ移動し、退勤時刻をその場で入力できます。ダッシュボードのアラート一覧にも件数が表示されます。' },
       { q: 'シフトの氏名が一致しないときは', a: '「勤怠」→「シフト」の確定シフトのカードに、一致しなかった氏名が出ます。その場で該当のスタッフを選んで「結びつける」を押すと対応が登録され、次の取り込みから自動で一致します。改姓や表記ゆれがある方はこれで対応してください。退職した方がシートに残っている場合は、自動で飛ばすので登録は不要です。' },
       { q: 'シフトの公開をスタッフに知らせるには', a: '「勤怠」→「シフト」の確定シフトのカードから送れます。「全員（◯名）に知らせる」と、直近の取り込みで内容が変わった方だけに送る「変更があった◯名に知らせる」の2つがあります。変更があった方へのお知らせには、どの日がどう変わったかが入ります。アプリ内のお知らせのみで、メールは送りません。' },
@@ -18775,7 +18794,7 @@ const LATE_DEDUCTION_LABEL = '遅刻早退控除';
 //             平日に取れば平日の日額、土日祝に取れば土日祝の日額です。
 //
 // 1日の所定労働時間は、給与規定グループの「所定勤務時間」
-//（始業〜終業 − 休憩60分）から出します。
+//（始業〜終業 − 自動休憩）から出します。
 const PAID_LEAVE_LABEL = '有給休暇手当';
 
 // 戻り値の reason：
@@ -18904,7 +18923,7 @@ function computeLateEarlyDeduction({ baseAmount, monthlyStandardHours, hoursConf
 //
 // 深夜時間は computeNightMinutes が出します（賃金台帳でも使っている関数）。
 // ⚠ 日をまたぐ勤務には対応していません（夜勤の運用が無いため）。
-// ⚠ 休憩（固定60分）が何時に取られたかを記録していないため、
+// ⚠ 休憩が何時に取られたかを記録していないため、
 //   休憩が深夜帯にかかっても差し引けません。深夜時間が多めに出ます。
 const NIGHT_ALLOWANCE_LABEL = '深夜手当';
 const NIGHT_MULTIPLIER = 0.25;
@@ -20423,7 +20442,7 @@ function NightAndLateNote({ preview, lateDeduction, isPublished, premiumBasePart
           深夜は22時から翌5時までです。働いた時間ぶんの賃金は基本給・残業手当に入っているため、
           上に乗る割増だけを足しています。
           <div className="text-[10.5px] pt-0.5 opacity-80">
-            <b>休憩が深夜帯にかかっても差し引けません。</b>休憩（固定60分）を何時に取ったかを記録していないためです。
+            <b>休憩が深夜帯にかかっても差し引けません。</b>休憩を何時に取ったかを記録していないためです（ジョブカンの「普通勤務優先」と同じ扱いになります）。
             深夜に休憩を取った方がいる場合は、金額を手で直してください。
             日をまたぐ勤務にも対応していません。
           </div>
@@ -22143,7 +22162,7 @@ function weeklyWorkMinutesOf(employee, settings) {
   if (!Number.isFinite(days) || days <= 0) return null;
   const hours = groupWorkHoursFor(employee, settings);
   if (!hours || !isHHMM(hours.start) || !isHHMM(hours.end)) return null;
-  const daily = Math.max(0, toMinutes(hours.end) - toMinutes(hours.start) - BREAK_MINUTES_DEFAULT);
+  const daily = scheduledWorkMinutes(toMinutes(hours.start), toMinutes(hours.end));
   if (daily <= 0) return null;
   return Math.round(daily * days);
 }
@@ -27187,10 +27206,10 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     : { total: 0, parts: [] };
 
   // 日給制の1日の所定労働時間。給与規定グループの所定勤務時間から出します
-  //（始業〜終業 − 休憩60分）。残業の割増基礎単価の分母になります。
+  //（始業〜終業 − 自動休憩）。残業の割増基礎単価の分母になります。
   const groupHours = employee ? groupWorkHoursFor(employee, settings) : null;
   const dailyStandardMinutes = groupHours && groupHours.source === 'group'
-    ? Math.max(0, toMinutes(groupHours.end) - toMinutes(groupHours.start) - BREAK_MINUTES_DEFAULT)
+    ? scheduledWorkMinutes(toMinutes(groupHours.start), toMinutes(groupHours.end))
     : 0;
 
   const preview = employee ? computePayrollPreview({
