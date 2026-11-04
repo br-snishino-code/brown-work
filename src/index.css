@@ -16,6 +16,29 @@ body { margin: 0; min-width: 320px; min-height: 100dvh; background: #f8fafc; }
 button, input, select, textarea { font: inherit; }
 button { -webkit-tap-highlight-color: transparent; }
 
+/* 日付・月・時刻の入力欄
+ *
+ * iPhone と iPad の Safari は、この種類の入力欄を独自の見た目で描きます。
+ * 中身の文字が中央に寄り、枠の線や角丸がこちらの指定どおりにならず、
+ * 幅の狭い画面では枠からはみ出して右端が切れていました
+ *（「各種申請」→「月次勤怠申請」の対象月で確認）。
+ *
+ * appearance を none にすると、ふつうの入力欄として描かれ、
+ * 枠の線・角丸・余白・文字の位置がほかの欄とそろいます。
+ * 押したときに出る選択画面は、これまでどおり出ます。
+ *
+ * max-width と min-width は、中身の都合で横に広がらないようにするためです。
+ */
+input[type="date"],
+input[type="month"],
+input[type="time"],
+input[type="datetime-local"] {
+  -webkit-appearance: none;
+  appearance: none;
+  min-width: 0;
+  max-width: 100%;
+}
+
 @supports (padding: max(0px)) {
   body { padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right); }
 }
