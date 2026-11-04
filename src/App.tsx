@@ -9713,11 +9713,19 @@ function ShiftBadge({ shift, compact = false }) {
   );
 }
 
+// ラベルと入力欄の組。
+//
+// 【横に並べたときに入力欄の高さがそろうようにしています】
+//   ラベルの長さは項目によって違い、幅の狭い画面では2行に折り返します。
+//   ふつうに上から積むと、折り返した側だけ入力欄が下にずれます
+//   （例：「タブレット不備件数（-2P/件）」と「キャンセル件数（-3P/件）」）。
+//   縦並びの箱にして入力欄を下端に寄せると、横に並べたときにそろいます。
+//   横に並べていないところでは、余る高さが無いので見た目は変わりません。
 function Field({ label, children, className = '' }) {
   return (
-    <div className={className}>
+    <div className={`flex flex-col ${className}`}>
       <label className="block text-[11.5px] font-medium text-slate-500 mb-1">{label}</label>
-      {children}
+      <div className="mt-auto">{children}</div>
     </div>
   );
 }
@@ -10469,10 +10477,10 @@ function EoPerformanceSection({ employeeId, session, settings, onNotifyAdmin, is
           本人は確認のみで、入力はできない（管理画面の「インセンティブ集計」で入力する） */}
       {sheet === 'new' && (
         <div className="px-5 pb-3 grid grid-cols-2 gap-3">
-          <Field label="タブレット不備件数（-2P/件）">
+          <Field label={<>タブレット不備件数<span className="whitespace-nowrap">（-2P/件）</span></>}>
             <div className="w-full border border-slate-200 bg-slate-50 rounded-lg px-3 py-2 font-mono text-[13px] text-center text-slate-600">{tabletIssues || '0'}</div>
           </Field>
-          <Field label="キャンセル件数（-3P/件）">
+          <Field label={<>キャンセル件数<span className="whitespace-nowrap">（-3P/件）</span></>}>
             <div className="w-full border border-slate-200 bg-slate-50 rounded-lg px-3 py-2 font-mono text-[13px] text-center text-slate-600">{cancellations || '0'}</div>
           </Field>
           <div className="col-span-2 -mt-1 text-[11px] text-slate-400">
@@ -11732,10 +11740,10 @@ function EoAdminPerfEditModal({ employee, year, month, session, onNotifyEmployee
 
             {sheet === 'new' && (
               <div className="px-5 pb-3 grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <Field label="タブレット不備件数（-2P/件）">
+                <Field label={<>タブレット不備件数<span className="whitespace-nowrap">（-2P/件）</span></>}>
                   <input type="number" value={tabletIssues} onChange={(e) => setTabletIssues(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px] text-center" />
                 </Field>
-                <Field label="キャンセル件数（-3P/件）">
+                <Field label={<>キャンセル件数<span className="whitespace-nowrap">（-3P/件）</span></>}>
                   <input type="number" value={cancellations} onChange={(e) => setCancellations(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px] text-center" />
                 </Field>
                 <Field label="10G付帯率による半額の扱い">
