@@ -33,6 +33,9 @@ import {
   AGREEMENT_DEFAULTS, LEGAL as OVERTIME_LEGAL, WEEK_STARTS,
   monthlyTotals, judgeOvertime,
 } from './overtimeLimit';
+import {
+  splitDay as splitLateDeduction, defaultDeductFor as defaultLateDeductFor,
+} from './lateDeduction';
 
 // ---- constants ----
 const SCHEDULED_START = '09:00';
@@ -1101,7 +1104,28 @@ function computeMetrics(record) {
   const lateMin = Math.max(0, inMin - schedStart);
   const earlyLeaveMin = Math.max(0, schedEnd - outMin);
   const overtimeMin = Math.max(0, workedMin - schedWorked);
-  return { workedMin, lateMin, earlyLeaveMin, overtimeMin, breakMin };
+  // 遅刻・早退のうち、遅刻早退控除の対象になる分とならない分。
+  // lateMin / earlyLeaveMin は事実なので変えません。画面にはそのまま出します。
+  // 決まりは src/lateDeduction.ts にまとめています。
+  const split = splitLateDeduction({
+    lateMin,
+    earlyLeaveMin,
+    clockInStatus: record.clockInStatus,
+    clockOutStatus: record.clockOutStatus,
+    lateDeductionIn: record.clockInLateDeduction,
+    lateDeductionOut: record.clockOutLateDeduction,
+  });
+  return {
+    workedMin, lateMin, earlyLeaveMin, overtimeMin, breakMin,
+    // 控除の対象になる分（丸める前）
+    lateDeductMin: split.lateDeductMin,
+    earlyDeductMin: split.earlyDeductMin,
+    // 控除から外した分（丸めません。説明に使います）
+    lateExemptMin: split.lateExemptMin,
+    earlyExemptMin: split.earlyExemptMin,
+    lateReason: split.lateReason,
+    earlyReason: split.earlyReason,
+  };
 }
 
 // 給与計算も実打刻を1分単位で集計。日ごとの一律15分切り捨ては行わない。
@@ -1133,7 +1157,13 @@ function computeMonthlySummary(records, target = new Date()) {
     // 不就労時間（遅刻＋早退）。賃金規程どおり、日ごとに15分単位で切り捨ててから足します。
     // 月の合計を丸めると結果が変わるため、必ず日ごとに丸めます
     //（例：遅刻14分が5日 → 日ごとなら0分、月合計70分を丸めると60分）。
-    acc.unworkedMin += roundUnworkedMinutes(m.lateMin + m.earlyLeaveMin);
+    //
+    // 数えるのは「控除の対象になる分」だけです。打刻の区分がイベントの遅刻や
+    // イベント・研修の早退は、御社の決まりで控除しません（src/lateDeduction.ts）。
+    // 外したあとに丸めます（丸めてから外すと、外したはずの分が残ります）。
+    acc.unworkedMin += roundUnworkedMinutes(m.lateDeductMin + m.earlyDeductMin);
+    // 控除から外した分。給与計算の画面で根拠として出します（丸めません）
+    acc.unworkedExemptMin += m.lateExemptMin + m.earlyExemptMin;
     // 平日と土日祝を分けて数えます。日給制で単価が分かれている方は、
     // 基本給も残業・深夜の割増基礎単価も「その日の単価」で出すためです。
     // 土日祝の判定は土日祝皆勤手当と同じ（isWeekendOrHoliday）です。
@@ -1150,6 +1180,8 @@ function computeMonthlySummary(records, target = new Date()) {
     return acc;
   }, {
     days: 0, workedMin: 0, overtimeMin: 0, lateMin: 0, earlyLeaveMin: 0, nightMin: 0, unworkedMin: 0,
+    // 遅刻早退控除から外した分（打刻の区分や承認時の上書きによるもの）
+    unworkedExemptMin: 0,
     weekdayDays: 0, holidayDays: 0,
     weekdayOvertimeMin: 0, holidayOvertimeMin: 0,
     weekdayNightMin: 0, holidayNightMin: 0,
@@ -1845,6 +1877,11 @@ const rowToRecord = (row) => ({
   clockInPayDeductionNote: row.clock_in_pay_deduction_note,
   clockOutPayDeduction: row.clock_out_pay_deduction,
   clockOutPayDeductionNote: row.clock_out_pay_deduction_note,
+  // 遅刻早退控除を引くかどうかの上書き（93番）。
+  // null のときは打刻の区分のとおりに扱います。
+  // 列が無い古い本番でも落ちないよう、undefined はそのまま null にします。
+  clockInLateDeduction: row.clock_in_late_deduction ?? null,
+  clockOutLateDeduction: row.clock_out_late_deduction ?? null,
   offShift: !!row.off_shift,
   offShiftNote: row.off_shift_note || '',
 });
@@ -4515,18 +4552,30 @@ function AttendanceApp() {
           : ((patch.kind ? patch.kind === 'out' : true) && patch.approve != null
               ? (patch.approve === true ? (existing?.clockOutApproval === 'pending' ? 'approved' : existing?.clockOutApproval || null) : (existing?.clockOutApproval === 'pending' ? 'rejected' : existing?.clockOutApproval || null))
               : (existing?.clockOutApproval || null)),
-        clock_in_pay_deduction: clockInCleared
-          ? null
-          : ((patch.kind === 'in' && patch.approve != null) ? !!patch.deduction : (existing?.clockInPayDeduction ?? null)),
+        // 「減給あり」の印は、承認画面から書き込まなくなりました（93番で作りを変えました）。
+        // 過去に記録した分は勤怠一覧に出し続けるため、値はそのまま引き継ぎます。
+        clock_in_pay_deduction: clockInCleared ? null : (existing?.clockInPayDeduction ?? null),
+        clock_out_pay_deduction: clockOutCleared ? null : (existing?.clockOutPayDeduction ?? null),
+        // メモは引き続き使います（遅刻早退控除をどう判断したかの理由を残す場所です）
         clock_in_pay_deduction_note: clockInCleared
           ? null
           : ((patch.kind === 'in' && patch.approve != null) ? (patch.deductionNote || null) : (existing?.clockInPayDeductionNote || null)),
-        clock_out_pay_deduction: clockOutCleared
-          ? null
-          : ((patch.kind === 'out' && patch.approve != null) ? !!patch.deduction : (existing?.clockOutPayDeduction ?? null)),
         clock_out_pay_deduction_note: clockOutCleared
           ? null
           : ((patch.kind === 'out' && patch.approve != null) ? (patch.deductionNote || null) : (existing?.clockOutPayDeductionNote || null)),
+        // 遅刻早退控除を引くかどうかの上書き（93番）。
+        // null のままなら打刻の区分のとおりに扱います。
+        // メモは理由を残す場所として、これまでの列を使い続けます。
+        clock_in_late_deduction: clockInCleared
+          ? null
+          : ((patch.kind === 'in' && patch.lateDeduction !== undefined)
+              ? patch.lateDeduction
+              : (existing?.clockInLateDeduction ?? null)),
+        clock_out_late_deduction: clockOutCleared
+          ? null
+          : ((patch.kind === 'out' && patch.lateDeduction !== undefined)
+              ? patch.lateDeduction
+              : (existing?.clockOutLateDeduction ?? null)),
       },
       { onConflict: 'employee_id,date' }
     );
@@ -8909,6 +8958,14 @@ function EmployeeView({ now, todayRecord, todayShift = null, onClockIn, onClockO
     }
     if (r?.clockInPayDeduction) notes.push({ tone: 'text-rose-600 font-bold', text: `減給あり（出勤）${r.clockInPayDeductionNote ? `・${r.clockInPayDeductionNote}` : ''}` });
     if (r?.clockOutPayDeduction) notes.push({ tone: 'text-rose-600 font-bold', text: `減給あり（退勤）${r.clockOutPayDeductionNote ? `・${r.clockOutPayDeductionNote}` : ''}` });
+    // 遅刻・早退のうち、遅刻早退控除から外した分。
+    // 遅刻・早退そのものの時間は右の列にそのまま出しています（事実は変えません）。
+    if (metrics?.lateExemptMin > 0) {
+      notes.push({ tone: 'text-emerald-600', text: `遅刻${metrics.lateExemptMin}分は控除しません${r?.clockInPayDeductionNote ? `・${r.clockInPayDeductionNote}` : ''}` });
+    }
+    if (metrics?.earlyExemptMin > 0) {
+      notes.push({ tone: 'text-emerald-600', text: `早退${metrics.earlyExemptMin}分は控除しません${r?.clockOutPayDeductionNote ? `・${r.clockOutPayDeductionNote}` : ''}` });
+    }
     return { dateKey, r, dayStatus, metrics, pendingForDay, dayInfo, hasRecord, notes };
   });
 
@@ -14672,6 +14729,8 @@ const HELP_STAFF = [
       { q: '打刻の時刻を間違えました', a: '打刻をやり直すことはできませんが、修正申請を出せば直せます。手順は打刻忘れと同じで、「勤怠一覧」から該当日の修正申請を出してください。' },
       { q: '休憩時間はどう記録されますか', a: '休憩は原則1時間として自動的に差し引かれます。実際の休憩時間が大きく異なる場合は、管理者にご相談ください。' },
       { q: '定時より早く帰る／遅くまで残る場合は', a: '退勤打刻時に理由を選ぶ画面が出ます。残業の場合は「残業」を選んでください。管理者の承認が必要になります。早退の場合も、該当する理由を選択してください。' },
+      { q: '遅刻・早退をすると給与は引かれますか', a: '月給制・日給制の方は、遅刻・早退した時間に応じて「遅刻早退控除」が引かれます（時給制の方は、基本給が実働時間で出るため引きません）。ただし打刻のときに選んだ区分によって、引かない場合があります。出勤で「イベント（会議・研修など）」、退勤で「イベント・研修」を選んだ日は引きません。「遅刻」「自己都合」「その他」は引きます。出勤で「打刻漏れ」（本当は所定の時刻に出勤していた、という選択肢）を選んだ日は、時刻そのものが所定に直るため遅刻0分になります。引くか引かないかは管理者が承認するときに1件ずつ決められるので、最終的な扱いは「勤怠履歴」の各日のメモでご確認ください。控除しない日は「遅刻◯分は控除しません」と出ます。' },
+      { q: '遅刻早退控除はどう計算されますか', a: '1時間あたりの単価に、遅刻・早退の時間をかけて出します。時間は1時間未満の端数を15分単位で切り捨てます（00〜14分は0分、15〜29分は15分、30〜44分は30分、45〜59分は45分）。切り捨ては月の合計ではなく日ごとに行うため、たとえば14分の遅刻が5日あった場合は0分です。控除しない区分の分は、切り捨てる前に差し引いてから数えます。' },
       { q: '自分のシフトはどこで見られますか', a: '「勤怠」タブを開き、上の「シフト」を押すと、1か月分をまとめて確認できます。確定したシフトが取り込まれていればその内容が、まだであればご自身が提出した希望が表示されます。当日分は打刻画面の下にも「今日のシフト」として出ます。' },
       { q: '今日のシフトはどこで見られますか', a: '打刻画面の下に「今日のシフト」として表示されます。シフト上が休み・有給の日に出勤を押すと確認画面が出ますが、応援や代打の場合はそのまま出勤できます。理由を入力しておくと管理者に伝わります。' },
       { q: '打刻した場所は記録されますか', a: '記録されます。不正打刻の防止のため、打刻時の位置情報を取得しています。スマートフォンで位置情報の許可を求められた場合は「許可」を選んでください。許可しないと打刻が記録されても位置情報が空になり、管理者側にアラートが出ます。' },
@@ -14736,6 +14795,8 @@ const HELP_ADMIN = [
       { q: 'スタッフ一覧から直接操作するには', a: '「勤怠」→「スタッフ一覧」の各行に、本日の状態・今月の勤務時間・有休残・その方の未処理が表示されます。行の右端にある「⋯」を押すと、そのスタッフの勤怠の確認と修正、未処理の承認、給与の作成、登録情報の編集へ直接移動できます。' },
       { q: '勤怠修正申請を承認するには', a: '「勤怠」→「休暇申請」に未承認の申請が一覧表示されます。内容を確認して承認または却下してください。承認すると勤怠記録が自動で書き換わります。' },
       { q: '管理者が直接勤怠を修正できますか', a: 'できます。「勤怠」→「勤怠一覧」で対象のスタッフと日付を選び、時刻を直接編集してください。給与に反映させない修正の場合は、控除対象外のフラグを設定できます。' },
+      { q: '遅刻・早退を承認するときに決めることは', a: '「勤怠」→「勤怠一覧」の上に「承認待ちの出勤」が出ます。各件に「引く」「引かない」の2つのボタンがあり、遅刻早退控除を引くかどうかをその場で決めます。初めは打刻の区分どおりの既定が選ばれています。出勤の「イベント（会議・研修など）」と退勤の「イベント・研修」は「引かない」、「遅刻」「自己都合」「その他」は「引く」が既定です。既定と違う選び方をすると、その旨が画面に出ます。メモ欄に理由を残せます。却下した場合は控除を引く扱いになります。遅刻・早退が0分の日は決めることがないため、ボタンは出ません。' },
+      { q: '遅刻早退控除から外した時間はどこで分かりますか', a: '3か所で分かります。①「勤怠」→「勤怠一覧」の「遅刻/早退」の欄に「控除なし ◯分」と出ます。②「給与」タブで対象月を開くと、集計に「控除から外した遅刻・早退」が出て、根拠の説明にも理由が出ます。③スタッフ側の「勤怠履歴」の各日のメモに「遅刻◯分は控除しません」と出ます。なお勤怠一覧の「遅刻/早退」に出る分数は実際の遅刻・早退（事実）で、控除から外しても変わりません。CSVにも「控除から外した(分)」の列が入ります。' },
       { q: '打刻漏れはどこで分かりますか', a: '「勤怠」→「勤怠修正」を開くと、上部に赤い枠で日付とスタッフ名が表示されます。各行の「この日の勤怠を修正する」を押すと、その日のそのスタッフに絞り込んだ勤怠一覧へ移動し、退勤時刻をその場で入力できます。ダッシュボードのアラート一覧にも件数が表示されます。' },
       { q: 'シフトの氏名が一致しないときは', a: '「勤怠」→「シフト」の確定シフトのカードに、一致しなかった氏名が出ます。その場で該当のスタッフを選んで「結びつける」を押すと対応が登録され、次の取り込みから自動で一致します。改姓や表記ゆれがある方はこれで対応してください。退職した方がシートに残っている場合は、自動で飛ばすので登録は不要です。' },
       { q: 'シフトの公開をスタッフに知らせるには', a: '「勤怠」→「シフト」の確定シフトのカードから送れます。「全員（◯名）に知らせる」と、直近の取り込みで内容が変わった方だけに送る「変更があった◯名に知らせる」の2つがあります。変更があった方へのお知らせには、どの日がどう変わったかが入ります。アプリ内のお知らせのみで、メールは送りません。' },
@@ -18231,7 +18292,7 @@ const BUILTIN_PAYROLL_ITEMS = [
   { label: '交通費精算', kind: 'payment', rounding: 'ceil', desc: '承認済みの交通費精算の合計' },
   { label: '有給休暇手当', kind: 'payment', rounding: 'ceil', desc: '時給制：時給 × 1日の所定労働時間 × 有給使用日数／日給制：その日の日額 × 有給使用日数（平日・土日祝それぞれの日額を使います）。月給制には付きません（基本給が月給そのままで、有休を取っても減らないため）。' },
   { label: '深夜手当', kind: 'payment', rounding: 'ceil', desc: '【割増基礎単価】×【深夜時間】×【割増率】。割増率は「給与の設定」→「計算のきまり」で変えられます（既定0.25）。深夜は22時から翌5時まで。働いた時間ぶんの賃金は基本給・残業手当に入っているため、上に乗る割増だけを足します。' },
-  { label: '遅刻早退控除', kind: 'payment', rounding: 'floor', desc: '遅刻早退控除単価（1円未満切り捨て）×【遅刻早退時間】。単価の出し方は「給与の設定」→「計算のきまり」で選べます。時給制の方には当てません（基本給が実働時間で出るため、遅刻したぶんはすでに引かれています）。時間は日ごとに15分単位で切り捨てた合計。賃金そのものが減るものなので、支給項目にマイナスの金額で入ります。' },
+  { label: '遅刻早退控除', kind: 'payment', rounding: 'floor', desc: '遅刻早退控除単価（1円未満切り捨て）×【遅刻早退時間】。単価の出し方は「給与の設定」→「計算のきまり」で選べます。時給制の方には当てません（基本給が実働時間で出るため、遅刻したぶんはすでに引かれています）。時間は日ごとに15分単位で切り捨てた合計です。打刻の区分がイベント（会議・研修など）の遅刻と、イベント・研修の早退は数えません（承認のときに1件ずつ変えられます）。賃金そのものが減るものなので、支給項目にマイナスの金額で入ります。' },
   { label: '欠勤控除', kind: 'payment', rounding: 'floor', desc: '欠勤控除単価（基本給 ÷ 当月の出勤規定日数・1円未満切り捨て）×【欠勤日数】。賃金そのものが減るものなので、支給項目にマイナスの金額で入ります。' },
   { label: '健康保険料', kind: 'deduction', statutory: true, desc: '標準報酬月額 ×【健康保険料率】÷ 2' },
   { label: '介護保険料', kind: 'deduction', statutory: true, desc: '標準報酬月額 ×【介護保険料率】÷ 2（40歳から64歳の月のみ）' },
@@ -18604,6 +18665,10 @@ async function savePayrollItemGroups(groups, actor = null) {
 // 時間のほうは、賃金規程どおり日ごとに15分単位で切り捨てた合計を使います
 // （computeMonthlySummary の unworkedMin）。
 //
+// 数えるのは「控除の対象になる分」だけです。打刻の区分がイベント（会議・研修など）の
+// 遅刻と、イベント・研修の早退は、御社の決まりで控除しません。承認のときに
+// 1件ずつ変えることもできます。決まりは src/lateDeduction.ts にまとめています。
+//
 // ⚠ 分母の月平均所定労働時間が未設定のあいだは、仮の値で計算されます。
 //   正しい値は社労士の確認待ちです（確認事項の一覧の6番）。
 //
@@ -18876,7 +18941,7 @@ const FORMULA_VARIABLE_HELP = {
   '実働時間': '休憩を除いた実働の時間数（小数。90分なら1.5）',
   '残業時間': '残業の時間数（小数）',
   '深夜時間': '22時から翌5時までの時間数（小数）',
-  '遅刻早退時間': '遅刻・早退の時間数（小数。日ごとに15分単位で切り捨てた合計）',
+  '遅刻早退時間': '遅刻・早退の時間数（小数。控除の対象になる分だけを、日ごとに15分単位で切り捨てた合計）',
   '実出勤日数': '打刻のあった日数',
   '出勤規定日数': 'その月の出勤規定日数（未設定なら0）',
   '欠勤日数': '給与計算の画面に入れた欠勤日数',
@@ -20205,7 +20270,7 @@ function applyDeductionAmounts(items, amounts) {
 // ---- 深夜手当・遅刻早退控除の根拠（給与計算画面） ----
 // どちらも勤怠から自動で出すため、下書きにそのまま入ります。
 // 金額がどこから来たのかと、いまの作りの限界を必ず見せます。
-function NightAndLateNote({ preview, lateDeduction, isPublished, premiumBaseParts = [] }) {
+function NightAndLateNote({ preview, lateDeduction, isPublished, premiumBaseParts = [], exemptMinutes = 0 }) {
   if (!preview) return null;
   const night = preview.nightMinutes > 0;
   const late = lateDeduction && lateDeduction.amount != null && lateDeduction.unworkedMinutes > 0;
@@ -20218,7 +20283,10 @@ function NightAndLateNote({ preview, lateDeduction, isPublished, premiumBasePart
   // 日給制で平日と土日祝の単価が分かれているとき。どちらの単価でいくら出したのかを出します
   const splitDaily = preview.weekdayHourly != null
     && preview.dailyWageWeekday !== preview.dailyWageHoliday;
-  if (!night && !late && !premium && !hourlySkipped && !splitDaily) return null;
+  // 遅刻早退控除から外した分。全部外した月は late が false になり、
+  // 何も出ないまま控除0円になってしまうため、必ず出します。
+  const exempt = Math.max(0, Math.round(Number(exemptMinutes) || 0));
+  if (!night && !late && !premium && !hourlySkipped && !splitDaily && exempt === 0) return null;
   const hm = (min) => {
     const m = Math.max(0, Math.round(Number(min) || 0));
     return `${Math.floor(m / 60)}時間${m % 60}分`;
@@ -20280,8 +20348,19 @@ function NightAndLateNote({ preview, lateDeduction, isPublished, premiumBasePart
           </div>
         </div>
       )}
+      {exempt > 0 && (
+        <div className={(night || premium || splitDaily || hourlySkipped) ? 'pt-1.5 border-t border-current/15' : ''}>
+          <div className="font-bold">控除から外した遅刻・早退 {hm(exempt)}</div>
+          打刻の区分が<b>イベント（会議・研修など）の遅刻</b>と<b>イベント・研修の早退</b>は、
+          御社の決まりで遅刻早退控除を引きません。承認のときに1件ずつ変えることもできます。
+          <div className="text-[10.5px] pt-0.5 opacity-80">
+            どの日を外したかは「勤怠」→「勤怠一覧」の各日のメモに出ます。
+            この時間は上の遅刻早退控除の計算には入っていません。
+          </div>
+        </div>
+      )}
       {late && (
-        <div className={(night || premium || splitDaily) ? 'pt-1.5 border-t border-current/15' : ''}>
+        <div className={(night || premium || splitDaily || exempt > 0) ? 'pt-1.5 border-t border-current/15' : ''}>
           <div className="font-bold">遅刻早退控除 {formatYen(lateDeduction.amount)}</div>
           {lateDeduction.wageType === 'daily' ? (
             <>
@@ -27529,10 +27608,18 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
           <PayrollMetric label="遅刻" value={`${monthly.lateMin || 0}分`} />
           <PayrollMetric label="早退" value={`${monthly.earlyLeaveMin || 0}分`} />
         </div>
-        {monthly.nightMin > 0 && (
+        {/* 深夜と不就労。
+            不就労は以前、深夜がある月だけ出していましたが、
+            遅刻早退控除の根拠として必要なので、遅刻・早退がある月は必ず出します。 */}
+        {(monthly.nightMin > 0 || monthly.unworkedMin > 0 || monthly.unworkedExemptMin > 0) && (
           <div className="grid grid-cols-2 gap-3">
-            <PayrollMetric label="深夜（22時〜翌5時）" value={minutesToHHMM(monthly.nightMin)} />
-            <PayrollMetric label="不就労（15分単位で切り捨て後）" value={minutesToHHMM(monthly.unworkedMin)} />
+            {monthly.nightMin > 0 && (
+              <PayrollMetric label="深夜（22時〜翌5時）" value={minutesToHHMM(monthly.nightMin)} />
+            )}
+            <PayrollMetric label="不就労（控除する分・15分単位で切り捨て後）" value={minutesToHHMM(monthly.unworkedMin)} />
+            {monthly.unworkedExemptMin > 0 && (
+              <PayrollMetric label="控除から外した遅刻・早退" value={minutesToHHMM(monthly.unworkedExemptMin)} />
+            )}
           </div>
         )}
         <DeemedOvertimeNote deemed={deemed} preview={preview} employee={employee} />
@@ -27549,7 +27636,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
         </div>
         <PaidLeaveNote pay={paidLeavePay} employee={employee} isPublished={isPublished} />
         <FormulaErrorNote paymentItems={paymentItems} deductionItems={deductionItems} isPublished={isPublished} />
-        <NightAndLateNote preview={preview} lateDeduction={lateDeduction} isPublished={isPublished} premiumBaseParts={premiumBase.parts} />
+        <NightAndLateNote preview={preview} lateDeduction={lateDeduction} isPublished={isPublished} premiumBaseParts={premiumBase.parts} exemptMinutes={monthly.unworkedExemptMin} />
         <AbsenceDeductionNote
           deduction={absenceDeduction}
           wageType={wageType}
@@ -28787,6 +28874,10 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
           clockIn: record.clockIn ? hhmm(new Date(record.clockIn)) : '',
           clockInActual: record.clockInActual ? hhmm(new Date(record.clockInActual)) : '',
           note: record.clockInNote || '',
+          // 遅刻早退控除の初期表示に使います（区分の既定／いまの上書き／遅刻の分数）
+          status: record.clockInStatus || null,
+          lateDeduction: record.clockInLateDeduction ?? null,
+          unworkedMin: computeMetrics(record)?.lateMin ?? 0,
         });
       }
       if (record?.clockOutApproval === 'pending') {
@@ -28800,15 +28891,28 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
           clockIn: record.clockOut ? hhmm(new Date(record.clockOut)) : '',
           clockInActual: record.clockOutActual ? hhmm(new Date(record.clockOutActual)) : '',
           note: record.clockOutNote || '',
+          status: record.clockOutStatus || null,
+          lateDeduction: record.clockOutLateDeduction ?? null,
+          unworkedMin: computeMetrics(record)?.earlyLeaveMin ?? 0,
         });
       }
     });
   });
   pendingApprovals.sort((a, b) => (a.date > b.date ? 1 : a.date < b.date ? -1 : 0));
 
-  const decideApproval = async (item, approve, deduction, deductionNote) => {
+  // 承認・却下。遅刻早退控除を引くかどうかも一緒に記録します。
+  //   承認する … 画面で選んだとおり（「引く」／「引かない」）
+  //   却下     … 引きます（理由を認めないため）
+  //   遅刻・早退が0分の日 … 記録しません（決めることがないため）
+  const decideApproval = async (item, approve, deduction, deductionNote, unworkedMin = 0) => {
     setApprovingKey(`${item.employeeId}|${item.date}|${item.kind}`);
-    await onAdminUpdateAttendance(item.employeeId, item.date, { approve, deduction, deductionNote, kind: item.kind }, {});
+    const lateDeduction = unworkedMin > 0 ? (approve ? !!deduction : true) : null;
+    await onAdminUpdateAttendance(
+      item.employeeId,
+      item.date,
+      { approve, deduction, deductionNote, kind: item.kind, lateDeduction },
+      {},
+    );
     setApprovingKey(null);
   };
 
@@ -28831,6 +28935,11 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
       overtimeMin: metrics?.overtimeMin ?? 0,
       lateMin: metrics?.lateMin ?? 0,
       earlyLeaveMin: metrics?.earlyLeaveMin ?? 0,
+      // 遅刻早退控除の対象になる分と、外した分（打刻の区分・承認時の判断による）
+      lateDeductMin: metrics?.lateDeductMin ?? 0,
+      earlyDeductMin: metrics?.earlyDeductMin ?? 0,
+      lateExemptMin: metrics?.lateExemptMin ?? 0,
+      earlyExemptMin: metrics?.earlyExemptMin ?? 0,
       status: computeDayStatus(record).label,
       clockInStatusLabel: (record?.clockInStatus && clockInStatusLabel(record.clockInStatus, record.scheduledStartRaw)) || '',
       clockInActual: record?.clockInActual && record.clockInActual !== record.clockIn ? hhmm(new Date(record.clockInActual)) : '',
@@ -28883,8 +28992,8 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
     return `"${text.replace(/"/g, '""')}"`;
   };
   const exportCsv = () => {
-    const header = ['スタッフ名','日付','出勤','実打刻','出勤区分','退勤','実打刻','退勤区分','休憩(分)','実働','残業','遅刻(分)','早退(分)','状態'];
-    const body = rows.map((r) => [r.employeeName,r.date,r.clockIn,r.clockInActual,r.clockInStatusLabel,r.clockOut,r.clockOutActual,r.clockOutStatusLabel,r.breakMin,minutesToHHMM(r.workedMin),minutesToHHMM(r.overtimeMin),r.lateMin,r.earlyLeaveMin,r.status]);
+    const header = ['スタッフ名','日付','出勤','実打刻','出勤区分','退勤','実打刻','退勤区分','休憩(分)','実働','残業','遅刻(分)','早退(分)','控除から外した(分)','状態'];
+    const body = rows.map((r) => [r.employeeName,r.date,r.clockIn,r.clockInActual,r.clockInStatusLabel,r.clockOut,r.clockOutActual,r.clockOutStatusLabel,r.breakMin,minutesToHHMM(r.workedMin),minutesToHHMM(r.overtimeMin),r.lateMin,r.earlyLeaveMin,r.lateExemptMin + r.earlyExemptMin,r.status]);
     const csv = '\uFEFF' + [header, ...body].map((line) => line.map(escapeCsv).join(',')).join('\r\n');
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -28912,7 +29021,15 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
             {pendingApprovals.map((item) => {
               const key = `${item.employeeId}|${item.date}|${item.kind}`;
               const busy = approvingKey === key;
-              const d = deductionState[key] || { deduction: false, note: '' };
+              // 遅刻早退控除を引くかどうか。
+              // 初めは打刻の区分どおりの既定を出し、必要なときだけ変えてもらいます。
+              // すでに上書きが入っている日は、その値を出します。
+              const ruleDeduct = defaultLateDeductFor(item.status, item.kind);
+              const d = deductionState[key] || {
+                deduction: item.lateDeduction == null ? ruleDeduct : item.lateDeduction,
+                note: '',
+              };
+              const sideLabel = item.kind === 'in' ? '遅刻' : '早退';
               return (
                 <div key={key} className="px-5 py-3 space-y-2">
                   <div>
@@ -28922,21 +29039,54 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
                       {item.note && `・${item.note}`}
                     </div>
                   </div>
-                  <div className="bg-slate-50 rounded-lg px-3 py-2 space-y-1.5">
-                    <label className="flex items-center gap-2 text-[12px] font-bold text-slate-600">
-                      <input type="checkbox" checked={d.deduction} onChange={(e) => setDeductionField(key, 'deduction', e.target.checked)} />
-                      減給あり
-                    </label>
-                    <input
-                      value={d.note}
-                      onChange={(e) => setDeductionField(key, 'note', e.target.value)}
-                      placeholder="メモ（任意・減給理由など）"
-                      className="w-full border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12px] bg-white"
-                    />
-                  </div>
+                  {item.unworkedMin > 0 ? (
+                    <div className="bg-slate-50 rounded-lg px-3 py-2 space-y-1.5">
+                      <div className="text-[12px] font-bold text-slate-600">
+                        {sideLabel} {item.unworkedMin}分の遅刻早退控除
+                      </div>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => setDeductionField(key, 'deduction', true)}
+                          className={`flex-1 py-1.5 rounded-lg border-2 text-[12px] font-bold ${d.deduction ? 'border-rose-500 bg-rose-50 text-rose-700' : 'border-slate-200 text-slate-500'}`}
+                        >
+                          引く
+                        </button>
+                        <button
+                          onClick={() => setDeductionField(key, 'deduction', false)}
+                          className={`flex-1 py-1.5 rounded-lg border-2 text-[12px] font-bold ${d.deduction ? 'border-slate-200 text-slate-500' : 'border-emerald-500 bg-emerald-50 text-emerald-700'}`}
+                        >
+                          引かない
+                        </button>
+                      </div>
+                      <div className="text-[11px] text-slate-400">
+                        {item.lateDeduction == null
+                          ? `この区分の既定は「${ruleDeduct ? '引く' : '引かない'}」です`
+                          : `すでに「${item.lateDeduction ? '引く' : '引かない'}」で記録されています`}
+                        {d.deduction !== ruleDeduct && <b className="text-amber-700">（既定と違う選び方をしています）</b>}
+                      </div>
+                      <input
+                        value={d.note}
+                        onChange={(e) => setDeductionField(key, 'note', e.target.value)}
+                        placeholder="メモ（任意・理由など）"
+                        className="w-full border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12px] bg-white"
+                      />
+                    </div>
+                  ) : (
+                    <div className="bg-slate-50 rounded-lg px-3 py-2 space-y-1.5">
+                      <div className="text-[11.5px] text-slate-500">
+                        この日は{sideLabel}が0分のため、遅刻早退控除はありません。
+                      </div>
+                      <input
+                        value={d.note}
+                        onChange={(e) => setDeductionField(key, 'note', e.target.value)}
+                        placeholder="メモ（任意・理由など）"
+                        className="w-full border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12px] bg-white"
+                      />
+                    </div>
+                  )}
                   <div className="flex items-center justify-end gap-2">
-                    <button onClick={() => decideApproval(item, false, d.deduction, d.note)} disabled={busy} className="text-[12px] font-bold text-slate-500 border border-slate-200 rounded-lg px-3 py-1.5 disabled:opacity-50">却下</button>
-                    <button onClick={() => decideApproval(item, true, d.deduction, d.note)} disabled={busy} className="text-[12px] font-bold text-white bg-amber-600 rounded-lg px-3 py-1.5 disabled:opacity-50">{busy ? '処理中…' : '承認する'}</button>
+                    <button onClick={() => decideApproval(item, false, d.deduction, d.note, item.unworkedMin)} disabled={busy} className="text-[12px] font-bold text-slate-500 border border-slate-200 rounded-lg px-3 py-1.5 disabled:opacity-50">却下</button>
+                    <button onClick={() => decideApproval(item, true, d.deduction, d.note, item.unworkedMin)} disabled={busy} className="text-[12px] font-bold text-white bg-amber-600 rounded-lg px-3 py-1.5 disabled:opacity-50">{busy ? '処理中…' : '承認する'}</button>
                   </div>
                 </div>
               );
@@ -29063,7 +29213,13 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
                     <td className="px-2 py-2"><input type="number" min="0" step="5" value={e.breakMinutes ?? ''} onChange={(ev) => setField('breakMinutes', ev.target.value)} className="w-14 border border-slate-200 rounded px-1 py-1 font-mono text-[11.5px]" /></td>
                     <td className="px-2 py-2 font-mono font-semibold whitespace-nowrap">{minutesToHHMM(r.workedMin)}</td>
                     <td className="px-2 py-2 font-mono whitespace-nowrap">{minutesToHHMM(r.overtimeMin)}</td>
-                    <td className="px-2 py-2 whitespace-nowrap">{r.lateMin > 0 || r.earlyLeaveMin > 0 ? `${r.lateMin}分/${r.earlyLeaveMin}分` : '-'}</td>
+                    <td className="px-2 py-2 whitespace-nowrap">
+                      {r.lateMin > 0 || r.earlyLeaveMin > 0 ? `${r.lateMin}分/${r.earlyLeaveMin}分` : '-'}
+                      {/* 控除から外した分。金額に効くので一覧でも分かるようにします */}
+                      {(r.lateExemptMin + r.earlyExemptMin) > 0 && (
+                        <span className="block text-[10.5px] text-emerald-600 font-bold">控除なし {r.lateExemptMin + r.earlyExemptMin}分</span>
+                      )}
+                    </td>
                     <td className="px-2 py-2 whitespace-nowrap">
                       {r.status}
                       {r.clockInPayDeduction && r.clockInPayDeductionNote && <div className="text-[9.5px] text-rose-500">出勤メモ：{r.clockInPayDeductionNote}</div>}
