@@ -29,6 +29,10 @@ import {
   fiscalYearOfMonth, fiscalYearRange, buildLaborInsurance,
   laborInsurancePremiums, laborInsuranceWarnings,
 } from './laborInsurance';
+import {
+  AGREEMENT_DEFAULTS, LEGAL as OVERTIME_LEGAL, WEEK_STARTS,
+  monthlyTotals, judgeOvertime,
+} from './overtimeLimit';
 
 // ---- constants ----
 const SCHEDULED_START = '09:00';
@@ -6019,6 +6023,20 @@ function AttendanceApp() {
                 settings={data.settings}
                 shiftRequests={data.shiftRequests}
                 shiftAssignments={data.shiftAssignments}
+                isDesktop={isDesktop}
+              />
+            )}
+            {/* 36協定の上限。労働時間が載るため、マスター管理者だけに出します */}
+            {!showStaffScreens && session.role === 'master_admin' && (
+              <OvertimeAgreementTab
+                employeeAccounts={employeeAccounts}
+                records={data.records}
+                settings={data.settings}
+                shiftRequests={data.shiftRequests}
+                shiftAssignments={data.shiftAssignments}
+                actor={session}
+                isMasterAdmin={session.role === 'master_admin'}
+                onSaved={refreshData}
                 isDesktop={isDesktop}
               />
             )}
@@ -13564,6 +13582,304 @@ function toSheetName(name, used) {
 //
 // 作れない欄があるときは空欄にせず、なぜ出せないかを帳簿に書きます。
 // 空欄のまま出すと、記入漏れなのか対象外なのか分からなくなるためです。
+// ---- 36協定の上限 ----
+//
+// 協定で定めた時間と、法令の線を両方見て、超えているもの・近づいているものを
+// 出します。数え方は src/overtimeLimit.ts に書いています。
+//
+// ⚠ ここでいう時間外労働は「法定労働時間（1日8時間・週40時間）を超えた分」です。
+//   給与の残業手当は「所定を超えた分」で出しているため、数字が一致しないことが
+//   あります（所定が8時間より短い方）。画面にもその旨を出しています。
+//
+// 役員は労働者ではないため、36協定の対象から外しています。
+// ただし、労働者として働いている部分がある方（兼務役員）は対象になることが
+// あるので、画面でお知らせします。
+function OvertimeAgreementTab({ employeeAccounts = [], records = {}, settings = {},
+  shiftRequests = [], shiftAssignments = [], actor, isMasterAdmin, onSaved, isDesktop }) {
+  const [open, setOpen] = useState(false);
+  const agreement = useMemo(() => parseOvertimeAgreement(settings), [settings]);
+  const now = new Date();
+  // いまの年度（起算月より前なら前の年度）
+  const currentFiscal = now.getMonth() + 1 >= agreement.startMonth
+    ? now.getFullYear() : now.getFullYear() - 1;
+  const [fiscalYear, setFiscalYear] = useState(currentFiscal);
+
+  // 終わっている月（今日の前月まで）。平均を出すのに使います
+  const throughMonth = useMemo(() => {
+    const d = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}`;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const targets = useMemo(
+    () => (employeeAccounts || []).filter((a) => a && a.staffType !== '役員'),
+    [employeeAccounts]
+  );
+  const officers = useMemo(
+    () => (employeeAccounts || []).filter((a) => a && a.staffType === '役員'),
+    [employeeAccounts]
+  );
+
+  // 法定休日の決め方が未設定だと、休日労働を分けられません
+  const statutoryOff = parseStatutoryHoliday(settings).mode === 'off';
+
+  const people = useMemo(() => targets.map((account) => {
+    const mine = records[account.id] || {};
+    const rule = statutoryRuleFor(settings, account);
+    // 年度の12か月ぶんの日をそろえます
+    const holidaySet = new Set();
+    for (let i = 0; i < 12; i += 1) {
+      const d = new Date(fiscalYear, (agreement.startMonth - 1) + i, 1);
+      const st = statutoryHolidayWorkDays({
+        rule,
+        year: d.getFullYear(),
+        month: d.getMonth() + 1,
+        hasWork: (k) => !!mine[k]?.clockIn,
+        shiftOf: (k) => {
+          const found = shiftForDate(shiftRequests, account.id, k, shiftAssignments);
+          return found?.confirmed ? found : null;
+        },
+      });
+      st.dates.forEach((k) => holidaySet.add(k));
+    }
+    const days = Object.entries(mine).map(([date, rec]) => {
+      const m = computeMetrics(rec);
+      return { date, workedMin: m ? m.workedMin : 0, statutoryHoliday: holidaySet.has(date) };
+    }).filter((d) => d.workedMin > 0);
+    const totals = monthlyTotals(days, agreement.weekStart);
+    return { account, result: judgeOvertime(totals, agreement, fiscalYear, throughMonth) };
+  }), [targets, records, settings, shiftRequests, shiftAssignments, agreement, fiscalYear, throughMonth]);
+
+  const withError = people.filter((p) => p.result.issues.some((i) => i.level === 'error'));
+  const withWarn = people.filter((p) => !withError.includes(p) && p.result.issues.some((i) => i.level === 'warn'));
+
+  const years = [currentFiscal, currentFiscal - 1, currentFiscal - 2];
+  const monthLabel = (k) => `${Number(k.slice(5, 7))}月`;
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+      <div className="px-5 py-3.5 border-b border-slate-100 flex items-center gap-2 flex-wrap">
+        <h2 className="font-bold text-[13.5px] flex items-center gap-2">
+          <ShieldCheck size={16} className="text-slate-400" />36協定の上限
+        </h2>
+        {withError.length > 0 && <span className="text-[11px] font-bold text-rose-600">超過 {withError.length}名</span>}
+        {withWarn.length > 0 && <span className="text-[11px] font-bold text-amber-700">注意 {withWarn.length}名</span>}
+        <select
+          value={fiscalYear}
+          onChange={(e) => setFiscalYear(Number(e.target.value))}
+          className="ml-auto border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white"
+        >
+          {years.map((y) => <option key={y} value={y}>{y}年度</option>)}
+        </select>
+      </div>
+
+      <div className="px-5 py-4 space-y-3">
+        <div className="text-[10.5px] text-slate-500 leading-relaxed">
+          {agreement.startMonth}月1日から1年ぶんを見ています。
+          協定で定めた時間（1か月{agreement.monthLimit}時間／1年{agreement.yearLimit}時間
+          {agreement.special && `／特別条項 年${agreement.specialYear}時間・1か月の合計${agreement.specialMonthTotal}時間・年${agreement.specialCount}回`}）
+          と、法令の線（時間外＋休日労働が月{OVERTIME_LEGAL.monthTotalMax}時間未満・2〜6か月平均{OVERTIME_LEGAL.averageMax}時間以内）の
+          両方を見ています。
+          <b className="block pt-0.5">
+            ここでいう時間外労働は、法定労働時間（1日8時間・週{40}時間・週の始まりは{WEEK_STARTS[agreement.weekStart]?.label}）を超えた分です。
+            給与の残業手当は所定を超えた分で出しているため、所定が8時間より短い方は数字が一致しません。
+          </b>
+          2〜6か月平均は、終わった月（{throughMonth.slice(0, 4)}年{Number(throughMonth.slice(5, 7))}月まで）で見ています。
+        </div>
+
+        {statutoryOff && (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-800 leading-relaxed">
+            <b className="block">法定休日の決め方が未設定です。</b>
+            休日労働を分けられないため、時間外と休日労働の合計で見る線（月{OVERTIME_LEGAL.monthTotalMax}時間未満・
+            2〜6か月平均{OVERTIME_LEGAL.averageMax}時間以内）が正しく出ません。
+            「給与」→「給与の設定」→「法定休日の決め方」で設定してください。
+          </div>
+        )}
+
+        {officers.length > 0 && (
+          <div className="text-[10.5px] text-slate-400 leading-relaxed">
+            役員{officers.length}名（{officers.map((a) => a.name).join('、')}）は、労働者ではないため外しています。
+            労働者として働いている部分がある方（兼務役員）は対象になることがあります。
+          </div>
+        )}
+
+        {people.length === 0 ? (
+          <div className="py-8 text-center text-[12.5px] text-slate-300">対象のスタッフがいません</div>
+        ) : (
+          <div className="space-y-2.5">
+            {people.map(({ account, result }) => {
+              const errs = result.issues.filter((i) => i.level === 'error');
+              const warns = result.issues.filter((i) => i.level === 'warn');
+              const tone = errs.length > 0 ? 'border-rose-200 bg-rose-50'
+                : warns.length > 0 ? 'border-amber-200 bg-amber-50' : 'border-slate-200 bg-white';
+              return (
+                <div key={account.id} className={`rounded-xl border ${tone} px-3.5 py-3 space-y-2`}>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-[13px] font-bold text-slate-800">{account.name}</span>
+                    <span className="text-[11px] text-slate-500">
+                      年度の時間外 {result.yearHours}時間／{agreement.special ? agreement.specialYear : agreement.yearLimit}時間
+                    </span>
+                    <span className="text-[11px] text-slate-500">休日労働 {result.yearHolidayHours}時間</span>
+                    {agreement.special && (
+                      <span className={`text-[11px] ${result.overCount >= (agreement.specialCount || 6) ? 'font-bold text-amber-700' : 'text-slate-500'}`}>
+                        限度時間超 {result.overCount}回／{agreement.specialCount}回
+                      </span>
+                    )}
+                    {result.worstAverage && (
+                      <span className={`text-[11px] ${result.worstAverage.hours > OVERTIME_LEGAL.averageMax ? 'font-bold text-rose-600' : 'text-slate-500'}`}>
+                        最大の平均 {result.worstAverage.hours}時間（{result.worstAverage.months}か月）
+                      </span>
+                    )}
+                  </div>
+
+                  {/* 月ごとの時間外。横に12か月ぶん並べます */}
+                  <div className={`grid gap-1 ${isDesktop ? 'grid-cols-12' : 'grid-cols-6'}`}>
+                    {result.months.map((m) => (
+                      <div
+                        key={m.month}
+                        className={`rounded px-1 py-1 text-center ${
+                          m.overMonthLimit ? 'bg-amber-200 text-amber-900'
+                            : m.overtimeHours > 0 ? 'bg-slate-100 text-slate-700' : 'bg-slate-50 text-slate-300'
+                        }`}
+                        title={`${m.month}　時間外${m.overtimeHours}時間／休日労働${m.holidayHours}時間／累計${m.cumulativeHours}時間`}
+                      >
+                        <div className="text-[9px] leading-tight">{monthLabel(m.month)}</div>
+                        <div className="text-[11px] font-mono font-bold leading-tight">{m.overtimeHours}</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {errs.map((i, n) => (
+                    <div key={`e${n}`} className="text-[11px] text-rose-700 leading-relaxed">● {i.message}</div>
+                  ))}
+                  {warns.map((i, n) => (
+                    <div key={`w${n}`} className="text-[11px] text-amber-800 leading-relaxed">● {i.message}</div>
+                  ))}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        <OvertimeAgreementSettings
+          settings={settings}
+          actor={actor}
+          isMasterAdmin={isMasterAdmin}
+          onSaved={onSaved}
+          open={open}
+          onToggle={() => setOpen((v) => !v)}
+        />
+      </div>
+    </div>
+  );
+}
+
+// 36協定の内容を登録する。協定書に書いてある数字をそのまま入れます
+function OvertimeAgreementSettings({ settings, actor, isMasterAdmin, onSaved, open, onToggle }) {
+  const [form, setForm] = useState(() => parseOvertimeAgreement(settings));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [done, setDone] = useState('');
+
+  const savedJson = settings?.[SETTING_OVERTIME_AGREEMENT] || '';
+  useEffect(() => {
+    setForm(parseOvertimeAgreement(settings));
+    // settings は毎回あたらしい物になるため、中身の文字列を見ています
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savedJson]);
+
+  if (!isMasterAdmin) return null;
+
+  const set = (k) => (e) => {
+    setError(''); setDone('');
+    const v = e.target.type === 'checkbox' ? e.target.checked : e.target.value;
+    setForm((prev) => ({ ...prev, [k]: v }));
+  };
+
+  const save = async () => {
+    setError(''); setDone(''); setSaving(true);
+    const res = await saveOvertimeAgreement(form, actor);
+    setSaving(false);
+    if (!res.ok) { setError(res.message || '保存できませんでした。'); return; }
+    setDone('36協定の内容を保存しました。');
+    if (onSaved) await onSaved();
+  };
+
+  const num = (k, label, hint) => (
+    <label className="block">
+      <span className="block text-[10.5px] font-bold text-slate-500 mb-0.5">{label}</span>
+      <input
+        type="number" min="0" step="1" value={form[k] ?? ''} onChange={set(k)}
+        className="w-full border border-slate-200 rounded-lg px-2.5 py-1.5 font-mono text-[12.5px] bg-white"
+      />
+      {hint && <span className="block text-[10px] text-slate-400 pt-0.5">{hint}</span>}
+    </label>
+  );
+
+  return (
+    <div className="rounded-xl border border-slate-200 overflow-hidden">
+      <button onClick={onToggle} className="w-full px-3.5 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center gap-2 flex-wrap text-left">
+        <span className="text-[12px] font-bold text-slate-600">36協定の内容</span>
+        <span className="text-[11px] text-slate-400">
+          {form.startMonth}月起算／月{form.monthLimit}時間・年{form.yearLimit}時間
+          {form.special ? '／特別条項あり' : ''}
+        </span>
+        <span className="ml-auto text-[11px] font-bold text-slate-500">{open ? '閉じる' : '開く'}</span>
+      </button>
+      {open && (
+        <div className="px-3.5 py-3 space-y-3">
+          {error && <div className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-700">{error}</div>}
+          {done && <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-[11px] text-emerald-700">{done}</div>}
+
+          <div className="text-[10.5px] text-slate-500 leading-relaxed">
+            労働基準監督署に届け出た協定書（様式第9号、特別条項があれば様式第9号の2）に
+            書いてある数字を、そのまま入れてください。こちらでは決められません。
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+            {num('startMonth', '起算月', '協定の「起算日」の月')}
+            <label className="block">
+              <span className="block text-[10.5px] font-bold text-slate-500 mb-0.5">週の始まり</span>
+              <select value={form.weekStart} onChange={set('weekStart')} className="w-full border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white">
+                {Object.entries(WEEK_STARTS).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+              </select>
+              <span className="block text-[10px] text-slate-400 pt-0.5">週40時間を数える単位</span>
+            </label>
+            {num('dayLimit', '1日の限度（時間）', '協定の「1日」の欄')}
+            {num('monthLimit', '1か月の限度（時間）', `${OVERTIME_LEGAL.monthLimit}時間以内`)}
+            {num('yearLimit', '1年の限度（時間）', `${OVERTIME_LEGAL.yearLimit}時間以内`)}
+          </div>
+
+          <label className="flex items-center gap-2 text-[12px] text-slate-700">
+            <input type="checkbox" checked={!!form.special} onChange={set('special')} />
+            特別条項あり（様式第9号の2を届け出ている）
+          </label>
+
+          {form.special && (
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+              {num('specialYear', '1年の時間数', `${OVERTIME_LEGAL.specialYearMax}時間以内・時間外のみ`)}
+              {num('specialMonthTotal', '1か月の合計時間数', `${OVERTIME_LEGAL.monthTotalMax}時間未満・休日労働を含む`)}
+              {num('specialCount', '限度時間を超えられる回数', `年${OVERTIME_LEGAL.specialCountMax}回以内`)}
+              {num('specialRate', '割増賃金率（%）', '限度時間を超えた分')}
+            </div>
+          )}
+
+          <div className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 text-[10.5px] text-slate-600 leading-relaxed">
+            <b className="block">協定で定めても超えられない線があります。</b>
+            時間外労働と休日労働の合計は月{OVERTIME_LEGAL.monthTotalMax}時間未満、
+            2〜6か月のどの平均も{OVERTIME_LEGAL.averageMax}時間以内です。
+            協定の内容にかかわらず、この画面で見ています。
+          </div>
+
+          <button onClick={save} disabled={saving} className="w-full py-2 rounded-lg bg-slate-800 disabled:bg-slate-300 text-white text-[12.5px] font-bold">
+            {saving ? '保存中…' : '36協定の内容を保存'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function WageLedgerTab({ employeeAccounts, records, payrollRecords = [], settings = {}, shiftRequests = [], shiftAssignments = [], isDesktop }) {
   const now = new Date();
   // 給与は当月末締め・翌月25日払いのため、既定は前月分
@@ -18851,6 +19167,98 @@ function premiumBaseAllowanceTotal({ settings, employeeItems = [], groupItems = 
 //
 // ⚠ 支給日が土日祝のときに前倒しするかどうかは見ていません。
 //   御社の賃金規程の定めに合わせて、必要になったら足してください。
+// ---- 36協定（時間外労働・休日労働に関する協定）----
+//
+// 協定書に書いてある数字をそのまま登録します。こちらでは決められません。
+// 既定は御社の2026年度の協定（4月1日起算・1日3時間・月45時間・年360時間、
+// 特別条項は年650時間・1か月の合計60時間・年6回・割増25%）です。
+const SETTING_OVERTIME_AGREEMENT = 'overtime_agreement';
+
+function parseOvertimeAgreement(settings) {
+  let raw = null;
+  try {
+    const v = JSON.parse(settings?.[SETTING_OVERTIME_AGREEMENT] || 'null');
+    if (v && typeof v === 'object' && !Array.isArray(v)) raw = v;
+  } catch (_) { raw = null; }
+  const out = { ...AGREEMENT_DEFAULTS };
+  if (!raw) return out;
+  const num = (v, min, max) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n >= min && n <= max ? n : null;
+  };
+  const m = num(raw.startMonth, 1, 12); if (m != null) out.startMonth = Math.floor(m);
+  if (WEEK_STARTS[raw.weekStart]) out.weekStart = raw.weekStart;
+  out.dayLimit = num(raw.dayLimit, 0, 24);
+  const ml = num(raw.monthLimit, 1, 100); if (ml != null) out.monthLimit = ml;
+  const yl = num(raw.yearLimit, 1, 1000); if (yl != null) out.yearLimit = yl;
+  out.special = raw.special !== false;
+  out.specialYear = num(raw.specialYear, 1, 720);
+  out.specialMonthTotal = num(raw.specialMonthTotal, 1, 99);
+  out.specialCount = num(raw.specialCount, 1, 6);
+  out.specialRate = num(raw.specialRate, 0, 100);
+  return out;
+}
+
+async function saveOvertimeAgreement(values, actor = null) {
+  const v = values || {};
+  const num = (x) => (x === '' || x == null ? null : Number(x));
+  const monthLimit = num(v.monthLimit);
+  const yearLimit = num(v.yearLimit);
+  if (!Number.isFinite(monthLimit) || monthLimit <= 0) {
+    return { ok: false, message: '1か月の限度時間を入れてください。' };
+  }
+  if (!Number.isFinite(yearLimit) || yearLimit <= 0) {
+    return { ok: false, message: '1年の限度時間を入れてください。' };
+  }
+  // 法令の線を超える協定は結べません
+  if (monthLimit > OVERTIME_LEGAL.monthLimit) {
+    return { ok: false, message: `1か月の限度時間は${OVERTIME_LEGAL.monthLimit}時間以内です（1年単位の変形労働時間制なら42時間以内）。協定書の数字をお確かめください。` };
+  }
+  if (yearLimit > OVERTIME_LEGAL.yearLimit) {
+    return { ok: false, message: `1年の限度時間は${OVERTIME_LEGAL.yearLimit}時間以内です（1年単位の変形労働時間制なら320時間以内）。協定書の数字をお確かめください。` };
+  }
+  if (v.special) {
+    const sy = num(v.specialYear);
+    const smt = num(v.specialMonthTotal);
+    const sc = num(v.specialCount);
+    if (Number.isFinite(sy) && sy > OVERTIME_LEGAL.specialYearMax) {
+      return { ok: false, message: `特別条項の1年の時間数は${OVERTIME_LEGAL.specialYearMax}時間以内です。` };
+    }
+    if (Number.isFinite(smt) && smt >= OVERTIME_LEGAL.monthTotalMax) {
+      return { ok: false, message: `特別条項の1か月の合計時間数は${OVERTIME_LEGAL.monthTotalMax}時間未満です。` };
+    }
+    if (Number.isFinite(sc) && sc > OVERTIME_LEGAL.specialCountMax) {
+      return { ok: false, message: `限度時間を超えられる回数は年${OVERTIME_LEGAL.specialCountMax}回以内です。` };
+    }
+  }
+  const slim = {
+    startMonth: Math.floor(num(v.startMonth) || 4),
+    weekStart: WEEK_STARTS[v.weekStart] ? v.weekStart : 'sunday',
+    dayLimit: num(v.dayLimit),
+    monthLimit,
+    yearLimit,
+    special: !!v.special,
+    specialYear: v.special ? num(v.specialYear) : null,
+    specialMonthTotal: v.special ? num(v.specialMonthTotal) : null,
+    specialCount: v.special ? num(v.specialCount) : null,
+    specialRate: v.special ? num(v.specialRate) : null,
+  };
+  const { error } = await supabase.from('app_settings').upsert(
+    {
+      key: SETTING_OVERTIME_AGREEMENT,
+      value: JSON.stringify(slim),
+      updated_by: actor?.id || null,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: 'key' }
+  );
+  if (error) {
+    console.error('36協定の設定の保存に失敗しました', error);
+    return { ok: false, message: error.message || '' };
+  }
+  return { ok: true };
+}
+
 const SETTING_PAY_DATE = 'pay_date';
 
 const PAY_DATE_MONTHS = {
