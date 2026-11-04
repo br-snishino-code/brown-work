@@ -146,3 +146,32 @@ export function defaultDeductFor(status: string | null | undefined, side: 'in' |
   const exempt = side === 'in' ? LATE_EXEMPT_IN_STATUSES : LATE_EXEMPT_OUT_STATUSES;
   return !(status && (exempt as readonly string[]).includes(status));
 }
+
+// ---- 93番SQLをまだ流していない本番のための備え ----
+//
+// 上書きの2列（clock_in_late_deduction / clock_out_late_deduction）が無いと、
+// PostgREST は PGRST204 を返して保存そのものが失敗します。
+// 勤怠の修正ができなくなるのは困るので、そのときは2列を外して
+// もう一度保存します（遅刻早退控除は打刻の区分どおりに動きます）。
+
+/** 上書き用の列の名前 */
+export const LATE_DEDUCTION_COLS = ['clock_in_late_deduction', 'clock_out_late_deduction'] as const;
+
+/** その保存の失敗が「上書きの列が無いこと」によるものか */
+export function isMissingLateDeductionColumn(error: unknown): boolean {
+  if (!error) return false;
+  const e = error as { code?: string; message?: string };
+  const text = String(e.message || '');
+  const named = LATE_DEDUCTION_COLS.some((c) => text.includes(c));
+  if (named) return true;
+  // 文言が変わっても拾えるように、PGRST204（列が見つからない）も見ます。
+  // ほかの列が原因のときは、外してもう一度試しても同じ失敗になるだけです。
+  return e.code === 'PGRST204' && /column/i.test(text);
+}
+
+/** 保存する内容から、上書きの2列を外します（元の内容は変えません） */
+export function withoutLateDeductionCols<T extends Record<string, unknown>>(body: T): Partial<T> {
+  const out: Record<string, unknown> = { ...body };
+  LATE_DEDUCTION_COLS.forEach((c) => { delete out[c]; });
+  return out as Partial<T>;
+}

@@ -35,6 +35,7 @@ import {
 } from './overtimeLimit';
 import {
   splitDay as splitLateDeduction, defaultDeductFor as defaultLateDeductFor,
+  isMissingLateDeductionColumn, withoutLateDeductionCols,
 } from './lateDeduction';
 
 // ---- constants ----
@@ -4520,8 +4521,7 @@ function AttendanceApp() {
     };
     const clockInCleared = patch.clockIn === '';
     const clockOutCleared = patch.clockOut === '';
-    const { error } = await supabase.from('attendance_records').upsert(
-      {
+    const payload = {
         employee_id: targetEmployeeId,
         date: dateStr,
         clock_in: patch.clockIn ? toIso(patch.clockIn) : (clockInCleared ? null : existing?.clockIn || null),
@@ -4576,11 +4576,22 @@ function AttendanceApp() {
           : ((patch.kind === 'out' && patch.lateDeduction !== undefined)
               ? patch.lateDeduction
               : (existing?.clockOutLateDeduction ?? null)),
-      },
-      { onConflict: 'employee_id,date' }
-    );
+    };
+    // 93番SQLをまだ流していない本番でも保存できるようにします。
+    // 列が無いと PostgREST は PGRST204 を返すので、そのときだけ
+    // 上書きの2列を外してもう一度試します（遅刻早退控除は区分どおりに動きます）。
+    const upsert = (body) => supabase.from('attendance_records')
+      .upsert(body, { onConflict: 'employee_id,date' });
+    let { error } = await upsert(payload);
+    if (isMissingLateDeductionColumn(error)) {
+      console.warn('93番SQLが未適用のため、遅刻早退控除の上書きは保存しません', error.message);
+      ({ error } = await upsert(withoutLateDeductionCols(payload)));
+      if (!error && patch.lateDeduction !== undefined && !opts.silent) {
+        show('保存しましたが、遅刻早退控除の判断は記録できませんでした（93番SQLが未適用です）', 'warn');
+      }
+    }
     if (error) {
-      if (!opts.silent) show('勤怠の修正に失敗しました', 'warn');
+      if (!opts.silent) show(`勤怠の修正に失敗しました（${error.message || '原因不明'}）`, 'warn');
       return false;
     }
     if (!opts.silent) {
