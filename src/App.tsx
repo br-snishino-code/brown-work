@@ -9715,17 +9715,21 @@ function ShiftBadge({ shift, compact = false }) {
 
 // ラベルと入力欄の組。
 //
-// 【横に並べたときに入力欄の高さがそろうようにしています】
-//   ラベルの長さは項目によって違い、幅の狭い画面では2行に折り返します。
-//   ふつうに上から積むと、折り返した側だけ入力欄が下にずれます
-//   （例：「タブレット不備件数（-2P/件）」と「キャンセル件数（-3P/件）」）。
-//   縦並びの箱にして入力欄を下端に寄せると、横に並べたときにそろいます。
-//   横に並べていないところでは、余る高さが無いので見た目は変わりません。
+// 【中身を下端に寄せる作りにはしません】
+//   横に並べたときにラベルの行数が違うと入力欄がずれるため、
+//   一度は入力欄を下端に寄せる形にしましたが、やめました。
+//   入力欄の下に補足を置く欄（交通費精算の「提出日」など）では、
+//   補足のぶんだけ入力欄が上に残り、かえってずれてしまうためです。
+//   上から順に積む、いちばん素直な形に戻しています。
+//
+//   横に並べてラベルの行数が違ってしまう場所は、
+//   その場所で幅の狭い画面のときだけ縦に積むようにしてください
+//   （例：実績入力のタブレット不備件数・キャンセル件数）。
 function Field({ label, children, className = '' }) {
   return (
-    <div className={`flex flex-col ${className}`}>
+    <div className={className}>
       <label className="block text-[11.5px] font-medium text-slate-500 mb-1">{label}</label>
-      <div className="mt-auto">{children}</div>
+      {children}
     </div>
   );
 }
@@ -10474,9 +10478,13 @@ function EoPerformanceSection({ employeeId, session, settings, onNotifyAdmin, is
       )}
 
       {/* タブレット不備件数とキャンセル件数は管理者が入力する項目。
-          本人は確認のみで、入力はできない（管理画面の「インセンティブ集計」で入力する） */}
+          本人は確認のみで、入力はできない（管理画面の「インセンティブ集計」で入力する）。
+
+          幅の狭い画面では縦に積みます。横に並べると
+          「タブレット不備件数（-2P/件）」だけがラベル2行になり、
+          入力欄の高さがそろわないためです。 */}
       {sheet === 'new' && (
-        <div className="px-5 pb-3 grid grid-cols-2 gap-3">
+        <div className="px-5 pb-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
           <Field label={<>タブレット不備件数<span className="whitespace-nowrap">（-2P/件）</span></>}>
             <div className="w-full border border-slate-200 bg-slate-50 rounded-lg px-3 py-2 font-mono text-[13px] text-center text-slate-600">{tabletIssues || '0'}</div>
           </Field>
