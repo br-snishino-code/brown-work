@@ -28538,8 +28538,19 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
     if (onRefresh) onRefresh({ showIndicator: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
-  const pending = data.corrections.filter((c) => c.status === 'pending');
-  const decided = data.corrections.filter((c) => c.status !== 'pending').slice(0, 8);
+  // 勤怠修正申請は、新しいものを上に並べる。
+  // 読み込みのときに並べ替えていないため、そのままだとデータベースが返した順
+  // （書き換えのたびに入れ替わる、決まっていない順）で出てしまう。
+  const pending = data.corrections
+    .filter((c) => c.status === 'pending')
+    .sort((a, b) => String(b.submittedAt || '').localeCompare(String(a.submittedAt || '')));
+  // 処理済みは、処理した日時の新しい順に8件。
+  // 並べ替えずに8件だけ切り出していたため、これまでは
+  // 「どの8件が出るか」も決まっていなかった。
+  const decided = data.corrections
+    .filter((c) => c.status !== 'pending')
+    .sort((a, b) => String(b.decidedAt || b.submittedAt || '').localeCompare(String(a.decidedAt || a.submittedAt || '')))
+    .slice(0, 8);
   const leavePending = data.leaveRequests.filter((l) => l.status === 'pending');
   const leaveDecided = data.leaveRequests.filter((l) => l.status !== 'pending').slice(0, 8);
   const today = todayKey();
