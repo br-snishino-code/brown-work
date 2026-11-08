@@ -39,6 +39,10 @@ import {
 } from './lateDeduction';
 import { mergeCommuteItems } from './payslipDisplay';
 import { autoBreakMinutes, scheduledWorkMinutes } from './breakTime';
+import {
+  correctionDiffLines, correctionBreakMinutes, correctionSummary,
+  correctionStatusLabel, canCancelCorrection, isCancelNotReadyError,
+} from './correctionView';
 
 // ---- constants ----
 const SCHEDULED_START = '09:00';
@@ -116,6 +120,16 @@ const minutesToHHMM = (mins) => {
   const sign = mins < 0 ? '-' : '';
   const abs = Math.abs(mins);
   return `${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`;
+};
+// 長さを「9時間0分」の形で出す。
+// 時刻と並べて出す場所では minutesToHHMM（09:00）だと時刻に見えてしまうため、
+// 長さだと分かるこちらを使う。
+const hoursMinutesLabel = (mins) => {
+  if (mins == null || isNaN(mins)) return '—';
+  const abs = Math.abs(Math.round(mins));
+  const h = Math.floor(abs / 60);
+  const m = abs % 60;
+  return h === 0 ? `${m}分` : m === 0 ? `${h}時間` : `${h}時間${m}分`;
 };
 const dateLabel = (key) => {
   const d = new Date(key + 'T00:00:00');
@@ -1795,7 +1809,23 @@ const rowToAccount = (row) => ({
   monthlySalary: row.monthly_salary != null ? Number(row.monthly_salary) : 0,
   birthDate: row.birth_date || '',
   gender: row.gender || '',
-  staffType: row.staff_type || '正社員',
+  // スタッフ種別。登録されていないときは空（未設定）のままにします。
+  //
+  // 【2026年11月に変えました】
+  //   以前はここで '正社員' を埋めていました。アカウントを作った直後の方は
+  //   staff_type が空のまま（create-employee は入れていません）なので、
+  //   画面では「正社員」が選ばれて見え、選び忘れに気づけませんでした。
+  //   種別は有休の比例付与・法定休日の決め方・給与の既定項目の3つに効くため、
+  //   選び忘れが分かるように未設定のままにしています。
+  //
+  //   空のときの扱い：
+  //     有休の比例付与 … 対象外（これまでの '正社員' と同じ）
+  //     役員かどうか   … 役員ではない（これまでの '正社員' と同じ）
+  //     法定休日       … 全体の決め方を使う（種別ごとの決め方は当たりません）
+  //     給与の既定項目 … 「(種別未設定)」のグループとして扱います
+  //   後ろ2つはこれまでと変わるため、既存の方で staff_type が空の人が
+  //   いないか確かめてください（supabase/96_staff_type_check.sql）。
+  staffType: row.staff_type || '',
   mainGroup: row.main_group || '',
   subGroup: row.sub_group || '',
   commuteAllowance: row.commute_allowance != null ? Number(row.commute_allowance) : 0,
@@ -4554,6 +4584,46 @@ function AttendanceApp() {
     return true;
   };
 
+  // 誤って出した勤怠修正申請を、本人が取り消す（95番）。
+  //
+  // 取り消せるのは、まだ処理されていない（承認待ちの）自分の申請だけです。
+  // データベース側（95番のガード）でも同じ条件で止めています。
+  // 95番SQLをまだ流していない本番では、検査制約かガードで拒まれるため、
+  // そのときは何をすればよいかを画面に出します（申請はそのまま残ります）。
+  const cancelMyCorrection = async (id) => {
+    const target = (data.corrections || []).find((c) => c.id === id);
+    if (!canCancelCorrection(target, employeeId)) {
+      show('この申請は取り消せません（すでに処理されています）', 'warn');
+      return false;
+    }
+    const { error } = await supabase
+      .from('corrections')
+      .update({ status: 'cancelled', decided_at: new Date().toISOString() })
+      .eq('id', id);
+    if (error) {
+      console.error('修正申請の取り消しに失敗しました', error);
+      show(
+        isCancelNotReadyError(error)
+          ? '取り消しの設定がまだ本番に入っていません（95番SQLが未適用です）。申請はそのまま残っています'
+          : `修正申請の取り消しに失敗しました（${error.message || '原因不明'}）`,
+        'warn'
+      );
+      return false;
+    }
+    // 管理者が承認しようとしていた申請が消えるため、画面のお知らせで伝える。
+    // 申請そのものと同じ扱いで、メールは送りません。
+    await notifyAdmin(
+      `【勤怠修正申請の取り消し】${session.name} - ${dateLabel(target.date)}`,
+      `${session.name}さんが ${dateLabel(target.date)} の勤怠修正申請を取り消しました。承認は不要です。`,
+      id
+    );
+    await refreshData();
+    setCorrectionModal(null);
+    await logAudit(session, '勤怠修正申請を取り消し', `${dateLabel(target.date)}分の勤怠修正申請`, employeeId, session.name);
+    show('修正申請を取り消しました', 'warn');
+    return true;
+  };
+
   // 管理者が勤怠一覧から直接、出退勤時刻を修正する（承認フローを介さず即時反映）
   const adminUpdateAttendance = async (targetEmployeeId, dateStr, patch, opts = {}) => {
     const existing = data.records[targetEmployeeId]?.[dateStr] || null;
@@ -4760,7 +4830,13 @@ function AttendanceApp() {
           date: correction.date,
           clock_in: req.clockIn ? buildIso(req.clockIn) : existing.clockIn,
           clock_out: req.clockOut ? buildIso(req.clockOut) : existing.clockOut,
-          break_minutes_override: req.breakMinutes != null ? Number(req.breakMinutes) : existing.breakMinutesOverride,
+          // 休憩は2026年11月から打刻から自動で出すため、新しい申請には分数が入りません。
+          // 入っていない（undefined）ときは、いま入っている手入力の分数をそのまま残します。
+          // 手入力が無ければ null のままで、承認後の打刻から自動で出ます。
+          // それより前に出された申請だけ、入っている分数を使います。
+          break_minutes_override: req.breakMinutes != null
+            ? Number(req.breakMinutes)
+            : (existing.breakMinutesOverride ?? null),
         },
         { onConflict: 'employee_id,date' }
       );
@@ -6092,7 +6168,13 @@ function AttendanceApp() {
                   profileRequests: data.profileUpdateRequests.filter((r) => r.employeeId === employeeId),
                   shiftRequests: (data.shiftRequests || []).filter((r) => r.employeeId === employeeId),
                 })}
-                onOpen={(key) => (key === 'profile' ? setTopTab('profile') : openRequest(key))}
+                onOpen={(key) => {
+                  // 個人情報の変更は「個人情報」タブ、勤怠修正は「勤怠」タブの勤怠履歴、
+                  // それ以外は「各種申請」の該当タブへ移動します
+                  if (key === 'profile') { setTopTab('profile'); return; }
+                  if (key === 'attendance') { setTopTab('attendance'); setEmployeeTab('attendance'); return; }
+                  openRequest(key);
+                }}
               />
             )}
             {/* 配信・削除のボタンは管理画面のときだけ。スタッフ画面では閲覧のみ */}
@@ -6567,8 +6649,10 @@ function AttendanceApp() {
         <CorrectionModal
           dateKey={correctionModal}
           record={employeeRecords[correctionModal]}
+          pending={myCorrections.find((c) => c.date === correctionModal && c.status === 'pending') || null}
           onClose={() => setCorrectionModal(null)}
           onSubmit={submitCorrection}
+          onCancelRequest={cancelMyCorrection}
         />
       )}
       {leaveModalOpen && (
@@ -8304,6 +8388,8 @@ const MY_REQUEST_STATE = {
   pending: { label: '確認中', cls: 'bg-amber-50 text-amber-700', open: true },
   admin_approved: { label: '最終承認待ち', cls: 'bg-amber-50 text-amber-700', open: true },
   rejected: { label: '差し戻し', cls: 'bg-rose-50 text-rose-600', open: true },
+  // 本人が取り消した勤怠修正申請（95番）。進行中には出しません
+  cancelled: { label: '取り消し済み', cls: 'bg-slate-100 text-slate-500', open: false },
   approved: { label: '完了', cls: 'bg-emerald-50 text-emerald-700', open: false },
   confirmed: { label: '確定済み', cls: 'bg-emerald-50 text-emerald-700', open: false },
   submitted: { label: '提出済み', cls: 'bg-emerald-50 text-emerald-700', open: false },
@@ -8311,9 +8397,16 @@ const MY_REQUEST_STATE = {
 
 function buildMyRequests({ corrections = [], leaveRequests = [], monthlyConfirmations = [], commuteClaims = [], yearEndAdjustments = [], profileRequests = [], shiftRequests = [] }) {
   const out = [];
+  // 勤怠修正は、出した中身（修正前→修正後）と理由もここに出します。
+  // 「申請中」とだけ見えていたときは、誤って出しても本人が気づけませんでした。
   corrections.forEach((c) => out.push({
-    id: `cor-${c.id}`, kind: '勤怠修正', tab: null,
-    title: `${dateLabel(c.date)}の打刻修正`, status: c.status, at: c.submittedAt, memo: '',
+    id: `cor-${c.id}`, kind: '勤怠修正', tab: 'attendance',
+    title: `${dateLabel(c.date)}の打刻修正`,
+    status: c.status, at: c.submittedAt,
+    // 出した中身は折り返して出す（見出しの行は端が切れるため）
+    memo: [correctionSummary(c.original, c.requested), c.reason ? `理由：${c.reason}` : '']
+      .filter(Boolean).join('\n'),
+    memoTone: 'plain',
   }));
   leaveRequests.forEach((l) => out.push({
     id: `lv-${l.id}`, kind: '休暇申請', tab: 'leave',
@@ -8389,9 +8482,16 @@ function MyRequestStatusCard({ items, onOpen }) {
                   </span>
                 </div>
                 {it.memo && (
-                  <div className="mt-1.5 rounded-lg bg-amber-50 border border-amber-100 px-2.5 py-1.5 text-[11px] text-amber-800">
-                    管理者コメント：{it.memo}
-                  </div>
+                  // 管理者からのコメントは目立つ色で。自分が書いた内容（勤怠修正の理由など）は控えめに
+                  it.memoTone === 'plain' ? (
+                    <div className="mt-1.5 rounded-lg bg-slate-50 border border-slate-100 px-2.5 py-1.5 text-[11px] text-slate-600 whitespace-pre-line">
+                      {it.memo}
+                    </div>
+                  ) : (
+                    <div className="mt-1.5 rounded-lg bg-amber-50 border border-amber-100 px-2.5 py-1.5 text-[11px] text-amber-800">
+                      管理者コメント：{it.memo}
+                    </div>
+                  )
                 )}
               </>
             );
@@ -9049,6 +9149,16 @@ function EmployeeView({ now, todayRecord, todayShift = null, onClockIn, onClockO
     if (metrics?.earlyExemptMin > 0) {
       notes.push({ tone: 'text-emerald-600', text: `早退${metrics.earlyExemptMin}分は控除しません${r?.clockOutPayDeductionNote ? `・${r.clockOutPayDeductionNote}` : ''}` });
     }
+    // 出した修正申請の中身。「申請中」とだけ出していたときは、
+    // 誤って出しても本人が気づけなかったため、内容をそのまま並べる
+    if (pendingForDay) {
+      notes.push({
+        tone: 'text-amber-700 font-medium',
+        text: `修正申請中：${correctionSummary(pendingForDay.original, pendingForDay.requested)}`
+          + `${pendingForDay.reason ? `・理由：${pendingForDay.reason}` : ''}`
+          + '（右の修正ボタンから内容の確認と取り消しができます）',
+      });
+    }
     return { dateKey, r, dayStatus, metrics, pendingForDay, dayInfo, hasRecord, notes };
   });
 
@@ -9665,23 +9775,69 @@ function ClockOutConfirmModal({ now, standardMinutes, onClose, onConfirm }) {
   );
 }
 
-function CorrectionModal({ dateKey, record, onClose, onSubmit }) {
-  const [clockIn, setClockIn] = useState(record?.clockIn ? hhmm(new Date(record.clockIn)) : '');
-  const [clockOut, setClockOut] = useState(record?.clockOut ? hhmm(new Date(record.clockOut)) : '');
-  // 休憩の初期値。その日の記録から出します（自動休憩の決まりのとおり）
-  const [breakMinutes, setBreakMinutes] = useState(record?.breakMinutes ?? getRecordedBreakMinutes(record));
-  const [reason, setReason] = useState('');
+// 勤怠修正申請の画面。
+//
+// 【すでに申請中のとき】
+//   その申請の内容（時刻・理由）をそのまま出します。出した本人が
+//   「何時で出したのか」「理由に何を書いたのか」をあとから確かめられます。
+//   そのまま直して出し直すこともできます（同じ申請が書き換わります）。
+//
+// 【休憩時間】
+//   2026年11月から、本人に入力してもらうのをやめました。
+//   出勤から退勤までが6時間以上なら1時間、6時間未満なら0分です
+//   （労働基準法34条の下限（6時間超で45分・8時間超で1時間）を上回る、
+//     御社のジョブカンの設定と同じ決まり。src/breakTime.ts）。
+//   手で入れられる欄があると法令より短い休憩で申請できてしまうため、
+//   画面では自動で出した分数を見せるだけにしています。
+//   申請には分数を入れません（承認したときに、そのときの打刻から
+//   自動で出し直されます）。
+function CorrectionModal({ dateKey, record, pending = null, onClose, onSubmit, onCancelRequest }) {
+  const requested = pending?.requested || null;
+  const recordIn = record?.clockIn ? hhmm(new Date(record.clockIn)) : '';
+  const recordOut = record?.clockOut ? hhmm(new Date(record.clockOut)) : '';
+  // 申請中ならその内容を、そうでなければその日の打刻を初期値にする
+  const [clockIn, setClockIn] = useState(requested?.clockIn || recordIn);
+  const [clockOut, setClockOut] = useState(requested?.clockOut || recordOut);
+  const [reason, setReason] = useState(pending?.reason || '');
   // 送信中は押せないようにする（連打で同じ申請が何件も入るのを防ぐ）
   const [sending, setSending] = useState(false);
-  const canSubmit = reason.trim().length > 0 && (clockIn || clockOut) && !sending;
+  const [cancelling, setCancelling] = useState(false);
+  const [confirmCancel, setConfirmCancel] = useState(false);
+  const canSubmit = reason.trim().length > 0 && (clockIn || clockOut) && !sending && !cancelling;
+
+  // 休憩は、修正後の出勤・退勤から自動で出します。
+  // 片方しか入れていないときは、いま記録されている方の時刻で補います。
+  // 退勤が出勤より前になる日（日付をまたぐ打刻）は、いまの集計と同じく0分です。
+  const boundIn = clockIn || recordIn;
+  const boundOut = clockOut || recordOut;
+  const boundMin = boundIn && boundOut
+    ? Math.max(0, toMinutes(boundOut) - toMinutes(boundIn))
+    : null;
+  const autoBreak = boundMin == null ? null : autoBreakMinutes(boundMin);
+
+  // 申請中の内容を「修正前 → 修正後」で出すための行
+  const pendingLines = pending ? correctionDiffLines(pending.original, requested) : [];
+  const pendingBreak = pending ? correctionBreakMinutes(requested) : null;
 
   const handleSubmit = async () => {
     if (!canSubmit) return;
     setSending(true);
     try {
-      await onSubmit({ date: dateKey, clockIn: clockIn || null, clockOut: clockOut || null, breakMinutes: Number(breakMinutes), reason });
+      // breakMinutes は送りません（承認時に打刻から自動で出します）
+      await onSubmit({ date: dateKey, clockIn: clockIn || null, clockOut: clockOut || null, reason });
     } finally {
       setSending(false);
+    }
+  };
+
+  const handleCancel = async () => {
+    if (!pending || !onCancelRequest) return;
+    setCancelling(true);
+    try {
+      await onCancelRequest(pending.id);
+    } finally {
+      setCancelling(false);
+      setConfirmCancel(false);
     }
   };
 
@@ -9696,31 +9852,119 @@ function CorrectionModal({ dateKey, record, onClose, onSubmit }) {
           <button onClick={onClose} className="text-slate-400 text-xl leading-none px-1">×</button>
         </div>
         <div className="px-5 py-4 space-y-4">
+          {/* すでに申請中のとき：出した内容をそのまま見せる */}
+          {pending && (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-3">
+              <div className="flex items-center gap-1.5">
+                <ClipboardList size={14} className="text-amber-700 shrink-0" />
+                <span className="text-[12.5px] font-bold text-amber-900">この日は申請中です</span>
+                <span className="ml-auto text-[10.5px] text-amber-700">
+                  {pending.submittedAt ? `${new Date(pending.submittedAt).toLocaleString('ja-JP')} 提出` : ''}
+                </span>
+              </div>
+              <div className="mt-2 space-y-1">
+                {pendingLines.length === 0 ? (
+                  <div className="text-[12px] text-amber-900">時刻の指定なし</div>
+                ) : pendingLines.map((l) => (
+                  <div key={l.label} className="flex items-center gap-2 text-[12.5px] text-amber-900">
+                    <span className="w-8 shrink-0 font-bold">{l.label}</span>
+                    <span className="font-mono">{l.from}</span>
+                    <span className="text-amber-500">→</span>
+                    <span className="font-mono font-bold">{l.to}</span>
+                    {!l.changed && <span className="text-[10.5px] text-amber-600">（変わりません）</span>}
+                  </div>
+                ))}
+                {pendingBreak != null && (
+                  <div className="flex items-center gap-2 text-[12.5px] text-amber-900">
+                    <span className="w-8 shrink-0 font-bold">休憩</span>
+                    <span className="font-mono font-bold">{pendingBreak}分</span>
+                    <span className="text-[10.5px] text-amber-600">（この申請を出したときに入力した分数）</span>
+                  </div>
+                )}
+              </div>
+              {pending.reason && (
+                <div className="mt-2 text-[12px] text-amber-900">理由：{pending.reason}</div>
+              )}
+              <div className="mt-2 text-[11px] text-amber-700">
+                下の欄を直して「申請し直す」を押すと、この申請が書き換わります。
+                出す必要がなかったときは「この申請を取り消す」を押してください。
+              </div>
+            </div>
+          )}
+
           <Field label="出勤時刻">
             <input type="time" value={clockIn} onChange={(e) => setClockIn(e.target.value)} style={{ WebkitAppearance: 'none', appearance: 'none' }} className="block w-full min-w-0 max-w-full box-border bg-white border border-slate-200 rounded-lg px-3 py-2.5 font-mono text-[16px]" />
           </Field>
           <Field label="退勤時刻">
             <input type="time" value={clockOut} onChange={(e) => setClockOut(e.target.value)} style={{ WebkitAppearance: 'none', appearance: 'none' }} className="block w-full min-w-0 max-w-full box-border bg-white border border-slate-200 rounded-lg px-3 py-2.5 font-mono text-[16px]" />
           </Field>
-          <Field label="休憩時間（分）">
-            <input type="number" min="0" step="5" value={breakMinutes} onChange={(e) => setBreakMinutes(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2.5 font-mono text-[16px]" />
+          {/* 休憩は入力してもらわず、上の2つから自動で出す */}
+          <Field label="休憩時間">
+            <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5">
+              <div className="font-mono text-[16px] text-slate-800">
+                {autoBreak == null ? '—' : `${autoBreak}分`}
+              </div>
+              <div className="mt-0.5 text-[11px] text-slate-500">
+                {autoBreak == null
+                  ? '出勤と退勤の両方が入ると自動で出ます'
+                  : autoBreak > 0
+                    ? `出勤から退勤までが${hoursMinutesLabel(boundMin)}（6時間以上）のため、1時間を差し引きます`
+                    : `出勤から退勤までが${hoursMinutesLabel(boundMin)}（6時間未満）のため、休憩は差し引きません`}
+              </div>
+            </div>
           </Field>
           <Field label="修正理由">
             <textarea value={reason} onChange={(e) => setReason(e.target.value)} rows={3} placeholder="例）打刻を忘れたため" className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] resize-none" />
           </Field>
           <div className="flex items-start gap-2 bg-slate-50 rounded-lg p-3 text-[11.5px] text-slate-500">
             <Mail size={13} className="mt-0.5 shrink-0" />
-            <span>申請すると管理者にメール通知が送信されます（承認されるまで反映されません）</span>
+            <span>申請すると管理者にお知らせが届きます（承認されるまで反映されません）</span>
           </div>
+
+          {/* 誤って出した申請の取り消し */}
+          {pending && onCancelRequest && (
+            confirmCancel ? (
+              <div className="rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-3">
+                <div className="text-[12.5px] font-bold text-rose-800">この申請を取り消します</div>
+                <div className="mt-1 text-[11.5px] text-rose-700">
+                  取り消すと管理者の承認待ちから外れ、この日の勤怠は打刻のままになります。
+                  同じ日にあらためて申請することもできます。
+                </div>
+                <div className="mt-2.5 flex gap-2">
+                  <button
+                    onClick={() => setConfirmCancel(false)}
+                    disabled={cancelling}
+                    className="flex-1 py-2 rounded-lg border border-slate-200 bg-white text-[12.5px] font-medium text-slate-500"
+                  >
+                    やめる
+                  </button>
+                  <button
+                    onClick={handleCancel}
+                    disabled={cancelling}
+                    className="flex-1 py-2 rounded-lg bg-rose-600 disabled:bg-slate-200 text-white text-[12.5px] font-bold"
+                  >
+                    {cancelling ? '取り消し中…' : '取り消す'}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                onClick={() => setConfirmCancel(true)}
+                className="w-full py-2.5 rounded-lg border border-rose-200 text-[12.5px] font-bold text-rose-600"
+              >
+                この申請を取り消す
+              </button>
+            )
+          )}
         </div>
         <div className="px-5 pb-5 pt-1 flex gap-2 sticky bottom-0 bg-white">
-          <button onClick={onClose} className="flex-1 py-2.5 rounded-lg border border-slate-200 text-[13.5px] font-medium text-slate-500">キャンセル</button>
+          <button onClick={onClose} className="flex-1 py-2.5 rounded-lg border border-slate-200 text-[13.5px] font-medium text-slate-500">閉じる</button>
           <button
             onClick={handleSubmit}
             disabled={!canSubmit}
             className="flex-1 py-2.5 rounded-lg bg-slate-800 disabled:bg-slate-200 text-white text-[13.5px] font-bold"
           >
-            {sending ? '送信中…' : '申請する'}
+            {sending ? '送信中…' : pending ? '申請し直す' : '申請する'}
           </button>
         </div>
       </div>
@@ -9739,6 +9983,82 @@ const TIME_INPUT_STYLE = { WebkitAppearance: 'none', appearance: 'none' };
 const DATE_INPUT_STYLE = { WebkitAppearance: 'none', appearance: 'none' };
 const TIME_INPUT_CLASS = 'w-full box-border min-w-0 border border-slate-200 rounded bg-white text-slate-800 px-2 py-1.5 font-mono text-[12.5px] text-center';
 const BREAK_INPUT_CLASS = 'w-full box-border min-w-0 border border-slate-200 rounded bg-white text-slate-800 px-1 py-1.5 font-mono text-[12.5px] text-center';
+
+// 勤怠一覧の時刻入力。右に「×」を置いて、入れた時刻を空に戻せるようにしている。
+//
+// 【なぜ必要か】
+//   スマホやタブレットで時刻の欄に触ると端末の時刻選択が開き、
+//   そのまま意図しない時刻が入ってしまう。キーボードのある画面なら
+//   選んで消せるが、タッチ操作だけでは空に戻す手立てが無かった。
+//
+// 【空にしたときの動き】
+//   空（''）で保存すると、その時刻は打刻なしに戻る
+//   （adminUpdateAttendance が '' を「消した」と見て null を入れる）。
+//   出勤時刻を空にすると、その打刻に付いていた区分・メモ・位置情報も
+//   いっしょに消える。打刻そのものを丸ごと消すときは「削除」を使うこと。
+//
+// 値が無いときはボタンを invisible にして、欄の幅が動かないようにしている。
+// grow を付けると、入力欄が枠いっぱいに広がり、「×」のぶんだけ縮みます。
+// 幅いっぱいで使うスマホの勤怠一覧ではこちら。付けないと、入力欄は
+// 渡した幅（デスクトップの表の w-[84px] など）のままです。
+// grow なしで幅いっぱいの指定を渡すと、「×」のぶんだけ横にはみ出します。
+function TimeInputWithClear({ value, onChange, className, label = 'この時刻を空にする', grow = false }) {
+  const v = value || '';
+  return (
+    <div className={`flex items-center gap-1 ${grow ? 'w-full min-w-0' : ''}`}>
+      <input
+        type="time"
+        value={v}
+        onChange={(ev) => onChange(ev.target.value)}
+        style={TIME_INPUT_STYLE}
+        className={`${grow ? 'flex-1 min-w-0 ' : ''}${className}`}
+      />
+      <button
+        type="button"
+        onClick={() => onChange('')}
+        disabled={!v}
+        aria-label={label}
+        title={label}
+        className={`shrink-0 rounded border border-slate-200 bg-white px-1.5 py-1 text-[12px] font-bold leading-none text-slate-400 hover:border-rose-300 hover:text-rose-600 ${v ? '' : 'invisible'}`}
+      >
+        ×
+      </button>
+    </div>
+  );
+}
+
+// 勤怠一覧（幅の狭い画面）の時刻入力。
+//
+// 入力欄の横に「×」を置くと、出勤・退勤・休憩を横に3つ並べた幅に収まらず、
+// 休憩の欄が画面の外へはみ出しました（375px幅で確認）。
+// そこで「×」はラベルの行の右端に置き、入力欄の幅はこれまでのままにしています。
+function TimeFieldWithClear({ label, value, onChange, clearLabel }) {
+  const v = value || '';
+  return (
+    <div className="min-w-0">
+      <div className="mb-1 flex items-center justify-between gap-1">
+        <label className="block text-[11.5px] font-medium text-slate-500">{label}</label>
+        <button
+          type="button"
+          onClick={() => onChange('')}
+          disabled={!v}
+          aria-label={clearLabel}
+          title={clearLabel}
+          className={`shrink-0 rounded border border-slate-200 bg-white px-1.5 text-[11px] font-bold leading-[15px] text-slate-400 hover:border-rose-300 hover:text-rose-600 ${v ? '' : 'invisible'}`}
+        >
+          ×
+        </button>
+      </div>
+      <input
+        type="time"
+        value={v}
+        onChange={(ev) => onChange(ev.target.value)}
+        style={TIME_INPUT_STYLE}
+        className={TIME_INPUT_CLASS}
+      />
+    </div>
+  );
+}
 
 // 勤怠一覧の日付の横に出す、その日の確定シフト。
 // 確定していないもの（スタッフの希望の段階）は出さない。
@@ -14827,6 +15147,9 @@ const HELP_STAFF = [
       { q: '出勤・退勤の打刻はどこからしますか', a: '「勤怠」タブを開くと、画面の中央に大きな打刻ボタンが表示されます。出勤時は「出勤」、退勤時は「退勤」を押してください。押した時刻がそのまま記録されます。' },
       { q: '打刻を忘れてしまいました', a: '「勤怠」タブの「勤怠一覧」から、該当する日付を選んで修正申請を出してください。正しい時刻と理由を入力して送信すると、管理者の承認後に記録が修正されます。当日中に気づいた場合も同じ手順です。' },
       { q: '打刻の時刻を間違えました', a: '打刻をやり直すことはできませんが、修正申請を出せば直せます。手順は打刻忘れと同じで、「勤怠一覧」から該当日の修正申請を出してください。' },
+      { q: '出した修正申請の内容を確認したい', a: '2つの場所で確認できます。1つは「勤怠」タブの勤怠履歴で、申請中の日の下に「修正申請中：」として、修正前の時刻・修正後の時刻・理由が並びます。もう1つはその日の修正ボタン（鉛筆のしるし）を押したときの画面で、上に「この日は申請中です」として同じ内容が出ます。「各種申請」の「進行中の手続き」からも、勤怠修正の行で同じ内容を確認できます。' },
+      { q: '間違えて出した修正申請を取り消したい', a: '「勤怠」タブの勤怠履歴で、申請中の日の修正ボタン（鉛筆のしるし）を押してください。画面の下にある「この申請を取り消す」を押し、確認の「取り消す」を押すと取り消せます。取り消せるのは、まだ承認も却下もされていない申請だけです。取り消したあと、同じ日にあらためて申請できます。なお内容を直したいだけであれば、取り消さずに同じ画面で時刻や理由を直して「申請し直す」を押してください。' },
+      { q: '修正申請の休憩時間はどこで入れますか', a: '入れる必要はありません。入力していただいていた休憩時間の欄は無くし、申請する出勤・退勤の時刻から自動で出すようにしました。出勤から退勤までが6時間以上なら1時間、6時間未満なら0分です。申請の画面には自動で出た分数が出ます。実際の休憩が大きく違う場合は、理由の欄に書き添えてください。管理者が個別に直せます。' },
       { q: '休憩時間はどう記録されますか', a: '休憩の打刻はありません。出勤から退勤までが6時間以上の日に、1時間の休憩が自動で差し引かれます。6時間未満の日は差し引きません。実際の休憩時間が大きく異なる場合は、管理者にご相談ください。管理者が個別に直せます。' },
       { q: '定時より早く帰る／遅くまで残る場合は', a: '退勤打刻時に理由を選ぶ画面が出ます。残業の場合は「残業」を選んでください。管理者の承認が必要になります。早退の場合も、該当する理由を選択してください。' },
       { q: '遅刻・早退をすると給与は引かれますか', a: '月給制・日給制の方は、遅刻・早退した時間に応じて「遅刻早退控除」が引かれます（時給制の方は、基本給が実働時間で出るため引きません）。ただし打刻のときに選んだ区分によって、引かない場合があります。出勤で「イベント（会議・研修など）」、退勤で「イベント・研修」を選んだ日は引きません。「遅刻」「自己都合」「その他」は引きます。出勤で「打刻漏れ」（本当は所定の時刻に出勤していた、という選択肢）を選んだ日は、時刻そのものが所定に直るため遅刻0分になります。引くか引かないかは管理者が承認するときに1件ずつ決められるので、最終的な扱いは「勤怠履歴」の各日のメモでご確認ください。控除しない日は「遅刻◯分は控除しません」と出ます。' },
@@ -14863,7 +15186,7 @@ const HELP_STAFF = [
       { q: 'スタッフコードでログインできますか', a: 'できます。ログイン画面の欄は「メールアドレスまたはスタッフコード」です。どちらを入れてもログインできます。パスワードは同じものです。ご自身のスタッフコードが分からないときは管理者にご確認ください。スタッフコードが未登録の方は、これまでどおりメールアドレスでログインしてください。' },
       { q: '初めてログインするときの流れは', a: '管理者から届いた案内メールのURLを開き、メールアドレスと仮パスワードでログインします。続けてご自身のパスワードを設定し、ご登録情報（ふりがな・生年月日・連絡先・郵便番号・現住所・住民票の住所・配偶者の有無・世帯主・緊急連絡先・給与振込先の口座情報・マイナンバー）を入力すると利用開始です。いずれも必須のため、通帳とマイナンバーカードをお手元にご用意ください。' },
       { q: '賞与明細はどこで見られますか', a: '「給与」タブの給与明細の下に「賞与明細」として表示されます。公開された分だけが並び、「印刷・PDF保存」からPDFとして保存できます。' },
-      { q: '給与明細を印刷するときの用紙は', a: '「印刷・PDF保存」を押すと別の窓が開き、印刷の画面が出ます。A4の横向き1枚に収まる形で作っています。ブラウザの印刷画面で、用紙サイズがA4、向きが横になっていることをご確認ください。「ヘッダーとフッター」を外しておくと、日付やURLが入りません。賞与明細も同じ形です。' },
+      { q: '給与明細を印刷するときの用紙は', a: '「印刷・PDF保存」を押すと、そのまま印刷の画面が出ます。A4の横向き1枚に収まる形で作っています。ブラウザの印刷画面で、用紙サイズがA4、向きが横になっていることをご確認ください。「ヘッダーとフッター」を外しておくと、日付やURLが入りません。賞与明細も同じ形です。' },
       { q: '住所や氏名が変わりました', a: '画面右上のアイコンを押して「登録情報の閲覧・変更」を選び、「変更を申請」から変更内容を入力して申請してください。氏名・ふりがな・連絡先・住所・世帯・緊急連絡先・給与振込先の口座情報を申請できます。マスター管理者が承認すると反映されます。生年月日・入職日・雇用形態などは申請できないため、管理者にご相談ください。' },
       { q: 'スマートフォンで使えますか', a: '使えます。ブラウザで同じURLを開いてログインしてください。画面はスマートフォン用に自動で切り替わります。ホーム画面に追加しておくとアプリのように使えます。パソコンでご覧の場合、画面右上の「PC表示」を押すとスマートフォン向けの表示に切り替えられます。' },
     ],
@@ -14890,21 +15213,24 @@ const HELP_ADMIN = [
   {
     category: '勤怠の管理',
     items: [
-      { q: 'シフト希望を集めるには', a: '「勤怠」→「シフト」で対象月を選び、締切と連絡事項を入れて「この月の受付を開始する」を押します。対象者は既定で在籍スタッフ全員ですが、「選んだ方のみ」に切り替えると、チェックした方にだけ表示できます（試験運用のときに便利です）。スタッフの「各種申請」に「シフト希望」が出て、提出されると一覧に反映されます。未提出の方がいるときは「未提出の◯名に依頼を送る」でお知らせとメールをまとめて送れます。一覧の最下行はその日に出勤可能な人数で、10名以下の日は赤くなります。集まったら「CSVで書き出す」でスタッフ×日付の形に出力し、スプレッドシートに貼り付けてシフトを作成してください。締め切るときは「受付を締め切る」を押します。' },
+      { q: 'シフト希望を集めるには', a: '「勤怠」→「シフト」で対象月を選び、締切と連絡事項を入れて「この月の受付を開始する」を押します。対象者は既定で「在籍スタッフ全員（◯名）」です。「グループで選ぶ（◯グループ）」または「個別に選ぶ（◯名）」に切り替えると、選んだ方にだけ表示できます（試験運用のときに便利です）。スタッフの「各種申請」に「シフト希望」が出て、提出されると一覧に反映されます。未提出の方がいるときは「未提出の◯名に依頼を送る」でお知らせとメールをまとめて送れます。一覧の最下行はその日に出勤可能な人数で、10名以下の日は赤くなります。集まったら「CSVで書き出す」でスタッフ×日付の形に出力し、スプレッドシートに貼り付けてシフトを作成してください。締め切るときは「受付を締め切る」を押します。' },
       { q: '承認をまとめて行うには', a: '「勤怠」→「承認」を開くと、勤怠修正・休暇・月次勤怠の確定・交通費の未処理が1つの画面に並びます。上の「すべて／勤怠修正／休暇／月次確定／交通費」で絞り込めます。左のチェックを入れて「まとめて承認」を押すと、種類が違っても一度に承認できます。却下も同じ手順です。金額を直してから承認する場合や、差し戻しの理由を入れる場合は「詳細」から元の画面で操作してください。交通費と月次勤怠の最終承認はマスター管理者のみに表示されます。' },
       { q: 'ダッシュボードの右側は何ですか', a: '「本日の勤務状況」は勤務中・退勤済・未出勤の人数と、まだ打刻のない方の氏名です。「今月の締めまで」は前月分の月次勤怠と交通費の提出状況で、未提出の方へまとめて提出のお知らせを送れます。「最近の操作」は直近の承認や修正の履歴です。' },
+      { q: 'アカウントを作ったあとにスタッフ種別を設定するには', a: 'アカウントを作った時点では、スタッフ種別は未設定です。「勤怠」→「スタッフ一覧」でその方の「詳細」→「基本」タブを開き、「スタッフ種別」を選んで保存してください。選ぶまでは、スタッフ一覧のグループの列に赤字で「未設定」と出ます。一覧の上の「スタッフ種別」で「未設定」を選ぶと、未設定の方だけを絞り込めます。スタッフ種別は有休の比例付与・法定休日の決め方・給与の既定項目の3つに効くため、給与計算の前に必ず設定してください。' },
       { q: 'スタッフ一覧から直接操作するには', a: '「勤怠」→「スタッフ一覧」の各行に、本日の状態・今月の勤務時間・有休残・その方の未処理が表示されます。行の右端にある「⋯」を押すと、そのスタッフの勤怠の確認と修正、未処理の承認、給与の作成、登録情報の編集へ直接移動できます。' },
-      { q: '勤怠修正申請を承認するには', a: '「勤怠」→「休暇申請」に未承認の申請が一覧表示されます。内容を確認して承認または却下してください。承認すると勤怠記録が自動で書き換わります。' },
+      { q: '勤怠修正申請を承認するには', a: '「勤怠」→「勤怠修正申請」の「承認待ちの修正申請」に一覧表示されます。修正前と修正後の時刻が並ぶので、内容を確認して「承認」または「却下」を押してください。承認すると勤怠記録が自動で書き換わります。休憩は申請した時刻から自動で出すため（拘束6時間以上で1時間）、申請には分数が入りません。勤怠一覧で休憩を手入力済みの日は、その手入力した分数がそのまま残ります。' },
       { q: '管理者が直接勤怠を修正できますか', a: 'できます。「勤怠」→「勤怠一覧」で対象のスタッフと日付を選び、時刻を直接編集してください。給与に反映させない修正の場合は、控除対象外のフラグを設定できます。' },
       { q: '遅刻・早退を承認するときに決めることは', a: '「勤怠」→「勤怠一覧」の上に「承認待ちの出勤」が出ます。各件に「引く」「引かない」の2つのボタンがあり、遅刻早退控除を引くかどうかをその場で決めます。初めは打刻の区分どおりの既定が選ばれています。出勤の「イベント（会議・研修など）」と退勤の「イベント・研修」は「引かない」、「遅刻」「自己都合」「その他」は「引く」が既定です。既定と違う選び方をすると、その旨が画面に出ます。メモ欄に理由を残せます。却下した場合は控除を引く扱いになります。遅刻・早退が0分の日は決めることがないため、ボタンは出ません。' },
       { q: '遅刻早退控除から外した時間はどこで分かりますか', a: '3か所で分かります。①「勤怠」→「勤怠一覧」の「遅刻/早退」の欄に「控除なし ◯分」と出ます。②「給与」タブで対象月を開くと、集計に「控除から外した遅刻・早退」が出て、根拠の説明にも理由が出ます。③スタッフ側の「勤怠履歴」の各日のメモに「遅刻◯分は控除しません」と出ます。なお勤怠一覧の「遅刻/早退」に出る分数は実際の遅刻・早退（事実）で、控除から外しても変わりません。CSVにも「控除から外した(分)」の列が入ります。' },
       { q: '休憩時間はどう決まりますか', a: 'ジョブカンの自動休憩と同じ決まりです。出勤から退勤までの拘束時間が6時間以上の日に1時間を差し引き、6時間未満の日は差し引きません。休憩の打刻はありません。所定勤務時間からも同じように差し引くため、所定が9時から18時の方は所定労働時間が8時間、9時から14時の方は5時間（休憩なし）になります。個別に直したいときは勤怠一覧から休憩の分数を手で入力してください。手で入れた値がそのまま使われます。なお休憩を何時に取ったかは記録していないため、深夜帯からは差し引きません（ジョブカンの「普通勤務優先」と同じ扱いです）。' },
+      { q: '勤怠一覧で誤って入れた時刻を空に戻すには', a: '時刻の欄の右にある「×」を押すと空になります。そのあと下の「まとめて更新」を押すと保存されます。空にして保存すると、その時刻は打刻なしに戻ります。出勤時刻を空にすると、その打刻に付いていた区分（遅刻・イベントなど）やメモ、位置情報もいっしょに消えます。その日の記録を丸ごと消したいときは、行の「削除」をお使いください（マスター管理者のみ）。' },
+      { q: 'スタッフを取り消した修正申請はどこで分かりますか', a: '「勤怠」→「勤怠修正申請」の「処理済みの申請」に「取り消し済み」として並びます。承認待ちの一覧からは外れるので、承認は不要です。取り消されたときは画面右上のベルのお知らせにも届きます。' },
       { q: '打刻漏れはどこで分かりますか', a: '「勤怠」→「勤怠修正」を開くと、上部に赤い枠で日付とスタッフ名が表示されます。各行の「この日の勤怠を修正する」を押すと、その日のそのスタッフに絞り込んだ勤怠一覧へ移動し、退勤時刻をその場で入力できます。ダッシュボードのアラート一覧にも件数が表示されます。' },
-      { q: 'シフトの氏名が一致しないときは', a: '「勤怠」→「シフト」の確定シフトのカードに、一致しなかった氏名が出ます。その場で該当のスタッフを選んで「結びつける」を押すと対応が登録され、次の取り込みから自動で一致します。改姓や表記ゆれがある方はこれで対応してください。退職した方がシートに残っている場合は、自動で飛ばすので登録は不要です。' },
+      { q: 'シフトの氏名が一致しないときは', a: 'スプレッドシート側の氏名を、Brown Work に登録されている氏名と同じにしてください。氏名が合わない方のシフトは Brown Work に入らず、アプリの画面には何も出ません。一致しなかった方は、シフト表で「Brown Work」→「確定シフトを送る」を押したときに出るダイアログに【氏名が一致しなかった方】として並ぶので、そこでご確認ください。退職した方がシートに残っている場合は、自動で飛ばすので直す必要はありません。' },
       { q: 'シフトの公開をスタッフに知らせるには', a: '「勤怠」→「シフト」の確定シフトのカードから送れます。「全員（◯名）に知らせる」と、直近の取り込みで内容が変わった方だけに送る「変更があった◯名に知らせる」の2つがあります。変更があった方へのお知らせには、どの日がどう変わったかが入ります。アプリ内のお知らせのみで、メールは送りません。' },
       { q: 'シフトの変更履歴は見られますか', a: '「勤怠」→「シフト」の確定シフトのカードに「変更履歴」として残ります。誰のどの日が、何から何に変わったかと、変わった日時が分かります。その月の初回の取り込みは履歴に残りません。' },
       { q: '出勤予定なのに打刻がない日を知るには', a: 'ダッシュボードのお知らせ一覧と、「勤怠」→「シフト」の確定シフトのカードに出ます。確定シフトで出勤になっている日のうち、出勤打刻がないものを拾っています。シフトが休みの日の打刻漏れは含みません。' },
-      { q: '確定シフトはどう取り込みますか', a: 'スプレッドシートで組んだシフト表から取り込みます。シフト表を開いて「Brown Work」→「確定シフトを送る」を押すと、Brown Work に反映されます。自動で送る設定もできます。取り込んだ内容は「勤怠」→「シフト」の一番上で確認でき、氏名が一致しなかった方がいればそこに表示されます。' },
+      { q: '確定シフトはどう取り込みますか', a: 'スプレッドシートで組んだシフト表から取り込みます。シフト表を開いて「Brown Work」→「確定シフトを送る」を押すと、Brown Work に反映されます。自動で送る設定もできます。取り込んだ内容は「勤怠」→「シフト」の一番上で確認できます。氏名が一致しなかった方は、シフト表で「確定シフトを送る」を押したときのダイアログに出ます。' },
       { q: 'シフト外の出勤とは', a: 'スタッフが提出したシフトで「休み」「有給」になっている日に出勤した記録です。打刻は止めずに、確認画面を出したうえで記録に印を付けています。ダッシュボードと勤怠一覧の上部に直近30日分が出るほか、打刻された時点でお知らせも届きます。応援や代打での出勤はこれにあたるため、理由を見てご判断ください。' },
       { q: '位置情報のアラートとは', a: '打刻時に位置情報が5回以上連続で記録されなかったスタッフを検知しています。端末の設定で位置情報が拒否されている可能性があるため、本人に確認してください。' },
       { q: '出勤規定日数の設定はどこですか', a: '「勤怠」→「その他」→「出勤規定日数設定」で、グループ別・月別に設定します。給与計算の基礎になる日数です。' },
@@ -15142,7 +15468,6 @@ function ConfirmedShiftAdminCard({
   const now = new Date();
   const [month, setMonth] = useState(`${now.getFullYear()}-${pad(now.getMonth() + 1)}`);
   const [open, setOpen] = useState(false);
-  const [aliasPick, setAliasPick] = useState({});
   const [announcing, setAnnouncing] = useState(false);
   const [showChanges, setShowChanges] = useState(false);
   // この下に「確定シフトの準備ができていません」の早期 return があるため、
@@ -15192,9 +15517,24 @@ function ConfirmedShiftAdminCard({
   // その日に出勤する人数
   const workCount = (dateKey) => monthAssignments.filter((a) => a.date === dateKey && a.kind === 'work').length;
 
-  // 氏名が一致しなかった方（対応表に未登録のものだけ）
-  const aliasNames = new Set(aliases.map((a) => a.sheetName));
-  const unmatchedNames = (lastLog?.unmatchedNames || []).filter((n) => !aliasNames.has(n));
+  // 【氏名が一致しなかった方の表示は、御社のご判断で画面から外しました（2026年11月）】
+  //   以前はここで lastLog.unmatchedNames を出し、スプレッドシート上の氏名と
+  //   スタッフを結びつける操作（shift_name_aliases への登録）ができました。
+  //   表示も結びつける操作も画面からは無くしています。
+  //
+  //   そのため、氏名が合わない方のシフトは Brown Work に入らず、
+  //   アプリ側では何も知らせません。気づく場所はスプレッドシートの
+  //   「Brown Work」→「確定シフトを送る」で出るダイアログだけです
+  //   （そこには【氏名が一致しなかった方】が引き続き出ます）。
+  //   運用としては、スプレッドシートの氏名を Brown Work の氏名に合わせてください。
+  //
+  //   すでに shift_name_aliases に登録済みの対応は、取り込み側
+  //   （supabase/functions/shift-confirmed-import）が読んでいるため
+  //   これまでどおり効きます。消していません。
+  //
+  //   戻すときは、この下の「最終取り込み」の行に unmatchedNames の赤字を戻し、
+  //   結びつける赤い枠（onSaveAlias を呼ぶもの）を足してください。
+  //   props の aliases / onSaveAlias / onDeleteAlias は残してあります。
 
   // 最後に取り込んだのがいつか。しばらく届いていないときは注意を出す
   const lastImportedAt = importLogs.length > 0 ? importLogs[0].importedAt : null;
@@ -15272,54 +15612,14 @@ function ConfirmedShiftAdminCard({
             最終取り込み：{new Date(lastLog.importedAt).toLocaleString('ja-JP')}
             　{lastLog.matchedRows}／{lastLog.totalRows}名　{lastLog.assignmentCount}件
             {lastLog.sheetName ? `　シート「${lastLog.sheetName}」` : ''}
-            {lastLog.unmatchedNames.length > 0 && (
-              <div className="mt-1 font-bold text-rose-600">
-                氏名が一致しなかった方：{lastLog.unmatchedNames.join('、')}
-              </div>
-            )}
           </>
         ) : (
           <>{monthKeyLabel(month)}の確定シフトはまだ取り込まれていません。スプレッドシートの「Brown Work」メニューから取り込んでください。</>
         )}
       </div>
 
-      {/* 氏名が一致しなかった方。登録するまで出し続ける */}
-      {unmatchedNames.length > 0 && (
-        <div className="px-5 py-3.5 border-b border-slate-100 bg-rose-50">
-          <div className="flex items-center gap-2">
-            <AlertTriangle size={15} className="text-rose-600 shrink-0" />
-            <div className="text-[12.5px] font-bold text-rose-800">
-              氏名が一致しなかった方が{unmatchedNames.length}名います（この方のシフトは入っていません）
-            </div>
-          </div>
-          <div className="mt-1 text-[11px] text-rose-700">
-            スプレッドシート上の表記とスタッフを結びつけると、次の取り込みから自動で一致します。
-          </div>
-          <div className="mt-2 space-y-2">
-            {unmatchedNames.map((n) => (
-              <div key={n} className="flex items-center gap-2 flex-wrap">
-                <span className="min-w-[7rem] text-[12.5px] font-bold text-slate-800">{n}</span>
-                <span className="text-[12px] text-slate-400">→</span>
-                <select
-                  value={aliasPick[n] || ''}
-                  onChange={(e) => setAliasPick((prev) => ({ ...prev, [n]: e.target.value }))}
-                  className="flex-1 min-w-[10rem] border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white"
-                >
-                  <option value="">スタッフを選ぶ</option>
-                  {staff.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-                </select>
-                <button
-                  onClick={() => aliasPick[n] && onSaveAlias(n, aliasPick[n])}
-                  disabled={!aliasPick[n]}
-                  className="shrink-0 rounded-lg bg-rose-600 disabled:bg-slate-200 px-3 py-1.5 text-[12px] font-bold text-white"
-                >
-                  結びつける
-                </button>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+      {/* 氏名が一致しなかった方の赤い枠は、御社のご判断で外しました（2026年11月）。
+          経緯はこのコンポーネントの上のほうのコメントに書いています。 */}
 
       {/* しばらく取り込まれていないときの注意 */}
       {daysSinceImport != null && daysSinceImport >= 3 && (
@@ -28446,7 +28746,12 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
       id: c.id,
       employeeId: c.employeeId,
       employeeName: c.employeeName,
-      summary: `${dateLabel(c.date)} 出勤 ${c.requested?.clockIn || '変更なし'}／退勤 ${c.requested?.clockOut || '変更なし'}／休憩 ${c.requested?.breakMinutes ?? 0}分`,
+      // 休憩は、2026年11月から打刻から自動で出しています。
+      // それより前に出された申請だけ分数が入っているため、入っているときだけ出します。
+      summary: `${dateLabel(c.date)} 出勤 ${c.requested?.clockIn || '変更なし'}／退勤 ${c.requested?.clockOut || '変更なし'}`
+        + (correctionBreakMinutes(c.requested) != null
+          ? `／休憩 ${correctionBreakMinutes(c.requested)}分`
+          : '／休憩 打刻から自動'),
       note: c.reason ? `理由：${c.reason}` : '',
       at: c.submittedAt,
     })),
@@ -28844,10 +29149,28 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
                       <div className="text-[13px] font-semibold"><EmployeeLink id={c.employeeId} name={c.employeeName} /> — {dateLabel(c.date)}</div>
                       <div className="text-[10.5px] text-slate-400">{new Date(c.submittedAt).toLocaleString('ja-JP')}</div>
                     </div>
-                    <div className="font-mono text-[12.5px] text-slate-600 bg-slate-50 rounded-lg px-3 py-2 mb-2 flex flex-wrap gap-x-4 gap-y-1">
-                      <span>出勤 <b className="text-slate-800">{c.requested.clockIn || '変更なし'}</b></span>
-                      <span>退勤 <b className="text-slate-800">{c.requested.clockOut || '変更なし'}</b></span>
-                      <span>休憩 <b className="text-slate-800">{c.requested.breakMinutes}分</b></span>
+                    {/* 修正前→修正後を並べて出す。スタッフ側も同じ組み立てを使っています
+                        （src/correctionView.ts）*/}
+                    <div className="font-mono text-[12.5px] text-slate-600 bg-slate-50 rounded-lg px-3 py-2 mb-2 space-y-1">
+                      {correctionDiffLines(c.original, c.requested).length === 0 ? (
+                        <div className="font-sans text-slate-400">時刻の指定なし</div>
+                      ) : correctionDiffLines(c.original, c.requested).map((l) => (
+                        <div key={l.label} className="flex items-center gap-2">
+                          <span className="w-8 shrink-0 font-sans font-bold text-slate-500">{l.label}</span>
+                          <span>{l.from}</span>
+                          <span className="text-slate-300">→</span>
+                          <b className="text-slate-800">{l.to}</b>
+                          {!l.changed && <span className="font-sans text-[10.5px] text-slate-400">（変わりません）</span>}
+                        </div>
+                      ))}
+                      <div className="flex items-center gap-2">
+                        <span className="w-8 shrink-0 font-sans font-bold text-slate-500">休憩</span>
+                        {correctionBreakMinutes(c.requested) != null ? (
+                          <b className="text-slate-800">{correctionBreakMinutes(c.requested)}分</b>
+                        ) : (
+                          <span className="font-sans text-slate-500">打刻から自動（拘束6時間以上なら1時間）</span>
+                        )}
+                      </div>
                     </div>
                     <div className="text-[12.5px] text-slate-500 mb-3">理由：{c.reason}</div>
                     <div className="flex gap-2">
@@ -28874,8 +29197,9 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
                   {decided.map((c) => (
                     <div key={c.id} className="px-5 py-2.5 flex items-center justify-between text-[12.5px]">
                       <span><EmployeeLink id={c.employeeId} name={c.employeeName} /> — {dateLabel(c.date)}</span>
+                      {/* 本人が取り消した申請（95番）も、却下と区別して出します */}
                       <span className={`font-medium ${c.status === 'approved' ? 'text-emerald-600' : 'text-slate-400'}`}>
-                        {c.status === 'approved' ? '承認済み' : '却下'}
+                        {correctionStatusLabel(c.status)}
                       </span>
                     </div>
                   ))}
@@ -29306,7 +29630,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
                       {r.shift && <div className="mt-0.5"><ShiftBadge shift={r.shift} compact /></div>}
                     </td>
                     <td className="px-2 py-2">
-                      <input type="time" value={e.clockIn || ''} onChange={(ev) => setField('clockIn', ev.target.value)} className="w-[84px] border border-slate-200 rounded px-1 py-1 font-mono text-[11.5px]" />
+                      <TimeInputWithClear value={e.clockIn} onChange={(v) => setField('clockIn', v)} className="w-[84px] border border-slate-200 rounded px-1 py-1 font-mono text-[11.5px]" label="出勤時刻を空にする" />
                       {(r.clockInActual || r.clockInStatusLabel) && (
                         <div className={`text-[9.5px] font-sans whitespace-nowrap mt-0.5 ${approvalColorClass(r.clockInApproval, r.clockInPayDeduction, 'text-blue-600')}`}>
                           {r.clockInActual ? `実${r.clockInActual}` : ''}{r.clockInStatusLabel ? `・${r.clockInStatusLabel}` : ''}{r.clockInApproval ? `・${approvalSuffix(r.clockInApproval, r.clockInPayDeduction)}` : ''}
@@ -29314,7 +29638,7 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
                       )}
                     </td>
                     <td className="px-2 py-2">
-                      <input type="time" value={e.clockOut || ''} onChange={(ev) => setField('clockOut', ev.target.value)} className="w-[84px] border border-slate-200 rounded px-1 py-1 font-mono text-[11.5px]" />
+                      <TimeInputWithClear value={e.clockOut} onChange={(v) => setField('clockOut', v)} className="w-[84px] border border-slate-200 rounded px-1 py-1 font-mono text-[11.5px]" label="退勤時刻を空にする" />
                       {(r.clockOutActual || r.clockOutStatusLabel) && (
                         <div className={`text-[9.5px] font-sans whitespace-nowrap mt-0.5 ${approvalColorClass(r.clockOutApproval, r.clockOutPayDeduction, 'text-purple-600')}`}>
                           {r.clockOutActual ? `実${r.clockOutActual}` : ''}{r.clockOutStatusLabel ? `・${r.clockOutStatusLabel}` : ''}{r.clockOutApproval ? `・${approvalSuffix(r.clockOutApproval, r.clockOutPayDeduction)}` : ''}
@@ -29383,8 +29707,8 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
                   </div>
                 </div>
                 <div className="mt-2 grid grid-cols-[1fr_1fr_72px] gap-2">
-                  <Field label="出勤"><input type="time" value={e.clockIn || ''} onChange={(ev) => setField('clockIn', ev.target.value)} style={TIME_INPUT_STYLE} className={TIME_INPUT_CLASS} /></Field>
-                  <Field label="退勤"><input type="time" value={e.clockOut || ''} onChange={(ev) => setField('clockOut', ev.target.value)} style={TIME_INPUT_STYLE} className={TIME_INPUT_CLASS} /></Field>
+                  <TimeFieldWithClear label="出勤" value={e.clockIn} onChange={(v) => setField('clockIn', v)} clearLabel="出勤時刻を空にする" />
+                  <TimeFieldWithClear label="退勤" value={e.clockOut} onChange={(v) => setField('clockOut', v)} clearLabel="退勤時刻を空にする" />
                   <Field label="休憩(分)"><input type="number" min="0" step="5" value={e.breakMinutes ?? ''} onChange={(ev) => setField('breakMinutes', ev.target.value)} className={BREAK_INPUT_CLASS} /></Field>
                 </div>
                 <div className="mt-2 text-[11px] text-slate-400">{r.status} ・実働 {minutesToHHMM(r.workedMin)}{r.overtimeMin > 0 ? ` ・ 残業 ${minutesToHHMM(r.overtimeMin)}` : ''}{r.lateMin > 0 ? ` ・ 遅刻 ${r.lateMin}分` : ''}{r.earlyLeaveMin > 0 ? ` ・ 早退 ${r.earlyLeaveMin}分` : ''}</div>
@@ -29680,7 +30004,7 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
                         {r.shift && <div className="mt-0.5"><ShiftBadge shift={r.shift} compact /></div>}
                       </td>
                       <td className="px-3 py-2">
-                        <input type="time" value={e.clockIn || ''} onChange={(ev) => setField('clockIn', ev.target.value)} className="w-[92px] border border-slate-200 rounded px-1.5 py-1 font-mono text-[12px]" />
+                        <TimeInputWithClear value={e.clockIn} onChange={(v) => setField('clockIn', v)} className="w-[92px] border border-slate-200 rounded px-1.5 py-1 font-mono text-[12px]" label="出勤時刻を空にする" />
                         {r.clockInStatusLabel && (
                           <div className={`text-[9.5px] whitespace-nowrap mt-0.5 ${approvalColorClass(r.clockInApproval, r.clockInPayDeduction, 'text-blue-600')}`}>
                             {r.clockInStatusLabel}{r.clockInApproval ? `・${approvalSuffix(r.clockInApproval, r.clockInPayDeduction)}` : ''}
@@ -29688,7 +30012,7 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
                         )}
                       </td>
                       <td className="px-3 py-2">
-                        <input type="time" value={e.clockOut || ''} onChange={(ev) => setField('clockOut', ev.target.value)} className="w-[92px] border border-slate-200 rounded px-1.5 py-1 font-mono text-[12px]" />
+                        <TimeInputWithClear value={e.clockOut} onChange={(v) => setField('clockOut', v)} className="w-[92px] border border-slate-200 rounded px-1.5 py-1 font-mono text-[12px]" label="退勤時刻を空にする" />
                         {r.clockOutStatusLabel && (
                           <div className={`text-[9.5px] whitespace-nowrap mt-0.5 ${approvalColorClass(r.clockOutApproval, r.clockOutPayDeduction, 'text-purple-600')}`}>
                             {r.clockOutStatusLabel}{r.clockOutApproval ? `・${approvalSuffix(r.clockOutApproval, r.clockOutPayDeduction)}` : ''}
@@ -29762,8 +30086,8 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
                     )}
                   </div>
                   <div className="mt-2 grid grid-cols-[1fr_1fr_72px] gap-2">
-                    <Field label="出勤"><input type="time" value={e.clockIn || ''} onChange={(ev) => setField('clockIn', ev.target.value)} style={TIME_INPUT_STYLE} className={TIME_INPUT_CLASS} /></Field>
-                    <Field label="退勤"><input type="time" value={e.clockOut || ''} onChange={(ev) => setField('clockOut', ev.target.value)} style={TIME_INPUT_STYLE} className={TIME_INPUT_CLASS} /></Field>
+                    <TimeFieldWithClear label="出勤" value={e.clockIn} onChange={(v) => setField('clockIn', v)} clearLabel="出勤時刻を空にする" />
+                    <TimeFieldWithClear label="退勤" value={e.clockOut} onChange={(v) => setField('clockOut', v)} clearLabel="退勤時刻を空にする" />
                     <Field label="休憩(分)"><input type="number" min="0" step="5" value={e.breakMinutes ?? ''} onChange={(ev) => setField('breakMinutes', ev.target.value)} className={BREAK_INPUT_CLASS} /></Field>
                   </div>
                   <div className="mt-2 text-[11px] text-slate-400">{r.status} ・実働 {minutesToHHMM(r.workedMin)}{r.overtimeMin > 0 ? ` ・ 残業 ${minutesToHHMM(r.overtimeMin)}` : ''}</div>
@@ -32677,7 +33001,10 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
   const filteredEmployeeAccounts = employeeAccounts
     .filter((acc) => {
       if (listGroupFilter !== 'all' && acc.mainGroup !== listGroupFilter) return false;
-      if (listStaffTypeFilter !== 'all' && acc.staffType !== listStaffTypeFilter) return false;
+      // '__unset' はスタッフ種別が未設定の方だけを出す絞り込み
+      if (listStaffTypeFilter === '__unset') {
+        if (acc.staffType) return false;
+      } else if (listStaffTypeFilter !== 'all' && acc.staffType !== listStaffTypeFilter) return false;
       if (listStatusFilter === 'active' && acc.resignationDate) return false;
       if (listStatusFilter === 'retired' && !acc.resignationDate) return false;
       const q = listNameQuery.trim();
@@ -32761,6 +33088,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
         <Field label="スタッフ種別">
           <select value={listStaffTypeFilter} onChange={(e) => setListStaffTypeFilter(e.target.value)} className="w-full border border-slate-200 rounded-lg px-2.5 py-1.5 text-[12.5px] bg-white">
             <option value="all">全て</option>
+            <option value="__unset">未設定</option>
             {STAFF_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
           </select>
         </Field>
@@ -32808,7 +33136,11 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
                     {retired && <span className="ml-1.5 text-[10px] font-bold text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">退職済み</span>}
                     {acc.furigana && <div className="text-[10.5px] font-normal text-slate-400">{acc.furigana}</div>}
                   </td>
-                  <td className="px-3 py-2.5 text-slate-600 whitespace-nowrap">{acc.mainGroup || acc.staffType || '正社員'}</td>
+                  <td className="px-3 py-2.5 whitespace-nowrap">
+                    {acc.mainGroup || acc.staffType
+                      ? <span className="text-slate-600">{acc.mainGroup || acc.staffType}</span>
+                      : <span className="text-rose-600 font-bold">未設定</span>}
+                  </td>
                   <td className={`px-3 py-2.5 font-bold whitespace-nowrap ${state ? state.cls : 'text-slate-300'}`}>{state ? state.label : '—'}</td>
                   <td className="px-3 py-2.5 font-mono text-slate-600 whitespace-nowrap">{info ? minutesToHHMM(info.monthWorkedMin) : '—'}</td>
                   <td className={`px-3 py-2.5 font-mono whitespace-nowrap ${info?.leaveShort ? 'text-rose-600 font-bold' : 'text-slate-600'}`}>
@@ -32868,7 +33200,9 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
                     </div>
                     {acc.furigana && <div className="text-[10.5px] text-slate-400">{acc.furigana}</div>}
                     <div className="text-[11.5px] text-slate-500 mt-0.5">
-                      {acc.mainGroup || acc.staffType || '正社員'}
+                      {acc.mainGroup || acc.staffType
+                        ? (acc.mainGroup || acc.staffType)
+                        : <span className="text-rose-600 font-bold">未設定</span>}
                       {info && <span className="ml-2 font-mono">今月 {minutesToHHMM(info.monthWorkedMin)}</span>}
                       {info && <span className={`ml-2 font-mono ${info.leaveShort ? 'text-rose-600 font-bold' : ''}`}>有休 {info.leavePending ? '集計中' : `${fmtDays(info.leaveRemaining)}日`}</span>}
                     </div>
@@ -34864,7 +35198,8 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
     emergencyContactAddress: account.emergencyContactAddress || '',
     birthDate: account.birthDate || '',
     gender: account.gender || '',
-    staffType: account.staffType || '正社員',
+    // 登録されていなければ未設定のまま。選び忘れが分かるようにしています
+    staffType: account.staffType || '',
     mainGroup: account.mainGroup || '',
     subGroup: account.subGroup || '',
     wageType: account.wageType || 'hourly',
@@ -35074,16 +35409,29 @@ function EmployeeProfileModal({ account, onClose, onSave, onFetchMyNumber, onSav
                   <input type="date" value={form.birthDate} onChange={set('birthDate')} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13.5px]" />
                 </Field>
                 <Field label="スタッフ種別">
-                  <select value={form.staffType} onChange={set('staffType')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white">
+                  {/* アカウントを作った直後は未設定です。選ばれていないことが
+                      分かるように、既定で「正社員」を選んだ形にはしていません。
+                      一覧に無い値（昔の種別）が入っている方のぶんは
+                      staffTypeOptions が足しています。 */}
+                  <select
+                    value={form.staffType}
+                    onChange={set('staffType')}
+                    className={`w-full border rounded-lg px-3 py-2 text-[13.5px] bg-white ${form.staffType ? 'border-slate-200' : 'border-rose-300'}`}
+                  >
+                    <option value="">未設定（選んでください）</option>
                     {staffTypeOptions(form.staffType).map((t) => (
                       <option key={t} value={t}>{STAFF_TYPES.includes(t) ? t : `${t}（一覧にない値）`}</option>
                     ))}
-                    {form.staffType && !STAFF_TYPES.includes(form.staffType) && (
-                      <option value={form.staffType}>{form.staffType}（旧区分）</option>
-                    )}
                   </select>
                 </Field>
               </div>
+              {!form.staffType && (
+                <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2.5 text-[11.5px] text-rose-700">
+                  <span className="font-bold">スタッフ種別が未設定です。</span>
+                  有休の比例付与・法定休日の決め方・給与の既定項目はスタッフ種別で決まるため、
+                  給与計算の前に選んで保存してください。
+                </div>
+              )}
               {isProportionalLeaveStaffType(form.staffType) && (
                 <Field label="週の所定労働日数（比例付与の計算に使用）">
                   <select value={form.scheduledWeeklyDays} onChange={set('scheduledWeeklyDays')} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13.5px] bg-white">
