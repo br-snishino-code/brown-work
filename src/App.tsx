@@ -40,6 +40,10 @@ import {
 import { mergeCommuteItems } from './payslipDisplay';
 import { autoBreakMinutes, scheduledWorkMinutes } from './breakTime';
 import {
+  commuteRowSubtotal, isSavableCommuteRow, commuteSavedTotal,
+  incompleteCommuteRows, incompleteCommuteLabel,
+} from './commuteRows';
+import {
   correctionDiffLines, correctionBreakMinutes, correctionSummary,
   correctionStatusLabel, canCancelCorrection, isCancelNotReadyError,
 } from './correctionView';
@@ -15173,6 +15177,7 @@ const HELP_STAFF = [
     category: '給与・交通費',
     items: [
       { q: '給与明細はどこで見られますか', a: '「給与」タブを開くと、公開済みの給与明細が一覧で表示されます。明細をクリックすると内訳が確認でき、印刷もできます。' },
+      { q: '交通費を保存したら0円になってしまいました', a: '1つの行に「利用日」「乗駅」「降駅」の3つが入っていないと、その行は保存されません。以前はこの3つが足りない行を黙って捨てていたため、画面に金額が出ていても保存すると0円になることがありました。いまは足りない行があると、保存する前に赤字で「◯行目：乗駅が未入力です」とお知らせし、保存のボタンは押せないようにしています。足りない項目を入れるか、その行をごみ箱のしるしで消してから保存してください。なお、その月に交通費が無い場合は、何も入れずに保存すれば0円として記録できます。これは正しい使い方です。' },
       { q: '交通費の申請はいつまでですか', a: '毎月1日が締め切りです。前月分の交通費を、翌月1日までに申請してください。期限までに未提出の場合、打刻時にお知らせが表示されます。' },
       { q: '交通費の申請方法を教えてください', a: '入力は「各種申請」→「交通費申請」でおこないます。日付・区間・金額を入力して申請します。経路検索のリンクがあるので、運賃の確認に利用してください。複数件をまとめて登録できます。一度申請した区間は運賃を覚えているため、次回は乗駅・降駅を入れるだけで金額が入ります。その月に交通費が無い場合も、空のまま「0円」として申請できます。0円で申請しようとすると、入力漏れでないかの確認が表示されます。「交通費の内容を保存する」で入力を残し、申請は「各種申請」→「月次勤怠申請」の「勤怠と交通費をまとめて申請する」でおこないます。月の途中でこまめに入力しておき、締切前にまとめて申請する使い方ができます。保存した内容は一覧の「続きを入力する」から再開できます。車通勤などで交通費を個別に申請する方は、管理者がスタッフ詳細の「交通費精算の申請方法」を「個別に申請する」に設定します。この設定の方は交通費申請の画面に「交通費を申請する」ボタンが出て、単独で申請できます。' },
       { q: '申請した交通費を間違えました', a: '承認される前であれば、「各種申請」→「交通費申請」の一覧にある「修正する」から内容を直せます。修正して「この内容で修正する」を押すと、改めて承認待ちになります。承認済みのものは修正できないため、管理者にご相談ください。' },
@@ -30973,16 +30978,8 @@ const confirmZeroMessage = (itemCount, targetMonth) => (
 );
 
 const emptyCommuteRow = () => ({ date: '', workplace: '', transport: '', fromStation: '', toStation: '', calcMethod: 'round_trip', unitPrice: '', passFare: '', excessAmount: '', note: '' });
-const computeCommuteRowSubtotal = (row) => {
-  switch (row.calcMethod) {
-    case 'one_way': return Number(row.unitPrice) || 0;
-    case 'pass_fare': return Number(row.passFare) || 0;
-    case 'within_pass': return 0;
-    case 'excess': return Number(row.excessAmount) || 0;
-    case 'round_trip':
-    default: return (Number(row.unitPrice) || 0) * 2;
-  }
-};
+// 小計の計算と、保存できる行かどうかの判定は src/commuteRows.ts にまとめています
+const computeCommuteRowSubtotal = commuteRowSubtotal;
 const yahooTransitUrl = (from, to) => `https://transit.yahoo.co.jp/search/result?flatlon=&from=${encodeURIComponent(from || '')}&to=${encodeURIComponent(to || '')}`;
 
 // 交通費の明細入力（勤怠の確定申請とお支払いの申請で共用する）
@@ -31023,17 +31020,26 @@ function useCommuteRows(claims, initialRows) {
   const addRow = () => setRows((prev) => [...prev, emptyCommuteRow()]);
   const copyPrevRow = (i) => setRows((prev) => prev.map((r, idx) => (idx === i && i > 0 ? { ...prev[i - 1], date: r.date, note: '' } : r)));
   const removeRow = (i) => setRows((prev) => prev.filter((_, idx) => idx !== i));
-  const total = rows.reduce((sum, r) => sum + computeCommuteRowSubtotal(r), 0);
+  // 画面に出す合計は、実際に保存される行だけで出します。
+  // 以前はすべての行を足していたため、利用日・乗駅・降駅が足りない行の金額も
+  // 合計に入り、保存した途端に 0円 になることがありました。
+  const total = commuteSavedTotal(rows);
+  // 何かを入力したのに、利用日・乗駅・降駅のどれかが空の行。
+  // この行があるあいだは保存も申請もしません（黙って捨てると入力が戻らないため）
+  const incomplete = incompleteCommuteRows(rows);
   const toItems = () => rows
-    .filter((r) => r.date && r.fromStation && r.toStation)
+    .filter(isSavableCommuteRow)
     .map(({ recalled, subtotal, ...r }) => ({ ...r, subtotal: computeCommuteRowSubtotal(r) }));
   const reset = (next) => setRows(next || Array.from({ length: 5 }, emptyCommuteRow));
 
-  return { rows, setRows, updateRow, addRow, copyPrevRow, removeRow, total, toItems, reset };
+  return { rows, setRows, updateRow, addRow, copyPrevRow, removeRow, total, incomplete, toItems, reset };
 }
 
 function CommuteRowsEditor({ editor }) {
   const { rows, updateRow, addRow, copyPrevRow, removeRow } = editor;
+  // 何かを入力したのに利用日・乗駅・降駅が足りない行は、行番号で引けるようにしておく
+  const missingByNumber = {};
+  (editor.incomplete || []).forEach((r) => { missingByNumber[r.number] = r.missing; });
   return (
     <>
           <div className="overflow-x-auto">
@@ -31045,7 +31051,7 @@ function CommuteRowsEditor({ editor }) {
               </thead>
               <tbody>
                 {rows.map((r, i) => (
-                  <tr key={i} className="border-b border-slate-100 last:border-0 align-top">
+                  <tr key={i} className={`border-b border-slate-100 last:border-0 align-top ${missingByNumber[i + 1] ? 'bg-rose-50/70' : ''}`}>
                     <td className="px-2 py-1.5">
                       {/* スマホの日付入力は、いったん入れた日付を消す手立てが
                           端末によって無いため、消すためのボタンを添える */}
@@ -31089,7 +31095,17 @@ function CommuteRowsEditor({ editor }) {
                         <a href={yahooTransitUrl(r.fromStation, r.toStation)} target="_blank" rel="noopener noreferrer" className="block mt-1 text-[10px] text-blue-600 font-bold">経路を調べる↗</a>
                       )}
                     </td>
-                    <td className="px-2 py-1.5 font-mono text-slate-500 whitespace-nowrap pt-2.5">{formatYen(computeCommuteRowSubtotal(r))}</td>
+                    {/* 小計。保存されない行は、金額を灰色にして理由を添える */}
+                    <td className="px-2 py-1.5 whitespace-nowrap pt-2.5">
+                      <div className={`font-mono ${missingByNumber[i + 1] ? 'text-slate-300 line-through' : 'text-slate-500'}`}>
+                        {formatYen(computeCommuteRowSubtotal(r))}
+                      </div>
+                      {missingByNumber[i + 1] && (
+                        <div className="mt-0.5 text-[10px] font-bold text-rose-600 whitespace-normal w-24">
+                          {missingByNumber[i + 1].join('・')}が未入力のため保存されません
+                        </div>
+                      )}
+                    </td>
                     <td className="px-2 py-1.5"><input value={r.note} onChange={(e) => updateRow(i, 'note', e.target.value)} className="w-20 border border-slate-200 rounded px-1.5 py-1 text-[11.5px]" /></td>
                     <td className="px-2 py-1.5 pt-2.5"><button onClick={() => removeRow(i)} className="text-slate-300 hover:text-rose-500"><Trash2 size={13} /></button></td>
                   </tr>
@@ -31108,7 +31124,7 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate, onSav
   const [targetMonth, setTargetMonth] = useState(() => prevMonthKey());
   const [saving, setSaving] = useState(false);
   const editor = useCommuteRows(claims);
-  const { total } = editor;
+  const { total, incomplete } = editor;
 
   const resetForm = () => {
     setEditingId(null);
@@ -31134,6 +31150,9 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate, onSav
 
   // 申請はせず、入力内容だけ残す
   const saveDraft = async () => {
+    // 利用日・乗駅・降駅が足りない行があるあいだは保存しません。
+    // 保存すると、その行は捨てられて入力内容が戻ってこないためです。
+    if (incomplete.length > 0) return;
     const items = editor.toItems();
     setSaving(true);
     const ok = await onSaveDraft({
@@ -31147,6 +31166,7 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate, onSav
   };
 
   const submit = async () => {
+    if (incomplete.length > 0) return;
     const items = editor.toItems();
     const totalAmount = items.reduce((s, r) => s + r.subtotal, 0);
     // 0円での申請は、入力漏れと区別がつかないため確認する
@@ -31210,6 +31230,7 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate, onSav
             <div>・行が足りない場合は下の「行を追加」で増やせます。</div>
             <div>・一度申請した区間は運賃を覚えています。乗駅・降駅を入れると金額が自動で入ります（金額は書き換えられます）。</div>
             <div>・提出後も、承認されるまでは一覧の「修正する」から内容を直せます。</div>
+            <div>・1つの行に<b>「利用日」「乗駅」「降駅」</b>の3つが入っていないと、その行は保存されません。足りない行があるときは、保存する前に赤字でお知らせします。</div>
             <div>・この月に交通費が無い場合は、空のまま保存すれば「0円」として記録できます。</div>
           </div>
 
@@ -31219,16 +31240,43 @@ function CommuteExpenseClaimSection({ session, claims, onSubmit, onUpdate, onSav
             <span className="text-[12.5px] font-bold">合計金額</span>
             <span className="font-mono text-[18px] font-bold">{formatYen(total)}</span>
           </div>
+
+          {/* 保存できない行があるときは、何を入れればよいかを出して保存を止める。
+              以前はそのまま保存でき、足りない行は金額ごと捨てられていた。 */}
+          {incomplete.length > 0 && (
+            <div className="rounded-xl border border-rose-300 bg-rose-50 px-3.5 py-3">
+              <div className="flex items-center gap-1.5">
+                <AlertTriangle size={14} className="text-rose-600 shrink-0" />
+                <span className="text-[12.5px] font-bold text-rose-800">
+                  入力が足りない行があるため、まだ保存できません
+                </span>
+              </div>
+              <div className="mt-1.5 space-y-0.5">
+                {incomplete.map((r) => (
+                  <div key={r.number} className="text-[12px] text-rose-800">
+                    ・{r.number}行目：<b>{r.missing.join('・')}</b>が未入力です
+                    {r.subtotal > 0 && <span className="text-rose-600">（{formatYen(r.subtotal)}が合計に入っていません）</span>}
+                  </div>
+                ))}
+              </div>
+              <div className="mt-1.5 text-[11px] text-rose-700">
+                入力するか、その行の右端の
+                <Trash2 size={11} className="inline mx-0.5 -mt-0.5" />
+                で行ごと消してください。
+              </div>
+            </div>
+          )}
+
           <div className="flex gap-2">
             <button
               onClick={saveDraft}
-              disabled={saving}
+              disabled={saving || incomplete.length > 0}
               className={`py-2.5 rounded-lg text-[13.5px] font-bold ${showSubmitButton ? 'flex-1 border border-slate-300 disabled:border-slate-200 disabled:text-slate-300 text-slate-600' : 'w-full bg-amber-600 disabled:bg-slate-200 text-white'}`}
             >
               {saving ? '保存中…' : '交通費の内容を保存する'}
             </button>
             {showSubmitButton && (
-              <button onClick={submit} disabled={saving} className="flex-1 py-2.5 rounded-lg bg-amber-600 disabled:bg-slate-200 text-white text-[13.5px] font-bold">
+              <button onClick={submit} disabled={saving || incomplete.length > 0} className="flex-1 py-2.5 rounded-lg bg-amber-600 disabled:bg-slate-200 text-white text-[13.5px] font-bold">
                 {saving ? '送信中…' : editingSubmitted ? 'この内容で修正する' : '交通費を申請する'}
               </button>
             )}
@@ -31284,6 +31332,25 @@ function CommuteApproveEditor({ claim, onCancel, onApprove, comment, onCommentCh
         <span className="text-[12px] font-bold">修正後の合計</span>
         <span className="font-mono text-[15px] font-bold">{formatYen(editor.total)}</span>
       </div>
+      {/* スタッフの入力画面と同じ決まり。足りない行があるあいだは承認しません
+          （承認すると、その行は捨てられて金額から外れるため） */}
+      {editor.incomplete.length > 0 && (
+        <div className="rounded-lg border border-rose-300 bg-rose-50 px-3 py-2.5">
+          <div className="flex items-center gap-1.5">
+            <AlertTriangle size={13} className="text-rose-600 shrink-0" />
+            <span className="text-[12px] font-bold text-rose-800">入力が足りない行があるため、まだ承認できません</span>
+          </div>
+          <div className="mt-1 space-y-0.5">
+            {editor.incomplete.map((r) => (
+              <div key={r.number} className="text-[11.5px] text-rose-800">
+                ・{r.number}行目：<b>{r.missing.join('・')}</b>が未入力です
+                {r.subtotal > 0 && <span className="text-rose-600">（{formatYen(r.subtotal)}が合計に入っていません）</span>}
+              </div>
+            ))}
+          </div>
+          <div className="mt-1 text-[11px] text-rose-700">入力するか、その行の右端のごみ箱で行ごと消してください。</div>
+        </div>
+      )}
       <input
         value={comment}
         onChange={(e) => onCommentChange(e.target.value)}
@@ -31291,8 +31358,8 @@ function CommuteApproveEditor({ claim, onCancel, onApprove, comment, onCommentCh
         className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-[12.5px] bg-white"
       />
       <button
-        onClick={() => onApprove(editor.toItems())}
-        disabled={running}
+        onClick={() => editor.incomplete.length === 0 && onApprove(editor.toItems())}
+        disabled={running || editor.incomplete.length > 0}
         className="w-full py-1.5 rounded-lg bg-emerald-600 disabled:bg-slate-200 text-white text-[12px] font-bold"
       >
         修正して承認する
