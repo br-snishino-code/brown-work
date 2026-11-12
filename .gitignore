@@ -8,3 +8,6 @@ dist
 preview/
 preview-dist/
 preview.vite.config.js
+
+# ビルドのたびに作り直す版の目印（scripts/write-version.mjs）
+public/version.json
