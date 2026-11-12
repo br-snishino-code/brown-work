@@ -4863,6 +4863,26 @@ function AttendanceApp() {
   const decideCorrection = async (id, decision) => {
     const correction = data.corrections.find((c) => c.id === id);
     if (!correction) return;
+
+    // 承認すると出勤と退勤が同じ時刻になる申請は、承認できません。
+    // 申請の画面では止めていますが、次の2つの場合にここへ届きます。
+    //   ・同時刻を止める前（2026年11月12日より前）に出された申請
+    //   ・申請のあとに管理者がもう一方の時刻を入れて、同じになった場合
+    if (decision === 'approved') {
+      const req = correction.requested || {};
+      const exist = (data.records[correction.employeeId] || {})[correction.date] || {};
+      const resultIn = req.clockIn || (exist.clockIn ? hhmm(new Date(exist.clockIn)) : '');
+      const resultOut = req.clockOut || (exist.clockOut ? hhmm(new Date(exist.clockOut)) : '');
+      if (isSameClockTime(resultIn, resultOut)) {
+        show(
+          `承認すると出勤と退勤がどちらも${resultIn}になり、実働0分になります。`
+          + '本人に出し直してもらうか、却下してから勤怠一覧で直してください',
+          'warn'
+        );
+        return;
+      }
+    }
+
     const { error } = await supabase
       .from('corrections')
       .update({ status: decision, decided_at: new Date().toISOString() })
