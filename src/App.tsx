@@ -40,6 +40,7 @@ import {
 import { mergeCommuteItems } from './payslipDisplay';
 import { autoBreakMinutes, scheduledWorkMinutes } from './breakTime';
 import { isSameClockTime, sameTimeEdits } from './attendanceEdit';
+import { parseBuildId, shouldPromptReload, buildTimeLabel } from './appVersion';
 import {
   commuteRowSubtotal, isSavableCommuteRow, commuteSavedTotal,
   incompleteCommuteRows, incompleteCommuteLabel,
@@ -9869,6 +9870,96 @@ function ClockOutConfirmModal({ now, standardMinutes, onClose, onConfirm }) {
 //   画面では自動で出した分数を見せるだけにしています。
 //   申請には分数を入れません（承認したときに、そのときの打刻から
 //   自動で出し直されます）。
+// 新しい版が出たことを知らせる帯。
+//
+// 【なぜ必要か】
+//   ホーム画面に追加したアプリや、開きっぱなしのタブは、
+//   新しい版を出しても再読み込みされるまで古いまま動き続けます。
+//   「直したはずの動きが直っていない」の原因になります。
+//
+// 【やり方】
+//   ビルドのたびに public/version.json の目印が変わります。
+//   開いたときの目印を控えておき、
+//     ・画面に戻ってきたとき（別のアプリから切り替えたとき）
+//     ・10分おき
+//   に読み直して、違っていれば帯を出します。
+//   自分の版を埋め込まずに済むので、ビルドの設定はそのままです。
+//
+//   押したときは、ためこんだ控え（キャッシュ）を消してから読み込み直します。
+//   ホーム画面のアプリでも確実に新しい版になるようにするためです。
+function NewVersionBanner() {
+  const firstBuildRef = useRef(null);
+  const [newBuild, setNewBuild] = useState(null);
+  const [reloading, setReloading] = useState(false);
+
+  useEffect(() => {
+    let stopped = false;
+    const check = async () => {
+      try {
+        // 配信側や端末に古いものが残らないよう、毎回ちがう印を付けて取りに行きます
+        const res = await fetch(`/version.json?t=${Date.now()}`, { cache: 'no-store' });
+        if (!res.ok || stopped) return;
+        const id = parseBuildId(await res.json());
+        if (!id || stopped) return;
+        if (firstBuildRef.current == null) {
+          firstBuildRef.current = id;
+          return;
+        }
+        if (shouldPromptReload(firstBuildRef.current, id)) setNewBuild(id);
+      } catch {
+        // つながらないときは何もしません（オフラインでも邪魔をしないため）
+      }
+    };
+    check();
+    const timer = setInterval(check, 10 * 60 * 1000);
+    const onVisible = () => { if (document.visibilityState === 'visible') check(); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, []);
+
+  const reloadNow = async () => {
+    setReloading(true);
+    try {
+      if ('caches' in window) {
+        const names = await caches.keys();
+        await Promise.all(names.map((n) => caches.delete(n)));
+      }
+    } catch {
+      // 消せなくても読み込み直します
+    }
+    window.location.reload();
+  };
+
+  if (!newBuild) return null;
+  const when = buildTimeLabel(newBuild);
+  return (
+    // 画面の下に固定します。上に置くと、ログイン後の貼り付く見出しと重なるためです。
+    <div
+      className="fixed inset-x-0 bottom-0 z-50 bg-sky-600 text-white px-4 pt-2.5 flex items-center gap-3 shadow-[0_-2px_12px_rgba(0,0,0,0.18)]"
+      style={{ paddingBottom: 'calc(0.625rem + env(safe-area-inset-bottom))' }}
+    >
+      <RefreshCw size={15} className="shrink-0" />
+      <div className="text-[12.5px] font-bold leading-snug">
+        新しい版が出ています{when ? `（${when} 更新）` : ''}
+        <span className="block text-[11px] font-normal text-sky-100">
+          いまの画面は古いままです。押すと最新になります。
+        </span>
+      </div>
+      <button
+        onClick={reloadNow}
+        disabled={reloading}
+        className="ml-auto shrink-0 rounded-lg bg-white/95 disabled:bg-white/60 px-3 py-1.5 text-[12px] font-bold text-sky-700"
+      >
+        {reloading ? '更新中…' : '最新にする'}
+      </button>
+    </div>
+  );
+}
+
 function CorrectionModal({ dateKey, record, pending = null, onClose, onSubmit, onCancelRequest }) {
   const requested = pending?.requested || null;
   const recordIn = record?.clockIn ? hhmm(new Date(record.clockIn)) : '';
@@ -36581,3 +36672,8 @@ export default function AttendanceAppRoot() {
     </AppErrorBoundary>
   );
 }
+
+export { CorrectionModal };
+
+// ログイン前の画面でも出せるよう、ここから書き出しています（src/main.tsx で使用）
+export { NewVersionBanner };

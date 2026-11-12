@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
+    "prebuild": "node scripts/write-version.mjs",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
     "check-names": "tsc --noEmit --jsx preserve --target es2020 --lib es2020,dom --moduleResolution bundler --skipLibCheck --noImplicitAny false src/App.tsx | grep -E 'Cannot find name|used before its declaration|Block-scoped variable' || true",
