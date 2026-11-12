@@ -39,6 +39,7 @@ import {
 } from './lateDeduction';
 import { mergeCommuteItems } from './payslipDisplay';
 import { autoBreakMinutes, scheduledWorkMinutes } from './breakTime';
+import { isSameClockTime, sameTimeEdits } from './attendanceEdit';
 import {
   commuteRowSubtotal, isSavableCommuteRow, commuteSavedTotal,
   incompleteCommuteRows, incompleteCommuteLabel,
@@ -905,6 +906,39 @@ const NEW_PERF_CONTRACT_FIELDS = [
   { key: 'mesh', label: 'メッシュ' },
 ];
 
+// エンパケ成約・後日成約で入力する項目（2026年11月から、ネットだけ）。
+//
+// それまでは新規ご成約内訳と同じ6項目を並べていましたが、
+// この2つで記録するのはネットだけ、とのご指示で絞りました。
+//
+// すでに保存されている月のテレビ・10G・セキュパ・メッシュの数値は
+// 消していません。ポイントの計算（NEW_PERF_POINTS）は入っている値を
+// そのまま足すため、過去の月のポイントはこれまでと変わりません。
+// ただし画面には出なくなるため、入っている日には注意書きを出します。
+const NEW_PERF_NET_ONLY_FIELDS = [{ key: 'net', label: 'ネット' }];
+
+// 画面から消した項目（入力済みの値が残っていないかを調べるのに使う）
+const NEW_PERF_HIDDEN_KEYS = NEW_PERF_CONTRACT_FIELDS
+  .filter((f) => !NEW_PERF_NET_ONLY_FIELDS.some((n) => n.key === f.key))
+  .map((f) => f.key);
+
+/** エンパケ・後日成約に、画面から消した項目の入力が残っている日を探す */
+function hiddenNewPerfEntries(daily) {
+  const out = [];
+  Object.entries(daily || {}).forEach(([day, data]) => {
+    ['empake', 'later'].forEach((section) => {
+      NEW_PERF_HIDDEN_KEYS.forEach((key) => {
+        const v = Number(data?.[section]?.[key]) || 0;
+        if (v > 0) {
+          const label = NEW_PERF_CONTRACT_FIELDS.find((f) => f.key === key)?.label || key;
+          out.push({ day: Number(day), section, key, label, value: v });
+        }
+      });
+    });
+  });
+  return out.sort((a, b) => a.day - b.day);
+}
+
 const emptyNewPerfDay = () => ({
   store: '', targets: '', approaches: '', negotiations: '',
   contract: { net: '', tvMulti: '', tvBasic: '', g10: '', secpack: '', mesh: '' },
@@ -1028,7 +1062,15 @@ function computeEoIncentive(staffMonthData, groupFlags, upsellRank) {
   if (groupFlags?.cancelTargetMet) newPointsForJudge += 6;
   if (groupFlags?.empakeTargetMet && empakeCount >= 4) newPointsForJudge += 5;
 
-  const isHalf = g10HalfOverride != null ? g10HalfOverride : (approxG10Rate != null && approxG10Rate < 0.4);
+  // 10G付帯率による半額は、管理者のチェックで決めます（2026年11月から）。
+  //
+  // それまでは「画面に出ている参考値が40%未満なら自動で半額」としていました。
+  // ところがエンパケ成約・後日成約から10Gの入力欄を外したため、参考値の
+  // 分子（10G）がそれらの分だけ入らなくなり、実際より低く出ます。
+  // 自動判定のままだと、本来は半額でない方まで半額になってしまうため、
+  // 管理者が「10G付帯率が40%未満」にチェックを入れたときだけ半額にします。
+  // approxG10Rate は画面に出す参考値としてだけ使っています。
+  const isHalf = g10HalfOverride === true;
 
   let newAcquisitionAmount = 0;
   const eligible = existingPoints >= 60 && newPointsForJudge >= 80 && empakeCount >= 3;
@@ -4638,6 +4680,18 @@ function AttendanceApp() {
     };
     const clockInCleared = patch.clockIn === '';
     const clockOutCleared = patch.clockOut === '';
+
+    // 出勤と退勤が同じ時刻になる修正は受け付けません。
+    // 実働0分の記録ができてしまい、どちらかの打ち間違いであることがほとんどのためです。
+    // 片方だけ直すときは、もう一方の今の時刻と見比べます。
+    // 空にする修正（打刻なしに戻す）は、比べる相手がいないので対象外です。
+    const nextIn = patch.clockIn || (clockInCleared ? '' : (existing?.clockIn ? hhmm(new Date(existing.clockIn)) : ''));
+    const nextOut = patch.clockOut || (clockOutCleared ? '' : (existing?.clockOut ? hhmm(new Date(existing.clockOut)) : ''));
+    if (isSameClockTime(nextIn, nextOut)) {
+      if (!opts.silent) show(`${dateLabel(dateStr)}：出勤と退勤が同じ時刻（${nextIn}）です。実働0分になるため保存できません`, 'warn');
+      return false;
+    }
+
     const payload = {
         employee_id: targetEmployeeId,
         date: dateStr,
@@ -9807,7 +9861,16 @@ function CorrectionModal({ dateKey, record, pending = null, onClose, onSubmit, o
   const [sending, setSending] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [confirmCancel, setConfirmCancel] = useState(false);
-  const canSubmit = reason.trim().length > 0 && (clockIn || clockOut) && !sending && !cancelling;
+
+  // 出勤と退勤が同じ時刻のときは申請できません。
+  // 実働0分の記録ができてしまい、どちらかの打ち間違いであることがほとんどのためです。
+  // 片方しか入れていないときは、いま記録されているもう一方の時刻と見比べます
+  // （例：出勤 9:00 が記録済みの日に、退勤だけ 9:00 で出したとき）。
+  const cmpIn = clockIn || recordIn;
+  const cmpOut = clockOut || recordOut;
+  const sameTime = isSameClockTime(cmpIn, cmpOut);
+
+  const canSubmit = reason.trim().length > 0 && (clockIn || clockOut) && !sameTime && !sending && !cancelling;
 
   // 休憩は、修正後の出勤・退勤から自動で出します。
   // 片方しか入れていないときは、いま記録されている方の時刻で補います。
@@ -9900,8 +9963,16 @@ function CorrectionModal({ dateKey, record, pending = null, onClose, onSubmit, o
             <input type="time" value={clockIn} onChange={(e) => setClockIn(e.target.value)} style={{ WebkitAppearance: 'none', appearance: 'none' }} className="block w-full min-w-0 max-w-full box-border bg-white border border-slate-200 rounded-lg px-3 py-2.5 font-mono text-[16px]" />
           </Field>
           <Field label="退勤時刻">
-            <input type="time" value={clockOut} onChange={(e) => setClockOut(e.target.value)} style={{ WebkitAppearance: 'none', appearance: 'none' }} className="block w-full min-w-0 max-w-full box-border bg-white border border-slate-200 rounded-lg px-3 py-2.5 font-mono text-[16px]" />
+            <input type="time" value={clockOut} onChange={(e) => setClockOut(e.target.value)} style={{ WebkitAppearance: 'none', appearance: 'none' }} className={`block w-full min-w-0 max-w-full box-border bg-white border rounded-lg px-3 py-2.5 font-mono text-[16px] ${sameTime ? 'border-rose-400' : 'border-slate-200'}`} />
           </Field>
+          {sameTime && (
+            <div className="rounded-lg border border-rose-300 bg-rose-50 px-3 py-2.5 text-[12px] text-rose-800">
+              <b>出勤と退勤が同じ時刻（{cmpIn}）です。</b>
+              <div className="mt-0.5 text-[11.5px] text-rose-700">
+                このままでは実働0分になります。どちらかの時刻を直してから申請してください。
+              </div>
+            </div>
+          )}
           {/* 休憩は入力してもらわず、上の2つから自動で出す */}
           <Field label="休憩時間">
             <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5">
@@ -10408,11 +10479,11 @@ const NEW_PERF_LATER_META_FIELDS = [
 
 const NEW_PERF_COLUMN_GROUPS = [
   { label: '基本', fields: NEW_PERF_BASIC_FIELDS, path: null },
-  { label: '新規ご成約内訳', fields: NEW_PERF_CONTRACT_FIELDS, path: 'contract' },
+  { label: '新規ご成約内訳（エンパケ後日タブ登録分含む）', fields: NEW_PERF_CONTRACT_FIELDS, path: 'contract' },
   { label: 'エンパケ', fields: [{ key: 'empakeCount', label: '配布枚数' }], path: null },
-  { label: 'エンパケご成約内訳', fields: NEW_PERF_CONTRACT_FIELDS, path: 'empake' },
+  { label: 'エンパケ成約（web登録分のみ）', fields: NEW_PERF_NET_ONLY_FIELDS, path: 'empake' },
   { label: '後日成約', fields: NEW_PERF_LATER_META_FIELDS, path: null },
-  { label: '後日成約内訳', fields: NEW_PERF_CONTRACT_FIELDS, path: 'later' },
+  { label: '後日成約（自身案内かつ別スタッフ受付分）', fields: NEW_PERF_NET_ONLY_FIELDS, path: 'later' },
 ];
 
 // ---- 実績の変更点を洗い出す ----
@@ -10550,7 +10621,31 @@ const HEAD_ROW_H = 'h-[28px] py-0 leading-[28px]';
 
 function EoNewPerfTable({ year, month, daily, onUpdateDay, readOnly = false }) {
   const days = Array.from({ length: lastDayOfMonth(year, month) }, (_, i) => i + 1);
+  // エンパケ成約・後日成約から外した項目（テレビ・10G・セキュパ・メッシュ）に
+  // 入力が残っている日。画面には出ないのにポイントには入るため、ここで知らせる。
+  const hidden = hiddenNewPerfEntries(daily);
   return (
+    <>
+    {hidden.length > 0 && (
+      <div className="mb-2 rounded-lg border border-amber-300 bg-amber-50 px-3.5 py-2.5">
+        <div className="flex items-center gap-1.5">
+          <AlertTriangle size={13} className="text-amber-700 shrink-0" />
+          <span className="text-[12px] font-bold text-amber-900">
+            いまは入力欄が無い項目に、以前の入力が残っています（ポイントには入っています）
+          </span>
+        </div>
+        <div className="mt-1 space-y-0.5">
+          {hidden.map((h) => (
+            <div key={`${h.day}-${h.section}-${h.key}`} className="text-[11.5px] text-amber-900">
+              ・{h.day}日　{h.section === 'empake' ? 'エンパケ成約' : '後日成約'}・{h.label}：<b>{h.value}</b>
+            </div>
+          ))}
+        </div>
+        <div className="mt-1 text-[11px] text-amber-700">
+          エンパケ成約・後日成約はネットだけを入力する形に変わりました。この数値を消したいときはご連絡ください。
+        </div>
+      </div>
+    )}
     <div className="overflow-auto max-h-[70vh] border border-slate-200 rounded-xl">
       <table className="text-[11px] border-collapse">
         <thead>
@@ -10601,6 +10696,7 @@ function EoNewPerfTable({ year, month, daily, onUpdateDay, readOnly = false }) {
         </tbody>
       </table>
     </div>
+    </>
   );
 }
 
@@ -10869,7 +10965,12 @@ function EoPerformanceSection({ employeeId, session, settings, onNotifyAdmin, is
         </div>
       )}
       {sheet === 'new' && approxG10Rate != null && (
-        <div className="px-5 pb-3 text-[11px] text-slate-400">10G付帯率（参考値・ネット成約数に対する10G成約数の割合）：{Math.round(approxG10Rate * 1000) / 10}%</div>
+        <div className="px-5 pb-3 text-[11px] text-slate-400">
+          10G付帯率（参考値・ネット成約数に対する10G成約数の割合）：{Math.round(approxG10Rate * 1000) / 10}%
+          <div className="text-[10.5px] text-slate-300">
+            分母のネットにはエンパケ成約・後日成約も入りますが、10Gはこの2つに入力欄が無いため、実際より低く出ます。半額にするかどうかは管理者のチェックで決めます。
+          </div>
+        </div>
       )}
 
       {loading ? (
@@ -11983,9 +12084,12 @@ function EoAdminPerfEditModal({ employee, year, month, session, onNotifyEmployee
     if (!samePerfValue(original.cancellations, cancellations)) {
       scalarDiff.push({ fieldLabel: 'キャンセル件数', from: perfValueText(original.cancellations), to: perfValueText(cancellations) });
     }
-    if (original.g10Half !== g10Half) {
-      const label = (s) => (s === 'half' ? '半額にする' : s === 'full' ? '半額にしない' : '自動判定（10G付帯率で判定）');
-      scalarDiff.push({ fieldLabel: '10G付帯率による半額の扱い', from: label(original.g10Half), to: label(g10Half) });
+    // チェックが入っているかどうかだけを比べます。
+    // 保存済みの古い値（自動判定＝空）はチェックなしと同じ扱いのため、
+    // 空のまま開いて閉じただけでは「変更あり」になりません。
+    if ((original.g10Half === 'half') !== (g10Half === 'half')) {
+      const label = (s) => (s === 'half' ? 'チェックあり（半額）' : 'チェックなし（半額にしない）');
+      scalarDiff.push({ fieldLabel: '10G付帯率が40%未満', from: label(original.g10Half), to: label(g10Half) });
     }
   }
   const changeLines = [
@@ -12126,12 +12230,22 @@ function EoAdminPerfEditModal({ employee, year, month, session, onNotifyEmployee
                 <Field label={<>キャンセル件数<span className="whitespace-nowrap">（-3P/件）</span></>}>
                   <input type="number" value={cancellations} onChange={(e) => setCancellations(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[13px] text-center" />
                 </Field>
-                <Field label="10G付帯率による半額の扱い">
-                  <select value={g10Half} onChange={(e) => setG10Half(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px] bg-white">
-                    <option value="">自動判定（参考値が40%未満なら半額）</option>
-                    <option value="half">半額にする</option>
-                    <option value="full">半額にしない</option>
-                  </select>
+                <Field label="10G付帯率">
+                  {/* 自動判定はやめ、管理者のチェックで半額を決めます。
+                      エンパケ成約・後日成約から10Gの欄を外したため、
+                      画面の参考値が実際より低く出るようになったためです。 */}
+                  <label className="flex items-start gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={g10Half === 'half'}
+                      onChange={(e) => setG10Half(e.target.checked ? 'half' : 'full')}
+                      className="mt-0.5 w-4 h-4 shrink-0 accent-slate-900"
+                    />
+                    <span className="text-[13px] text-slate-700 leading-snug">
+                      40%未満
+                      <span className="block text-[11px] text-slate-400">新規獲得インセンティブを半額にします</span>
+                    </span>
+                  </label>
                 </Field>
               </div>
             )}
@@ -15142,6 +15256,7 @@ const HELP_STAFF = [
       { q: '申請はどこからしますか', a: '休暇・月次勤怠・交通費・年末調整・シフト希望は「各種申請」タブからです。開くと一覧で並ぶので、必要なものを選んでください。未提出のものがあるときはタブに印が付きます。実績の入力と確定シフトの確認は「勤怠」タブの中にあります。ご自身の登録情報の確認と変更申請だけは、画面右上のアイコンを押して「登録情報の閲覧・変更」から行います。' },
       { q: 'シフト希望はどこから出しますか', a: '受付が始まると「各種申請」に「シフト希望」が出ます。1日ごとに「●（出勤可能）」「×（希望休）」「有給（SV報告済）」から選び、すべての日を選ぶと提出できます。★が付いている日は出勤依頼日（土日祝）です。「残りを●にする」で未選択の日をまとめて●にできます。締切前であれば、提出後も同じ画面から出し直せます。受付が終わると項目は表示されなくなります。' },
       { q: '実績はどこで入力しますか', a: '「勤怠」タブを開き、上の「実績」を押してください。入力する項目は、所属している業務によって自動で切り替わります。対象の年月を選び、新規実績・既存実績（アップセルLTV）を日ごとに入力します。入力の途中でも「一時保存」で残せます（新規・既存の両方がまとめて保存されます）。入力が終わったら「一時保存」の隣の「提出する」を押してください。提出後に直したときは、同じボタンが「この内容で出し直す」になります。保存していない入力があるときはボタンの下に「保存していない入力があります」と出て、対象月を切り替えようとすると確認が出ます。' },
+      { q: '「エンパケ成約」と「後日成約」はネットしか入力できませんか', a: 'はい。2026年11月から、この2つはネットだけを入力する形になりました。テレビ・10G・セキュパ・メッシュの欄はありません。それらを含むご成約は「新規ご成約内訳（エンパケ後日タブ登録分含む）」に入力してください。「エンパケ成約（web登録分のみ）」はweb登録分、「後日成約（自身案内かつ別スタッフ受付分）」はご自身が案内して別のスタッフが受け付けた分です。なお、欄を減らす前に入力されていた数値はそのまま残しており、ポイントにも入っています。残っている日がある月は、表の上に黄色でお知らせが出ます。' },
       { q: '月次勤怠申請とは', a: '前月分の勤怠を確認して提出する手続きです。「各種申請」→「月次勤怠申請」から、交通費とまとめて提出できます。提出すると管理者が確認し、最後にマスター管理者が最終承認して確定します。確定後にその月の給与明細が公開されます。未提出のときは「勤怠」タブにもお知らせが出ます。' },
     ],
   },
@@ -15151,6 +15266,7 @@ const HELP_STAFF = [
       { q: '出勤・退勤の打刻はどこからしますか', a: '「勤怠」タブを開くと、画面の中央に大きな打刻ボタンが表示されます。出勤時は「出勤」、退勤時は「退勤」を押してください。押した時刻がそのまま記録されます。' },
       { q: '打刻を忘れてしまいました', a: '「勤怠」タブの「勤怠一覧」から、該当する日付を選んで修正申請を出してください。正しい時刻と理由を入力して送信すると、管理者の承認後に記録が修正されます。当日中に気づいた場合も同じ手順です。' },
       { q: '打刻の時刻を間違えました', a: '打刻をやり直すことはできませんが、修正申請を出せば直せます。手順は打刻忘れと同じで、「勤怠一覧」から該当日の修正申請を出してください。' },
+      { q: '出勤と退勤が同じ時刻だと申請できません', a: '出勤と退勤が同じ時刻のままでは、その日が実働0分になってしまうため申請できません。退勤の欄に出勤の時刻を入れてしまっているなど、どちらかの打ち間違いであることがほとんどです。赤い枠に出ている時刻を見て、どちらかを正しい時刻に直してから申請してください。片方だけを直す申請のときは、もう一方のいま記録されている時刻と見比べています。' },
       { q: '出した修正申請の内容を確認したい', a: '2つの場所で確認できます。1つは「勤怠」タブの勤怠履歴で、申請中の日の下に「修正申請中：」として、修正前の時刻・修正後の時刻・理由が並びます。もう1つはその日の修正ボタン（鉛筆のしるし）を押したときの画面で、上に「この日は申請中です」として同じ内容が出ます。「各種申請」の「進行中の手続き」からも、勤怠修正の行で同じ内容を確認できます。' },
       { q: '間違えて出した修正申請を取り消したい', a: '「勤怠」タブの勤怠履歴で、申請中の日の修正ボタン（鉛筆のしるし）を押してください。画面の下にある「この申請を取り消す」を押し、確認の「取り消す」を押すと取り消せます。取り消せるのは、まだ承認も却下もされていない申請だけです。取り消したあと、同じ日にあらためて申請できます。なお内容を直したいだけであれば、取り消さずに同じ画面で時刻や理由を直して「申請し直す」を押してください。' },
       { q: '修正申請の休憩時間はどこで入れますか', a: '入れる必要はありません。入力していただいていた休憩時間の欄は無くし、申請する出勤・退勤の時刻から自動で出すようにしました。出勤から退勤までが6時間以上なら1時間、6時間未満なら0分です。申請の画面には自動で出た分数が出ます。実際の休憩が大きく違う場合は、理由の欄に書き添えてください。管理者が個別に直せます。' },
@@ -15228,7 +15344,9 @@ const HELP_ADMIN = [
       { q: '遅刻・早退を承認するときに決めることは', a: '「勤怠」→「勤怠一覧」の上に「承認待ちの出勤」が出ます。各件に「引く」「引かない」の2つのボタンがあり、遅刻早退控除を引くかどうかをその場で決めます。初めは打刻の区分どおりの既定が選ばれています。出勤の「イベント（会議・研修など）」と退勤の「イベント・研修」は「引かない」、「遅刻」「自己都合」「その他」は「引く」が既定です。既定と違う選び方をすると、その旨が画面に出ます。メモ欄に理由を残せます。却下した場合は控除を引く扱いになります。遅刻・早退が0分の日は決めることがないため、ボタンは出ません。' },
       { q: '遅刻早退控除から外した時間はどこで分かりますか', a: '3か所で分かります。①「勤怠」→「勤怠一覧」の「遅刻/早退」の欄に「控除なし ◯分」と出ます。②「給与」タブで対象月を開くと、集計に「控除から外した遅刻・早退」が出て、根拠の説明にも理由が出ます。③スタッフ側の「勤怠履歴」の各日のメモに「遅刻◯分は控除しません」と出ます。なお勤怠一覧の「遅刻/早退」に出る分数は実際の遅刻・早退（事実）で、控除から外しても変わりません。CSVにも「控除から外した(分)」の列が入ります。' },
       { q: '休憩時間はどう決まりますか', a: 'ジョブカンの自動休憩と同じ決まりです。出勤から退勤までの拘束時間が6時間以上の日に1時間を差し引き、6時間未満の日は差し引きません。休憩の打刻はありません。所定勤務時間からも同じように差し引くため、所定が9時から18時の方は所定労働時間が8時間、9時から14時の方は5時間（休憩なし）になります。個別に直したいときは勤怠一覧から休憩の分数を手で入力してください。手で入れた値がそのまま使われます。なお休憩を何時に取ったかは記録していないため、深夜帯からは差し引きません（ジョブカンの「普通勤務優先」と同じ扱いです）。' },
+      { q: '勤怠一覧で出勤と退勤を同じ時刻にできません', a: 'その日が実働0分で確定してしまうため、同じ時刻では保存できません。「まとめて更新」の上に、どのスタッフのどの日かと、同じになっている時刻を赤字で出します。どちらかを正しい時刻に直すか、時刻の欄の右にある「×」で空にしてから保存してください。' },
       { q: '勤怠一覧で誤って入れた時刻を空に戻すには', a: '時刻の欄の右にある「×」を押すと空になります。そのあと下の「まとめて更新」を押すと保存されます。空にして保存すると、その時刻は打刻なしに戻ります。出勤時刻を空にすると、その打刻に付いていた区分（遅刻・イベントなど）やメモ、位置情報もいっしょに消えます。その日の記録を丸ごと消したいときは、行の「削除」をお使いください（マスター管理者のみ）。' },
+      { q: '10G付帯率による半額はどう決まりますか', a: '実績の編集画面にある「10G付帯率」の「40%未満」にチェックを入れた月だけ、新規獲得インセンティブが半額になります。2026年11月までは画面の参考値が40%未満なら自動で半額にしていましたが、エンパケ成約・後日成約から10Gの入力欄を外したため、参考値の分子に入らない分が出て実際より低く出るようになりました。そのため自動判定はやめ、管理者のチェックで決める形にしています。参考値は表の上に引き続き出ますので、目安としてご覧ください。チェックを入れていない月は半額になりません。' },
       { q: 'スタッフを取り消した修正申請はどこで分かりますか', a: '「勤怠」→「勤怠修正申請」の「処理済みの申請」に「取り消し済み」として並びます。承認待ちの一覧からは外れるので、承認は不要です。取り消されたときは画面右上のベルのお知らせにも届きます。' },
       { q: '打刻漏れはどこで分かりますか', a: '「勤怠」→「勤怠修正」を開くと、上部に赤い枠で日付とスタッフ名が表示されます。各行の「この日の勤怠を修正する」を押すと、その日のそのスタッフに絞り込んだ勤怠一覧へ移動し、退勤時刻をその場で入力できます。ダッシュボードのアラート一覧にも件数が表示されます。' },
       { q: 'シフトの氏名が一致しないときは', a: 'スプレッドシート側の氏名を、Brown Work に登録されている氏名と同じにしてください。氏名が合わない方のシフトは Brown Work に入らず、アプリの画面には何も出ません。一致しなかった方は、シフト表で「Brown Work」→「確定シフトを送る」を押したときに出るダイアログに【氏名が一致しなかった方】として並ぶので、そこでご確認ください。退職した方がシートに残っている場合は、自動で飛ばすので直す必要はありません。' },
@@ -29263,6 +29381,8 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
   const [employeeFilter, setEmployeeFilter] = useState('all');
   const [groupFilter, setGroupFilter] = useState('all');
   const [edits, setEdits] = useState({}); // { 'employeeId|date': { clockIn, clockOut, breakMinutes, approve } }
+  // 出勤と退勤が同じ時刻になっている行。あるあいだは「まとめて更新」を止める
+  const badEdits = sameTimeEdits(edits);
   const [savingAll, setSavingAll] = useState(false);
   const [monthlyViewTarget, setMonthlyViewTarget] = useState(null); // { employeeId, employeeName, month }
   const [deleteTarget, setDeleteTarget] = useState(null); // 打刻を削除する行
@@ -29740,26 +29860,49 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
           })}</div>
         )}
         {rows.length > 0 && (
-          <div className="px-5 py-3.5 border-t border-slate-100 flex items-center justify-end gap-2">
-            {Object.keys(edits).length > 0 && (
-              <button onClick={() => setEdits({})} className="text-[12px] font-medium text-slate-400 px-3 py-2">変更を取り消す</button>
+          <div className="px-5 py-3.5 border-t border-slate-100 space-y-2.5">
+            {/* 出勤と退勤が同じ時刻のまま保存すると、その日が実働0分で確定してしまう */}
+            {badEdits.length > 0 && (
+              <div className="rounded-lg border border-rose-300 bg-rose-50 px-3.5 py-2.5">
+                <div className="flex items-center gap-1.5">
+                  <AlertTriangle size={13} className="text-rose-600 shrink-0" />
+                  <span className="text-[12px] font-bold text-rose-800">出勤と退勤が同じ時刻の行があるため、まだ保存できません</span>
+                </div>
+                <div className="mt-1 space-y-0.5">
+                  {badEdits.map((b) => {
+                    const row = rows.find((r) => `${r.employeeId}|${r.date}` === b.key);
+                    return (
+                      <div key={b.key} className="text-[11.5px] text-rose-800">
+                        ・{row ? `${row.employeeName}（${row.dateShort}）` : b.key}：出勤・退勤とも <b>{b.time}</b>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="mt-1 text-[11px] text-rose-700">実働0分になります。どちらかの時刻を直すか、「×」で空にしてください。</div>
+              </div>
             )}
-            <button
-              onClick={async () => {
-                setSavingAll(true);
-                const changes = Object.entries(edits).map(([key, patch]) => {
-                  const [empId, dateStr] = key.split('|');
-                  return { employeeId: empId, date: dateStr, patch };
-                });
-                await onAdminUpdateAttendanceBatch(changes);
-                setEdits({});
-                setSavingAll(false);
-              }}
-              disabled={Object.keys(edits).length === 0 || savingAll}
-              className="rounded-lg bg-slate-900 disabled:bg-slate-200 text-white px-5 py-2.5 text-[13px] font-bold"
-            >
-              {savingAll ? '更新中…' : `まとめて更新${Object.keys(edits).length > 0 ? `（${Object.keys(edits).length}件）` : ''}`}
-            </button>
+            <div className="flex items-center justify-end gap-2">
+              {Object.keys(edits).length > 0 && (
+                <button onClick={() => setEdits({})} className="text-[12px] font-medium text-slate-400 px-3 py-2">変更を取り消す</button>
+              )}
+              <button
+                onClick={async () => {
+                  if (badEdits.length > 0) return;
+                  setSavingAll(true);
+                  const changes = Object.entries(edits).map(([key, patch]) => {
+                    const [empId, dateStr] = key.split('|');
+                    return { employeeId: empId, date: dateStr, patch };
+                  });
+                  await onAdminUpdateAttendanceBatch(changes);
+                  setEdits({});
+                  setSavingAll(false);
+                }}
+                disabled={Object.keys(edits).length === 0 || savingAll || badEdits.length > 0}
+                className="rounded-lg bg-slate-900 disabled:bg-slate-200 text-white px-5 py-2.5 text-[13px] font-bold"
+              >
+                {savingAll ? '更新中…' : `まとめて更新${Object.keys(edits).length > 0 ? `（${Object.keys(edits).length}件）` : ''}`}
+              </button>
+            </div>
           </div>
         )}
       </div>
@@ -29770,6 +29913,8 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
 function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onBack, onAdminUpdateAttendanceBatch, onDeleteAttendance, isMasterAdmin = false, isDesktop }) {
   const [month, setMonth] = useState(initialMonth); // 'YYYY-MM'
   const [edits, setEdits] = useState({}); // { date: { clockIn, clockOut, breakMinutes, approve } }
+  // 出勤と退勤が同じ時刻になっている日。あるあいだは「まとめて更新」を止める
+  const badEdits = sameTimeEdits(edits);
   const [savingAll, setSavingAll] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null); // 打刻を削除する日
   // 所定の始業・終業をまとめて直す（規定勤怠時間の登録漏れで誤った時刻が
@@ -29853,6 +29998,7 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
   const statutoryDates = new Set(statutory.dates);
 
   const saveAll = async () => {
+    if (sameTimeEdits(edits).length > 0) return;
     setSavingAll(true);
     const changes = Object.entries(edits).map(([dateStr, patch]) => ({ employeeId, date: dateStr, patch }));
     await onAdminUpdateAttendanceBatch(changes);
@@ -30133,17 +30279,36 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
           />
         )}
         {rows.length > 0 && (
-          <div className="px-5 py-3.5 border-t border-slate-100 flex items-center justify-end gap-2">
-            {Object.keys(edits).length > 0 && (
-              <button onClick={() => setEdits({})} className="text-[12px] font-medium text-slate-400 px-3 py-2">変更を取り消す</button>
+          <div className="px-5 py-3.5 border-t border-slate-100 space-y-2.5">
+            {/* 出勤と退勤が同じ時刻のまま保存すると、その日が実働0分で確定してしまう */}
+            {badEdits.length > 0 && (
+              <div className="rounded-lg border border-rose-300 bg-rose-50 px-3.5 py-2.5">
+                <div className="flex items-center gap-1.5">
+                  <AlertTriangle size={13} className="text-rose-600 shrink-0" />
+                  <span className="text-[12px] font-bold text-rose-800">出勤と退勤が同じ時刻の日があるため、まだ保存できません</span>
+                </div>
+                <div className="mt-1 space-y-0.5">
+                  {badEdits.map((b) => (
+                    <div key={b.key} className="text-[11.5px] text-rose-800">
+                      ・{formatAdminDate(b.key).label}：出勤・退勤とも <b>{b.time}</b>
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-1 text-[11px] text-rose-700">実働0分になります。どちらかの時刻を直すか、「×」で空にしてください。</div>
+              </div>
             )}
-            <button
-              onClick={saveAll}
-              disabled={Object.keys(edits).length === 0 || savingAll}
-              className="rounded-lg bg-slate-900 disabled:bg-slate-200 text-white px-5 py-2.5 text-[13px] font-bold"
-            >
-              {savingAll ? '更新中…' : `まとめて更新${Object.keys(edits).length > 0 ? `（${Object.keys(edits).length}件）` : ''}`}
-            </button>
+            <div className="flex items-center justify-end gap-2">
+              {Object.keys(edits).length > 0 && (
+                <button onClick={() => setEdits({})} className="text-[12px] font-medium text-slate-400 px-3 py-2">変更を取り消す</button>
+              )}
+              <button
+                onClick={saveAll}
+                disabled={Object.keys(edits).length === 0 || savingAll || badEdits.length > 0}
+                className="rounded-lg bg-slate-900 disabled:bg-slate-200 text-white px-5 py-2.5 text-[13px] font-bold"
+              >
+                {savingAll ? '更新中…' : `まとめて更新${Object.keys(edits).length > 0 ? `（${Object.keys(edits).length}件）` : ''}`}
+              </button>
+            </div>
           </div>
         )}
       </div>
