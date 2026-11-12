@@ -3,3 +3,8 @@ dist
 .env
 .env.local
 .env.*.local
+
+# 画面を目で確かめるときに作る一時ファイル（リポジトリには入れません）
+preview/
+preview-dist/
+preview.vite.config.js
