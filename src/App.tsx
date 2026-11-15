@@ -40,6 +40,7 @@ import {
 import { mergeCommuteItems } from './payslipDisplay';
 import { autoBreakMinutes, scheduledWorkMinutes } from './breakTime';
 import { isSameClockTime, sameTimeEdits } from './attendanceEdit';
+import { hasPunchLocation, punchMapUrl, punchLocationLabel } from './punchLocation';
 import { parseBuildId, shouldPromptReload, buildTimeLabel } from './appVersion';
 import {
   commuteRowSubtotal, isSavableCommuteRow, commuteSavedTotal,
@@ -10188,6 +10189,43 @@ const BREAK_INPUT_CLASS = 'w-full box-border min-w-0 border border-slate-200 rou
 // 幅いっぱいで使うスマホの勤怠一覧ではこちら。付けないと、入力欄は
 // 渡した幅（デスクトップの表の w-[84px] など）のままです。
 // grow なしで幅いっぱいの指定を渡すと、「×」のぶんだけ横にはみ出します。
+// 打刻した場所を見るためのしるし（勤怠一覧）。
+//
+// 打刻のときに緯度・経度を記録しています（attendance_records の
+// clock_in_location / clock_out_location）。これまで記録はされていても
+// 画面に出す場所が無く、「どこで打刻したか」を確かめられませんでした。
+//
+// 押すとGoogleマップがその場所で開きます。アプリの外に出るため別のタブです。
+// 端末で位置情報を許可していない打刻は記録が空になるため、
+// 灰色のしるしにして「未取得」と分かるようにしています
+// （打刻そのものは記録されています）。
+function PunchLocationLink({ loc, what }) {
+  const url = punchMapUrl(loc);
+  if (!url) {
+    return (
+      <span
+        className="inline-flex items-center text-slate-300"
+        title={`${what}の位置情報は記録されていません（端末で許可されていない可能性があります）`}
+      >
+        <MapPin size={11} />
+      </span>
+    );
+  }
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noreferrer"
+      onClick={(e) => e.stopPropagation()}
+      // 指で押せるよう、見た目を変えずに当たり判定だけ広げています
+      className="inline-flex items-center p-1.5 -m-1.5 text-sky-600 hover:text-sky-700"
+      title={`${what}の場所を地図で開く（${punchLocationLabel(loc)}）`}
+    >
+      <MapPin size={11} />
+    </a>
+  );
+}
+
 function TimeInputWithClear({ value, onChange, className, label = 'この時刻を空にする', grow = false }) {
   const v = value || '';
   return (
@@ -15477,6 +15515,7 @@ const HELP_ADMIN = [
       { q: '確定シフトはどう取り込みますか', a: 'スプレッドシートで組んだシフト表から取り込みます。シフト表を開いて「Brown Work」→「確定シフトを送る」を押すと、Brown Work に反映されます。自動で送る設定もできます。取り込んだ内容は「勤怠」→「シフト」の一番上で確認できます。氏名が一致しなかった方は、シフト表で「確定シフトを送る」を押したときのダイアログに出ます。' },
       { q: 'シフト外の出勤とは', a: 'スタッフが提出したシフトで「休み」「有給」になっている日に出勤した記録です。打刻は止めずに、確認画面を出したうえで記録に印を付けています。ダッシュボードと勤怠一覧の上部に直近30日分が出るほか、打刻された時点でお知らせも届きます。応援や代打での出勤はこれにあたるため、理由を見てご判断ください。' },
       { q: '位置情報のアラートとは', a: '打刻時に位置情報が5回以上連続で記録されなかったスタッフを検知しています。端末の設定で位置情報が拒否されている可能性があるため、本人に確認してください。' },
+      { q: '打刻した場所を確認するには', a: '「勤怠」→「勤怠一覧」で、出勤・退勤の時刻の下に小さな青いしるしが出ます。押すとGoogleマップが別のタブで開き、その打刻がどこで行われたかを見られます。月間ページでも同じように出ます。位置情報が記録されていない打刻は灰色のしるし（幅の狭い画面では「未取得」）になります。端末で位置情報が許可されていないと記録されませんが、打刻そのものは記録されています。' },
       { q: '出勤規定日数の設定はどこですか', a: '「勤怠」→「その他」→「出勤規定日数設定」で、グループ別・月別に設定します。給与計算の基礎になる日数です。' },
     ],
   },
@@ -29644,6 +29683,9 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
       clockInPayDeductionNote: record?.clockInPayDeductionNote || '',
       clockOutPayDeduction: record?.clockOutPayDeduction || false,
       clockOutPayDeductionNote: record?.clockOutPayDeductionNote || '',
+      // 打刻したときの位置情報（地図のしるしに使います）
+      clockInLocation: record?.clockInLocation || null,
+      clockOutLocation: record?.clockOutLocation || null,
       breakMinutes: record ? getRecordedBreakMinutes(record, record.clockOut ? new Date(record.clockOut) : new Date()) : null,
       dateShort: formatAdminDate(dateStr).label,
       hasRecord: !!record,
@@ -29893,12 +29935,24 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
                           {r.clockInActual ? `実${r.clockInActual}` : ''}{r.clockInStatusLabel ? `・${r.clockInStatusLabel}` : ''}{r.clockInApproval ? `・${approvalSuffix(r.clockInApproval, r.clockInPayDeduction)}` : ''}
                         </div>
                       )}
+                      {/* 打刻した場所。押すと地図が開きます */}
+                      {r.clockIn && (
+                        <div className="mt-0.5 leading-none">
+                          <PunchLocationLink loc={r.clockInLocation} what="出勤" />
+                        </div>
+                      )}
                     </td>
                     <td className="px-2 py-2">
                       <TimeInputWithClear value={e.clockOut} onChange={(v) => setField('clockOut', v)} className="w-[84px] border border-slate-200 rounded px-1 py-1 font-mono text-[11.5px]" label="退勤時刻を空にする" />
                       {(r.clockOutActual || r.clockOutStatusLabel) && (
                         <div className={`text-[9.5px] font-sans whitespace-nowrap mt-0.5 ${approvalColorClass(r.clockOutApproval, r.clockOutPayDeduction, 'text-purple-600')}`}>
                           {r.clockOutActual ? `実${r.clockOutActual}` : ''}{r.clockOutStatusLabel ? `・${r.clockOutStatusLabel}` : ''}{r.clockOutApproval ? `・${approvalSuffix(r.clockOutApproval, r.clockOutPayDeduction)}` : ''}
+                        </div>
+                      )}
+                      {/* 打刻した場所。押すと地図が開きます */}
+                      {r.clockOut && (
+                        <div className="mt-0.5 leading-none">
+                          <PunchLocationLink loc={r.clockOutLocation} what="退勤" />
                         </div>
                       )}
                     </td>
@@ -29973,6 +30027,28 @@ function AttendanceAdminTab({ data, employeeAccounts, gpsAlerts = [], offShiftAl
                 {r.clockOutStatusLabel && <div className={`mt-1 text-[11px] font-medium ${approvalColorClass(r.clockOutApproval, r.clockOutPayDeduction, 'text-purple-600')}`}>{r.clockOutStatusLabel}{r.clockOutApproval ? `・${approvalSuffix(r.clockOutApproval, r.clockOutPayDeduction)}` : ''}{r.clockOutActual ? `（実打刻 ${r.clockOutActual}）` : ''}</div>}
                 {r.clockInPayDeduction && r.clockInPayDeductionNote && <div className="mt-1 text-[11px] text-rose-500">出勤メモ：{r.clockInPayDeductionNote}</div>}
                 {r.clockOutPayDeduction && r.clockOutPayDeductionNote && <div className="mt-1 text-[11px] text-rose-500">退勤メモ：{r.clockOutPayDeductionNote}</div>}
+                {/* 打刻した場所。しるしを押すと地図が開きます */}
+                {(r.clockIn || r.clockOut) && (
+                  <div className="mt-1 flex items-center gap-3 text-[11px] text-slate-400">
+                    <span>打刻場所</span>
+                    {r.clockIn && (
+                      <span className="inline-flex items-center gap-1">
+                        出勤
+                        {hasPunchLocation(r.clockInLocation)
+                          ? <PunchLocationLink loc={r.clockInLocation} what="出勤" />
+                          : <span className="text-slate-300">未取得</span>}
+                      </span>
+                    )}
+                    {r.clockOut && (
+                      <span className="inline-flex items-center gap-1">
+                        退勤
+                        {hasPunchLocation(r.clockOutLocation)
+                          ? <PunchLocationLink loc={r.clockOutLocation} what="退勤" />
+                          : <span className="text-slate-300">未取得</span>}
+                      </span>
+                    )}
+                  </div>
+                )}
                 {r.needsApproval && (
                   <div className="mt-1.5 text-[11px] font-bold text-amber-700">↑上の「承認待ちの出勤」パネルで承認してください</div>
                 )}
@@ -30081,6 +30157,9 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
         clockInPayDeductionNote: record?.clockInPayDeductionNote || '',
         clockOutPayDeduction: record?.clockOutPayDeduction || false,
         clockOutPayDeductionNote: record?.clockOutPayDeductionNote || '',
+        // 打刻したときの位置情報（地図のしるしに使います）
+        clockInLocation: record?.clockInLocation || null,
+        clockOutLocation: record?.clockOutLocation || null,
         // 遅刻・早退の基準。打刻した瞬間に記録へ書き込まれた値です
         scheduledStart: record?.scheduledStart || '',
         scheduledEnd: record?.scheduledEnd || '',
@@ -30293,12 +30372,24 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
                             {r.clockInStatusLabel}{r.clockInApproval ? `・${approvalSuffix(r.clockInApproval, r.clockInPayDeduction)}` : ''}
                           </div>
                         )}
+                        {/* 打刻した場所。押すと地図が開きます */}
+                        {r.clockIn && (
+                          <div className="mt-0.5 leading-none">
+                            <PunchLocationLink loc={r.clockInLocation} what="出勤" />
+                          </div>
+                        )}
                       </td>
                       <td className="px-3 py-2">
                         <TimeInputWithClear value={e.clockOut} onChange={(v) => setField('clockOut', v)} className="w-[92px] border border-slate-200 rounded px-1.5 py-1 font-mono text-[12px]" label="退勤時刻を空にする" />
                         {r.clockOutStatusLabel && (
                           <div className={`text-[9.5px] whitespace-nowrap mt-0.5 ${approvalColorClass(r.clockOutApproval, r.clockOutPayDeduction, 'text-purple-600')}`}>
                             {r.clockOutStatusLabel}{r.clockOutApproval ? `・${approvalSuffix(r.clockOutApproval, r.clockOutPayDeduction)}` : ''}
+                          </div>
+                        )}
+                        {/* 打刻した場所。押すと地図が開きます */}
+                        {r.clockOut && (
+                          <div className="mt-0.5 leading-none">
+                            <PunchLocationLink loc={r.clockOutLocation} what="退勤" />
                           </div>
                         )}
                       </td>
@@ -30378,6 +30469,28 @@ function EmployeeMonthlyPage({ data, employeeId, employeeName, initialMonth, onB
                   {r.clockOutStatusLabel && <div className={`mt-1 text-[11px] font-medium ${approvalColorClass(r.clockOutApproval, r.clockOutPayDeduction, 'text-purple-600')}`}>{r.clockOutStatusLabel}{r.clockOutApproval ? `・${approvalSuffix(r.clockOutApproval, r.clockOutPayDeduction)}` : ''}</div>}
                   {r.clockInPayDeduction && r.clockInPayDeductionNote && <div className="mt-1 text-[11px] text-rose-500">出勤メモ：{r.clockInPayDeductionNote}</div>}
                 {r.clockOutPayDeduction && r.clockOutPayDeductionNote && <div className="mt-1 text-[11px] text-rose-500">退勤メモ：{r.clockOutPayDeductionNote}</div>}
+                {/* 打刻した場所。しるしを押すと地図が開きます */}
+                {(r.clockIn || r.clockOut) && (
+                  <div className="mt-1 flex items-center gap-3 text-[11px] text-slate-400">
+                    <span>打刻場所</span>
+                    {r.clockIn && (
+                      <span className="inline-flex items-center gap-1">
+                        出勤
+                        {hasPunchLocation(r.clockInLocation)
+                          ? <PunchLocationLink loc={r.clockInLocation} what="出勤" />
+                          : <span className="text-slate-300">未取得</span>}
+                      </span>
+                    )}
+                    {r.clockOut && (
+                      <span className="inline-flex items-center gap-1">
+                        退勤
+                        {hasPunchLocation(r.clockOutLocation)
+                          ? <PunchLocationLink loc={r.clockOutLocation} what="退勤" />
+                          : <span className="text-slate-300">未取得</span>}
+                      </span>
+                    )}
+                  </div>
+                )}
                   {r.needsApproval && (
                     <div className="mt-1.5 text-[11px] font-bold text-amber-700">「承認待ちの出勤」パネルで承認してください</div>
                   )}
