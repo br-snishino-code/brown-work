@@ -27969,9 +27969,14 @@ function PayrollSettingsTab({ settings, employeeAccounts = [], groupAttendanceSc
 
 function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExpenseClaims = [], monthlyConfirmations = [], groupAttendanceSchedules = {}, employeeAttendanceSchedules = {}, leaveRequests = [], settings = {}, payrollItemOverrides = {}, session = null, onSaveDraft, onPublish, onUnpublish, onRefresh, isMasterAdmin = false, isDesktop }) {
   const now = new Date();
-  const [employeeId, setEmployeeId] = useState(employeeAccounts[0]?.id || '');
-  const [year, setYear] = useState(now.getFullYear());
-  const [month, setMonth] = useState(now.getMonth() + 1);
+  // 最初は誰も選びません。先頭の方が選ばれていると、
+  // 別の方の明細を作ってしまう取り違えが起きるためです。
+  const [employeeId, setEmployeeId] = useState('');
+  // 当月末締め・翌月払いのため、作るのはたいてい前の月の分です。
+  // 1月に開いたときは前の年の12月になります。
+  const defaultMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const [year, setYear] = useState(defaultMonth.getFullYear());
+  const [month, setMonth] = useState(defaultMonth.getMonth() + 1);
   // 「いまの設定で作り直す」の確認。開いているときだけ中身が入ります
   const [rebuild, setRebuild] = useState(null);
   const [paymentItems, setPaymentItems] = useState([]);
@@ -28380,9 +28385,8 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [employeeId, year, month, existing?.id, employeeSalaryItems, approvedCommuteTotal, standardRemuneration, insuranceRates, residentTaxRow, withholdingDependents, settings]);
 
-  if (!employee) {
-    return <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-6 py-14 text-center text-[12.5px] text-slate-300">スタッフが登録されていません</div>;
-  }
+  // スタッフを選んでいないときの出し分けは、選ぶところを組み立てたあとで行います
+  // （この下はスタッフが決まっている前提の計算です）
 
   const paymentTotal = sumItems(paymentItems);
   const deductionTotal = sumItems(deductionItems);
@@ -28507,25 +28511,103 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
   const months = Array.from({ length: 12 }, (_, i) => i + 1);
   const recent = payrollRecords.slice(0, 20);
 
+  // スタッフ・年・月を選ぶところ。選ぶ前と選んだあとの両方で使います
+  const pickers = (
+    <>
+      <h2 className="font-bold text-[14px] text-slate-800 flex items-center gap-2"><Wallet size={16} className="text-slate-400" />給与計算</h2>
+      <div className={`grid gap-3 ${isDesktop ? 'grid-cols-3' : 'grid-cols-1'}`}>
+        <Field label="スタッフ">
+          <EmployeeSearchSelect employeeAccounts={employeeAccounts} value={employeeId} onChange={setEmployeeId} showAllOption={false} placeholder="選んでください" />
+        </Field>
+        <Field label="年">
+          <select value={year} onChange={(e) => setYear(Number(e.target.value))} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px] bg-white">
+            {years.map((y) => <option key={y} value={y}>{y}年</option>)}
+          </select>
+        </Field>
+        <Field label="月">
+          <select value={month} onChange={(e) => setMonth(Number(e.target.value))} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px] bg-white">
+            {months.map((m) => <option key={m} value={m}>{m}月</option>)}
+          </select>
+        </Field>
+      </div>
+    </>
+  );
+
+  // 明細の一覧と予約公開。スタッフを選んでいなくても出します
+  const tail = (
+    <>
+        {openSlip && (
+          <PayslipDetailModal
+            record={openSlip}
+            employeeName={openSlip.employeeName || employeeAccounts.find((a) => a.id === openSlip.employeeId)?.name || ''}
+            onClose={() => setOpenSlip(null)}
+            settings={settings}
+            staffCode={employeeAccounts.find((a) => a.id === openSlip.employeeId)?.staffNumber || ''}
+          />
+        )}
+
+        <PublishSchedulePanel
+          kind="payroll"
+          year={year}
+          period={month}
+          draftCount={payrollRecords.filter((p) => p.year === year && p.month === month && p.status !== 'published').length}
+          unconfirmedNames={unpublishedUnconfirmedNames}
+          actor={session}
+          isMasterAdmin={isMasterAdmin}
+          isDesktop={isDesktop}
+        />
+
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="px-5 py-3.5 border-b border-slate-100 font-bold text-[13.5px]">作成済み給与明細（直近20件）</div>
+          {recent.length === 0 ? (
+            <div className="px-5 py-8 text-center text-[12.5px] text-slate-300">まだ作成されていません</div>
+          ) : (
+            <div className="divide-y divide-slate-100">
+              {recent.map((p) => (
+                <div key={p.id} className="px-5 py-3 flex items-center justify-between gap-2 text-[12.5px]">
+                  <span className="min-w-0"><EmployeeLink id={p.employeeId} name={p.employeeName} /> — {p.year}年{p.month}月分</span>
+                  <span className="flex items-center gap-2 shrink-0">
+                    <span className="font-mono font-bold text-slate-700">{formatYen(p.totalAmount)}</span>
+                    <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full ${p.status === 'published' ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-100 text-slate-400'}`}>
+                      {p.status === 'published' ? '公開済み' : '下書き'}
+                    </span>
+                    <button
+                      onClick={() => setOpenSlip(p)}
+                      className="rounded-lg border border-slate-300 px-2.5 py-1 text-[11.5px] font-bold text-slate-600"
+                    >
+                      明細を見る
+                    </button>
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+    </>
+  );
+
+  // スタッフを選ぶまでは、選ぶところだけを出します。
+  // 誰も選ばれていない状態で下の計算を描くと、賃金が無いまま0円で並んでしまうためです。
+  if (!employee) {
+    return (
+      <div className="space-y-5">
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
+          {pickers}
+          <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-6 text-center text-[12.5px] text-slate-500">
+            {employeeAccounts.length === 0
+              ? 'スタッフが登録されていません'
+              : '上の「スタッフ」から対象の方を選んでください。'}
+          </div>
+        </div>
+        {tail}
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-5">
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
-        <h2 className="font-bold text-[14px] text-slate-800 flex items-center gap-2"><Wallet size={16} className="text-slate-400" />給与計算</h2>
-        <div className={`grid gap-3 ${isDesktop ? 'grid-cols-3' : 'grid-cols-1'}`}>
-          <Field label="スタッフ">
-            <EmployeeSearchSelect employeeAccounts={employeeAccounts} value={employeeId} onChange={setEmployeeId} showAllOption={false} />
-          </Field>
-          <Field label="年">
-            <select value={year} onChange={(e) => setYear(Number(e.target.value))} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px] bg-white">
-              {years.map((y) => <option key={y} value={y}>{y}年</option>)}
-            </select>
-          </Field>
-          <Field label="月">
-            <select value={month} onChange={(e) => setMonth(Number(e.target.value))} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px] bg-white">
-              {months.map((m) => <option key={m} value={m}>{m}月</option>)}
-            </select>
-          </Field>
-        </div>
+        {pickers}
 
         {/* 賃金はマスター管理者だけが見られる（supabase/71_employee_sensitive_fields.sql）。
             それ以外の管理者には時給・月給が届かないため、給与形態の設定も明細の作成も出さない。
@@ -28830,53 +28912,7 @@ function PayrollAdminTab({ employeeAccounts, records, payrollRecords, commuteExp
         />
       )}
 
-      {openSlip && (
-        <PayslipDetailModal
-          record={openSlip}
-          employeeName={openSlip.employeeName || employeeAccounts.find((a) => a.id === openSlip.employeeId)?.name || ''}
-          onClose={() => setOpenSlip(null)}
-          settings={settings}
-          staffCode={employeeAccounts.find((a) => a.id === openSlip.employeeId)?.staffNumber || ''}
-        />
-      )}
-
-      <PublishSchedulePanel
-        kind="payroll"
-        year={year}
-        period={month}
-        draftCount={payrollRecords.filter((p) => p.year === year && p.month === month && p.status !== 'published').length}
-        unconfirmedNames={unpublishedUnconfirmedNames}
-        actor={session}
-        isMasterAdmin={isMasterAdmin}
-        isDesktop={isDesktop}
-      />
-
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-        <div className="px-5 py-3.5 border-b border-slate-100 font-bold text-[13.5px]">作成済み給与明細（直近20件）</div>
-        {recent.length === 0 ? (
-          <div className="px-5 py-8 text-center text-[12.5px] text-slate-300">まだ作成されていません</div>
-        ) : (
-          <div className="divide-y divide-slate-100">
-            {recent.map((p) => (
-              <div key={p.id} className="px-5 py-3 flex items-center justify-between gap-2 text-[12.5px]">
-                <span className="min-w-0"><EmployeeLink id={p.employeeId} name={p.employeeName} /> — {p.year}年{p.month}月分</span>
-                <span className="flex items-center gap-2 shrink-0">
-                  <span className="font-mono font-bold text-slate-700">{formatYen(p.totalAmount)}</span>
-                  <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full ${p.status === 'published' ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-100 text-slate-400'}`}>
-                    {p.status === 'published' ? '公開済み' : '下書き'}
-                  </span>
-                  <button
-                    onClick={() => setOpenSlip(p)}
-                    className="rounded-lg border border-slate-300 px-2.5 py-1 text-[11.5px] font-bold text-slate-600"
-                  >
-                    明細を見る
-                  </button>
-                </span>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+      {tail}
     </div>
   );
 }
