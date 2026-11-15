@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef, useContext, createContext } from 'react';
 import { createPortal } from 'react-dom';
 import * as XLSX from 'xlsx';
-import { Clock, MapPin, CheckCircle2, XCircle, AlertTriangle, LogIn, LogOut, FileEdit, Users, Bell, Calendar, Mail, LogOut as LogoutIcon, UserPlus, Lock, User, Monitor, Smartphone, Palmtree, Plus, Pencil, CalendarDays, ListChecks, ClipboardList, MessageSquare, Coffee, BarChart3, Home, Download, ChevronRight, LayoutGrid, Wallet, Briefcase, UserCog, Construction, Megaphone, Paperclip, FileText, Pin, Trash2, Key, ShieldCheck, ShieldAlert, HelpCircle, ChevronDown, ChevronLeft, Settings, RefreshCw, X } from 'lucide-react';
+import { Clock, MapPin, CheckCircle2, XCircle, AlertTriangle, LogIn, LogOut, FileEdit, Users, Bell, Calendar, Mail, LogOut as LogoutIcon, UserPlus, Lock, User, Monitor, Smartphone, Palmtree, Plus, Pencil, CalendarDays, ListChecks, ClipboardList, MessageSquare, Coffee, BarChart3, Home, Download, ChevronRight, LayoutGrid, Wallet, Briefcase, UserCog, Construction, Megaphone, Paperclip, Upload, FileText, Pin, Trash2, Key, ShieldCheck, ShieldAlert, HelpCircle, ChevronDown, ChevronLeft, Settings, RefreshCw, X } from 'lucide-react';
 import { supabase, CLOUD_ENABLED, INITIAL_URL, usernameToEmail } from './supabaseClient';
 import {
   OFFICE_INFO_DEFAULTS, OFFICE_FIELD_LABELS, OFFICE_REQUIRED_NENKIN, OFFICE_REQUIRED_HW,
@@ -41,6 +41,10 @@ import { mergeCommuteItems } from './payslipDisplay';
 import { autoBreakMinutes, scheduledWorkMinutes } from './breakTime';
 import { isSameClockTime, sameTimeEdits } from './attendanceEdit';
 import { hasPunchLocation, punchMapUrl, punchLocationLabel } from './punchLocation';
+import {
+  incentiveItemLabel, parseIncentiveSheet, matchIncentiveRows,
+  applyIncentiveToItems, currentIncentiveAmount, sumPayItems,
+} from './incentiveImport';
 import { parseBuildId, shouldPromptReload, buildTimeLabel } from './appVersion';
 import {
   commuteRowSubtotal, isSavableCommuteRow, commuteSavedTotal,
@@ -5670,6 +5674,61 @@ function AttendanceApp() {
     return 'changed';
   };
 
+  // Excelで計算したインセンティブを、その月の給与明細に入れる（マスター管理者のみ）。
+  //
+  // 画面（IncentiveImportTab）で一覧を確認してもらったあとに呼ばれます。
+  // 渡ってくるのは「下書きの明細があり、金額が変わる行」だけです
+  // （公開済み・明細なし・変わらない行は画面の側で外してあります）。
+  // 交通費の反映（syncCommuteAmountInPayroll）と同じ書き方に揃えています。
+  const applyIncentiveImport = async (year, month, targets) => {
+    if (session.role !== 'master_admin') {
+      show('インセンティブを取り込めるのはマスター管理者のみです', 'warn');
+      return { okCount: 0, failCount: 0 };
+    }
+    let okCount = 0;
+    let failCount = 0;
+    for (const t of targets) {
+      const record = (data.payrollRecords || []).find((r) => r.id === t.recordId);
+      // 画面を開いてから状況が変わっていないか、書き込む直前にもう一度見ます
+      if (!record || record.status === 'published') { failCount += 1; continue; }
+      const nextItems = applyIncentiveToItems(record.paymentItems, t.amount || 0, month);
+      const after = sumPayItems(nextItems);
+      const deductionTotal = sumPayItems(record.deductionItems);
+      const before = currentIncentiveAmount(record.paymentItems);
+      const { error } = await supabase
+        .from('payroll_records')
+        .update({
+          payment_items: nextItems,
+          base_amount: after,
+          total_amount: after - deductionTotal,
+          edit_history: appendHistory(record.editHistory, makeHistoryEntry(session, 'インセンティブを取り込み', [
+            `${incentiveItemLabel(month)}：${formatYen(before)} → ${formatYen(t.amount || 0)}`,
+          ])),
+        })
+        .eq('id', record.id);
+      if (error) {
+        console.error('給与明細へのインセンティブの取り込みに失敗しました', error);
+        failCount += 1;
+        continue;
+      }
+      okCount += 1;
+      await logAudit(
+        session,
+        '給与明細にインセンティブを取り込み',
+        `${year}年${month}月：${formatYen(before)} → ${formatYen(t.amount || 0)}`,
+        t.employeeId
+      );
+    }
+    await refreshData();
+    show(
+      failCount === 0
+        ? `${okCount}件の給与明細にインセンティブを反映しました`
+        : `${okCount}件に反映しました（${failCount}件は失敗）`,
+      failCount === 0 ? 'ok' : 'warn'
+    );
+    return { okCount, failCount };
+  };
+
   // 公開済みで反映できなかったときに、管理者へ出す案内
   const warnCommuteSyncBlocked = (targetMonth) => {
     const [y, m] = String(targetMonth || '').split('-').map(Number);
@@ -6534,6 +6593,15 @@ function AttendanceApp() {
                   payrollRecords={data.payrollRecords}
                   bonusRecords={data.bonusRecords}
                   settings={data.settings}
+                  isDesktop={isDesktop}
+                />
+              )}
+              {session.role === 'master_admin' && activePayrollTab === 'incentive' && (
+                <IncentiveImportTab
+                  employeeAccounts={employeeAccounts}
+                  payrollRecords={data.payrollRecords}
+                  actor={session}
+                  onApply={applyIncentiveImport}
                   isDesktop={isDesktop}
                 />
               )}
@@ -15538,6 +15606,8 @@ const HELP_ADMIN = [
       { q: '標準報酬月額の設定はどこですか', a: 'スタッフの「詳細」→「給与・口座」タブの「標準報酬月額（給与計算に使う）」で設定します。右上に年と月を入れてから金額を登録します。「表から選択」を押すと等級表から選べます。対象月より前でいちばん新しい記録を使うので、毎月入れ直す必要はありません。金額が変わった月だけ登録してください。給与明細の健康保険料・介護保険料・厚生年金保険料は、ここの金額から自動で入ります。電子申請の算定基礎届・月額変更届の「従前の標準報酬月額」も、ここの記録から入ります。保険料率は「給与」→「給与の設定」→「社会保険の料率」で設定します（全スタッフ共通です）。「上の標準報酬月額・料率から自動計算する（本人負担分）」を押すと、同じ画面の参考欄に概算が入ります。' },
       { q: '明細の「通勤手当」には何が入りますか', a: 'スタッフ詳細に登録した通勤手当（通勤経路を登録している方はその合計額）と、その月の承認済みの交通費精算を合算した金額です。御社の交通費精算は中身がすべて通勤のための費用のため、明細では1行にまとめて出しています。給与を作る画面では「通勤手当」と「交通費精算」の2つに分かれたままで、雇用保険の賃金総額・所得税・源泉徴収票の計算も、これまでどおり2つを分けて扱っています（合算するのは明細の見た目だけです）。なお通勤手当の非課税には、通勤の手段と距離で決まる限度額があります。システムは限度額を見ていないため、限度を超える方が出たときは、その方の明細を手で直してください。' },
       { q: '交通費精算の承認とExcel出力', a: '「給与」タブの交通費精算一覧から承認・却下します。承認できるのはマスター管理者のみです。承認待ちの左側にあるチェックを入れると、まとめて承認できます。承認済みのものは月を指定してExcelファイルに出力でき、経理処理に使えます。承認した金額は、同じ対象月の給与を新規作成する際に支給項目「交通費精算」として自動で入ります。なお給与明細（スタッフが見る画面と印刷したもの）では、この「交通費精算」は「通勤手当」に合算して1行で出ます。金額の内訳を確認したいときは、給与を作る画面をご覧ください。そちらは2つの項目に分かれたままです。承認する前に「内容を修正して承認」を選ぶと、金額や区間を直してから承認できます。修正した箇所は本人への通知に一覧で記載されます。承認後に修正が必要になった場合は、マスター管理者が「承認を取り消す」で差し戻しに戻せます。いずれの場合も、作成済みの給与明細の「交通費精算」の金額は自動で更新されます。' },
+      { q: 'インセンティブを給与明細に入れるには', a: '「給与」タブの「インセンティブ」で、Excelファイルから取り込みます（マスター管理者のみ）。まず対象の年月を選び、「ひな形をダウンロード（在籍スタッフ入り）」を押すと、在籍スタッフのスタッフコードと氏名が入ったExcelが出ます。金額の列に支給額を入れて保存し、「Excelファイルを選ぶ」で読み込ませてください。読み込むと一覧が出て、1行ずつ「反映します」「変わりません」「公開済みのため反映しません」「この月の給与明細がまだありません」「取り込めません」のどれかが表示されます。中身を確かめてから「◯件を給与明細に反映する」を押すと、支給項目「インセンティブ（◯月分）」として入ります。金額の計算はExcelの側でおこない、システムは入れるだけです。何度取り込んでも同じ項目が書き換わるので、二重には増えません。金額を空または0にすると、その方のインセンティブの行を取り除きます。公開済みの明細は書き換えません（スタッフが受け取った控えと食い違うため）。直す場合は、いったん非公開にしてから取り込んでください。給与明細をまだ作っていない月は取り込めないため、先に明細を作ってください。' },
+      { q: 'インセンティブのExcelはどう作りますか', a: '見出しの行に「スタッフコード」「氏名」「金額」の3つを並べてください（この言葉のままでお願いします）。読むのは1番目のシートだけです。ひな形をダウンロードすると、1行目と2行目は見出しの上の余白、3行目が見出しになっています。1行目と2行目は自由に書き換えてかまいませんが、見出しの行はそのままにしてください。人を探すときはスタッフコードを先に見ます。コードが空のときは氏名で探しますが、表記ゆれで合わないことがあるため、コードを入れていただくのが確実です。金額はカンマや「円」が付いていても読み取ります。読み取れない文字が入っている行は「取り込めません」と出て、その行だけ飛ばします。' },
       { q: '年末調整の進め方', a: '「人材」タブの年末調整で、スタッフから提出された内容を確認し、承認します。見出しの横に提出済みの人数が出ます。未提出の方がいるときは「未提出の◯名に入力依頼を送る」が表示され、お知らせとメールをまとめて送れます（この送信はマスター管理者のみ行えます）。承認したことはアプリ内のお知らせでのみ伝わり、メールは送りません。差し戻した場合は再提出が必要なため、メールでもお知らせします。' },
       { q: '給与の設定にはどんな項目がありますか', a: '「給与」タブの「給与の設定」に8つあります。「支給・控除項目一覧」＝明細に出す項目の名前・並び順・0円の行を出すか・端数の丸め方。「所定勤務時間」＝グループごとの始業・終業。「計算のきまり」＝残業と深夜の割増率、欠勤控除・遅刻早退控除の単価の出し方。「法定休日の決め方」＝どの曜日を法定休日とするか。「社会保険の料率」＝健康保険・介護保険・厚生年金の料率（全スタッフ共通）。「給与の支給日」＝締め月に対していつ支払うか。「割増基礎単価に入れる項目」＝残業代のもとになる手当。「みなし残業」＝グループごとの固定残業時間。いずれもマスター管理者のみが操作できます。' },
       { q: '社会保険の料率はどこで設定しますか', a: '「給与」タブの「給与の設定」→「社会保険の料率」です。全スタッフ共通の設定で、健康保険料率・介護保険料率・厚生年金料率の3つを入れます。健康保険料率は協会けんぽの都道府県支部ごとに異なり、毎年3月分（4月納付分）から変わるため、京都支部の最新の料率表をご確認のうえ入れてください。介護保険料率と厚生年金料率は全国一律です。通常の範囲から外れた値を入れると「入れ間違いかもしれません」と出ますが、そのまま保存することもできます。料率を変えても、すでに作ってある給与明細の金額は変わりません。作り直しが要ります。' },
@@ -17052,10 +17122,12 @@ const PAYROLL_SUBTABS = {
   withholding: { label: '源泉徴収票', icon: FileText },
   laborins: { label: '労働保険', icon: ShieldCheck },
   commute: { label: '交通費', icon: MapPin },
+  // Excelで作ったインセンティブを給与明細に取り込む画面
+  incentive: { label: 'インセンティブ', icon: Upload },
   settings: { label: '給与の設定', icon: Settings },
 };
-const PAYROLL_SUBTAB_ORDER = ['payroll', 'bonus', 'transfer', 'withholding', 'laborins', 'commute', 'settings'];
-const PAYROLL_SUBTABS_MASTER_ONLY = ['payroll', 'bonus', 'transfer', 'withholding', 'laborins', 'settings'];
+const PAYROLL_SUBTAB_ORDER = ['payroll', 'bonus', 'transfer', 'withholding', 'laborins', 'commute', 'incentive', 'settings'];
+const PAYROLL_SUBTABS_MASTER_ONLY = ['payroll', 'bonus', 'transfer', 'withholding', 'laborins', 'incentive', 'settings'];
 
 // その権限で出せるサブタブの並び
 function payrollSubTabKeys(role) {
@@ -26384,6 +26456,236 @@ function TransferPayerSettings({ settings, actor, onSaved }) {
           <button onClick={save} disabled={saving} className="w-full py-2.5 rounded-lg bg-slate-800 disabled:bg-slate-200 text-white text-[12.5px] font-bold">
             {saving ? '保存中…' : '振込元の情報を保存する'}
           </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ==== インセンティブの取り込み（給与タブ・マスター管理者のみ）====
+//
+// Excelで計算したインセンティブを読み取り、その月の給与明細に
+// 「インセンティブ（◯月分）」として入れます。
+// 金額の計算はExcel側で行い、Brown Work は入れるだけです。
+//
+// 【安全のための決まり】
+//   ・いきなり明細を書き換えず、必ず一覧を出して確認してもらいます
+//   ・公開済みの明細は書き換えません（交通費の反映と同じ扱い）
+//   ・給与明細がまだ無い方は飛ばします（先に明細を作る必要があります）
+//   ・同じ項目が二重に増えません（既にあるものを書き換えます）
+//   ・判定の中身は src/incentiveImport.ts にまとめ、テストしています
+function IncentiveImportTab({ employeeAccounts = [], payrollRecords = [], actor, onApply, isDesktop }) {
+  const now = new Date();
+  const [year, setYear] = useState(now.getFullYear());
+  const [month, setMonth] = useState(now.getMonth() + 1);
+  const [fileName, setFileName] = useState('');
+  const [sheetError, setSheetError] = useState('');
+  const [rows, setRows] = useState(null);     // 読み取った行（確認前）
+  const [applying, setApplying] = useState(false);
+  const [result, setResult] = useState(null); // 反映したあとの結果
+
+  const livingAccounts = employeeAccounts.filter((a) => !a.resignationDate);
+
+  // Excelを読み取って、スタッフと結びつけるところまでやります（まだ書き込みません）
+  const readFile = async (file) => {
+    setResult(null);
+    setRows(null);
+    setSheetError('');
+    setFileName(file?.name || '');
+    if (!file) return;
+    try {
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: 'array' });
+      const first = wb.SheetNames[0];
+      if (!first) {
+        setSheetError('シートが見つかりません');
+        return;
+      }
+      const aoa = XLSX.utils.sheet_to_json(wb.Sheets[first], { header: 1, raw: true, defval: '' });
+      const parsed = parseIncentiveSheet(aoa);
+      if (parsed.error) {
+        setSheetError(parsed.error);
+        return;
+      }
+      setRows(matchIncentiveRows(parsed.rows, livingAccounts));
+    } catch (e) {
+      console.error('インセンティブの取り込みに失敗しました', e);
+      setSheetError('ファイルを読み取れませんでした。Excel（.xlsx）かCSVをお試しください');
+    }
+  };
+
+  // 1行ごとに、いまの給与明細の状態を調べます
+  const judged = (rows || []).map((r) => {
+    if (!r.employeeId) return { ...r, state: 'error' };
+    const rec = payrollRecords.find((p) => p.employeeId === r.employeeId && p.year === year && p.month === month);
+    if (!rec) return { ...r, state: 'noslip', before: 0 };
+    if (rec.status === 'published') return { ...r, state: 'published', before: currentIncentiveAmount(rec.paymentItems) };
+    const before = currentIncentiveAmount(rec.paymentItems);
+    if (before === (r.amount || 0)) return { ...r, state: 'same', before, recordId: rec.id };
+    return { ...r, state: 'ready', before, recordId: rec.id };
+  });
+
+  const ready = judged.filter((r) => r.state === 'ready');
+  const problems = judged.filter((r) => r.state === 'error' || r.state === 'published' || r.state === 'noslip');
+
+  const STATE_LABEL = {
+    ready: { text: '反映します', cls: 'text-emerald-700 bg-emerald-50 border-emerald-200' },
+    same: { text: '変わりません', cls: 'text-slate-500 bg-slate-50 border-slate-200' },
+    published: { text: '公開済みのため反映しません', cls: 'text-amber-700 bg-amber-50 border-amber-200' },
+    noslip: { text: 'この月の給与明細がまだありません', cls: 'text-amber-700 bg-amber-50 border-amber-200' },
+    error: { text: '取り込めません', cls: 'text-rose-700 bg-rose-50 border-rose-200' },
+  };
+
+  const apply = async () => {
+    if (ready.length === 0) return;
+    setApplying(true);
+    const res = await onApply(year, month, ready);
+    setApplying(false);
+    setResult(res);
+    setRows(null);
+    setFileName('');
+  };
+
+  // 入力用のひな形を書き出します（列の並びを間違えないように）
+  const downloadTemplate = () => {
+    const aoa = [
+      [`${year}年${month}月分 インセンティブ`],
+      ['※ 1行目と2行目は自由に書き換えてかまいません。見出しの行（3行目）はこのままにしてください。'],
+      ['スタッフコード', '氏名', '金額'],
+      ...livingAccounts.slice(0, 50).map((a) => [a.staffNumber || '', a.name, '']),
+    ];
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws['!cols'] = [{ wch: 16 }, { wch: 20 }, { wch: 12 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'インセンティブ');
+    XLSX.writeFile(wb, `インセンティブ_${year}年${String(month).padStart(2, '0')}月.xlsx`);
+  };
+
+  return (
+    <div className="space-y-5">
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm">
+        <div className="px-5 py-4 border-b border-slate-100">
+          <h2 className="font-bold text-[14px] text-slate-800 flex items-center gap-2">
+            <Upload size={16} className="text-slate-400" />インセンティブの取り込み
+          </h2>
+          <p className="mt-1 text-[11.5px] text-slate-500">
+            Excelで計算したインセンティブを、その月の給与明細に「インセンティブ（◯月分）」として入れます。
+            取り込む前に必ず一覧でご確認いただきます。
+          </p>
+        </div>
+
+        <div className="px-5 py-4 space-y-4">
+          <div className={`grid gap-3 ${isDesktop ? 'grid-cols-3' : 'grid-cols-2'}`}>
+            <Field label="対象年">
+              <select value={year} onChange={(e) => { setYear(Number(e.target.value)); setRows(null); setResult(null); }} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px] bg-white">
+                {[now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1].map((y) => <option key={y} value={y}>{y}年</option>)}
+              </select>
+            </Field>
+            <Field label="対象月">
+              <select value={month} onChange={(e) => { setMonth(Number(e.target.value)); setRows(null); setResult(null); }} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px] bg-white">
+                {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => <option key={m} value={m}>{m}月</option>)}
+              </select>
+            </Field>
+          </div>
+
+          <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-[11.5px] text-slate-600 space-y-1">
+            <div className="font-bold text-slate-700">Excelの作り方</div>
+            <div>・見出しの行に「スタッフコード」「氏名」「金額」を並べてください（この3つの言葉のままでお願いします）</div>
+            <div>・スタッフコードで人を探します。空のときは氏名で探しますが、表記ゆれで合わないことがあります</div>
+            <div>・金額が空または0の方は、その月のインセンティブの行を取り除きます</div>
+            <div>・1番目のシートだけを読みます</div>
+            <button onClick={downloadTemplate} className="mt-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-[12px] font-bold text-slate-600">
+              ひな形をダウンロード（在籍スタッフ入り）
+            </button>
+          </div>
+
+          <label className="flex items-center justify-center gap-2 border-2 border-dashed border-slate-300 rounded-xl px-4 py-5 cursor-pointer text-[13px] font-bold text-slate-600">
+            <Upload size={15} />
+            {fileName || 'Excelファイルを選ぶ'}
+            <input
+              type="file"
+              accept=".xlsx,.xls,.csv"
+              className="hidden"
+              onChange={(e) => { readFile(e.target.files?.[0] || null); e.target.value = ''; }}
+            />
+          </label>
+
+          {sheetError && (
+            <div className="rounded-xl border border-rose-300 bg-rose-50 px-3.5 py-3 text-[12.5px] text-rose-800">
+              <AlertTriangle size={14} className="inline mr-1 -mt-0.5" />{sheetError}
+            </div>
+          )}
+
+          {result && (
+            <div className="rounded-xl border border-emerald-300 bg-emerald-50 px-3.5 py-3 text-[12.5px] text-emerald-800">
+              <div className="font-bold">{result.okCount}件の給与明細に反映しました（{year}年{month}月分）</div>
+              {result.failCount > 0 && <div className="mt-1 text-rose-700">{result.failCount}件は反映できませんでした。やり直してください</div>}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {rows && (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm">
+          <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between gap-3 flex-wrap">
+            <div>
+              <h3 className="font-bold text-[13.5px] text-slate-800">取り込む内容の確認（{year}年{month}月分）</h3>
+              <p className="mt-0.5 text-[11.5px] text-slate-500">
+                読み取った{judged.length}件のうち、{ready.length}件を反映します
+                {problems.length > 0 ? `。${problems.length}件は反映しません（理由は下の表）` : ''}
+              </p>
+            </div>
+            <button
+              onClick={apply}
+              disabled={ready.length === 0 || applying}
+              className="shrink-0 rounded-lg bg-slate-900 disabled:bg-slate-200 text-white px-5 py-2.5 text-[13px] font-bold"
+            >
+              {applying ? '反映中…' : `${ready.length}件を給与明細に反映する`}
+            </button>
+          </div>
+          <div className="overflow-auto">
+            <table className="w-full text-[12px]">
+              <thead className="bg-slate-50 text-slate-500">
+                <tr className="text-left">
+                  <th className="px-3 py-2 font-medium whitespace-nowrap">行</th>
+                  <th className="px-3 py-2 font-medium whitespace-nowrap">Excelの記載</th>
+                  <th className="px-3 py-2 font-medium whitespace-nowrap">スタッフ</th>
+                  <th className="px-3 py-2 font-medium whitespace-nowrap text-right">いまの金額</th>
+                  <th className="px-3 py-2 font-medium whitespace-nowrap text-right">取り込む金額</th>
+                  <th className="px-3 py-2 font-medium whitespace-nowrap">扱い</th>
+                </tr>
+              </thead>
+              <tbody>
+                {judged.map((r) => {
+                  const st = STATE_LABEL[r.state];
+                  return (
+                    <tr key={r.rowNumber} className="border-b border-slate-100 last:border-0">
+                      <td className="px-3 py-2 font-mono text-slate-400 whitespace-nowrap">{r.rowNumber}</td>
+                      <td className="px-3 py-2 whitespace-nowrap">
+                        <span className="font-mono text-slate-500">{r.code || '（コードなし）'}</span>
+                        <span className="ml-2 text-slate-700">{r.name || ''}</span>
+                      </td>
+                      <td className="px-3 py-2 whitespace-nowrap">
+                        {r.employeeName
+                          ? <>{r.employeeName}<span className="ml-1 text-[10px] text-slate-400">{r.matchedBy === 'code' ? 'コードで一致' : '氏名で一致'}</span></>
+                          : <span className="text-rose-600">—</span>}
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono text-slate-500 whitespace-nowrap">
+                        {r.state === 'error' ? '—' : formatYen(r.before || 0)}
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono font-bold text-slate-800 whitespace-nowrap">
+                        {r.amount == null ? '—' : formatYen(r.amount)}
+                      </td>
+                      <td className="px-3 py-2">
+                        <span className={`inline-block rounded border px-1.5 py-0.5 text-[10.5px] font-bold ${st.cls}`}>{st.text}</span>
+                        {r.error && <div className="mt-0.5 text-[10.5px] text-rose-600">{r.error}</div>}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
     </div>
