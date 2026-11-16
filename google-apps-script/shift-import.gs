@@ -19,10 +19,14 @@
  *   スタッフ×日付の表が書き込まれます。
  *
  * ■ 自動で取り込む場合
- *   「Brown Work」→「自動取り込みの間隔を選ぶ」から、毎朝1回・30分おき・15分おきを選べます。
+ *   「Brown Work」→「自動取り込みの間隔を選ぶ」から、毎朝1回・30分おき・15分おき・5分おきを選べます。
  *   止めるときは「自動取り込みを解除」。今の設定は「自動取り込みの状態を見る」で確認できます。
  *   内容が前回と変わっていないときはシートを書き換えないため、
  *   短い間隔にしても、見ている最中に表示が消えることはありません。
+ *
+ *   自動で動くのは「シフト希望の取り込み」だけです。
+ *   確定シフトは自動では送りません。組みかけのシフトがスタッフに見えてしまうのを
+ *   避けるため、「確定シフトを送る」で内容を確かめてからお送りください。
  */
 
 var SHEET_PREFIX = 'シフト希望_';
@@ -251,7 +255,9 @@ function chooseTriggerInterval() {
   ui.alert(
     '設定しました',
     '「' + chosen.label + '」で、翌月分のシフト希望を自動で取り込みます。\n' +
-    '内容が前回と変わっていないときは、シートを書き換えません。',
+    '内容が前回と変わっていないときは、シートを書き換えません。\n\n' +
+    '自動で動くのはシフト希望の取り込みだけです。\n' +
+    '確定シフトは「確定シフトを送る」で手動でお送りください。',
     ui.ButtonSet.OK
   );
 }
@@ -259,17 +265,17 @@ function chooseTriggerInterval() {
 /** 指定された間隔でトリガーを作り直す */
 function setTriggerInterval(key) {
   removeTriggersOnly();
-  // シフト希望の取り込みと、確定シフトの送信を同じ間隔で動かす
-  ['importNextMonthShiftRequests', 'pushConfirmedShiftsAuto'].forEach(function (fn) {
-    var builder = ScriptApp.newTrigger(fn).timeBased();
-    switch (key) {
-      case 'm5':  builder.everyMinutes(5); break;
-      case 'm15': builder.everyMinutes(15); break;
-      case 'm30': builder.everyMinutes(30); break;
-      default:    builder.atHour(6).everyDays(1); break;
-    }
-    builder.create();
-  });
+  // 自動で動かすのはシフト希望の取り込みだけです。
+  // 確定シフトは、内容を確かめてから手で送っていただく形にしています
+  // （組みかけのシフトがスタッフに見えてしまうのを避けるためです）。
+  var builder = ScriptApp.newTrigger('importNextMonthShiftRequests').timeBased();
+  switch (key) {
+    case 'm5':  builder.everyMinutes(5); break;
+    case 'm15': builder.everyMinutes(15); break;
+    case 'm30': builder.everyMinutes(30); break;
+    default:    builder.atHour(6).everyDays(1); break;
+  }
+  builder.create();
   if (['m5', 'm15', 'm30'].indexOf(key) < 0) key = 'daily';
   writeConfig(INTERVAL_PROP, key);
 }
@@ -287,6 +293,7 @@ function showTriggerStatus() {
     ui.alert('自動取り込みの状態', '今は自動取り込みを設定していません。', ui.ButtonSet.OK);
     return;
   }
+  // 確定シフトは自動で送らないため、最後に手で送った時刻として出します
   var key = readConfig(INTERVAL_PROP) || 'daily';
   var label = key;
   for (var j = 0; j < INTERVALS.length; j++) {
@@ -295,9 +302,12 @@ function showTriggerStatus() {
   var last = PropertiesService.getScriptProperties().getProperty(LAST_RUN_PROP);
   ui.alert(
     '自動取り込みの状態',
-    '間隔：' + label + '\n' +
-    'シフト希望の取り込み：' + (last || '記録なし') + '\n' +
-    '確定シフトの送信：' + (lastPush || '記録なし'),
+    '自動で動くのは、シフト希望の取り込みだけです。\n' +
+    '　間隔：' + label + '\n' +
+    '　最後に取り込んだ時刻：' + (last || '記録なし') + '\n\n' +
+    '確定シフトは自動で送りません。\n' +
+    '　「確定シフトを送る」でその都度お送りください。\n' +
+    '　最後に送った時刻：' + (lastPush || '記録なし'),
     ui.ButtonSet.OK
   );
 }
@@ -887,21 +897,21 @@ function pushConfirmedShiftsCore(sheet, month) {
 }
 
 /** 自動実行用：内容が変わっていたときだけ送る */
+/**
+ * 以前の版では、確定シフトもこの関数で自動送信していました。
+ * いまは自動で送りません（「確定シフトを送る」で手動のみ）。
+ *
+ * 古い版を入れたままのファイルには、この関数を呼ぶ自動実行が
+ * 残っていることがあります。そのまま放っておくと動き続けるため、
+ * 呼ばれたらその自動実行を自分で消します。何も送りません。
+ */
 function pushConfirmedShiftsAuto() {
-  var sheet = findConfirmedSheet();
-  var month = guessTargetMonth(sheet);
-  if (!month) return;
-  var payload = buildConfirmedPayload(sheet, month);
-  if (payload.rows.length === 0) return;
-
-  var props = PropertiesService.getScriptProperties();
-  props.setProperty(LAST_PUSH_PROP, Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy/MM/dd HH:mm'));
-
-  var fingerprint = buildPushFingerprint(payload);
-  if (props.getProperty(PUSH_FINGERPRINT_PROP + month) === fingerprint) return;
-
-  sendConfirmedShifts(payload);
-  props.setProperty(PUSH_FINGERPRINT_PROP + month, fingerprint);
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === 'pushConfirmedShiftsAuto') {
+      ScriptApp.deleteTrigger(triggers[i]);
+    }
+  }
 }
 
 /** 接続先と合言葉を設定する */
