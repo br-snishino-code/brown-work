@@ -45,6 +45,10 @@ import {
   incentiveItemLabel, parseIncentiveSheet, matchIncentiveRows,
   applyIncentiveToItems, currentIncentiveAmount, sumPayItems,
 } from './incentiveImport';
+import {
+  STAFF_IMPORT_COLUMNS, ROLE_LABELS, parseStaffSheet, checkStaffRows,
+  staffProfilePatch, staffImportSummary,
+} from './staffImport';
 import { parseBuildId, shouldPromptReload, buildTimeLabel } from './appVersion';
 import {
   commuteRowSubtotal, isSavableCommuteRow, commuteSavedTotal,
@@ -3922,17 +3926,73 @@ function AttendanceApp() {
         await sendEmailBestEffort(payload.username, mail.subject, mail.text);
       }
 
-      await refreshData();
+      // 一括登録では1人ごとに読み直すと遅いため、最後にまとめて読み直します
+      if (!payload.skipRefresh) await refreshData();
       await logAudit(session, 'スタッフアカウントを作成', `username: ${payload.username}`, newId, payload.name);
       if (!payload.skipInvite) {
         show(`${payload.name}さんのアカウントを作成し、ログイン案内を送信しました`, 'success');
       }
-      return true;
+      // 作成したあとに続けて項目を入れられるよう、できたスタッフのidを返します。
+      // 中身のあるオブジェクトなので、これまでどおり if (ok) で成否を判定できます。
+      return { ok: true, id: newId };
     } catch (e) {
       console.error('アカウント作成エラー:', e);
       show('アカウント作成に失敗しました', 'warn');
       return false;
     }
+  };
+
+  /**
+   * Excelから読み取ったスタッフをまとめて登録します（マスター管理者のみ）。
+   * 1人ずつ「アカウントを作る → 残りの項目を入れる」の順で進め、
+   * 途中で失敗した方があっても、ほかの方はそのまま続けます。
+   * 読み直しは最後に1回だけです。
+   */
+  const importStaffAccounts = async (targets, options = {}) => {
+    if (session?.role !== 'master_admin') {
+      show('スタッフの一括登録はマスター管理者のみです', 'warn');
+      return [];
+    }
+    const results = [];
+    for (const t of targets) {
+      const created = await handleAddAccount({
+        name: t.name,
+        furigana: t.furigana,
+        username: t.username,
+        password: t.password,
+        hireDate: t.hireDate,
+        role: t.role,
+        adminPermissions: t.role === 'admin' ? ['attendance', 'labor', 'hr', 'payroll'] : undefined,
+        contactEmail: t.username,
+        requireProfileSetup: options.requireProfileSetup !== false,
+        skipInvite: options.sendInvite !== true,
+        skipRefresh: true,
+      });
+      if (!created || created.ok !== true) {
+        results.push({ key: t.key, ok: false, message: 'アカウントを作れませんでした' });
+        continue;
+      }
+      // 残りの項目（スタッフコード・グループ・種別・賃金）を入れます。
+      // ここで失敗しても、アカウント自体はできています。
+      let patched = true;
+      if (created.id && t.patch && Object.keys(t.patch).length > 0) {
+        patched = await updateEmployeeProfile(created.id, t.patch);
+      }
+      results.push({
+        key: t.key,
+        ok: true,
+        id: created.id,
+        password: t.password,
+        message: patched ? '' : 'アカウントは作れましたが、スタッフコードなどの登録に失敗しました',
+      });
+    }
+    await refreshData();
+    await logAudit(
+      session,
+      'スタッフを一括登録',
+      `${results.filter((r) => r.ok).length}名を登録（${results.filter((r) => !r.ok).length}名は失敗）`,
+    );
+    return results;
   };
 
   const handleDeleteAccount = async (account) => {
@@ -6766,6 +6826,7 @@ function AttendanceApp() {
             onNotifyEmployee={notifyEmployeeUser}
             onSaveShiftPeriod={saveShiftPeriod}
             onAddAccount={handleAddAccount}
+            onImportStaff={importStaffAccounts}
             onDeleteAccount={handleDeleteAccount}
             onResetPassword={handleResetPassword}
             onFetchMyNumber={fetchMyNumber}
@@ -15565,6 +15626,8 @@ const HELP_ADMIN = [
       { q: 'シフト希望を集めるには', a: '「勤怠」→「シフト」で対象月を選び、締切と連絡事項を入れて「この月の受付を開始する」を押します。対象者は既定で「在籍スタッフ全員（◯名）」です。「グループで選ぶ（◯グループ）」または「個別に選ぶ（◯名）」に切り替えると、選んだ方にだけ表示できます（試験運用のときに便利です）。スタッフの「各種申請」に「シフト希望」が出て、提出されると一覧に反映されます。未提出の方がいるときは「未提出の◯名に依頼を送る」でお知らせとメールをまとめて送れます。一覧の最下行はその日に出勤可能な人数で、10名以下の日は赤くなります。集まったら「CSVで書き出す」でスタッフ×日付の形に出力し、スプレッドシートに貼り付けてシフトを作成してください。締め切るときは「受付を締め切る」を押します。' },
       { q: '承認をまとめて行うには', a: '「勤怠」→「承認」を開くと、勤怠修正・休暇・月次勤怠の確定・交通費の未処理が1つの画面に並びます。上の「すべて／勤怠修正／休暇／月次確定／交通費」で絞り込めます。左のチェックを入れて「まとめて承認」を押すと、種類が違っても一度に承認できます。却下も同じ手順です。金額を直してから承認する場合や、差し戻しの理由を入れる場合は「詳細」から元の画面で操作してください。交通費と月次勤怠の最終承認はマスター管理者のみに表示されます。' },
       { q: 'ダッシュボードの右側は何ですか', a: '「本日の勤務状況」は勤務中・退勤済・未出勤の人数と、まだ打刻のない方の氏名です。「今月の締めまで」は前月分の月次勤怠と交通費の提出状況で、未提出の方へまとめて提出のお知らせを送れます。「最近の操作」は直近の承認や修正の履歴です。' },
+      { q: 'スタッフをExcelでまとめて登録するには', a: '「勤怠」→「スタッフ一覧」の上にある「Excelで一括登録」から取り込みます（マスター管理者のみ）。まず「ひな形をダウンロード」でExcelを作り、1行1人で入力して保存し、「Excelファイルを選ぶ」で読み込みます。読み込むと一覧が出て、1行ずつ「登録します」か、登録できない理由が表示されます。中身を確かめてから「◯名を登録する」を押してください。入れられるのは、姓・名・姓カナ・名カナ・ログインID（メールアドレス）・仮パスワード・入職日・権限・スタッフコード・メイングループ・スタッフ種別・給与形態・時給・日給（平日）・日給（土日祝）・月給・交通費（月額）・みなし残業時間です。住所・電話・生年月日・口座などの個人情報は入れていません。これらはスタッフご本人が初回ログインのときに入力します。ログインIDかスタッフコードが、すでに登録済みの方やExcelの別の行と重なっている場合は、その行だけ登録しません。' },
+      { q: '一括登録の仮パスワードはどうなりますか', a: 'Excelの「仮パスワード」を空欄にしておくと、こちらで作ります。英大文字・英小文字・数字を必ず含む12文字で、紛らわしい文字（0とO、1とlとI）は使いません。作った仮パスワードは、登録したあとの一覧に出ます。この一覧は画面を閉じると二度と出ませんので、閉じる前に控えをお取りください。「ログイン案内メールを送る」にチェックを入れると、各メールアドレス宛にログインURLと仮パスワードが届きます。チェックを入れない場合は送られないので、一覧から控えてご本人にお伝えください。ご自分で決めた仮パスワードを使う場合は、8文字以上で英大文字・英小文字・数字をそれぞれ1つ以上入れてください。' },
       { q: 'アカウントを作ったあとにスタッフ種別を設定するには', a: 'アカウントを作った時点では、スタッフ種別は未設定です。「勤怠」→「スタッフ一覧」でその方の「詳細」→「基本」タブを開き、「スタッフ種別」を選んで保存してください。選ぶまでは、スタッフ一覧のグループの列に赤字で「未設定」と出ます。一覧の上の「スタッフ種別」で「未設定」を選ぶと、未設定の方だけを絞り込めます。スタッフ種別は有休の比例付与・法定休日の決め方・給与の既定項目の3つに効くため、給与計算の前に必ず設定してください。' },
       { q: 'スタッフ一覧から直接操作するには', a: '「勤怠」→「スタッフ一覧」の各行に、本日の状態・今月の勤務時間・有休残・その方の未処理が表示されます。行の右端にある「⋯」を押すと、そのスタッフの勤怠の確認と修正、未処理の承認、給与の作成、登録情報の編集へ直接移動できます。' },
       { q: '勤怠修正申請を承認するには', a: '「勤怠」→「勤怠修正申請」の「承認待ちの修正申請」に一覧表示されます。修正前と修正後の時刻が並ぶので、内容を確認して「承認」または「却下」を押してください。承認すると勤怠記録が自動で書き換わります。休憩は申請した時刻から自動で出すため（拘束6時間以上で1時間）、申請には分数が入りません。勤怠一覧で休憩を手入力済みの日は、その手入力した分数がそのまま残ります。' },
@@ -29175,7 +29238,7 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
   );
 }
 
-function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAdminTab = null, onConsumeRequestedAdminTab, onDecide, onDecideLeave, onDecideCommute, onNotifyEmployee, onSaveShiftPeriod, onAddAccount, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onListMyNumbers, onDeleteMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onSaveGroupFormats, onSaveZtvRates, onSavePerfDeadline, onSaveShiftAlias, onDeleteShiftAlias, onAnnounceShift, onChangeLoginEmail, onDecideMonthlyConfirm, onCancelMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onDeleteAttendance, onRefresh, isDesktop }) {
+function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAdminTab = null, onConsumeRequestedAdminTab, onDecide, onDecideLeave, onDecideCommute, onNotifyEmployee, onSaveShiftPeriod, onAddAccount, onImportStaff, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onListMyNumbers, onDeleteMyNumber, onUpdateDates, onUpdateAdminAccess, onSaveAdminNotifyEmail, onSaveGroupFormats, onSaveZtvRates, onSavePerfDeadline, onSaveShiftAlias, onDeleteShiftAlias, onAnnounceShift, onChangeLoginEmail, onDecideMonthlyConfirm, onCancelMonthlyConfirm, onSaveGroupLeave, onSaveEmployeeAttendance, onAdminUpdateAttendance, onAdminUpdateAttendanceBatch, onDeleteAttendance, onRefresh, isDesktop }) {
   const [tab, setTab] = useState('dashboard'); // dashboard | attendance | requests | leave | performance | accounts
   useEffect(() => {
     window.scrollTo({ top: 0, behavior: 'auto' });
@@ -29623,6 +29686,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
         <AccountManagement
           employeeAccounts={employeeAccounts}
           onAddAccount={onAddAccount}
+          onImportStaff={onImportStaff}
           onChangeLoginEmail={onChangeLoginEmail}
           onUpdateDates={onUpdateDates}
           onDeleteAccount={onDeleteAccount}
@@ -33695,7 +33759,7 @@ function MyNumberRetentionCard({ accounts, onListMyNumbers, onDeleteMyNumber, is
   );
 }
 
-function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail, onUpdateDates, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onListMyNumbers, onDeleteMyNumber, groupLeaveSchedules, employeeAttendanceSchedules, onSaveEmployeeAttendance, resignationReasons = [], settings = {}, payrollItemOverrides = {}, initialProfileId = null, onConsumeInitialProfile, rowInfo = {}, rowActions = {}, session, leaveGrants = [], leaveRequests = [], onLeaveGrantsChanged, isDesktop }) {
+function AccountManagement({ employeeAccounts, onAddAccount, onImportStaff, onChangeLoginEmail, onUpdateDates, onDeleteAccount, onResetPassword, onFetchMyNumber, onSaveMyNumber, onListMyNumbers, onDeleteMyNumber, groupLeaveSchedules, employeeAttendanceSchedules, onSaveEmployeeAttendance, resignationReasons = [], settings = {}, payrollItemOverrides = {}, initialProfileId = null, onConsumeInitialProfile, rowInfo = {}, rowActions = {}, session, leaveGrants = [], leaveRequests = [], onLeaveGrantsChanged, isDesktop }) {
   const knownGroups = Array.from(new Set([...employeeAccounts.map((a) => a.mainGroup).filter(Boolean), ...Object.keys(groupLeaveSchedules || {})]));
   const [listGroupFilter, setListGroupFilter] = useState('all');
   const [listStaffTypeFilter, setListStaffTypeFilter] = useState('all');
@@ -33897,7 +33961,7 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
         <span className="text-[11px] text-slate-400">{filteredEmployeeAccounts.length}名 / 全{employeeAccounts.length}名</span>
         {isMasterAdmin && (
           <button onClick={() => setCsvModalOpen(true)} className="ml-auto flex items-center gap-1 text-[12px] font-bold text-slate-500 border border-slate-200 rounded-lg px-2.5 py-1.5">
-            <Download size={13} className="rotate-180" /> CSV一括登録
+            <Upload size={13} /> Excelで一括登録
           </button>
         )}
         {isMasterAdmin && (
@@ -34194,9 +34258,12 @@ function AccountManagement({ employeeAccounts, onAddAccount, onChangeLoginEmail,
   const modals = (
     <>
       {csvModalOpen && isMasterAdmin && (
-        <CsvImportModal
+        <StaffImportModal
           onClose={() => setCsvModalOpen(false)}
-          onAddAccount={onAddAccount}
+          onImport={onImportStaff}
+          employeeAccounts={employeeAccounts}
+          knownGroups={knownGroups}
+          isDesktop={isDesktop}
         />
       )}
       {deleteTarget && (
@@ -34393,189 +34460,293 @@ function DeleteAccountModal({ account, onClose, onConfirm }) {
   );
 }
 
-function CsvImportModal({ onClose, onAddAccount }) {
-  const [csvText, setCsvText] = useState('name,email,password,hireDate\n田中 花子,tanaka@brownkyoto.com,pass1234,2026-08-01');
-  const [rows, setRows] = useState([]);
-  const [invalid, setInvalid] = useState([]);
-  // 一括登録では既定でログイン案内メールを送らない
+// ---- Excelでスタッフを一括登録（スタッフ一覧→「Excelで一括登録」） ----
+// 1行1人で並べたExcelを読み取り、まとめてアカウントを作ります。
+// 作ったあと、スタッフコード・グループ・種別・賃金も続けて登録します。
+// 住所・口座などの個人情報は入れていません（ご本人が初回ログインで入力します）。
+function StaffImportModal({ onClose, onImport, employeeAccounts = [], knownGroups = [], isDesktop }) {
+  const [rows, setRows] = useState([]);          // 読み取って突き合わせた結果
+  const [sheetError, setSheetError] = useState('');
+  const [fileName, setFileName] = useState('');
   const [sendInvite, setSendInvite] = useState(false);
-  // 登録情報の入力を求めるか（単体の作成画面と同じ。既定は求める）
   const [requireProfileSetup, setRequireProfileSetup] = useState(true);
   const [running, setRunning] = useState(false);
-  const [results, setResults] = useState([]);
+  const [results, setResults] = useState(null);  // 登録したあとの結果
+  const fileRef = useRef(null);
 
-  const parse = () => {
-    const lines = csvText.trim().split('\n').filter((l) => l.trim());
-    if (lines.length < 2) {
-      setRows([]);
-      setInvalid([]);
-      return;
-    }
-    const header = lines[0].split(',').map((h) => h.trim());
-    // 旧形式（username）の見出しも受け付ける
-    const emailCol = header.indexOf('email') >= 0 ? header.indexOf('email') : header.indexOf('username');
-    const idx = {
-      name: header.indexOf('name'),
-      email: emailCol,
-      password: header.indexOf('password'),
-      hireDate: header.indexOf('hireDate'),
-    };
-    if (idx.name < 0 || idx.email < 0 || idx.password < 0) {
-      setRows([]);
-      setInvalid([]);
-      return;
-    }
-    const all = lines.slice(1).map((line) => {
-      const cols = line.split(',').map((c) => c.trim());
-      const email = cols[idx.email] || '';
-      return {
-        name: cols[idx.name] || '',
-        username: email,
-        contactEmail: email,
-        password: cols[idx.password] || '',
-        hireDate: idx.hireDate >= 0 ? cols[idx.hireDate] || todayKey() : todayKey(),
-      };
-    }).filter((r) => r.name || r.username || r.password);
-    // ログイン案内メールを送るため、メールアドレス形式とパスワードの決まりを満たすことを必須とする
-    const ok = [];
-    const ng = [];
-    all.forEach((r) => {
-      if (!r.name || !r.username || !r.password) ng.push({ ...r, reason: '未入力の項目があります' });
-      else if (!r.username.includes('@')) ng.push({ ...r, reason: 'メールアドレスの形式ではありません' });
-      else if (passwordProblem(r.password)) ng.push({ ...r, reason: passwordProblem(r.password) });
-      else ok.push(r);
-    });
-    setRows(ok);
-    setInvalid(ng);
-    setResults([]);
+  const summary = useMemo(() => staffImportSummary(rows), [rows]);
+
+  const downloadTemplate = async () => {
+    const XLSX = await import('xlsx');
+    const header = STAFF_IMPORT_COLUMNS.map((c) => c.label);
+    const sample = [
+      '山田', '太郎', 'ヤマダ', 'タロウ', 'yamada@example.com', '',
+      todayKey(), 'スタッフ', '', knownGroups[0] || '', STAFF_TYPES[1], '月給',
+      '', '', '', '', '', '',
+    ];
+    const aoa = [
+      ['スタッフの一括登録用'],
+      ['※ 1行目と2行目は自由に書き換えていただけます。3行目の見出しはそのままにしてください。'],
+      header,
+      sample,
+    ];
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws['!cols'] = header.map((h) => ({ wch: Math.max(10, h.length + 2) }));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'スタッフ');
+    XLSX.writeFile(wb, `スタッフ一括登録_ひな形_${todayKey()}.xlsx`);
   };
 
-  const runImport = async () => {
-    setRunning(true);
-    const nextResults = [];
-    for (const row of rows) {
-      const ok = await onAddAccount({ ...row, skipInvite: !sendInvite, requireProfileSetup });
-      nextResults.push({ ...row, ok });
+  const readFile = async (file) => {
+    if (!file) return;
+    setFileName(file.name);
+    setResults(null);
+    try {
+      const XLSX = await import('xlsx');
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: 'array', cellDates: true });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' });
+      const parsed = parseStaffSheet(aoa);
+      if (parsed.error) {
+        setRows([]);
+        setSheetError(parsed.error);
+        return;
+      }
+      setSheetError('');
+      setRows(checkStaffRows(parsed.rows, {
+        existing: employeeAccounts.map((a) => ({
+          id: a.id, name: a.name, email: a.username || a.contactEmail || '', staffNumber: a.staffNumber || '',
+        })),
+        knownGroups,
+        staffTypes: STAFF_TYPES,
+      }));
+    } catch (e) {
+      console.error('スタッフの読み取りエラー:', e);
+      setRows([]);
+      setSheetError('Excelファイルを読み取れませんでした。.xlsx の形式でご用意ください');
     }
-    setResults(nextResults);
+  };
+
+  const run = async () => {
+    setRunning(true);
+    const targets = rows.filter((r) => r.ok).map((r) => ({
+      key: String(r.rowNumber),
+      name: `${r.sei} ${r.mei}`,
+      furigana: [r.seiKana, r.meiKana].filter(Boolean).join(' '),
+      username: r.email,
+      password: r.password,
+      hireDate: r.hireDate,
+      role: r.role,
+      patch: staffProfilePatch(r),
+    }));
+    const res = await onImport(targets, { sendInvite, requireProfileSetup });
+    const byKey = new Map((res || []).map((x) => [x.key, x]));
+    setResults(rows.filter((r) => r.ok).map((r) => ({
+      row: r,
+      result: byKey.get(String(r.rowNumber)) || { ok: false, message: '結果が分かりません' },
+    })));
     setRunning(false);
   };
 
+  const cell = 'px-2 py-1.5 text-[11.5px] align-top';
+
   return createPortal(
     <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-40 p-0 sm:p-4">
-      <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg max-h-[92vh] overflow-y-auto">
-        <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white">
-          <h3 className="font-bold text-[15px]">CSVでスタッフを一括登録</h3>
+      <div className="bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-3xl max-h-[92vh] overflow-y-auto">
+        <div className="px-5 pt-5 pb-3 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white z-10">
+          <h3 className="font-bold text-[15px]">Excelでスタッフを一括登録</h3>
           <button onClick={onClose} className="text-slate-400 text-xl leading-none px-1">×</button>
         </div>
+
         <div className="px-5 py-4 space-y-3">
-          <div className="text-[11.5px] text-slate-500 bg-slate-50 rounded-lg p-3">
-            1行目は見出し（<code className="font-mono">name,email,password,hireDate</code>）にしてください。<br />
-            2行目以降に1人ずつ、カンマ区切りで入力します。<code className="font-mono">email</code>はログインIDになります。登録フォームと同じく、メールアドレスでご入力ください（このアドレス宛にログイン案内が届きます）。<code className="font-mono">hireDate</code>は省略可（形式：YYYY-MM-DD）。<code className="font-mono">password</code>は仮パスワードです。{PASSWORD_RULE_HINT}
-          </div>
-          <textarea
-            value={csvText}
-            onChange={(e) => { setCsvText(e.target.value); setRows([]); setInvalid([]); setResults([]); }}
-            rows={8}
-            className="w-full border border-slate-200 rounded-lg px-3 py-2 font-mono text-[12.5px] resize-none"
-          />
-          <button onClick={parse} className="text-[12px] font-bold text-slate-600 border border-slate-200 rounded-lg px-3 py-1.5">
-            内容を確認する
-          </button>
-
-          <label className="flex items-start gap-2 text-[12px] text-slate-600 cursor-pointer border border-slate-200 rounded-lg px-3 py-2.5">
-            <input
-              type="checkbox"
-              checked={sendInvite}
-              onChange={(e) => setSendInvite(e.target.checked)}
-              className="mt-0.5"
-            />
-            <span>
-              ログイン案内メールを送る
-              <span className="block text-[11px] text-slate-400">
-                {sendInvite
-                  ? '各メールアドレス宛に、ログインURLと仮パスワードを記載した案内を送信します。'
-                  : 'チェックを入れない場合は送信しません。ログインURLと仮パスワードは別途ご本人にお伝えください。'}
-              </span>
-            </span>
-          </label>
-
-          {/* すでに在籍している方をまとめて登録するときに外す */}
-          <label className="flex items-start gap-2 text-[12px] text-slate-600 cursor-pointer border border-slate-200 rounded-lg px-3 py-2.5">
-            <input
-              type="checkbox"
-              checked={requireProfileSetup}
-              onChange={(e) => setRequireProfileSetup(e.target.checked)}
-              className="mt-0.5"
-            />
-            <span>
-              初回ログイン時に、登録情報（住所・口座など）の入力を求める
-              <span className="block text-[11px] text-slate-400">
-                {requireProfileSetup
-                  ? 'パスワードの変更のあと、登録情報の入力画面が出ます。'
-                  : 'パスワードの変更だけで、すぐ通常の画面に入れます。登録情報は本人があとから入力できます。'}
-              </span>
-            </span>
-          </label>
-
-          {invalid.length > 0 && results.length === 0 && (
-            <div className="border border-rose-200 bg-rose-50 rounded-lg overflow-hidden">
-              <div className="px-3 py-2 text-[11.5px] font-bold text-rose-700">{invalid.length}件は登録できません</div>
-              <div className="divide-y divide-rose-100 max-h-32 overflow-y-auto">
-                {invalid.map((r, i) => (
-                  <div key={i} className="px-3 py-1.5 text-[12px] flex items-center justify-between gap-2">
-                    <span className="truncate">{r.name || '(氏名なし)'}<span className="ml-1 font-mono text-rose-400">{r.username}</span></span>
-                    <span className="shrink-0 text-[11px] text-rose-600">{r.reason}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {rows.length > 0 && results.length === 0 && (
-            <div className="border border-slate-200 rounded-lg overflow-hidden">
-              <div className="px-3 py-2 bg-slate-50 text-[11.5px] font-bold text-slate-600">{rows.length}名を登録します</div>
-              <div className="divide-y divide-slate-100 max-h-48 overflow-y-auto">
-                {rows.map((r, i) => (
-                  <div key={i} className="px-3 py-1.5 text-[12px] flex items-center justify-between">
-                    <span>{r.name}</span>
-                    <span className="font-mono text-slate-400">{r.username}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {results.length > 0 && (
-            <div className="border border-slate-200 rounded-lg overflow-hidden">
-              <div className="px-3 py-2 bg-slate-50 text-[11.5px] font-bold text-slate-600">
-                結果：成功 {results.filter((r) => r.ok).length}件 ／ 失敗 {results.filter((r) => !r.ok).length}件
-                <div className="font-normal text-slate-500 mt-0.5">
-                  {sendInvite
-                    ? '各メールアドレス宛に、ログイン案内を送信しました。'
-                    : `ログイン案内メールは送信していません。ログインURL（${APP_LOGIN_URL}）と仮パスワードを、ご本人にお伝えください。`}
+          {results === null && (
+            <>
+              <div className="text-[11.5px] text-slate-600 bg-slate-50 border border-slate-200 rounded-lg p-3 space-y-1.5">
+                <div className="font-bold text-slate-700">進め方</div>
+                <div>1. 下の「ひな形をダウンロード」でExcelを作ります</div>
+                <div>2. 1行1人で入力して保存します</div>
+                <div>3. 「Excelファイルを選ぶ」で読み込み、内容を確かめてから登録します</div>
+                <div className="pt-1 text-slate-500">
+                  仮パスワードは空欄のままで差し支えありません。こちらで作り、登録したあとの一覧に出します。
+                </div>
+                <div className="text-slate-500">
+                  住所・電話・生年月日・口座などは入れていません。これらはスタッフご本人が初回ログインのときに入力します。
                 </div>
               </div>
-              <div className="divide-y divide-slate-100 max-h-48 overflow-y-auto">
-                {results.map((r, i) => (
-                  <div key={i} className="px-3 py-1.5 text-[12px] flex items-center justify-between">
-                    <span>{r.name}（{r.username}）</span>
-                    <span className={`font-bold ${r.ok ? 'text-emerald-600' : 'text-rose-600'}`}>{r.ok ? '成功' : '失敗'}</span>
-                  </div>
-                ))}
+
+              <div className={`flex gap-2 ${isDesktop ? '' : 'flex-col'}`}>
+                <button
+                  onClick={downloadTemplate}
+                  className="flex-1 flex items-center justify-center gap-1.5 rounded-lg border border-slate-300 bg-white py-2.5 text-[12.5px] font-bold text-slate-600"
+                >
+                  <Download size={14} /> ひな形をダウンロード
+                </button>
+                <button
+                  onClick={() => fileRef.current?.click()}
+                  className="flex-1 flex items-center justify-center gap-1.5 rounded-lg border border-slate-300 bg-white py-2.5 text-[12.5px] font-bold text-slate-600"
+                >
+                  <Upload size={14} /> Excelファイルを選ぶ
+                </button>
+                <input
+                  ref={fileRef}
+                  type="file"
+                  accept=".xlsx,.xls"
+                  className="hidden"
+                  onChange={(e) => { readFile(e.target.files?.[0]); e.target.value = ''; }}
+                />
               </div>
-            </div>
+
+              {fileName && (
+                <div className="text-[11.5px] text-slate-500">読み込んだファイル：{fileName}</div>
+              )}
+
+              {sheetError && (
+                <div className="border border-rose-200 bg-rose-50 rounded-lg px-3 py-2.5 text-[12px] text-rose-700">
+                  {sheetError}
+                </div>
+              )}
+
+              {rows.length > 0 && (
+                <>
+                  <div className="flex items-center gap-3 text-[12px] flex-wrap">
+                    <span className="font-bold text-slate-700">読み取り：{rows.length}行</span>
+                    <span className="text-emerald-700">登録できる {summary.ok}名</span>
+                    {summary.ng > 0 && <span className="text-rose-600">登録できない {summary.ng}名</span>}
+                    {summary.warned > 0 && <span className="text-amber-600">要確認 {summary.warned}名</span>}
+                  </div>
+
+                  <div className="border border-slate-200 rounded-lg overflow-hidden">
+                    <div className="overflow-x-auto max-h-72 overflow-y-auto">
+                      <table className="w-full border-collapse">
+                        <thead className="sticky top-0 bg-slate-50">
+                          <tr className="text-[10.5px] text-slate-500 text-left">
+                            <th className={cell}>行</th>
+                            <th className={cell}>氏名</th>
+                            <th className={cell}>ログインID</th>
+                            <th className={cell}>入職日</th>
+                            <th className={cell}>権限</th>
+                            <th className={cell}>コード</th>
+                            <th className={cell}>扱い</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {rows.map((r) => (
+                            <tr key={r.rowNumber} className={r.ok ? '' : 'bg-rose-50/60'}>
+                              <td className={`${cell} font-mono text-slate-400`}>{r.rowNumber}</td>
+                              <td className={cell}>{r.fullName || '（氏名なし）'}</td>
+                              <td className={`${cell} font-mono text-[10.5px] break-all`}>{r.email}</td>
+                              <td className={`${cell} font-mono`}>{r.hireDate || '—'}</td>
+                              <td className={cell}>{ROLE_LABELS[r.role] || '—'}</td>
+                              <td className={`${cell} font-mono`}>{r.staffNumber || '—'}</td>
+                              <td className={cell}>
+                                {r.ok ? (
+                                  <>
+                                    <span className="text-emerald-700 font-bold">登録します</span>
+                                    {r.passwordGenerated && (
+                                      <span className="block text-[10px] text-slate-400">仮パスワードは自動</span>
+                                    )}
+                                    {r.warning && (
+                                      <span className="block text-[10px] text-amber-600">{r.warning}</span>
+                                    )}
+                                  </>
+                                ) : (
+                                  <span className="text-rose-600">{r.error}</span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  <label className="flex items-start gap-2 text-[12px] text-slate-600 cursor-pointer border border-slate-200 rounded-lg px-3 py-2.5">
+                    <input type="checkbox" checked={sendInvite} onChange={(e) => setSendInvite(e.target.checked)} className="mt-0.5" />
+                    <span>
+                      ログイン案内メールを送る
+                      <span className="block text-[11px] text-slate-400">
+                        {sendInvite
+                          ? '各メールアドレス宛に、ログインURLと仮パスワードを記載した案内を送信します。'
+                          : '送信しません。ログインURLと仮パスワードは、このあと出る一覧からお伝えください。'}
+                      </span>
+                    </span>
+                  </label>
+
+                  <label className="flex items-start gap-2 text-[12px] text-slate-600 cursor-pointer border border-slate-200 rounded-lg px-3 py-2.5">
+                    <input type="checkbox" checked={requireProfileSetup} onChange={(e) => setRequireProfileSetup(e.target.checked)} className="mt-0.5" />
+                    <span>
+                      初回ログイン時に、登録情報（住所・口座など）の入力を求める
+                      <span className="block text-[11px] text-slate-400">
+                        {requireProfileSetup
+                          ? 'パスワードの変更のあと、登録情報の入力画面が出ます。'
+                          : 'パスワードの変更だけで、すぐ通常の画面に入れます。登録情報は本人があとから入力できます。'}
+                      </span>
+                    </span>
+                  </label>
+
+                  <button
+                    onClick={run}
+                    disabled={running || summary.ok === 0}
+                    className="w-full rounded-lg bg-slate-800 py-2.5 text-[13px] font-bold text-white disabled:bg-slate-300"
+                  >
+                    {running ? '登録中…' : `${summary.ok}名を登録する`}
+                  </button>
+                  {summary.ng > 0 && (
+                    <div className="text-[11px] text-slate-500 text-center">
+                      登録できない{summary.ng}名は飛ばします。Excelを直してもう一度読み込んでください。
+                    </div>
+                  )}
+                </>
+              )}
+            </>
           )}
-        </div>
-        <div className="px-5 pb-5 pt-1 flex gap-2 sticky bottom-0 bg-white">
-          <button onClick={onClose} className="flex-1 py-2.5 rounded-lg border border-slate-200 text-[13.5px] font-medium text-slate-500">閉じる</button>
-          <button
-            onClick={runImport}
-            disabled={rows.length === 0 || running}
-            className="flex-1 py-2.5 rounded-lg bg-slate-800 disabled:bg-slate-300 text-white text-[13.5px] font-bold"
-          >
-            {running ? '登録中…' : `${rows.length || ''}名を登録する`}
-          </button>
+
+          {results !== null && (
+            <>
+              <div className="text-[12.5px] font-bold text-slate-700">
+                {results.filter((x) => x.result.ok).length}名を登録しました
+                {results.some((x) => !x.result.ok) && `（${results.filter((x) => !x.result.ok).length}名は失敗）`}
+              </div>
+              <div className="text-[11.5px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2.5">
+                仮パスワードはこの画面を閉じると二度と出ません。
+                {sendInvite ? 'ログイン案内メールは送信済みですが、念のため控えをお取りください。' : '閉じる前に控えをお取りください。'}
+              </div>
+              <div className="border border-slate-200 rounded-lg overflow-hidden">
+                <div className="overflow-x-auto max-h-80 overflow-y-auto">
+                  <table className="w-full border-collapse">
+                    <thead className="sticky top-0 bg-slate-50">
+                      <tr className="text-[10.5px] text-slate-500 text-left">
+                        <th className={cell}>氏名</th>
+                        <th className={cell}>ログインID</th>
+                        <th className={cell}>仮パスワード</th>
+                        <th className={cell}>結果</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {results.map((x) => (
+                        <tr key={x.row.rowNumber}>
+                          <td className={cell}>{x.row.fullName}</td>
+                          <td className={`${cell} font-mono text-[10.5px] break-all`}>{x.row.email}</td>
+                          <td className={`${cell} font-mono select-all`}>{x.result.ok ? x.row.password : '—'}</td>
+                          <td className={cell}>
+                            {x.result.ok
+                              ? (x.result.message
+                                ? <span className="text-amber-600">{x.result.message}</span>
+                                : <span className="text-emerald-700 font-bold">登録しました</span>)
+                              : <span className="text-rose-600">{x.result.message}</span>}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <button onClick={onClose} className="w-full rounded-lg border border-slate-300 bg-white py-2.5 text-[13px] font-bold text-slate-600">
+                控えました。閉じる
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>,
