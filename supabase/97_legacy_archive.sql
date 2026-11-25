@@ -55,6 +55,11 @@ create table if not exists public.legacy_attendance_months (
   deemed_overtime_hours numeric,
   over_deemed_hours numeric,
 
+  -- 消化した休暇。見出しをそのまま名前にして入れます（例：{"有休(全休)": 1}）。
+  -- ジョブカンの出力では、休暇を取った方のシートにだけこの列が現れます。
+  -- 休暇の種類が増えても表を変えずに済むよう、jsonb で持ちます。
+  leave_used jsonb not null default '{}'::jsonb,
+
   source text not null default 'jobcan',
   imported_at timestamptz not null default now(),
   imported_by uuid references public.employees(id) on delete set null,
@@ -80,6 +85,10 @@ create table if not exists public.legacy_attendance_days (
   imported_at timestamptz not null default now(),
   unique (employee_id, date)
 );
+
+-- 先に97番を流したあとで足した列。もう一度流すとここで追加されます
+alter table public.legacy_attendance_months
+  add column if not exists leave_used jsonb not null default '{}'::jsonb;
 
 create index if not exists legacy_days_employee_date_idx
   on public.legacy_attendance_days (employee_id, date);

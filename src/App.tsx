@@ -26899,6 +26899,7 @@ function LegacyArchiveTab({ employeeAccounts = [], session, isDesktop }) {
           holiday_work_hours: m.holidayWorkHours, holiday_overtime_hours: m.holidayOvertimeHours,
           holiday_night_hours: m.holidayNightHours,
           deemed_overtime_hours: m.deemedOvertimeHours, over_deemed_hours: m.overDeemedHours,
+          leave_used: m.leaveUsed || {},
           imported_by: session?.id || null,
         });
         if (e1) throw e1;
@@ -26999,6 +27000,10 @@ function LegacyArchiveTab({ employeeAccounts = [], session, isDesktop }) {
               <PayrollMetric label="遅刻・早退" value={`${num(month.late_count)} / ${num(month.early_count)}`} />
               <PayrollMetric label="みなし残業" value={num(month.deemed_overtime_hours, 'h')} />
               <PayrollMetric label="みなし外残業" value={num(month.over_deemed_hours, 'h')} />
+              {/* 消化した休暇。取った方にだけ列が現れるため、あるものだけ出します */}
+              {Object.entries(month.leave_used || {}).map(([label, v]) => (
+                <PayrollMetric key={label} label={label} value={`${v}日`} />
+              ))}
             </div>
             <div className="text-[11px] text-slate-400">
               当時の所属：{month.source_group_path || '—'}／{month.source_staff_type || '—'}
@@ -27022,8 +27027,9 @@ function LegacyArchiveTab({ employeeAccounts = [], session, isDesktop }) {
                   <tbody className="divide-y divide-slate-100">
                     {days.map((d) => {
                       const off = !d.clock_in_actual && !d.clock_out_actual;
-                      const rounded = (d.clock_in && d.clock_in !== d.clock_in_actual)
-                        || (d.clock_out && d.clock_out !== d.clock_out_actual);
+                      // 打刻した時刻と、計算に使われた時刻が違う日（丸め）
+                      const inRounded = d.clock_in && d.clock_in !== d.clock_in_actual;
+                      const outRounded = d.clock_out && d.clock_out !== d.clock_out_actual;
                       return (
                         <tr key={d.date} className={off ? 'bg-slate-50/60' : ''}>
                           <td className={`${cell} font-mono whitespace-nowrap`}>
@@ -27031,16 +27037,20 @@ function LegacyArchiveTab({ employeeAccounts = [], session, isDesktop }) {
                             <span className="text-slate-400">({d.weekday})</span>
                           </td>
                           <td className={cell}>
-                            {d.status || (d.holiday_kind ? <span className="text-rose-500">{d.holiday_kind}</span> : '')}
+                            {d.status && <span className="text-sky-700 font-bold">{d.status}</span>}
+                            {!d.status && d.holiday_kind && <span className="text-rose-500">{d.holiday_kind}</span>}
                           </td>
-                          <td className={`${cell} font-mono`}>{d.clock_in_actual || '—'}</td>
-                          <td className={`${cell} font-mono`}>{d.clock_out_actual || '—'}</td>
+                          <td className={`${cell} font-mono whitespace-nowrap`}>
+                            {d.clock_in_actual || '—'}
+                            {inRounded && <span className="block text-[10px] text-slate-400">→{d.clock_in}</span>}
+                          </td>
+                          <td className={`${cell} font-mono whitespace-nowrap`}>
+                            {d.clock_out_actual || '—'}
+                            {outRounded && <span className="block text-[10px] text-slate-400">→{d.clock_out}</span>}
+                          </td>
                           <td className={`${cell} font-mono`}>{d.break_hours === null ? '—' : `${d.break_hours}h`}</td>
                           <td className={`${cell} font-mono`}>{d.work_hours === null ? '—' : `${d.work_hours}h`}</td>
-                          <td className={`${cell} text-[10.5px] text-slate-500`}>
-                            {rounded && <span className="text-amber-600">丸めあり（{d.clock_in}〜{d.clock_out}）</span>}
-                            {d.note}
-                          </td>
+                          <td className={`${cell} text-[10.5px] text-slate-500`}>{d.note}</td>
                         </tr>
                       );
                     })}
@@ -27049,7 +27059,7 @@ function LegacyArchiveTab({ employeeAccounts = [], session, isDesktop }) {
               </div>
             </div>
             <div className="text-[11px] text-slate-400">
-              「出勤」「退勤」は実際に打刻した時刻です。計算に使われた時刻と違う日は備考に出ます。
+              「出勤」「退勤」は実際に打刻した時刻です。計算に使われた時刻が違う日は、その下に小さく「→」で出します。
             </div>
           </>
         )}

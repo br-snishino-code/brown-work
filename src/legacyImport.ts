@@ -126,6 +126,13 @@ export type LegacyMonth = {
   /** みなし残業 */
   deemedOvertimeHours: number | null;
   overDeemedHours: number | null;
+  /**
+   * 消化した休暇。見出しをそのまま名前にして入れます。
+   * 例：{ '有休(全休)': 1 }
+   * この欄は休暇を取った方のシートにだけ現れ、取っていない方には列ごとありません。
+   * 将来「半休」「特別休暇」などが増えても、見出しごと拾うので直さずに済みます。
+   */
+  leaveUsed: Record<string, number>;
   days: LegacyDay[];
   /** 読み取れなかった理由。問題なければ '' */
   error: string;
@@ -160,6 +167,7 @@ export function parseLegacySheet(sheetName: string, aoa: unknown[][]): LegacyMon
     weekdayWorkHours: null, weekdayOvertimeHours: null, weekdayNightHours: null,
     holidayWorkHours: null, holidayOvertimeHours: null, holidayNightHours: null,
     deemedOvertimeHours: null, overDeemedHours: null,
+    leaveUsed: {},
     days: [], error: '',
   };
 
@@ -258,6 +266,22 @@ export function parseLegacySheet(sheetName: string, aoa: unknown[][]): LegacyMon
   }
   const H = (i: number) => (hours.length > i && hours[i] !== null && hours[i] !== undefined ? hours[i] : null);
 
+  // ---- 消化した休暇 ----
+  // 「消化した休暇」の見出しがある列から右を、労働時間と同じ行で読みます。
+  // 休暇を取っていない方のシートにはこの列がありません（空のままになります）。
+  const leaveUsed: Record<string, number> = {};
+  const leaveHeadRow = rowOf(aoa, ['消化した休暇']);
+  if (leaveHeadRow >= 0 && hoursRow >= 0 && aoa[hoursRow + 1]) {
+    const leaveCol = colOf(aoa[leaveHeadRow], '消化した休暇');
+    const hh = aoa[hoursRow]; const vv = aoa[hoursRow + 1];
+    for (let j = leaveCol; j >= 0 && j < hh.length; j++) {
+      const label = text(hh[j]);
+      if (label === '') continue;
+      const n = toNum(vv[j]);
+      if (n !== null) leaveUsed[label] = n;
+    }
+  }
+
   // ---- みなし残業 ----
   let deemed: number | null = null; let overDeemed: number | null = null;
   const deemedRow = rowOf(aoa, ['みなし残業時間']);
@@ -278,6 +302,7 @@ export function parseLegacySheet(sheetName: string, aoa: unknown[][]): LegacyMon
     weekdayWorkHours: H(3), weekdayOvertimeHours: H(4), weekdayNightHours: H(5),
     holidayWorkHours: H(6), holidayOvertimeHours: H(7), holidayNightHours: H(8),
     deemedOvertimeHours: deemed, overDeemedHours: overDeemed,
+    leaveUsed,
     days,
     error: days.length === 0 ? '日ごとの行が1つも読み取れません' : '',
   };
