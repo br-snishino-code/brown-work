@@ -673,8 +673,18 @@ function buildConfirmedPayload(sheet, month) {
       cells[key] = text;
       if (text) any = true;
     }
-    // 1日も入っていない行は、空行や区切り行とみなして送らない
-    if (any) rows.push({ name: name, cells: cells });
+    // 1日も入っていない行も「この方は今月シフトなし」として送る。
+    //
+    // 【なぜ送るか】
+    //   送らないと、取り込み側はその方を対象外とみなし、
+    //   Brown Work に残っている先月組んだ分を消しません。
+    //   シフトから丸ごと外した方のシフトが、ご本人の画面に残り続けます。
+    //
+    // 【空行や区切り行も混ざりますが、害はありません】
+    //   empty: true の行は、取り込み側では「その方の分を消す」ためだけに使い、
+    //   スタッフと結びつかない氏名は黙って飛ばします
+    //   （氏名が一致しなかった方の一覧にも出しません）。
+    rows.push({ name: name, cells: cells, empty: !any });
   }
 
   return {
@@ -882,6 +892,9 @@ function pushConfirmedShiftsCore(sheet, month) {
     }
     if (result.resignedNames && result.resignedNames.length > 0) {
       msg += '\n\n【退職済みのため飛ばした方】\n　' + result.resignedNames.join('、');
+    }
+    if (result.clearedStaffCount > 0) {
+      msg += '\n\n【今月はシフトなしとして、古い分を消した方】' + result.clearedStaffCount + '名';
     }
     if (result.firstImport) {
       msg += '\n\nこの月の初回の取り込みです。';

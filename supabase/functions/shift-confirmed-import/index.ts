@@ -237,9 +237,14 @@ Deno.serve(async (req) => {
     const now = new Date().toISOString();
     let matchedRows = 0;
 
+    // 「今月はシフトなし」の方。古い分を消すためだけに使う
+    const clearIds = new Set<string>();
+
     for (const row of rows) {
       const name = normalizeName(String(row?.name || ''));
       if (!name) continue;
+      // シートで1日も埋まっていなかった行。空行や区切り行も混ざる
+      const isEmptyRow = row?.empty === true;
       // 対応表 → 完全一致 の順に探す
       const employeeId = aliasMap.get(name) ?? byName.get(name);
       if (employeeId === undefined) {
@@ -248,11 +253,19 @@ Deno.serve(async (req) => {
           if (!resigned.includes(name)) resigned.push(name);
           continue;
         }
+        // 空行・区切り行が「氏名が一致しません」として並ぶと読みにくいので、
+        // 中身の無い行は黙って飛ばす
+        if (isEmptyRow) continue;
         if (!unmatched.includes(name)) unmatched.push(name);
         continue;
       }
       if (employeeId === '') {
-        if (!duplicated.includes(name)) duplicated.push(name);
+        if (!isEmptyRow && !duplicated.includes(name)) duplicated.push(name);
+        continue;
+      }
+      if (isEmptyRow) {
+        // この方は今月シフトなし。古い分を消す対象にする
+        clearIds.add(employeeId);
         continue;
       }
       matchedRows += 1;
@@ -279,7 +292,14 @@ Deno.serve(async (req) => {
 
     // その月の既存分を、取り込んだスタッフの分だけ消してから入れ直す。
     // 取り込み対象外のスタッフのシフトは触らない。
-    const employeeIds = Array.from(new Set(assignments.map((a) => a.employee_id)));
+    //
+    // 「今月はシフトなし」の方も消す対象に含める。
+    // そうしないと、シフトから丸ごと外した方の古い分が残ってしまう。
+    // ただし、組みかけや別のシートを誤って送ったときに全員分が消えないよう、
+    // 1件も取り込む内容が無いときは消さない（上の早期リターンで止まる）。
+    const assignedIds = new Set(assignments.map((a) => a.employee_id));
+    const clearedIds = Array.from(clearIds).filter((id) => !assignedIds.has(id));
+    const employeeIds = Array.from(new Set([...assignedIds, ...clearedIds]));
     const lastDay = new Date(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0).getDate();
     const from = `${month}-01`;
     const to = `${month}-${String(lastDay).padStart(2, '0')}`;
@@ -394,6 +414,7 @@ Deno.serve(async (req) => {
       duplicatedNames: duplicated,
       resignedNames: resigned,
       assignmentCount: assignments.length,
+      clearedStaffCount: clearedIds.length,
       changeCount: beforeMap.size > 0 ? changes.length : 0,
       changedStaffCount: beforeMap.size > 0 ? changedEmployeeIds.length : 0,
       firstImport: beforeMap.size === 0,
