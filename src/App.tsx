@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef, useContext, createContext } from 'react';
 import { createPortal } from 'react-dom';
 import * as XLSX from 'xlsx';
-import { Clock, MapPin, CheckCircle2, XCircle, AlertTriangle, LogIn, LogOut, FileEdit, Users, Bell, Calendar, Mail, LogOut as LogoutIcon, UserPlus, Lock, User, Monitor, Smartphone, Palmtree, Plus, Pencil, CalendarDays, ListChecks, ClipboardList, MessageSquare, Coffee, BarChart3, Home, Download, ChevronRight, LayoutGrid, Wallet, Briefcase, UserCog, Construction, Megaphone, Paperclip, Upload, FileText, Pin, Trash2, Key, ShieldCheck, ShieldAlert, HelpCircle, ChevronDown, ChevronLeft, Settings, RefreshCw, X } from 'lucide-react';
+import { Clock, MapPin, CheckCircle2, XCircle, AlertTriangle, LogIn, LogOut, FileEdit, Users, Bell, Calendar, Mail, LogOut as LogoutIcon, UserPlus, Lock, User, Monitor, Smartphone, Palmtree, Plus, Pencil, CalendarDays, ListChecks, ClipboardList, MessageSquare, Coffee, BarChart3, Home, Download, ChevronRight, LayoutGrid, Wallet, Briefcase, UserCog, Construction, Megaphone, Paperclip, Upload, FileText, Pin, Trash2, Key, ShieldCheck, ShieldAlert, HelpCircle, ChevronDown, ChevronLeft, Settings, RefreshCw, Archive, X } from 'lucide-react';
 import { supabase, CLOUD_ENABLED, INITIAL_URL, usernameToEmail } from './supabaseClient';
 import {
   OFFICE_INFO_DEFAULTS, OFFICE_FIELD_LABELS, OFFICE_REQUIRED_NENKIN, OFFICE_REQUIRED_HW,
@@ -49,6 +49,9 @@ import {
   STAFF_IMPORT_COLUMNS, ROLE_LABELS, parseStaffSheet, checkStaffRows,
   staffProfilePatch, staffImportSummary,
 } from './staffImport';
+import {
+  parseLegacyWorkbook, matchLegacyMonths, legacySummary, monthLabel,
+} from './legacyImport';
 import { parseBuildId, shouldPromptReload, buildTimeLabel } from './appVersion';
 import {
   commuteRowSubtotal, isSavableCommuteRow, commuteSavedTotal,
@@ -26778,6 +26781,378 @@ function IncentiveImportTab({ employeeAccounts = [], payrollRecords = [], settin
   );
 }
 
+// ---- 過去の記録（ジョブカン）----
+// ジョブカン時代の勤怠を見るだけの書庫です。
+// いまの勤怠・給与計算・源泉徴収票・有休の残日数には一切混ざりません
+// （別の表に入れています。supabase/97_legacy_archive.sql）。
+// 当時の数字をそのまま出します。Brown Work の設定で計算し直しません。
+function LegacyArchiveTab({ employeeAccounts = [], session, isDesktop }) {
+  const isMaster = session?.role === 'master_admin';
+  const isStaff = session?.role !== 'master_admin' && session?.role !== 'admin';
+
+  // スタッフでない方は自分の分だけを見ます
+  const [employeeId, setEmployeeId] = useState(isStaff ? (session?.id || '') : '');
+  const [months, setMonths] = useState([]);      // この方の月のまとめ
+  const [days, setDays] = useState([]);          // 選んだ月の日ごと
+  const [picked, setPicked] = useState('');      // 'YYYY-M'
+  const [loading, setLoading] = useState(false);
+  const [notReady, setNotReady] = useState(false); // 97番SQLが未適用
+
+  // 取り込み（マスター管理者のみ）
+  const [preview, setPreview] = useState(null);  // 読み取った結果
+  const [fileName, setFileName] = useState('');
+  const [readError, setReadError] = useState('');
+  const [importing, setImporting] = useState(false);
+  const [importDone, setImportDone] = useState(null);
+  const fileRef = useRef(null);
+
+  const loadMonths = async (id) => {
+    if (!id) { setMonths([]); setDays([]); setPicked(''); return; }
+    setLoading(true);
+    const { data, error } = await supabase
+      .from('legacy_attendance_months')
+      .select('*')
+      .eq('employee_id', id)
+      .order('year', { ascending: false })
+      .order('month', { ascending: false });
+    setLoading(false);
+    if (error) {
+      // 表がまだ無い＝97番のSQLが流れていない
+      setNotReady(/legacy_attendance_months/.test(error.message || ''));
+      setMonths([]);
+      return;
+    }
+    setNotReady(false);
+    setMonths(data || []);
+    setPicked((data || []).length > 0 ? `${data[0].year}-${data[0].month}` : '');
+  };
+
+  const loadDays = async (id, key) => {
+    if (!id || !key) { setDays([]); return; }
+    const [y, mo] = key.split('-').map(Number);
+    const first = `${y}-${String(mo).padStart(2, '0')}-01`;
+    const last = `${y}-${String(mo).padStart(2, '0')}-31`;
+    const { data } = await supabase
+      .from('legacy_attendance_days')
+      .select('*')
+      .eq('employee_id', id)
+      .gte('date', first)
+      .lte('date', last)
+      .order('date');
+    setDays(data || []);
+  };
+
+  useEffect(() => { loadMonths(employeeId); }, [employeeId]);
+  useEffect(() => { loadDays(employeeId, picked); }, [employeeId, picked]);
+
+  const month = months.find((m) => `${m.year}-${m.month}` === picked) || null;
+
+  // ---- 取り込み ----
+  const readFile = async (file) => {
+    if (!file) return;
+    setFileName(file.name);
+    setImportDone(null);
+    try {
+      const XLSX = await import('xlsx');
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: 'array', cellDates: false });
+      const sheets = wb.SheetNames.map((name) => ({
+        name,
+        aoa: XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, raw: true, defval: '' }),
+      }));
+      const parsed = parseLegacyWorkbook(sheets);
+      const matched = matchLegacyMonths(parsed, employeeAccounts.map((a) => ({
+        id: a.id, name: a.name, staffNumber: a.staffNumber || '',
+      })));
+      setReadError('');
+      setPreview(matched);
+    } catch (e) {
+      console.error('過去の記録の読み取りエラー:', e);
+      setPreview(null);
+      setReadError('Excelファイルを読み取れませんでした。ジョブカンから出したままの .xlsx をお選びください');
+    }
+  };
+
+  const runImport = async () => {
+    if (!preview) return;
+    setImporting(true);
+    const done = [];
+    for (const m of preview.filter((x) => x.ok)) {
+      const first = `${m.year}-${String(m.month).padStart(2, '0')}-01`;
+      const last = `${m.year}-${String(m.month).padStart(2, '0')}-31`;
+      try {
+        // 取り込み直しに備えて、同じ月の分をいったん消してから入れます
+        await supabase.from('legacy_attendance_days').delete()
+          .eq('employee_id', m.employeeId).gte('date', first).lte('date', last);
+        await supabase.from('legacy_attendance_months').delete()
+          .eq('employee_id', m.employeeId).eq('year', m.year).eq('month', m.month);
+
+        const { error: e1 } = await supabase.from('legacy_attendance_months').insert({
+          employee_id: m.employeeId, year: m.year, month: m.month,
+          source_staff_name: m.staffName, source_staff_number: m.staffNumber,
+          source_group_path: m.groupPath, source_staff_type: m.staffType,
+          work_days: m.workDays, weekday_days: m.weekdayDays, holiday_days: m.holidayDays,
+          absent_days: m.absentDays, late_count: m.lateCount, early_count: m.earlyCount,
+          work_hours: m.workHours, overtime_hours: m.overtimeHours, night_hours: m.nightHours,
+          weekday_work_hours: m.weekdayWorkHours, weekday_overtime_hours: m.weekdayOvertimeHours,
+          weekday_night_hours: m.weekdayNightHours,
+          holiday_work_hours: m.holidayWorkHours, holiday_overtime_hours: m.holidayOvertimeHours,
+          holiday_night_hours: m.holidayNightHours,
+          deemed_overtime_hours: m.deemedOvertimeHours, over_deemed_hours: m.overDeemedHours,
+          imported_by: session?.id || null,
+        });
+        if (e1) throw e1;
+
+        const { error: e2 } = await supabase.from('legacy_attendance_days').insert(
+          m.days.map((d) => ({
+            employee_id: m.employeeId, date: d.date, weekday: d.weekday,
+            status: d.status, holiday_kind: d.holidayKind,
+            clock_in_actual: d.clockInActual, clock_out_actual: d.clockOutActual,
+            clock_in: d.clockIn, clock_out: d.clockOut,
+            break_hours: d.breakHours, work_hours: d.workHours, note: d.note,
+          }))
+        );
+        if (e2) throw e2;
+        done.push({ m, ok: true, message: '' });
+      } catch (err) {
+        console.error('過去の記録の取り込みエラー:', err);
+        const msg = String(err?.message || '');
+        done.push({
+          m, ok: false,
+          message: /legacy_attendance/.test(msg)
+            ? '書庫の表がまだありません（97番SQLが未適用です）'
+            : '取り込めませんでした',
+        });
+      }
+    }
+    setImporting(false);
+    setImportDone(done);
+    setPreview(null);
+    // いま見ている方の分が入ったら読み直します
+    if (done.some((d) => d.ok && d.m.employeeId === employeeId)) await loadMonths(employeeId);
+  };
+
+  const num = (v, unit = '') => (v === null || v === undefined ? '—' : `${v}${unit}`);
+  const cell = 'px-2 py-1.5 text-[11.5px]';
+
+  return (
+    <div className="space-y-5">
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
+        <h2 className="font-bold text-[14px] text-slate-800 flex items-center gap-2">
+          <Archive size={16} className="text-slate-400" />過去の記録（ジョブカン）
+        </h2>
+        <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-[11.5px] text-slate-600">
+          ジョブカンで記録していた当時の勤怠です。<span className="font-bold">当時の数字をそのまま出しています</span>（Brown Work の設定で計算し直していません）。
+          いまの勤怠一覧・給与計算・源泉徴収票・有休の残日数には入りません。
+        </div>
+
+        {!isStaff && (
+          <Field label="スタッフ">
+            <EmployeeSearchSelect
+              employeeAccounts={employeeAccounts}
+              value={employeeId}
+              onChange={setEmployeeId}
+              showAllOption={false}
+              placeholder="選んでください"
+            />
+          </Field>
+        )}
+
+        {notReady && (
+          <div className="border border-amber-200 bg-amber-50 rounded-lg px-3 py-2.5 text-[12px] text-amber-800">
+            書庫の表がまだありません。<span className="font-mono">supabase/97_legacy_archive.sql</span> を流してください。
+          </div>
+        )}
+
+        {!notReady && employeeId && !loading && months.length === 0 && (
+          <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-6 text-center text-[12.5px] text-slate-500">
+            この方の過去の記録はまだ取り込まれていません。
+          </div>
+        )}
+
+        {months.length > 0 && (
+          <Field label="月">
+            <select
+              value={picked}
+              onChange={(e) => setPicked(e.target.value)}
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px] bg-white"
+            >
+              {months.map((m) => (
+                <option key={`${m.year}-${m.month}`} value={`${m.year}-${m.month}`}>
+                  {m.year}年{m.month}月
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
+
+        {month && (
+          <>
+            <div className={`grid gap-2 ${isDesktop ? 'grid-cols-4' : 'grid-cols-2'}`}>
+              <PayrollMetric label="出勤日数" value={num(month.work_days, '日')} />
+              <PayrollMetric label="労働時間" value={num(month.work_hours, 'h')} />
+              <PayrollMetric label="残業時間" value={num(month.overtime_hours, 'h')} />
+              <PayrollMetric label="深夜時間" value={num(month.night_hours, 'h')} />
+              <PayrollMetric label="平日出勤" value={num(month.weekday_days, '日')} />
+              <PayrollMetric label="休日出勤" value={num(month.holiday_days, '日')} />
+              <PayrollMetric label="欠勤" value={num(month.absent_days, '日')} />
+              <PayrollMetric label="遅刻・早退" value={`${num(month.late_count)} / ${num(month.early_count)}`} />
+              <PayrollMetric label="みなし残業" value={num(month.deemed_overtime_hours, 'h')} />
+              <PayrollMetric label="みなし外残業" value={num(month.over_deemed_hours, 'h')} />
+            </div>
+            <div className="text-[11px] text-slate-400">
+              当時の所属：{month.source_group_path || '—'}／{month.source_staff_type || '—'}
+              （スタッフコード {month.source_staff_number || '—'}）
+            </div>
+
+            <div className="border border-slate-200 rounded-lg overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full border-collapse">
+                  <thead className="bg-slate-50">
+                    <tr className="text-[10.5px] text-slate-500 text-left">
+                      <th className={cell}>日付</th>
+                      <th className={cell}>状況</th>
+                      <th className={cell}>出勤</th>
+                      <th className={cell}>退勤</th>
+                      <th className={cell}>休憩</th>
+                      <th className={cell}>実労働</th>
+                      <th className={cell}>備考</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {days.map((d) => {
+                      const off = !d.clock_in_actual && !d.clock_out_actual;
+                      const rounded = (d.clock_in && d.clock_in !== d.clock_in_actual)
+                        || (d.clock_out && d.clock_out !== d.clock_out_actual);
+                      return (
+                        <tr key={d.date} className={off ? 'bg-slate-50/60' : ''}>
+                          <td className={`${cell} font-mono whitespace-nowrap`}>
+                            {Number(d.date.slice(5, 7))}/{Number(d.date.slice(8, 10))}
+                            <span className="text-slate-400">({d.weekday})</span>
+                          </td>
+                          <td className={cell}>
+                            {d.status || (d.holiday_kind ? <span className="text-rose-500">{d.holiday_kind}</span> : '')}
+                          </td>
+                          <td className={`${cell} font-mono`}>{d.clock_in_actual || '—'}</td>
+                          <td className={`${cell} font-mono`}>{d.clock_out_actual || '—'}</td>
+                          <td className={`${cell} font-mono`}>{d.break_hours === null ? '—' : `${d.break_hours}h`}</td>
+                          <td className={`${cell} font-mono`}>{d.work_hours === null ? '—' : `${d.work_hours}h`}</td>
+                          <td className={`${cell} text-[10.5px] text-slate-500`}>
+                            {rounded && <span className="text-amber-600">丸めあり（{d.clock_in}〜{d.clock_out}）</span>}
+                            {d.note}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div className="text-[11px] text-slate-400">
+              「出勤」「退勤」は実際に打刻した時刻です。計算に使われた時刻と違う日は備考に出ます。
+            </div>
+          </>
+        )}
+      </div>
+
+      {isMaster && (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-3">
+          <h3 className="font-bold text-[13px] text-slate-700 flex items-center gap-2">
+            <Upload size={14} className="text-slate-400" />ジョブカンのExcelを取り込む
+          </h3>
+          <div className="text-[11.5px] text-slate-600 bg-slate-50 border border-slate-200 rounded-lg p-3 space-y-1">
+            <div>ジョブカンから出した勤怠のExcel（1シート＝1人）をそのままお選びください。</div>
+            <div>同じ月をもう一度取り込むと、前の分を消してから入れ直します。</div>
+            <div className="text-slate-500">スタッフコードで突き合わせます。コードが合わないときは氏名で探します。</div>
+          </div>
+
+          <button
+            onClick={() => fileRef.current?.click()}
+            className="w-full flex items-center justify-center gap-1.5 rounded-lg border border-slate-300 bg-white py-2.5 text-[12.5px] font-bold text-slate-600"
+          >
+            <Upload size={14} /> Excelファイルを選ぶ
+          </button>
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".xlsx,.xls"
+            className="hidden"
+            onChange={(e) => { readFile(e.target.files?.[0]); e.target.value = ''; }}
+          />
+          {fileName && <div className="text-[11.5px] text-slate-500">読み込んだファイル：{fileName}</div>}
+          {readError && (
+            <div className="border border-rose-200 bg-rose-50 rounded-lg px-3 py-2.5 text-[12px] text-rose-700">{readError}</div>
+          )}
+
+          {preview && (
+            <>
+              <div className="text-[12px] font-bold text-slate-700">
+                {legacySummary(preview).sheets}シート：取り込める {legacySummary(preview).ok}人分
+                {legacySummary(preview).ng > 0 && `／取り込めない ${legacySummary(preview).ng}`}
+                （打刻のあった日 {legacySummary(preview).worked}日）
+              </div>
+              <div className="border border-slate-200 rounded-lg overflow-hidden">
+                <div className="overflow-x-auto max-h-64 overflow-y-auto">
+                  <table className="w-full border-collapse">
+                    <thead className="sticky top-0 bg-slate-50">
+                      <tr className="text-[10.5px] text-slate-500 text-left">
+                        <th className={cell}>シート</th>
+                        <th className={cell}>月</th>
+                        <th className={cell}>スタッフ</th>
+                        <th className={cell}>日数</th>
+                        <th className={cell}>扱い</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {preview.map((m, i) => (
+                        <tr key={`${m.sheetName}-${i}`} className={m.ok ? '' : 'bg-rose-50/60'}>
+                          <td className={cell}>{m.sheetName}</td>
+                          <td className={`${cell} whitespace-nowrap`}>{monthLabel(m) || '—'}</td>
+                          <td className={cell}>{m.employeeName || '—'}</td>
+                          <td className={`${cell} font-mono`}>{m.days.length}</td>
+                          <td className={cell}>
+                            {m.ok
+                              ? <span className="text-emerald-700 font-bold">
+                                  取り込みます{m.matchedBy === 'name' && <span className="block text-[10px] text-amber-600">氏名で突き合わせました</span>}
+                                </span>
+                              : <span className="text-rose-600">{m.error}</span>}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <button
+                onClick={runImport}
+                disabled={importing || legacySummary(preview).ok === 0}
+                className="w-full rounded-lg bg-slate-800 py-2.5 text-[13px] font-bold text-white disabled:bg-slate-300"
+              >
+                {importing ? '取り込み中…' : `${legacySummary(preview).ok}人分を取り込む`}
+              </button>
+            </>
+          )}
+
+          {importDone && (
+            <div className="space-y-1.5">
+              <div className="text-[12.5px] font-bold text-slate-700">
+                {importDone.filter((d) => d.ok).length}人分を取り込みました
+                {importDone.some((d) => !d.ok) && `（${importDone.filter((d) => !d.ok).length}件は失敗）`}
+              </div>
+              {importDone.map((d, i) => (
+                <div key={i} className="text-[11.5px] text-slate-600">
+                  {d.m.sheetName}（{monthLabel(d.m)}）：
+                  {d.ok ? <span className="text-emerald-700">{d.m.days.length}日分</span> : <span className="text-rose-600">{d.message}</span>}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PayrollTransferTab({ employeeAccounts = [], payrollRecords = [], bonusRecords = [], settings = {}, actor, onRefresh, isDesktop }) {
   const now = new Date();
   const defaultTarget = new Date(now.getFullYear(), now.getMonth() - 1, 1);
@@ -29117,11 +29492,13 @@ function AdminTopNav({ tab, setTab, attendanceCount = 0, correctionCount, leaveC
     {
       key: 'attendance-group',
       label: '出勤管理',
-      tabs: ['attendance', 'requests', 'monthlyconfirm'],
+      tabs: ['attendance', 'requests', 'monthlyconfirm', 'legacy'],
       items: [
         { tab: 'attendance', label: '勤怠一覧', sub: '月次一覧・CSV出力' },
         { tab: 'requests', label: '勤怠修正申請', sub: '承認・却下', badge: correctionCount },
         { tab: 'monthlyconfirm', label: '月次勤怠の確定', sub: '承認・最終承認', badge: monthlyConfirmCount },
+        // ジョブカン時代の勤怠を見るだけの書庫。いまの勤怠・給与計算には混ざりません
+        { tab: 'legacy', label: '過去の記録', sub: 'ジョブカン時代の勤怠' },
       ],
     },
     {
@@ -29680,6 +30057,14 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
 
       {tab === 'attendance' && (
         <AttendanceAdminTab data={data} employeeAccounts={employeeAccounts} gpsAlerts={gpsAlerts} offShiftAlerts={offShiftAlerts} focus={attendanceFocus} onConsumeFocus={() => setAttendanceFocus(null)} onAdminUpdateAttendance={onAdminUpdateAttendance} onAdminUpdateAttendanceBatch={onAdminUpdateAttendanceBatch} onDeleteAttendance={onDeleteAttendance} isMasterAdmin={session?.role === 'master_admin'} isDesktop={isDesktop} />
+      )}
+
+      {tab === 'legacy' && (
+        <LegacyArchiveTab
+          employeeAccounts={employeeAccounts}
+          session={session}
+          isDesktop={isDesktop}
+        />
       )}
 
       {tab === 'accounts' && isMasterAdmin && (
