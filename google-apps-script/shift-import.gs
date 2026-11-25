@@ -476,8 +476,31 @@ function guessTargetMonth(sheet) {
   return '';
 }
 
-/** 確定シフトのシートを選ぶ。設定があればそれ、無ければ「〇月」の名前を探す */
-function findConfirmedSheet() {
+/**
+ * シート名から月の数字を取り出す。'12月' → 12、'11月(確定)' → 11。
+ * 月が書かれていなければ 0。
+ */
+function sheetMonthNumber(name) {
+  var m = String(name == null ? '' : name).match(/(\d{1,2})\s*月/);
+  if (!m) return 0;
+  var n = Number(m[1]);
+  return (n >= 1 && n <= 12) ? n : 0;
+}
+
+/**
+ * 確定シフトのシートを選ぶ。
+ *   1. 読み取り設定でシート名を決めてあれば、それ
+ *   2. 対象月が分かっていれば、その月のタブ（「12月」など）
+ *   3. 「〇月」という名前のタブを上から順に最初に見つけたもの
+ *   4. 今開いているシート
+ *
+ * 【2を足した理由】
+ *   以前は 3 だけでした。11月のファイルの中に12月のタブを作っていると、
+ *   タブの並び順によっては12月の表を選んでしまいます。
+ *   対象月はファイル名から決まるため、12月の表を11月分として
+ *   送ってしまう事故が起きていました。
+ */
+function findConfirmedSheet(targetMonth) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var saved = readConfig(CONFIRMED_SHEET_PROP);
   if (saved) {
@@ -485,6 +508,15 @@ function findConfirmedSheet() {
     if (bySaved) return bySaved;
   }
   var sheets = ss.getSheets();
+
+  // 対象月が分かっていれば、その月のタブを優先する
+  if (targetMonth && /^\d{4}-\d{2}$/.test(targetMonth)) {
+    var want = Number(targetMonth.slice(5, 7));
+    for (var w = 0; w < sheets.length; w++) {
+      if (sheetMonthNumber(sheets[w].getName()) === want) return sheets[w];
+    }
+  }
+
   for (var i = 0; i < sheets.length; i++) {
     if (/^\d{1,2}\s*月$/.test(sheets[i].getName())) return sheets[i];
   }
@@ -747,8 +779,9 @@ function sendConfirmedShifts(payload) {
 function pushConfirmedShiftsPrompt() {
   var ui = SpreadsheetApp.getUi();
   try {
-    var sheet = findConfirmedSheet();
-    var month = guessTargetMonth(sheet);
+    // 先に対象月を決めてから、その月のシートを選ぶ
+    var month = guessTargetMonth(findConfirmedSheet());
+    var sheet = findConfirmedSheet(month);
     if (!month) {
       var ask = ui.prompt('確定シフトを送る', '対象月を YYYY-MM の形式で入力してください（例：2026-11）', ui.ButtonSet.OK_CANCEL);
       if (ask.getSelectedButton() !== ui.Button.OK) return;
@@ -791,7 +824,7 @@ function pushConfirmedShiftsForMonth() {
     var names = [];
     for (var i = 0; i < sheets.length; i++) names.push(sheets[i].getName());
     var monthNum = String(Number(month.slice(5, 7)));
-    var defaultSheet = ss.getSheetByName(monthNum + '月') || ss.getSheetByName(monthNum + ' 月') || findConfirmedSheet();
+    var defaultSheet = ss.getSheetByName(monthNum + '月') || ss.getSheetByName(monthNum + ' 月') || findConfirmedSheet(month);
 
     var askSheet = ui.prompt(
       '読み取るシート',
@@ -818,9 +851,31 @@ function pushConfirmedShiftsForMonth() {
 }
 
 /** 読み取って、確認画面を出してから送る本体 */
+/**
+ * 読み取るシートと対象月が食い違っていないか確かめる。
+ * 食い違ったまま送ると、別の月の表でその月のシフトを上書きしてしまう。
+ */
+function assertSheetMatchesMonth(sheet, month) {
+  var sheetMonth = sheetMonthNumber(sheet.getName());
+  if (!sheetMonth) return;                       // 月が読めない名前は確かめようがない
+  var target = Number(String(month).slice(5, 7));
+  if (!target || sheetMonth === target) return;
+  throw new Error(
+    '読み取るシート「' + sheet.getName() + '」は' + sheetMonth + '月の表のようですが、\n' +
+    '送ろうとしている対象月は ' + month + ' です。\n\n' +
+    'このまま送ると' + target + '月のシフトが' + sheetMonth + '月の内容で上書きされます。\n' +
+    '中止しました。\n\n' +
+    '・' + sheetMonth + '月分を送りたい場合：「対象月を指定して送る」で ' +
+    String(month).slice(0, 4) + '-' + ('0' + sheetMonth).slice(-2) + ' を指定してください\n' +
+    '・' + target + '月分を送りたい場合：「確定シフトの読み取り設定」で' + target + '月のシートを指定してください'
+  );
+}
+
 function pushConfirmedShiftsCore(sheet, month) {
   var ui = SpreadsheetApp.getUi();
   try {
+    // 別の月の表を、この月として送ってしまわないか先に確かめる
+    assertSheetMatchesMonth(sheet, month);
     var payload = buildConfirmedPayload(sheet, month);
     if (payload.rows.length === 0) {
       ui.alert(
