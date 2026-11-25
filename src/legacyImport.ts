@@ -405,3 +405,204 @@ export function monthLabel(m: { year: number; month: number }): string {
   if (!m.year || !m.month) return '';
   return `${m.year}年${m.month}月`;
 }
+
+// ============================================================
+// 有休の取得履歴（ジョブカンのCSV）
+// ============================================================
+//
+// 【ファイルの形】
+//   1行1件の素直なCSVです。文字コードはUTF-8（BOMつき）。
+//     スタッフコード,姓,名,休暇タイプ,休暇日,開始時間(時間指定の場合),終了時間(時間指定の場合),休暇理由
+//     "00002","今井","孝旺","有休","2020/09/07","","",""
+//
+//   ・休暇日は YYYY/MM/DD
+//   ・開始時間・終了時間が入っているのは時間休のときだけです
+//   ・休暇理由は引用符の中に改行が入ることがあります
+//
+// 【休暇理由の扱い】
+//   理由には「体調不良」「健康診断受診のため」など、健康に関わる内容が
+//   含まれます。本人とマスター管理者だけが見られるよう、
+//   理由だけ別の表（legacy_leave_reasons）に入れます。
+//   画面で隠すだけでは、API経由で読めてしまうためです。
+
+/** 引用符つきCSVを読みます（引用符の中の改行・カンマ・二重引用符に対応） */
+export function parseCsv(input: string): string[][] {
+  const s = String(input ?? '').replace(/^﻿/, '');   // BOMを外す
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = '';
+  let quoted = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (quoted) {
+      if (c === '"') {
+        if (s[i + 1] === '"') { cell += '"'; i++; }   // "" は " 1つ
+        else quoted = false;
+      } else cell += c;
+      continue;
+    }
+    if (c === '"') { quoted = true; continue; }
+    if (c === ',') { row.push(cell); cell = ''; continue; }
+    if (c === '\r') continue;
+    if (c === '\n') { row.push(cell); rows.push(row); row = []; cell = ''; continue; }
+    cell += c;
+  }
+  if (cell !== '' || row.length > 0) { row.push(cell); rows.push(row); }
+  // 全部空の行は落とします
+  return rows.filter((r) => r.some((v) => String(v).trim() !== ''));
+}
+
+export type LegacyLeave = {
+  rowNumber: number;
+  staffNumber: string;
+  staffName: string;
+  leaveType: string;
+  /** YYYY-MM-DD */
+  date: string;
+  /** 時間休のときだけ入ります */
+  startTime: string;
+  endTime: string;
+  reason: string;
+  error: string;
+};
+
+const LEAVE_ALIASES: Record<string, string[]> = {
+  staffNumber: ['スタッフコード', 'コード', '社員番号'],
+  sei: ['姓'],
+  mei: ['名'],
+  leaveType: ['休暇タイプ', '休暇種別', '種別'],
+  date: ['休暇日', '日付', '取得日'],
+  startTime: ['開始時間(時間指定の場合)', '開始時間'],
+  endTime: ['終了時間(時間指定の場合)', '終了時間'],
+  reason: ['休暇理由', '理由'],
+};
+
+/** YYYY/MM/DD・YYYY-MM-DD を YYYY-MM-DD にします */
+export function toLeaveDate(v: unknown): string {
+  const s = String(v ?? '').trim();
+  const m = s.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/);
+  if (!m) return '';
+  const y = Number(m[1]); const mo = Number(m[2]); const da = Number(m[3]);
+  if (mo < 1 || mo > 12 || da < 1 || da > 31) return '';
+  const d = new Date(Date.UTC(y, mo - 1, da));
+  if (d.getUTCMonth() + 1 !== mo || d.getUTCDate() !== da) return '';
+  return `${y}-${String(mo).padStart(2, '0')}-${String(da).padStart(2, '0')}`;
+}
+
+export type ParsedLeaveCsv = { rows: LegacyLeave[]; error: string };
+
+/** 有休取得履歴のCSVを読み取ります */
+export function parseLeaveCsv(input: string): ParsedLeaveCsv {
+  const table = parseCsv(input);
+  if (table.length === 0) return { rows: [], error: 'ファイルが空です' };
+
+  // 見出しの行を探します
+  let headIndex = -1;
+  let col: Record<string, number> = {};
+  for (let i = 0; i < Math.min(table.length, 10); i++) {
+    const cells = table[i].map(norm);
+    const found: Record<string, number> = {};
+    cells.forEach((c, j) => {
+      if (c === '') return;
+      Object.keys(LEAVE_ALIASES).forEach((k) => {
+        if (found[k] === undefined && LEAVE_ALIASES[k].some((a) => norm(a) === c)) found[k] = j;
+      });
+    });
+    if (found.date !== undefined && (found.staffNumber !== undefined || found.sei !== undefined)) {
+      headIndex = i; col = found; break;
+    }
+  }
+  if (headIndex < 0) {
+    return { rows: [], error: '見出しの行が見つかりません。「スタッフコード」「休暇日」のある表をお選びください' };
+  }
+
+  const g = (r: string[], k: string) => (col[k] === undefined ? '' : String(r[col[k]] ?? '').trim());
+  const rows: LegacyLeave[] = [];
+  for (let i = headIndex + 1; i < table.length; i++) {
+    const r = table[i];
+    const staffNumber = g(r, 'staffNumber');
+    const staffName = [g(r, 'sei'), g(r, 'mei')].filter(Boolean).join(' ');
+    const rawDate = g(r, 'date');
+    if (staffNumber === '' && staffName === '' && rawDate === '') continue;
+    const date = toLeaveDate(rawDate);
+    let error = '';
+    if (staffNumber === '' && staffName === '') error = 'スタッフコードと氏名のどちらも入っていません';
+    else if (rawDate === '') error = '休暇日が入っていません';
+    else if (date === '') error = `休暇日が読み取れません（いまは「${rawDate}」）`;
+    rows.push({
+      rowNumber: i + 1,
+      staffNumber, staffName,
+      leaveType: g(r, 'leaveType'),
+      date,
+      startTime: toTime(g(r, 'startTime')),
+      endTime: toTime(g(r, 'endTime')),
+      reason: g(r, 'reason'),
+      error,
+    });
+  }
+  if (rows.length === 0) return { rows, error: '取り込む行がありません' };
+  return { rows, error: '' };
+}
+
+export type MatchedLeave = LegacyLeave & {
+  employeeId: string | null;
+  employeeName: string;
+  matchedBy: 'code' | 'name' | null;
+  ok: boolean;
+};
+
+/** スタッフコード（0詰めの違いも見ます）、無ければ氏名で突き合わせます */
+export function matchLeaveRows(rows: LegacyLeave[], staff: LegacyTargetStaff[]): MatchedLeave[] {
+  const byCode = new Map<string, LegacyTargetStaff[]>();
+  const byName = new Map<string, LegacyTargetStaff[]>();
+  (staff || []).forEach((e) => {
+    codeKeys(String(e.staffNumber ?? '')).forEach((k) => byCode.set(k, [...(byCode.get(k) || []), e]));
+    const n = norm(e.name);
+    if (n !== '') byName.set(n, [...(byName.get(n) || []), e]);
+  });
+
+  return (rows || []).map((r) => {
+    const base = { ...r, employeeId: null as string | null, employeeName: '', matchedBy: null as 'code' | 'name' | null, ok: false };
+    if (r.error) return base;
+    for (const k of codeKeys(r.staffNumber)) {
+      const hit = byCode.get(k) || [];
+      if (hit.length === 1) return { ...base, employeeId: hit[0].id, employeeName: hit[0].name || '', matchedBy: 'code', ok: true };
+      if (hit.length > 1) return { ...base, error: '同じスタッフコードのスタッフが複数います' };
+    }
+    const hit = byName.get(norm(r.staffName)) || [];
+    if (hit.length === 1) return { ...base, employeeId: hit[0].id, employeeName: hit[0].name || '', matchedBy: 'name', ok: true };
+    if (hit.length > 1) return { ...base, error: '同じ氏名のスタッフが複数います' };
+    return {
+      ...base,
+      error: r.staffNumber !== ''
+        ? `スタッフコード「${r.staffNumber}」の方がBrown Workに見つかりません`
+        : `「${r.staffName}」という方がBrown Workに見つかりません`,
+    };
+  });
+}
+
+/** 取り込めなかった方を、人ごとにまとめます（1人で何十件も出ると読みにくいため） */
+export function leaveMissingStaff(rows: MatchedLeave[]): { who: string; count: number }[] {
+  const map = new Map<string, number>();
+  (rows || []).filter((r) => !r.ok).forEach((r) => {
+    const who = `${r.staffName || '（氏名なし）'}${r.staffNumber ? `（${r.staffNumber}）` : ''}`;
+    map.set(who, (map.get(who) || 0) + 1);
+  });
+  return [...map.entries()].map(([who, count]) => ({ who, count })).sort((a, b) => b.count - a.count);
+}
+
+/** 画面に出すまとめ */
+export function leaveSummary(rows: MatchedLeave[]) {
+  const ok = rows.filter((r) => r.ok);
+  const years = ok.map((r) => r.date.slice(0, 4)).filter(Boolean).sort();
+  return {
+    total: rows.length,
+    ok: ok.length,
+    ng: rows.length - ok.length,
+    people: new Set(ok.map((r) => r.employeeId)).size,
+    withReason: ok.filter((r) => r.reason !== '').length,
+    hourly: ok.filter((r) => r.startTime !== '').length,
+    from: years[0] || '',
+    to: years[years.length - 1] || '',
+  };
+}

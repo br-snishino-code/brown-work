@@ -90,6 +90,39 @@ create table if not exists public.legacy_attendance_days (
 alter table public.legacy_attendance_months
   add column if not exists leave_used jsonb not null default '{}'::jsonb;
 
+-- ---- 2b. 有休の取得履歴 ----
+-- ジョブカンの「休暇取得履歴」CSVを入れます。
+-- 有休の残日数の計算には入りません（移行日より前の取得は計算に入れない作りです）。
+create table if not exists public.legacy_leave_days (
+  id uuid primary key default gen_random_uuid(),
+  employee_id uuid not null references public.employees(id) on delete cascade,
+  date date not null,
+  leave_type text,            -- 有休 など
+  start_time text,            -- 時間休のときだけ
+  end_time text,
+  source_staff_name text,
+  source_staff_number text,
+  source text not null default 'jobcan',
+  imported_at timestamptz not null default now(),
+  unique (employee_id, date, leave_type)
+);
+
+-- 休暇理由だけを別の表に分けます。
+-- 理由には「体調不良」「健康診断受診のため」など健康に関わる内容が含まれるため、
+-- 本人とマスター管理者だけが読めるようにします。
+-- 同じ表の列にしてRLSで隠すことはできない（行単位でしか効かない）ので、
+-- 表を分けることでデータベース側から守ります。
+create table if not exists public.legacy_leave_reasons (
+  leave_id uuid primary key references public.legacy_leave_days(id) on delete cascade,
+  employee_id uuid not null references public.employees(id) on delete cascade,
+  reason text not null
+);
+
+create index if not exists legacy_leave_employee_date_idx
+  on public.legacy_leave_days (employee_id, date);
+create index if not exists legacy_leave_reasons_employee_idx
+  on public.legacy_leave_reasons (employee_id);
+
 create index if not exists legacy_days_employee_date_idx
   on public.legacy_attendance_days (employee_id, date);
 create index if not exists legacy_months_employee_idx
@@ -115,6 +148,26 @@ drop policy if exists legacy_days_write on public.legacy_attendance_days;
 create policy legacy_days_write on public.legacy_attendance_days
   for all using (public.is_master_admin()) with check (public.is_master_admin());
 
+-- 有休の取得履歴。日付と種別は管理者も見られます
+alter table public.legacy_leave_days enable row level security;
+drop policy if exists legacy_leave_select on public.legacy_leave_days;
+create policy legacy_leave_select on public.legacy_leave_days
+  for select using (employee_id = auth.uid() or public.is_admin());
+
+drop policy if exists legacy_leave_write on public.legacy_leave_days;
+create policy legacy_leave_write on public.legacy_leave_days
+  for all using (public.is_master_admin()) with check (public.is_master_admin());
+
+-- 休暇理由は本人とマスター管理者だけ。管理者には見せません
+alter table public.legacy_leave_reasons enable row level security;
+drop policy if exists legacy_leave_reasons_select on public.legacy_leave_reasons;
+create policy legacy_leave_reasons_select on public.legacy_leave_reasons
+  for select using (employee_id = auth.uid() or public.is_master_admin());
+
+drop policy if exists legacy_leave_reasons_write on public.legacy_leave_reasons;
+create policy legacy_leave_reasons_write on public.legacy_leave_reasons
+  for all using (public.is_master_admin()) with check (public.is_master_admin());
+
 -- ---- 4. 書き換えを防ぐ ----
 -- 過去の記録は「当時こうだった」という記録です。
 -- 取り込み直し（同じ月をもう一度入れる）はできますが、
@@ -138,6 +191,16 @@ create trigger guard_legacy_days_update
   before update on public.legacy_attendance_days
   for each row execute function public.guard_legacy_update();
 
+drop trigger if exists guard_legacy_leave_update on public.legacy_leave_days;
+create trigger guard_legacy_leave_update
+  before update on public.legacy_leave_days
+  for each row execute function public.guard_legacy_update();
+
+drop trigger if exists guard_legacy_leave_reasons_update on public.legacy_leave_reasons;
+create trigger guard_legacy_leave_reasons_update
+  before update on public.legacy_leave_reasons
+  for each row execute function public.guard_legacy_update();
+
 -- ---- 5. 確認 ----
 -- 流したあと、ここで出来ているか見られます
 select
@@ -145,5 +208,11 @@ select
     where table_schema = 'public' and table_name = 'legacy_attendance_months') as "月ごとの表",
   (select count(*) from information_schema.tables
     where table_schema = 'public' and table_name = 'legacy_attendance_days') as "日ごとの表",
+  (select count(*) from information_schema.tables
+    where table_schema = 'public' and table_name = 'legacy_leave_days') as "有休の表",
+  (select count(*) from information_schema.tables
+    where table_schema = 'public' and table_name = 'legacy_leave_reasons') as "休暇理由の表",
   (select count(*) from pg_policies
-    where schemaname = 'public' and tablename in ('legacy_attendance_months', 'legacy_attendance_days')) as "決まりの数";
+    where schemaname = 'public' and tablename in
+      ('legacy_attendance_months', 'legacy_attendance_days',
+       'legacy_leave_days', 'legacy_leave_reasons')) as "決まりの数";

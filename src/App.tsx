@@ -51,6 +51,7 @@ import {
 } from './staffImport';
 import {
   parseLegacyWorkbook, matchLegacyMonths, legacySummary, monthLabel,
+  parseLeaveCsv, matchLeaveRows, leaveSummary, leaveMissingStaff,
 } from './legacyImport';
 import { parseBuildId, shouldPromptReload, buildTimeLabel } from './appVersion';
 import {
@@ -26806,6 +26807,15 @@ function LegacyArchiveTab({ employeeAccounts = [], session, isDesktop }) {
   const [importDone, setImportDone] = useState(null);
   const fileRef = useRef(null);
 
+  // 有休の取得履歴（CSV）
+  const [leaves, setLeaves] = useState([]);          // 見ている方の有休
+  const [leavePreview, setLeavePreview] = useState(null);
+  const [leaveFileName, setLeaveFileName] = useState('');
+  const [leaveReadError, setLeaveReadError] = useState('');
+  const [leaveImporting, setLeaveImporting] = useState(false);
+  const [leaveDone, setLeaveDone] = useState(null);
+  const leaveFileRef = useRef(null);
+
   const loadMonths = async (id) => {
     if (!id) { setMonths([]); setDays([]); setPicked(''); return; }
     setLoading(true);
@@ -26842,8 +26852,26 @@ function LegacyArchiveTab({ employeeAccounts = [], session, isDesktop }) {
     setDays(data || []);
   };
 
+  // 有休の取得履歴。理由は別の表にあり、管理者には返りません（97番SQLの決まり）
+  const loadLeaves = async (id) => {
+    if (!id) { setLeaves([]); return; }
+    const { data } = await supabase
+      .from('legacy_leave_days')
+      .select('*')
+      .eq('employee_id', id)
+      .order('date', { ascending: false });
+    const rows = data || [];
+    const { data: reasons } = await supabase
+      .from('legacy_leave_reasons')
+      .select('leave_id, reason')
+      .eq('employee_id', id);
+    const byId = new Map((reasons || []).map((r) => [r.leave_id, r.reason]));
+    setLeaves(rows.map((r) => ({ ...r, reason: byId.get(r.id) || '' })));
+  };
+
   useEffect(() => { loadMonths(employeeId); }, [employeeId]);
   useEffect(() => { loadDays(employeeId, picked); }, [employeeId, picked]);
+  useEffect(() => { loadLeaves(employeeId); }, [employeeId]);
 
   const month = months.find((m) => `${m.year}-${m.month}` === picked) || null;
 
@@ -26932,6 +26960,80 @@ function LegacyArchiveTab({ employeeAccounts = [], session, isDesktop }) {
     // いま見ている方の分が入ったら読み直します
     if (done.some((d) => d.ok && d.m.employeeId === employeeId)) await loadMonths(employeeId);
   };
+
+  // ---- 有休の取得履歴の取り込み ----
+  const readLeaveFile = async (file) => {
+    if (!file) return;
+    setLeaveFileName(file.name);
+    setLeaveDone(null);
+    try {
+      const text = await file.text();
+      const parsed = parseLeaveCsv(text);
+      if (parsed.error) { setLeavePreview(null); setLeaveReadError(parsed.error); return; }
+      setLeaveReadError('');
+      setLeavePreview(matchLeaveRows(parsed.rows, employeeAccounts.map((a) => ({
+        id: a.id, name: a.name, staffNumber: a.staffNumber || '',
+      }))));
+    } catch (e) {
+      console.error('有休履歴の読み取りエラー:', e);
+      setLeavePreview(null);
+      setLeaveReadError('CSVを読み取れませんでした。ジョブカンから出したままのファイルをお選びください');
+    }
+  };
+
+  const runLeaveImport = async () => {
+    if (!leavePreview) return;
+    setLeaveImporting(true);
+    const rows = leavePreview.filter((r) => r.ok);
+    const people = [...new Set(rows.map((r) => r.employeeId))];
+    let saved = 0;
+    let failed = 0;
+    let message = '';
+    try {
+      // 取り込み直しに備えて、対象の方の分をいったん消します
+      for (const id of people) {
+        await supabase.from('legacy_leave_days').delete().eq('employee_id', id);
+      }
+      // 件数が多いので分けて入れます（2000件を一度に送らないため）
+      const CHUNK = 200;
+      for (let i = 0; i < rows.length; i += CHUNK) {
+        const part = rows.slice(i, i + CHUNK);
+        const { data, error } = await supabase.from('legacy_leave_days').insert(
+          part.map((r) => ({
+            employee_id: r.employeeId, date: r.date, leave_type: r.leaveType || null,
+            start_time: r.startTime || null, end_time: r.endTime || null,
+            source_staff_name: r.staffName, source_staff_number: r.staffNumber,
+          }))
+        ).select('id');
+        if (error) throw error;
+        // 理由は別の表へ（本人とマスター管理者だけが読めます）
+        const withReason = (data || [])
+          .map((row, j) => ({ row, src: part[j] }))
+          .filter((x) => x.src.reason !== '');
+        if (withReason.length > 0) {
+          const { error: e2 } = await supabase.from('legacy_leave_reasons').insert(
+            withReason.map((x) => ({ leave_id: x.row.id, employee_id: x.src.employeeId, reason: x.src.reason }))
+          );
+          if (e2) throw e2;
+        }
+        saved += part.length;
+      }
+    } catch (err) {
+      console.error('有休履歴の取り込みエラー:', err);
+      const msg = String(err?.message || '');
+      failed = rows.length - saved;
+      message = /legacy_leave/.test(msg)
+        ? '有休の表がまだありません（97番SQLをもう一度流してください）'
+        : '途中で取り込めなくなりました';
+    }
+    setLeaveImporting(false);
+    setLeaveDone({ saved, failed, people: people.length, message, missing: leaveMissingStaff(leavePreview) });
+    setLeavePreview(null);
+    if (people.includes(employeeId)) await loadLeaves(employeeId);
+  };
+
+  // 休暇理由は本人とマスター管理者だけ。管理者には表そのものが返りません（97番SQL）
+  const canSeeReason = isMaster || (isStaff && employeeId === session?.id);
 
   const num = (v, unit = '') => (v === null || v === undefined ? '—' : `${v}${unit}`);
   const cell = 'px-2 py-1.5 text-[11.5px]';
@@ -27063,6 +27165,51 @@ function LegacyArchiveTab({ employeeAccounts = [], session, isDesktop }) {
             </div>
           </>
         )}
+
+        {/* 有休の取得履歴。月を選ばなくても、その方の分をまとめて出します */}
+        {leaves.length > 0 && (
+          <>
+            <h3 className="font-bold text-[13px] text-slate-700 pt-2">
+              有休の取得履歴（{leaves.length}件）
+            </h3>
+            <div className="text-[11px] text-slate-400">
+              ジョブカン時代に取得した分です。いまの有休の残日数には入りません。
+            </div>
+            <div className="border border-slate-200 rounded-lg overflow-hidden">
+              <div className="overflow-x-auto max-h-80 overflow-y-auto">
+                <table className="w-full border-collapse">
+                  <thead className="sticky top-0 bg-slate-50">
+                    <tr className="text-[10.5px] text-slate-500 text-left">
+                      <th className={cell}>取得日</th>
+                      <th className={cell}>種別</th>
+                      <th className={cell}>時間</th>
+                      {canSeeReason && <th className={cell}>理由</th>}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {leaves.map((l) => (
+                      <tr key={l.id}>
+                        <td className={`${cell} font-mono whitespace-nowrap`}>{l.date}</td>
+                        <td className={cell}>{l.leave_type || '—'}</td>
+                        <td className={`${cell} font-mono whitespace-nowrap`}>
+                          {l.start_time ? `${l.start_time}〜${l.end_time || ''}` : '終日'}
+                        </td>
+                        {canSeeReason && (
+                          <td className={`${cell} text-slate-600 whitespace-pre-wrap`}>{l.reason || '—'}</td>
+                        )}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            {!canSeeReason && (
+              <div className="text-[11px] text-slate-400">
+                休暇理由は、ご本人とマスター管理者だけが見られます。
+              </div>
+            )}
+          </>
+        )}
       </div>
 
       {isMaster && (
@@ -27142,6 +27289,93 @@ function LegacyArchiveTab({ employeeAccounts = [], session, isDesktop }) {
               </button>
             </>
           )}
+
+          {/* ---- 有休の取得履歴（CSV）---- */}
+          <div className="pt-3 mt-1 border-t border-slate-100 space-y-3">
+            <h3 className="font-bold text-[13px] text-slate-700 flex items-center gap-2">
+              <Palmtree size={14} className="text-slate-400" />有休の取得履歴（CSV）を取り込む
+            </h3>
+            <div className="text-[11.5px] text-slate-600 bg-slate-50 border border-slate-200 rounded-lg p-3 space-y-1">
+              <div>ジョブカンの「休暇取得履歴」のCSVをそのままお選びください。</div>
+              <div>同じ方の分をもう一度取り込むと、その方の前の分を消してから入れ直します。</div>
+              <div className="text-slate-500">
+                休暇理由は別の場所に分けて入れ、ご本人とマスター管理者だけが見られるようにします。
+              </div>
+            </div>
+            <button
+              onClick={() => leaveFileRef.current?.click()}
+              className="w-full flex items-center justify-center gap-1.5 rounded-lg border border-slate-300 bg-white py-2.5 text-[12.5px] font-bold text-slate-600"
+            >
+              <Upload size={14} /> CSVファイルを選ぶ
+            </button>
+            <input
+              ref={leaveFileRef}
+              type="file"
+              accept=".csv,text/csv"
+              className="hidden"
+              onChange={(e) => { readLeaveFile(e.target.files?.[0]); e.target.value = ''; }}
+            />
+            {leaveFileName && <div className="text-[11.5px] text-slate-500">読み込んだファイル：{leaveFileName}</div>}
+            {leaveReadError && (
+              <div className="border border-rose-200 bg-rose-50 rounded-lg px-3 py-2.5 text-[12px] text-rose-700">{leaveReadError}</div>
+            )}
+
+            {leavePreview && (() => {
+              const ls = leaveSummary(leavePreview);
+              const missing = leaveMissingStaff(leavePreview);
+              return (
+                <>
+                  <div className="text-[12px] text-slate-700 space-y-1">
+                    <div className="font-bold">
+                      {ls.total}件のうち、{ls.ok}件（{ls.people}名分）を取り込めます
+                    </div>
+                    <div className="text-slate-500">
+                      期間 {ls.from}年〜{ls.to}年／時間休 {ls.hourly}件／理由のあるもの {ls.withReason}件
+                    </div>
+                  </div>
+                  {missing.length > 0 && (
+                    <div className="border border-amber-200 bg-amber-50 rounded-lg px-3 py-2.5 text-[11.5px] text-amber-800 space-y-1">
+                      <div className="font-bold">
+                        次の{missing.length}名はBrown Workに見つからないため、{ls.ng}件を飛ばします
+                      </div>
+                      <div className="max-h-32 overflow-y-auto">
+                        {missing.map((m) => (
+                          <div key={m.who}>{m.who}：{m.count}件</div>
+                        ))}
+                      </div>
+                      <div className="text-amber-700">
+                        退職された方であれば、そのままで差し支えありません。
+                        在籍中の方が入っている場合は、スタッフコードを登録してからもう一度お試しください。
+                      </div>
+                    </div>
+                  )}
+                  <button
+                    onClick={runLeaveImport}
+                    disabled={leaveImporting || ls.ok === 0}
+                    className="w-full rounded-lg bg-slate-800 py-2.5 text-[13px] font-bold text-white disabled:bg-slate-300"
+                  >
+                    {leaveImporting ? '取り込み中…' : `${ls.ok}件を取り込む`}
+                  </button>
+                </>
+              );
+            })()}
+
+            {leaveDone && (
+              <div className="text-[12px] space-y-1">
+                <div className="font-bold text-slate-700">
+                  {leaveDone.saved}件（{leaveDone.people}名分）を取り込みました
+                </div>
+                {leaveDone.failed > 0 && (
+                  <div className="text-rose-600">{leaveDone.failed}件は取り込めませんでした：{leaveDone.message}</div>
+                )}
+                {leaveDone.missing.length > 0 && (
+                  <div className="text-slate-500">
+                    見つからなかった{leaveDone.missing.length}名分は飛ばしました。
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
 
           {importDone && (
             <div className="space-y-1.5">
