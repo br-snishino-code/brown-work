@@ -34136,6 +34136,15 @@ const STAFF_TODAY_STATE = {
   absent: { label: '未出勤', cls: 'text-rose-600' },
 };
 
+// 行末メニューを開いたことを、ほかの行に知らせるための合図。
+//
+// 【なぜ必要か】
+//   各行のボタンは、自分の開け閉めを守るために mousedown を止めています。
+//   そのため、別の行のボタンを押しても、前に開いていたメニューには
+//   「外を押された」が届かず、閉じないまま重なって出てしまいます。
+//   開いたときにこの合図を出し、自分以外は閉じるようにします。
+const STAFF_MENU_OPEN_EVENT = 'brown-work:staff-menu-open';
+
 // スタッフ一覧の行末メニュー。その人の画面へ直接移動する
 function StaffRowMenu({ account, info, onOpenProfile, onOpenAttendance, onOpenApprovals, onOpenPayroll }) {
   const [pos, setPos] = useState(null); // 開いている位置（画面基準）
@@ -34154,10 +34163,21 @@ function StaffRowMenu({ account, info, onOpenProfile, onOpenAttendance, onOpenAp
     };
   }, [pos]);
 
+  // ほかの行のメニューが開いたら、自分は閉じます
+  useEffect(() => {
+    const onOtherOpened = (e) => {
+      if (e.detail !== account.id) setPos(null);
+    };
+    window.addEventListener(STAFF_MENU_OPEN_EVENT, onOtherOpened);
+    return () => window.removeEventListener(STAFF_MENU_OPEN_EVENT, onOtherOpened);
+  }, [account.id]);
+
   const toggle = () => {
     if (pos) { setPos(null); return; }
     const r = btnRef.current?.getBoundingClientRect();
     if (!r) return;
+    // 先にほかの行を閉じてから開きます
+    window.dispatchEvent(new CustomEvent(STAFF_MENU_OPEN_EVENT, { detail: account.id }));
     setPos({ top: r.bottom + 6, right: Math.max(8, window.innerWidth - r.right) });
   };
 
