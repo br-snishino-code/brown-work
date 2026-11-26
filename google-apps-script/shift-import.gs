@@ -48,6 +48,15 @@ var END_ROW_PROP = 'CONFIRMED_END_ROW';
 var NAME_HEADER_WORDS = ['スタッフ名', '氏名', '名前', '社員名', '従業員名'];
 
 function onOpen() {
+  // ★この行は残してください★
+  // 店舗シフト送付の仕組み（このファイルとは別に作られたもの）のメニューを出します。
+  // onOpen はファイルを開いたときに1つしか動かないため、
+  // あちらのメニューはここから呼ばないと出ません。
+  //
+  // そのファイルを外したときにここで止まり、Brown Work のメニューごと
+  // 出なくなってしまわないよう、あるときだけ呼びます。
+  if (typeof shiftSend_addMenu === 'function') shiftSend_addMenu();
+
   SpreadsheetApp.getUi()
     .createMenu('Brown Work')
     .addItem('シフト希望を取り込む', 'importShiftRequestsPrompt')
