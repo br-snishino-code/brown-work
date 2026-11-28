@@ -56,6 +56,10 @@ import {
 import {
   parsePayslipTable, matchPayslips, payslipSummary, payslipMissingStaff,
 } from './legacyPayslip';
+import {
+  GRANT_IMPORT_COLUMNS, LEGACY_LEAVE_REASON, parseGrantSheet, matchGrants,
+  grantSummary, planLeaveApply, leaveRequestRow,
+} from './leaveGrantImport';
 import { parseBuildId, shouldPromptReload, buildTimeLabel } from './appVersion';
 import {
   commuteRowSubtotal, isSavableCommuteRow, commuteSavedTotal,
@@ -26790,7 +26794,7 @@ function IncentiveImportTab({ employeeAccounts = [], payrollRecords = [], settin
 // いまの勤怠・給与計算・源泉徴収票・有休の残日数には一切混ざりません
 // （別の表に入れています。supabase/97_legacy_archive.sql）。
 // 当時の数字をそのまま出します。Brown Work の設定で計算し直しません。
-function LegacyArchiveTab({ employeeAccounts = [], session, isDesktop }) {
+function LegacyArchiveTab({ employeeAccounts = [], session, isDesktop, onRefresh }) {
   const isMaster = session?.role === 'master_admin';
   const isStaff = session?.role !== 'master_admin' && session?.role !== 'admin';
 
@@ -26832,6 +26836,18 @@ function LegacyArchiveTab({ employeeAccounts = [], session, isDesktop }) {
   const [payImporting, setPayImporting] = useState(false);
   const [payDone, setPayDone] = useState(null);
   const payFileRef = useRef(null);
+
+  // 本番データへの反映（有休の付与・有休の取得）
+  const [grantPreview, setGrantPreview] = useState(null);
+  const [grantFileName, setGrantFileName] = useState('');
+  const [grantReadError, setGrantReadError] = useState('');
+  const [grantRunning, setGrantRunning] = useState(false);
+  const [grantDone, setGrantDone] = useState(null);
+  const grantFileRef = useRef(null);
+
+  const [applyPlan, setApplyPlan] = useState(null);
+  const [applyRunning, setApplyRunning] = useState(false);
+  const [applyDone, setApplyDone] = useState(null);
 
   const loadMonths = async (id) => {
     if (!id) { setMonths([]); setDays([]); setPicked(''); return; }
@@ -27150,6 +27166,127 @@ function LegacyArchiveTab({ employeeAccounts = [], session, isDesktop }) {
     setPayDone({ saved, failed: rows.length - saved, message, missing: payslipMissingStaff(payPreview) });
     setPayPreview(null);
     if (rows.some((r) => r.employeeId === employeeId)) await loadSlips(employeeId);
+  };
+
+  // ---- 有休の付与（引き継ぎ）の一括登録。本番データに入ります ----
+  const downloadGrantTemplate = async () => {
+    const XLSX = await import('xlsx');
+    const header = GRANT_IMPORT_COLUMNS.map((c) => c.label);
+    const living = employeeAccounts.filter((a) => !a.resignationDate);
+    const aoa = [
+      ['有休の引き継ぎ（繰越残日数）'],
+      ['※ 付与日は「ジョブカンでのもとの付与日」、残日数は「使った分を引いたあとの日数」です。'],
+      ['※ 繰越分と当年度分が分かれている方は、2行に分けてください。'],
+      header,
+      ...living.map((a) => [a.staffNumber || '', a.name, '', '', '']),
+    ];
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws['!cols'] = header.map((h) => ({ wch: Math.max(12, h.length + 4) }));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, '有休の引き継ぎ');
+    XLSX.writeFile(wb, `有休の引き継ぎ_ひな形_${todayKey()}.xlsx`);
+  };
+
+  const readGrantFile = async (file) => {
+    if (!file) return;
+    setGrantFileName(file.name);
+    setGrantDone(null);
+    try {
+      const XLSX = await import('xlsx');
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: 'array', cellDates: true });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' });
+      const parsed = parseGrantSheet(aoa);
+      if (parsed.error) { setGrantPreview(null); setGrantReadError(parsed.error); return; }
+      // すでに登録されている付与を調べ、上書きになる行に印を付けます
+      const { data: existing } = await supabase
+        .from('employee_leave_grants')
+        .select('employee_id, grant_date');
+      setGrantReadError('');
+      setGrantPreview(matchGrants(
+        parsed.rows,
+        employeeAccounts.map((a) => ({ id: a.id, name: a.name, staffNumber: a.staffNumber || '' })),
+        (existing || []).map((g) => ({ employeeId: g.employee_id, grantDate: g.grant_date })),
+      ));
+    } catch (e) {
+      console.error('有休の付与の読み取りエラー:', e);
+      setGrantPreview(null);
+      setGrantReadError('Excelファイルを読み取れませんでした。.xlsx の形式でご用意ください');
+    }
+  };
+
+  const runGrantImport = async () => {
+    if (!grantPreview) return;
+    setGrantRunning(true);
+    const rows = grantPreview.filter((r) => r.ok);
+    let saved = 0;
+    let message = '';
+    try {
+      for (const r of rows) {
+        // 同じ方・同じ付与日は1件だけなので、入れ直す形にします
+        await supabase.from('employee_leave_grants').delete()
+          .eq('employee_id', r.employeeId).eq('grant_date', r.grantDate);
+        const { error } = await supabase.from('employee_leave_grants').insert({
+          employee_id: r.employeeId,
+          grant_date: r.grantDate,
+          days: r.days,
+          kind: 'carryover',
+          note: r.note || 'ジョブカンからの引き継ぎ',
+          created_by: session?.id || null,
+        });
+        if (error) throw error;
+        saved += 1;
+      }
+      await logAudit(session, '有休の付与を一括登録', `${saved}件（ジョブカンからの引き継ぎ）`);
+    } catch (err) {
+      console.error('有休の付与の取り込みエラー:', err);
+      message = '途中で取り込めなくなりました';
+    }
+    setGrantRunning(false);
+    setGrantDone({ saved, failed: rows.length - saved, message });
+    setGrantPreview(null);
+  };
+
+  // ---- 書庫の有休取得を、年5日の判定に反映する ----
+  const prepareLeaveApply = async () => {
+    const { data } = await supabase
+      .from('legacy_leave_days')
+      .select('id, employee_id, date, leave_type, start_time, end_time');
+    setApplyDone(null);
+    setApplyPlan(planLeaveApply(data || []));
+  };
+
+  const runLeaveApply = async () => {
+    if (!applyPlan) return;
+    setApplyRunning(true);
+    let saved = 0;
+    let message = '';
+    try {
+      const people = [...new Set(applyPlan.targets.map((t) => t.employeeId))];
+      // 入れ直しに備えて、前に入れた分だけを消します（目印で見分けます）。
+      // 本物の休暇申請は消しません。
+      for (const id of people) {
+        await supabase.from('leave_requests').delete()
+          .eq('employee_id', id).eq('reason', LEGACY_LEAVE_REASON);
+      }
+      const CHUNK = 200;
+      for (let i = 0; i < applyPlan.targets.length; i += CHUNK) {
+        const part = applyPlan.targets.slice(i, i + CHUNK);
+        const { error } = await supabase.from('leave_requests').insert(part.map(leaveRequestRow));
+        if (error) throw error;
+        saved += part.length;
+      }
+      await logAudit(session, '過去の有休取得を休暇申請に反映', `${saved}件（年5日の判定に使うため）`);
+      // 休暇申請はアプリ全体で使うデータなので、読み直します
+      if (onRefresh) await onRefresh();
+    } catch (err) {
+      console.error('有休取得の反映エラー:', err);
+      message = '途中で反映できなくなりました';
+    }
+    setApplyRunning(false);
+    setApplyDone({ saved, failed: applyPlan.targets.length - saved, message });
+    setApplyPlan(null);
   };
 
   // 休暇理由は本人とマスター管理者だけ。管理者には表そのものが返りません（97番SQL）
@@ -27725,6 +27862,166 @@ function LegacyArchiveTab({ employeeAccounts = [], session, isDesktop }) {
                 )}
               </div>
             )}
+          </div>
+
+          {/* ---- ここから下は本番データに入ります ---- */}
+          <div className="pt-3 mt-1 border-t-2 border-slate-200 space-y-3">
+            <h3 className="font-bold text-[13px] text-rose-700 flex items-center gap-2">
+              <Palmtree size={14} className="text-rose-400" />有休の引き継ぎ（本番データに入ります）
+            </h3>
+            <div className="text-[11.5px] text-rose-800 bg-rose-50 border border-rose-200 rounded-lg p-3">
+              ここから下の2つは、<span className="font-bold">書庫ではなく本番の有休データに入ります</span>。
+              残日数と年5日の判定に反映されます。
+            </div>
+
+            {/* --- 付与（繰越残日数）の一括登録 --- */}
+            <div className="border border-slate-200 rounded-lg p-3 space-y-2.5">
+              <div className="font-bold text-[12.5px] text-slate-700">① 繰越の残日数を登録する</div>
+              <div className="text-[11.5px] text-slate-600 space-y-1">
+                <div>ジョブカン時代の残日数を、付与日ごとに登録します。</div>
+                <div>
+                  <span className="font-bold">付与日</span>はジョブカンでのもとの日付、
+                  <span className="font-bold">残日数</span>は使った分を引いたあとの日数です。
+                </div>
+                <div className="text-slate-500">
+                  付与日に移行日を入れると、時効（付与日から2年）が2年ずれます。
+                  繰越分と当年度分が分かれている方は2行に分けてください。
+                </div>
+              </div>
+              <div className={`flex gap-2 ${isDesktop ? '' : 'flex-col'}`}>
+                <button onClick={downloadGrantTemplate}
+                  className="flex-1 flex items-center justify-center gap-1.5 rounded-lg border border-slate-300 bg-white py-2.5 text-[12.5px] font-bold text-slate-600">
+                  <Download size={14} /> ひな形をダウンロード
+                </button>
+                <button onClick={() => grantFileRef.current?.click()}
+                  className="flex-1 flex items-center justify-center gap-1.5 rounded-lg border border-slate-300 bg-white py-2.5 text-[12.5px] font-bold text-slate-600">
+                  <Upload size={14} /> Excelファイルを選ぶ
+                </button>
+                <input ref={grantFileRef} type="file" accept=".xlsx,.xls" className="hidden"
+                  onChange={(e) => { readGrantFile(e.target.files?.[0]); e.target.value = ''; }} />
+              </div>
+              {grantFileName && <div className="text-[11.5px] text-slate-500">読み込んだファイル：{grantFileName}</div>}
+              {grantReadError && (
+                <div className="border border-rose-200 bg-rose-50 rounded-lg px-3 py-2.5 text-[12px] text-rose-700">{grantReadError}</div>
+              )}
+
+              {grantPreview && (() => {
+                const gs = grantSummary(grantPreview);
+                return (
+                  <>
+                    <div className="text-[12px] text-slate-700">
+                      <span className="font-bold">{gs.people}名・{gs.ok}件（合計 {gs.days}日）を登録します</span>
+                      {gs.ng > 0 && <span className="text-rose-600">／登録できない {gs.ng}件</span>}
+                      {gs.replaces > 0 && (
+                        <div className="text-amber-700">
+                          うち{gs.replaces}件は、すでにある同じ付与日の登録を書き換えます
+                        </div>
+                      )}
+                    </div>
+                    <div className="border border-slate-200 rounded-lg overflow-hidden">
+                      <div className="overflow-x-auto max-h-64 overflow-y-auto">
+                        <table className="w-full border-collapse">
+                          <thead className="sticky top-0 bg-slate-50">
+                            <tr className="text-[10.5px] text-slate-500 text-left">
+                              <th className={cell}>行</th>
+                              <th className={cell}>スタッフ</th>
+                              <th className={cell}>付与日</th>
+                              <th className={cell}>残日数</th>
+                              <th className={cell}>扱い</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {grantPreview.map((r) => (
+                              <tr key={r.rowNumber} className={r.ok ? '' : 'bg-rose-50/60'}>
+                                <td className={`${cell} font-mono text-slate-400`}>{r.rowNumber}</td>
+                                <td className={cell}>{r.employeeName || r.name || r.staffNumber}</td>
+                                <td className={`${cell} font-mono whitespace-nowrap`}>{r.grantDate || '—'}</td>
+                                <td className={`${cell} font-mono`}>{r.days === null ? '—' : `${r.days}日`}</td>
+                                <td className={cell}>
+                                  {r.ok
+                                    ? (r.replaces
+                                      ? <span className="text-amber-700 font-bold">書き換えます</span>
+                                      : <span className="text-emerald-700 font-bold">登録します</span>)
+                                    : <span className="text-rose-600">{r.error}</span>}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                    <button onClick={runGrantImport} disabled={grantRunning || gs.ok === 0}
+                      className="w-full rounded-lg bg-slate-800 py-2.5 text-[13px] font-bold text-white disabled:bg-slate-300">
+                      {grantRunning ? '登録中…' : `${gs.ok}件を登録する`}
+                    </button>
+                    <div className="text-[11px] text-slate-500">
+                      登録後、「有休の手動調整」が入っている方には二重計上の警告が出ます。
+                      その方は手動調整を0に戻してください。
+                    </div>
+                  </>
+                );
+              })()}
+
+              {grantDone && (
+                <div className="text-[12px]">
+                  <span className="font-bold text-slate-700">{grantDone.saved}件を登録しました</span>
+                  {grantDone.failed > 0 && <span className="text-rose-600">／{grantDone.failed}件は失敗：{grantDone.message}</span>}
+                </div>
+              )}
+            </div>
+
+            {/* --- 過去の取得を年5日の判定に反映 --- */}
+            <div className="border border-slate-200 rounded-lg p-3 space-y-2.5">
+              <div className="font-bold text-[12.5px] text-slate-700">② 過去の有休取得を年5日の判定に反映する</div>
+              <div className="text-[11.5px] text-slate-600 space-y-1">
+                <div>
+                  書庫に取り込んだ有休の取得を、休暇申請（承認済み）として入れます。
+                  付与年度が移行日をまたぐ方の<span className="font-bold">年5日の判定が正しくなります</span>。
+                </div>
+                <div className="text-slate-500">
+                  残日数には影響しません（移行日より前の取得は残日数の計算に入らないためです）。
+                </div>
+                <div className="text-slate-500">
+                  休暇理由は入れません（管理者にも見えてしまうためです）。本物の理由は書庫に残ります。
+                </div>
+                <div className="text-slate-500">
+                  時間単位の有休は入れません（年5日の取得義務に算入しないためです）。
+                </div>
+              </div>
+              <button onClick={prepareLeaveApply}
+                className="w-full rounded-lg border border-slate-300 bg-white py-2.5 text-[12.5px] font-bold text-slate-600">
+                書庫の中身を調べる
+              </button>
+
+              {applyPlan && (
+                <>
+                  <div className="text-[12px] text-slate-700 space-y-1">
+                    <div className="font-bold">
+                      {applyPlan.people}名・{applyPlan.targets.length}件を休暇申請として入れます
+                    </div>
+                    <div className="text-slate-500">
+                      期間 {applyPlan.from}年〜{applyPlan.to}年
+                      {applyPlan.skippedHourly > 0 && `／時間単位の${applyPlan.skippedHourly}件は入れません`}
+                    </div>
+                  </div>
+                  <button onClick={runLeaveApply} disabled={applyRunning || applyPlan.targets.length === 0}
+                    className="w-full rounded-lg bg-slate-800 py-2.5 text-[13px] font-bold text-white disabled:bg-slate-300">
+                    {applyRunning ? '反映中…' : `${applyPlan.targets.length}件を反映する`}
+                  </button>
+                  <div className="text-[11px] text-slate-500">
+                    何度押しても二重になりません。前に入れた分だけを消してから入れ直します
+                    （ご本人が出した本物の休暇申請は消しません）。
+                  </div>
+                </>
+              )}
+
+              {applyDone && (
+                <div className="text-[12px]">
+                  <span className="font-bold text-slate-700">{applyDone.saved}件を反映しました</span>
+                  {applyDone.failed > 0 && <span className="text-rose-600">／{applyDone.failed}件は失敗：{applyDone.message}</span>}
+                </div>
+              )}
+            </div>
           </div>
 
           {importDone && (
@@ -30658,6 +30955,7 @@ function AdminView({ data, employeeAccounts, session, onNavigateTop, requestedAd
           employeeAccounts={employeeAccounts}
           session={session}
           isDesktop={isDesktop}
+          onRefresh={onRefresh}
         />
       )}
 
