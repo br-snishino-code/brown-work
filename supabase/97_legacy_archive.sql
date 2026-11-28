@@ -118,6 +118,66 @@ create table if not exists public.legacy_leave_reasons (
   reason text not null
 );
 
+-- ---- 2c. 過去の給与明細 ----
+-- ジョブカンの「支給・控除等一覧表」を入れます。
+-- いまの給与明細（payroll_records）とは別です。源泉徴収票・年末調整・
+-- 給与計算はこの表を一切見ません。
+--
+-- 【合計をそのまま持ちます】
+--   実物を検算したところ、内訳を足しても支給合計に届かない方がいました
+--   （時間外手当などの列が出力に含まれていない月があるためです）。
+--   合計は読み取った値をそのまま持ち、内訳との差は *_gap に残します。
+--   画面では「内訳に出ていない支給 ◯円」と正直に出します。
+create table if not exists public.legacy_payslips (
+  id uuid primary key default gen_random_uuid(),
+  employee_id uuid not null references public.employees(id) on delete cascade,
+  year int not null,
+  month int not null check (month between 1 and 12),
+
+  -- 合計（読み取った値そのまま）
+  pay_total numeric,              -- 支給合計
+  insurance_total numeric,        -- 社会保険料合計
+  deduction_total numeric,        -- 実際に引かれた額（社会保険料合計＋その他の控除）
+  net_pay numeric,                -- 差引支給額
+
+  -- 内訳との差。0 でなければ、出力に出ていない項目があります
+  pay_gap numeric not null default 0,
+  deduction_gap numeric not null default 0,
+  insurance_gap numeric not null default 0,
+
+  -- 勤怠（参考）
+  work_days numeric,
+  work_minutes int,
+  paid_leave_days numeric,
+  note text,
+
+  source_staff_code text,
+  source_staff_name text,
+  source text not null default 'jobcan',
+  imported_at timestamptz not null default now(),
+  imported_by uuid references public.employees(id) on delete set null,
+  unique (employee_id, year, month)
+);
+
+-- 支給・控除の内訳。1行1項目
+create table if not exists public.legacy_payslip_items (
+  id uuid primary key default gen_random_uuid(),
+  payslip_id uuid not null references public.legacy_payslips(id) on delete cascade,
+  employee_id uuid not null references public.employees(id) on delete cascade,
+  -- pay＝支給、deduction＝控除、insurance_part＝社会保険料の内訳
+  kind text not null check (kind in ('pay', 'deduction', 'insurance_part')),
+  label text not null,
+  amount numeric not null,
+  -- true なら引く向き（遅刻早退控除・欠勤控除・貸付金回収）
+  minus boolean not null default false,
+  sort_order int not null default 0
+);
+
+create index if not exists legacy_payslips_employee_idx
+  on public.legacy_payslips (employee_id, year, month);
+create index if not exists legacy_payslip_items_payslip_idx
+  on public.legacy_payslip_items (payslip_id);
+
 create index if not exists legacy_leave_employee_date_idx
   on public.legacy_leave_days (employee_id, date);
 create index if not exists legacy_leave_reasons_employee_idx
@@ -158,6 +218,26 @@ drop policy if exists legacy_leave_write on public.legacy_leave_days;
 create policy legacy_leave_write on public.legacy_leave_days
   for all using (public.is_master_admin()) with check (public.is_master_admin());
 
+-- 過去の給与明細。賃金のため、本人とマスター管理者だけが見られます
+-- （管理者には見せない、といういまの給与明細と同じ扱いです）
+alter table public.legacy_payslips enable row level security;
+drop policy if exists legacy_payslips_select on public.legacy_payslips;
+create policy legacy_payslips_select on public.legacy_payslips
+  for select using (employee_id = auth.uid() or public.is_master_admin());
+
+drop policy if exists legacy_payslips_write on public.legacy_payslips;
+create policy legacy_payslips_write on public.legacy_payslips
+  for all using (public.is_master_admin()) with check (public.is_master_admin());
+
+alter table public.legacy_payslip_items enable row level security;
+drop policy if exists legacy_payslip_items_select on public.legacy_payslip_items;
+create policy legacy_payslip_items_select on public.legacy_payslip_items
+  for select using (employee_id = auth.uid() or public.is_master_admin());
+
+drop policy if exists legacy_payslip_items_write on public.legacy_payslip_items;
+create policy legacy_payslip_items_write on public.legacy_payslip_items
+  for all using (public.is_master_admin()) with check (public.is_master_admin());
+
 -- 休暇理由は本人とマスター管理者だけ。管理者には見せません
 alter table public.legacy_leave_reasons enable row level security;
 drop policy if exists legacy_leave_reasons_select on public.legacy_leave_reasons;
@@ -196,6 +276,16 @@ create trigger guard_legacy_leave_update
   before update on public.legacy_leave_days
   for each row execute function public.guard_legacy_update();
 
+drop trigger if exists guard_legacy_payslips_update on public.legacy_payslips;
+create trigger guard_legacy_payslips_update
+  before update on public.legacy_payslips
+  for each row execute function public.guard_legacy_update();
+
+drop trigger if exists guard_legacy_payslip_items_update on public.legacy_payslip_items;
+create trigger guard_legacy_payslip_items_update
+  before update on public.legacy_payslip_items
+  for each row execute function public.guard_legacy_update();
+
 drop trigger if exists guard_legacy_leave_reasons_update on public.legacy_leave_reasons;
 create trigger guard_legacy_leave_reasons_update
   before update on public.legacy_leave_reasons
@@ -212,7 +302,12 @@ select
     where table_schema = 'public' and table_name = 'legacy_leave_days') as "有休の表",
   (select count(*) from information_schema.tables
     where table_schema = 'public' and table_name = 'legacy_leave_reasons') as "休暇理由の表",
+  (select count(*) from information_schema.tables
+    where table_schema = 'public' and table_name = 'legacy_payslips') as "給与明細の表",
+  (select count(*) from information_schema.tables
+    where table_schema = 'public' and table_name = 'legacy_payslip_items') as "明細の内訳の表",
   (select count(*) from pg_policies
     where schemaname = 'public' and tablename in
       ('legacy_attendance_months', 'legacy_attendance_days',
-       'legacy_leave_days', 'legacy_leave_reasons')) as "決まりの数";
+       'legacy_leave_days', 'legacy_leave_reasons',
+       'legacy_payslips', 'legacy_payslip_items')) as "決まりの数";

@@ -51,8 +51,11 @@ import {
 } from './staffImport';
 import {
   parseLegacyWorkbook, matchLegacyMonths, legacySummary, monthLabel,
-  parseLeaveCsv, matchLeaveRows, leaveSummary, leaveMissingStaff,
+  parseLeaveCsv, matchLeaveRows, leaveSummary, leaveMissingStaff, parseCsv,
 } from './legacyImport';
+import {
+  parsePayslipTable, matchPayslips, payslipSummary, payslipMissingStaff,
+} from './legacyPayslip';
 import { parseBuildId, shouldPromptReload, buildTimeLabel } from './appVersion';
 import {
   commuteRowSubtotal, isSavableCommuteRow, commuteSavedTotal,
@@ -26816,6 +26819,20 @@ function LegacyArchiveTab({ employeeAccounts = [], session, isDesktop }) {
   const [leaveDone, setLeaveDone] = useState(null);
   const leaveFileRef = useRef(null);
 
+  // 過去の給与明細（CSV）
+  const nowForPay = new Date();
+  const [slips, setSlips] = useState([]);            // 見ている方の明細
+  const [slipItems, setSlipItems] = useState([]);    // 選んだ明細の内訳
+  const [pickedSlip, setPickedSlip] = useState('');  // 'YYYY-M'
+  const [payYear, setPayYear] = useState(nowForPay.getFullYear());
+  const [payMonth, setPayMonth] = useState(nowForPay.getMonth() + 1);
+  const [payPreview, setPayPreview] = useState(null);
+  const [payFileName, setPayFileName] = useState('');
+  const [payReadError, setPayReadError] = useState('');
+  const [payImporting, setPayImporting] = useState(false);
+  const [payDone, setPayDone] = useState(null);
+  const payFileRef = useRef(null);
+
   const loadMonths = async (id) => {
     if (!id) { setMonths([]); setDays([]); setPicked(''); return; }
     setLoading(true);
@@ -26869,9 +26886,38 @@ function LegacyArchiveTab({ employeeAccounts = [], session, isDesktop }) {
     setLeaves(rows.map((r) => ({ ...r, reason: byId.get(r.id) || '' })));
   };
 
+  // 過去の給与明細。賃金のため、管理者には何も返りません（97番SQLの決まり）
+  const loadSlips = async (id) => {
+    if (!id) { setSlips([]); setSlipItems([]); setPickedSlip(''); return; }
+    const { data } = await supabase
+      .from('legacy_payslips')
+      .select('*')
+      .eq('employee_id', id)
+      .order('year', { ascending: false })
+      .order('month', { ascending: false });
+    const rows = data || [];
+    setSlips(rows);
+    setPickedSlip(rows.length > 0 ? `${rows[0].year}-${rows[0].month}` : '');
+  };
+
+  const loadSlipItems = async (slipId) => {
+    if (!slipId) { setSlipItems([]); return; }
+    const { data } = await supabase
+      .from('legacy_payslip_items')
+      .select('*')
+      .eq('payslip_id', slipId)
+      .order('sort_order');
+    setSlipItems(data || []);
+  };
+
   useEffect(() => { loadMonths(employeeId); }, [employeeId]);
   useEffect(() => { loadDays(employeeId, picked); }, [employeeId, picked]);
   useEffect(() => { loadLeaves(employeeId); }, [employeeId]);
+  useEffect(() => { loadSlips(employeeId); }, [employeeId]);
+  useEffect(() => {
+    const s = slips.find((x) => `${x.year}-${x.month}` === pickedSlip);
+    loadSlipItems(s ? s.id : '');
+  }, [pickedSlip, slips]);
 
   const month = months.find((m) => `${m.year}-${m.month}` === picked) || null;
 
@@ -27032,6 +27078,80 @@ function LegacyArchiveTab({ employeeAccounts = [], session, isDesktop }) {
     if (people.includes(employeeId)) await loadLeaves(employeeId);
   };
 
+  // ---- 過去の給与明細の取り込み ----
+  const readPayFile = async (file) => {
+    if (!file) return;
+    setPayFileName(file.name);
+    setPayDone(null);
+    try {
+      const text = await file.text();
+      const parsed = parsePayslipTable(parseCsv(text));
+      if (parsed.error) { setPayPreview(null); setPayReadError(parsed.error); return; }
+      setPayReadError('');
+      setPayPreview(matchPayslips(parsed.rows, employeeAccounts.map((a) => ({
+        id: a.id, name: a.name, staffNumber: a.staffNumber || '',
+      }))));
+    } catch (e) {
+      console.error('給与明細の読み取りエラー:', e);
+      setPayPreview(null);
+      setPayReadError('CSVを読み取れませんでした。ジョブカンから出したままのファイルをお選びください');
+    }
+  };
+
+  const runPayImport = async () => {
+    if (!payPreview) return;
+    setPayImporting(true);
+    const rows = payPreview.filter((r) => r.ok);
+    let saved = 0;
+    let message = '';
+    try {
+      for (const r of rows) {
+        // 取り込み直しに備えて、同じ月の分を消してから入れます
+        await supabase.from('legacy_payslips').delete()
+          .eq('employee_id', r.employeeId).eq('year', payYear).eq('month', payMonth);
+
+        const { data, error } = await supabase.from('legacy_payslips').insert({
+          employee_id: r.employeeId, year: payYear, month: payMonth,
+          pay_total: r.payTotal, insurance_total: r.insuranceTotal,
+          deduction_total: r.deductionTotal, net_pay: r.netPay,
+          pay_gap: r.payGap, deduction_gap: r.deductionGap, insurance_gap: r.insuranceGap,
+          work_days: r.workDays, work_minutes: r.workMinutes, paid_leave_days: r.paidLeaveDays,
+          note: r.note || null,
+          source_staff_code: r.staffCode, source_staff_name: r.staffName,
+          imported_by: session?.id || null,
+        }).select('id');
+        if (error) throw error;
+        const slipId = data?.[0]?.id;
+
+        const items = [
+          ...r.payItems.map((it) => ({ ...it, kind: 'pay' })),
+          ...r.insuranceParts.map((it) => ({ ...it, kind: 'insurance_part' })),
+          ...r.deductionItems.map((it) => ({ ...it, kind: 'deduction' })),
+        ];
+        if (slipId && items.length > 0) {
+          const { error: e2 } = await supabase.from('legacy_payslip_items').insert(
+            items.map((it, i) => ({
+              payslip_id: slipId, employee_id: r.employeeId,
+              kind: it.kind, label: it.label, amount: it.amount, minus: it.minus, sort_order: i,
+            }))
+          );
+          if (e2) throw e2;
+        }
+        saved += 1;
+      }
+    } catch (err) {
+      console.error('給与明細の取り込みエラー:', err);
+      const msg = String(err?.message || '');
+      message = /legacy_payslip/.test(msg)
+        ? '給与明細の表がまだありません（97番SQLをもう一度流してください）'
+        : '途中で取り込めなくなりました';
+    }
+    setPayImporting(false);
+    setPayDone({ saved, failed: rows.length - saved, message, missing: payslipMissingStaff(payPreview) });
+    setPayPreview(null);
+    if (rows.some((r) => r.employeeId === employeeId)) await loadSlips(employeeId);
+  };
+
   // 休暇理由は本人とマスター管理者だけ。管理者には表そのものが返りません（97番SQL）
   const canSeeReason = isMaster || (isStaff && employeeId === session?.id);
 
@@ -27165,6 +27285,131 @@ function LegacyArchiveTab({ employeeAccounts = [], session, isDesktop }) {
             </div>
           </>
         )}
+
+        {/* 過去の給与明細。賃金のため、本人とマスター管理者にしか返りません */}
+        {slips.length > 0 && (() => {
+          const slip = slips.find((x) => `${x.year}-${x.month}` === pickedSlip) || null;
+          const group = (kind) => slipItems.filter((i) => i.kind === kind);
+          const yen = (v) => (v === null || v === undefined ? '—' : `¥${Number(v).toLocaleString()}`);
+          return (
+            <>
+              <h3 className="font-bold text-[13px] text-slate-700 pt-2">過去の給与明細</h3>
+              <Field label="明細の月">
+                <select
+                  value={pickedSlip}
+                  onChange={(e) => setPickedSlip(e.target.value)}
+                  className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px] bg-white"
+                >
+                  {slips.map((x) => (
+                    <option key={`${x.year}-${x.month}`} value={`${x.year}-${x.month}`}>
+                      {x.year}年{x.month}月分
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              {slip && (
+                <>
+                  <div className={`grid gap-2 ${isDesktop ? 'grid-cols-3' : 'grid-cols-1'}`}>
+                    <PayrollMetric label="支給合計" value={yen(slip.pay_total)} />
+                    <PayrollMetric label="控除合計" value={yen(slip.deduction_total)} />
+                    <PayrollMetric label="差引支給額" value={yen(slip.net_pay)} />
+                  </div>
+
+                  {(slip.pay_gap !== 0 || slip.deduction_gap !== 0) && (
+                    <div className="border border-amber-200 bg-amber-50 rounded-lg px-3 py-2.5 text-[11.5px] text-amber-800 space-y-1">
+                      <div className="font-bold">内訳に出ていない金額があります</div>
+                      {slip.pay_gap !== 0 && (
+                        <div>支給：{yen(slip.pay_gap)}（ジョブカンの出力に項目が含まれていなかった分です。合計は正しい金額です）</div>
+                      )}
+                      {/* 控除の差は向きで意味が変わります。
+                          マイナス＝内訳に無い控除が引かれている（備考の立替金など）
+                          プラス＝内訳に出ている項目が、実際には引かれていない */}
+                      {slip.deduction_gap < 0 && (
+                        <div>
+                          控除：内訳に出ていない控除が{yen(-slip.deduction_gap)}あります
+                          {slip.note ? `（備考：${slip.note}）` : ''}
+                        </div>
+                      )}
+                      {slip.deduction_gap > 0 && (
+                        <div>
+                          控除：内訳に出ている項目のうち{yen(slip.deduction_gap)}は、実際には引かれていません
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <div className={`grid gap-3 ${isDesktop ? 'grid-cols-2' : 'grid-cols-1'}`}>
+                    <div className="border border-slate-200 rounded-lg overflow-hidden">
+                      <div className="bg-slate-50 px-3 py-1.5 text-[11px] font-bold text-slate-600">支給</div>
+                      <table className="w-full border-collapse">
+                        <tbody className="divide-y divide-slate-100">
+                          {group('pay').map((i) => (
+                            <tr key={i.id}>
+                              <td className="px-3 py-1.5 text-[11.5px]">{i.label}</td>
+                              <td className="px-3 py-1.5 text-[11.5px] font-mono text-right whitespace-nowrap">
+                                {i.minus ? `−${Number(i.amount).toLocaleString()}` : Number(i.amount).toLocaleString()}
+                              </td>
+                            </tr>
+                          ))}
+                          <tr className="bg-slate-50 font-bold">
+                            <td className="px-3 py-1.5 text-[11.5px]">支給合計</td>
+                            <td className="px-3 py-1.5 text-[11.5px] font-mono text-right">{yen(slip.pay_total)}</td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+
+                    <div className="border border-slate-200 rounded-lg overflow-hidden">
+                      <div className="bg-slate-50 px-3 py-1.5 text-[11px] font-bold text-slate-600">控除</div>
+                      <table className="w-full border-collapse">
+                        <tbody className="divide-y divide-slate-100">
+                          {group('insurance_part').map((i) => (
+                            <tr key={i.id}>
+                              <td className="px-3 py-1.5 text-[11.5px] text-slate-500 pl-5">{i.label}</td>
+                              <td className="px-3 py-1.5 text-[11.5px] font-mono text-right text-slate-500">
+                                {Number(i.amount).toLocaleString()}
+                              </td>
+                            </tr>
+                          ))}
+                          {slip.insurance_total !== null && (
+                            <tr>
+                              <td className="px-3 py-1.5 text-[11.5px]">社会保険料合計</td>
+                              <td className="px-3 py-1.5 text-[11.5px] font-mono text-right">
+                                {Number(slip.insurance_total).toLocaleString()}
+                              </td>
+                            </tr>
+                          )}
+                          {group('deduction').map((i) => (
+                            <tr key={i.id}>
+                              <td className="px-3 py-1.5 text-[11.5px]">{i.label}</td>
+                              <td className="px-3 py-1.5 text-[11.5px] font-mono text-right whitespace-nowrap">
+                                {i.minus ? `−${Number(i.amount).toLocaleString()}` : Number(i.amount).toLocaleString()}
+                              </td>
+                            </tr>
+                          ))}
+                          <tr className="bg-slate-50 font-bold">
+                            <td className="px-3 py-1.5 text-[11.5px]">控除合計</td>
+                            <td className="px-3 py-1.5 text-[11.5px] font-mono text-right">{yen(slip.deduction_total)}</td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  {slip.insurance_gap !== 0 && (
+                    <div className="text-[11px] text-slate-400">
+                      社会保険料の内訳を足した額は、合計より{yen(Math.abs(slip.insurance_gap))}少なくなっています。
+                      引かれた額は「社会保険料合計」のほうです。
+                    </div>
+                  )}
+                  <div className="text-[11px] text-slate-400">
+                    ジョブカン時代の明細です。当時の金額をそのまま出しています。源泉徴収票には入りません。
+                  </div>
+                </>
+              )}
+            </>
+          );
+        })()}
 
         {/* 有休の取得履歴。月を選ばなくても、その方の分をまとめて出します */}
         {leaves.length > 0 && (
@@ -27372,6 +27617,111 @@ function LegacyArchiveTab({ employeeAccounts = [], session, isDesktop }) {
                   <div className="text-slate-500">
                     見つからなかった{leaveDone.missing.length}名分は飛ばしました。
                   </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* ---- 過去の給与明細（CSV）---- */}
+          <div className="pt-3 mt-1 border-t border-slate-100 space-y-3">
+            <h3 className="font-bold text-[13px] text-slate-700 flex items-center gap-2">
+              <Wallet size={14} className="text-slate-400" />過去の給与明細（CSV）を取り込む
+            </h3>
+            <div className="text-[11.5px] text-slate-600 bg-slate-50 border border-slate-200 rounded-lg p-3 space-y-1">
+              <div>ジョブカンの「支給・控除等一覧表」のCSVをそのままお選びください。</div>
+              <div>このCSVには月が入っていないため、<span className="font-bold">働いた月をご自分で選んでください</span>。</div>
+              <div className="text-slate-500">
+                例：10月末締め・11月25日支給の分は「2026年10月」です。
+              </div>
+            </div>
+
+            <div className={`grid gap-3 ${isDesktop ? 'grid-cols-2' : 'grid-cols-1'}`}>
+              <Field label="年">
+                <select value={payYear} onChange={(e) => setPayYear(Number(e.target.value))}
+                  className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px] bg-white">
+                  {[nowForPay.getFullYear() - 6, nowForPay.getFullYear() - 5, nowForPay.getFullYear() - 4,
+                    nowForPay.getFullYear() - 3, nowForPay.getFullYear() - 2, nowForPay.getFullYear() - 1,
+                    nowForPay.getFullYear()].map((y) => <option key={y} value={y}>{y}年</option>)}
+                </select>
+              </Field>
+              <Field label="月（働いた月）">
+                <select value={payMonth} onChange={(e) => setPayMonth(Number(e.target.value))}
+                  className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[14px] bg-white">
+                  {[1,2,3,4,5,6,7,8,9,10,11,12].map((m) => <option key={m} value={m}>{m}月</option>)}
+                </select>
+              </Field>
+            </div>
+
+            <button
+              onClick={() => payFileRef.current?.click()}
+              className="w-full flex items-center justify-center gap-1.5 rounded-lg border border-slate-300 bg-white py-2.5 text-[12.5px] font-bold text-slate-600"
+            >
+              <Upload size={14} /> CSVファイルを選ぶ
+            </button>
+            <input ref={payFileRef} type="file" accept=".csv,text/csv" className="hidden"
+              onChange={(e) => { readPayFile(e.target.files?.[0]); e.target.value = ''; }} />
+            {payFileName && <div className="text-[11.5px] text-slate-500">読み込んだファイル：{payFileName}</div>}
+            {payReadError && (
+              <div className="border border-rose-200 bg-rose-50 rounded-lg px-3 py-2.5 text-[12px] text-rose-700">{payReadError}</div>
+            )}
+
+            {payPreview && (() => {
+              const ps = payslipSummary(payPreview);
+              const missing = payslipMissingStaff(payPreview);
+              return (
+                <>
+                  <div className="text-[12px] text-slate-700 space-y-1">
+                    <div className="font-bold">
+                      {payYear}年{payMonth}月分として、{ps.ok}名分を取り込みます
+                    </div>
+                    <div className="text-slate-500">
+                      支給のあった方 {ps.paid}名／支給0円の方 {ps.empty}名<br />
+                      支給合計 ¥{ps.payTotal.toLocaleString()}／差引支給額 ¥{ps.netPay.toLocaleString()}
+                    </div>
+                  </div>
+
+                  {(ps.withPayGap > 0 || ps.withDeductionGap > 0) && (
+                    <div className="border border-amber-200 bg-amber-50 rounded-lg px-3 py-2.5 text-[11.5px] text-amber-800 space-y-1">
+                      <div className="font-bold">内訳に出ていない金額がある方がいます</div>
+                      {ps.withPayGap > 0 && <div>支給：{ps.withPayGap}名（時間外手当などの列が出力に含まれていない分です）</div>}
+                      {ps.withDeductionGap > 0 && <div>控除：{ps.withDeductionGap}名</div>}
+                      <div className="text-amber-700">
+                        支給合計・控除合計・差引支給額は正しい金額で取り込みます。
+                        内訳との差は明細の画面にそのまま出します。
+                      </div>
+                    </div>
+                  )}
+
+                  {missing.length > 0 && (
+                    <div className="border border-amber-200 bg-amber-50 rounded-lg px-3 py-2.5 text-[11.5px] text-amber-800 space-y-1">
+                      <div className="font-bold">次の{missing.length}名はBrown Workに見つからないため飛ばします</div>
+                      <div className="max-h-32 overflow-y-auto">
+                        {missing.map((m) => <div key={m.who}>{m.who}</div>)}
+                      </div>
+                      <div className="text-amber-700">
+                        退職された方であれば、そのままで差し支えありません。
+                      </div>
+                    </div>
+                  )}
+
+                  <button
+                    onClick={runPayImport}
+                    disabled={payImporting || ps.ok === 0}
+                    className="w-full rounded-lg bg-slate-800 py-2.5 text-[13px] font-bold text-white disabled:bg-slate-300"
+                  >
+                    {payImporting ? '取り込み中…' : `${payYear}年${payMonth}月分として${ps.ok}名分を取り込む`}
+                  </button>
+                </>
+              );
+            })()}
+
+            {payDone && (
+              <div className="text-[12px] space-y-1">
+                <div className="font-bold text-slate-700">
+                  {payYear}年{payMonth}月分として{payDone.saved}名分を取り込みました
+                </div>
+                {payDone.failed > 0 && (
+                  <div className="text-rose-600">{payDone.failed}名分は取り込めませんでした：{payDone.message}</div>
                 )}
               </div>
             )}
