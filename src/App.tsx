@@ -17708,8 +17708,9 @@ function printPayslip(p, employeeName, settings = null, staffCode = '') {
   const paymentItems = settings ? visiblePayslipItems(allPayment, settings, 'payment') : allPayment;
   const deductionItems = settings ? visiblePayslipItems(allDeduction, settings, 'deduction') : allDeduction;
 
-  // 会社名は事業所情報の「事業所名称」です。未登録のときは出しません
-  const office = settings ? parseOfficeInfo(settings) : null;
+  // 会社名は事業所情報の「事業所名称」です。未登録のときは出しません。
+  // 事業所情報そのものはマスター管理者しか読めないため、
+  // 明細に出す会社名だけを company_name として別に持っています（companyName を参照）。
   const payKey = settings ? payDateFor(p.year, p.month, parsePayDate(settings)) : '';
   const payLabel = payKey
     ? `${payKey.slice(0, 4)}年${payKey.slice(5, 7)}月${payKey.slice(8, 10)}日　支給`
@@ -17733,7 +17734,7 @@ function printPayslip(p, employeeName, settings = null, staffCode = '') {
     docTitle: `給与明細 ${p.year}年${p.month}月分`,
     title: `${p.year}年${String(p.month).padStart(2, '0')}月　給与明細`,
     subtitle: payLabel,
-    officeName: office && office.nameKanji ? office.nameKanji : '',
+    officeName: companyName(settings),
     staffCode,
     employeeName,
     columns: [
@@ -18450,7 +18451,6 @@ function printBonusSlip(b, employeeName, settings = null, staffCode = '') {
   const title = b.title || bonusDefaultTitle(b.year, b.seq);
   const paymentTotal = sumItems(b.paymentItems || []);
   const deductionTotal = sumItems(b.deductionItems || []);
-  const office = settings ? parseOfficeInfo(settings) : null;
   // 賞与の支給日は明細そのものに入っています（給与と違い、決まりから出しません）
   const payLabel = b.paymentDate
     ? `${b.paymentDate.slice(0, 4)}年${b.paymentDate.slice(5, 7)}月${b.paymentDate.slice(8, 10)}日　支給`
@@ -18461,7 +18461,7 @@ function printBonusSlip(b, employeeName, settings = null, staffCode = '') {
     docTitle: `賞与明細 ${title}`,
     title: `${title}　賞与明細`,
     subtitle: payLabel,
-    officeName: office && office.nameKanji ? office.nameKanji : '',
+    officeName: companyName(settings),
     staffCode,
     employeeName,
     columns: [
@@ -22602,6 +22602,23 @@ function LeavePeriodsTab({ employeeAccounts = [], leavePeriods = [], ready = tru
 
 const SETTING_OFFICE_INFO = 'office_info';
 
+// 明細に出す会社名だけを別に持ちます。
+//
+// 事業所情報（office_info）には事業所記号・雇用保険の事業所番号・事業主住所が
+// 入っているため、マスター管理者しか読めないようにしています（101番のSQL）。
+// ところが給与明細と賞与明細の会社名はスタッフ本人も見るので、
+// 事業所名称だけをこのキーに写し、全員が読めるようにしています。
+const SETTING_COMPANY_NAME = 'company_name';
+
+// 明細に出す会社名。未登録のときは空にします（明細には出しません）。
+// マスター管理者は事業所情報そのものを読めるので、そちらからも拾います。
+function companyName(settings) {
+  const own = String(settings?.[SETTING_COMPANY_NAME] ?? '').trim();
+  if (own !== '') return own;
+  const office = settings ? parseOfficeInfo(settings) : null;
+  return office && office.nameKanji ? office.nameKanji : '';
+}
+
 // 事業所の情報を読みます。壊れていても画面は動かします。
 function parseOfficeInfo(settings) {
   let raw = null;
@@ -22633,13 +22650,14 @@ async function saveOfficeInfo(values, actor = null) {
       slim[k] = String(values?.[k] ?? '').trim();
     }
   });
+  // 事業所情報そのものと、明細に出す会社名を一緒に保存します。
+  // 会社名を別に持つ理由は SETTING_COMPANY_NAME のところに書いてあります。
+  const stamp = { updated_by: actor?.id || null, updated_at: new Date().toISOString() };
   const { error } = await supabase.from('app_settings').upsert(
-    {
-      key: SETTING_OFFICE_INFO,
-      value: JSON.stringify(slim),
-      updated_by: actor?.id || null,
-      updated_at: new Date().toISOString(),
-    },
+    [
+      { key: SETTING_OFFICE_INFO, value: JSON.stringify(slim), ...stamp },
+      { key: SETTING_COMPANY_NAME, value: slim.nameKanji, ...stamp },
+    ],
     { onConflict: 'key' }
   );
   if (error) {
