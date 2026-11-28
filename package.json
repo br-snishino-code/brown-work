@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "check-names": "tsc --noEmit --jsx preserve --target es2020 --lib es2020,dom --moduleResolution bundler --skipLibCheck --noImplicitAny false src/App.tsx | grep -E 'Cannot find name|used before its declaration|Block-scoped variable' || true",
     "check-hooks": "eslint --no-config-lookup -c eslint.hooks.config.mjs --quiet src",
+    "check-headers": "node scripts/check-headers.mjs",
     "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {

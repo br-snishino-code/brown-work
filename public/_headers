@@ -1,0 +1,29 @@
+# Brown Work のセキュリティヘッダー（Cloudflare Pages 用）
+#
+# 【このファイルは何か】
+#   いまは Vercel で動いており、Vercel は vercel.json の "headers" を見ます。
+#   Vercel はこのファイルを読まないので、置いてあっても今の動きは変わりません。
+#   Cloudflare Pages に移したときは、Cloudflare がこちらを読みます。
+#
+# 【大事なこと】
+#   中身は vercel.json と同じにしてあります。
+#   どちらかを直したら、必ずもう一方も同じように直してください。
+#   片方だけ直すと、移したときに守りが古いままになります。
+#
+# 【ルーティング（_redirects）が要らない理由】
+#   Cloudflare Pages は、求められたファイルが見つからず、404.html も無いときに、
+#   いちばん上の index.html を返します。画面遷移のあるアプリに必要な動きが
+#   はじめから入っているので、_redirects は作っていません。
+#   逆に _redirects に「すべてを index.html へ」と書くと、
+#   実在する JS や CSS まで index.html が返り、画面が真っ白になる恐れがあります。
+#   なお dist に 404.html を置くと、この既定の動きが止まります。置かないでください。
+#
+# 詳しい移し方は、リポジトリの CLOUDFLARE-PAGES.md を見てください。
+
+/*
+  Strict-Transport-Security: max-age=31536000; includeSubDomains
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: camera=(), microphone=(), payment=(), usb=(), geolocation=(self)
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://*.supabase.co wss://*.supabase.co; worker-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'
