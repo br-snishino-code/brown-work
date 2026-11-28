@@ -3,9 +3,18 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <meta name="theme-color" content="#0f172a" />
+    <!-- ヘッダーの色（slate-950）と同じにしています。
+         ホーム画面のアプリでは、この色が時計・電波の並ぶ帯の背景になります。 -->
+    <meta name="theme-color" content="#020617" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <!-- black ＝ 時計の帯は黒地に白文字。内容をその下から始めます。
+         black-translucent（帯の下まで内容を広げる）にしていたところ、
+         iOS 26 がホーム画面のアプリでだけ、上端に黒いぼかしをかけていました
+         （Liquid Glass のスクロールエッジ効果）。
+         帯の下まで広げなければ、この効果はかかりません。
+         ※ この設定はホーム画面に追加した時点のものが保持されるため、
+           変更を反映するには一度削除して追加し直す必要があります。 -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="black" />
     <meta name="apple-mobile-web-app-title" content="Brown Work" />
     <meta name="mobile-web-app-capable" content="yes" />
     <link rel="manifest" href="/manifest.webmanifest" />
