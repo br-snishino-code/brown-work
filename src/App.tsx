@@ -6335,7 +6335,10 @@ function AttendanceApp() {
 
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-900">
-      <div ref={appHeaderRef} className="sticky top-0 z-20">
+      {/* iOS 26 では、画面上端に固定した要素が「単色」でないと、
+          上から約40pt分に自動でぼかしがかかります（Liquid Glass のスクロールエッジ効果）。
+          外側の箱にも同じ色を置き、上端が単色になるようにしています。 */}
+      <div ref={appHeaderRef} className="sticky top-0 z-20 bg-slate-950">
         <div style={{ paddingTop: 'env(safe-area-inset-top)' }} className="bg-slate-950">
           <GlobalTopTabs
             topTab={effectiveTopTab}
@@ -8204,7 +8207,7 @@ function GlobalTopTabs({
   // 管理画面／自分の勤怠 の切り替え（PCはバーの右側、スマホはタブの下に全幅で表示）
   const showToggle = isAdminRole && !!setPersonalMode;
   const modeToggle = (fullWidth) => (
-    <div className={`flex items-center bg-white/10 rounded-lg p-0.5 text-[11px] font-bold ${fullWidth ? 'w-full' : ''}`}>
+    <div className={`flex items-center bg-[#1b1f2e] rounded-lg p-0.5 text-[11px] font-bold ${fullWidth ? 'w-full' : ''}`}>
       <button
         onClick={() => setPersonalMode(false)}
         className={`px-2.5 py-1.5 rounded-md transition-colors whitespace-nowrap ${fullWidth ? 'flex-1' : ''} ${!personalMode ? 'bg-white text-slate-900' : 'text-slate-300'}`}
@@ -8229,7 +8232,7 @@ function GlobalTopTabs({
               <Clock size={15} className="text-white" strokeWidth={2.4} />
             </div>
             <span className="text-white text-[13px] font-bold tracking-tight">Brown Work</span>
-            <span className="w-px h-5 bg-white/20 ml-1" />
+            <span className="w-px h-5 bg-[#353845] ml-1" />
           </div>
 
           <div className="flex items-center gap-1 flex-1 min-w-0 overflow-x-auto">
@@ -8259,7 +8262,7 @@ function GlobalTopTabs({
           <div ref={menuRef} className="relative shrink-0">
             <button
               onClick={() => setMenuOpen((v) => !v)}
-              className="flex items-center gap-1.5 rounded-lg bg-white/10 hover:bg-white/20 transition-colors px-2 py-1.5"
+              className="flex items-center gap-1.5 rounded-lg bg-[#1b1f2e] hover:bg-[#353845] transition-colors px-2 py-1.5"
             >
               <span className="w-5 h-5 rounded-full bg-slate-600 text-white text-[10px] font-bold flex items-center justify-center">
                 {(session?.name || '　').trim().charAt(0)}
