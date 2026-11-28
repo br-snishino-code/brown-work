@@ -26834,6 +26834,7 @@ function LegacyArchiveTab({ employeeAccounts = [], session, isDesktop, onRefresh
   const [payYear, setPayYear] = useState(nowForPay.getFullYear());
   const [payMonth, setPayMonth] = useState(nowForPay.getMonth() + 1);
   const [payPreview, setPayPreview] = useState(null);
+  const [payPlan, setPayPlan] = useState(null);
   const [payFileName, setPayFileName] = useState('');
   const [payReadError, setPayReadError] = useState('');
   const [payImporting, setPayImporting] = useState(false);
@@ -27105,14 +27106,16 @@ function LegacyArchiveTab({ employeeAccounts = [], session, isDesktop, onRefresh
     try {
       const text = await file.text();
       const parsed = parsePayslipTable(parseCsv(text));
-      if (parsed.error) { setPayPreview(null); setPayReadError(parsed.error); return; }
+      if (parsed.error) { setPayPreview(null); setPayPlan(null); setPayReadError(parsed.error); return; }
       setPayReadError('');
+      setPayPlan(parsed.plan);
       setPayPreview(matchPayslips(parsed.rows, employeeAccounts.map((a) => ({
         id: a.id, name: a.name, staffNumber: a.staffNumber || '',
       }))));
     } catch (e) {
       console.error('給与明細の読み取りエラー:', e);
       setPayPreview(null);
+      setPayPlan(null);
       setPayReadError('CSVを読み取れませんでした。ジョブカンから出したままのファイルをお選びください');
     }
   };
@@ -27168,6 +27171,7 @@ function LegacyArchiveTab({ employeeAccounts = [], session, isDesktop, onRefresh
     setPayImporting(false);
     setPayDone({ saved, failed: rows.length - saved, message, missing: payslipMissingStaff(payPreview) });
     setPayPreview(null);
+    setPayPlan(null);
     if (rows.some((r) => r.employeeId === employeeId)) await loadSlips(employeeId);
   };
 
@@ -27820,11 +27824,39 @@ function LegacyArchiveTab({ employeeAccounts = [], session, isDesktop, onRefresh
                     </div>
                   </div>
 
-                  {(ps.withPayGap > 0 || ps.withDeductionGap > 0) && (
+                  {payPlan?.layout === 'partial' && (
+                    <div className="border border-amber-200 bg-amber-50 rounded-lg px-3 py-2.5 text-[11.5px] text-amber-800 space-y-1.5">
+                      <div className="font-bold">このファイルには「控除合計」の列がありません</div>
+                      <div>
+                        ジョブカンの出力項目に
+                        <span className="font-bold">「控除合計」「子ども・子育て支援金」</span>
+                        を加えて出し直すと、支給・控除・差引支給額のすべてが一致します。
+                      </div>
+                      <div className="text-amber-700">
+                        このまま取り込んでも、支給合計と差引支給額は正しい金額で入ります。
+                        ただし控除の内訳が一部足りないため、明細の画面に差として出ます。
+                      </div>
+                    </div>
+                  )}
+
+                  {payPlan?.skipped?.length > 0 && (
+                    <div className="border border-slate-200 bg-slate-50 rounded-lg px-3 py-2.5 text-[11.5px] text-slate-600 space-y-1">
+                      <div className="font-bold text-slate-700">次の列は取り込みません</div>
+                      <div>{payPlan.skipped.join('、')}</div>
+                      <div className="text-slate-500">
+                        2024年の定額減税や年末調整の列です。所得税の列と重なるため、足すと控除が狂います。
+                      </div>
+                    </div>
+                  )}
+
+                  {(ps.withPayGap > 0 || ps.withDeductionGap > 0 || ps.withDeductionItemsGap > 0) && (
                     <div className="border border-amber-200 bg-amber-50 rounded-lg px-3 py-2.5 text-[11.5px] text-amber-800 space-y-1">
                       <div className="font-bold">内訳に出ていない金額がある方がいます</div>
                       {ps.withPayGap > 0 && <div>支給：{ps.withPayGap}名（時間外手当などの列が出力に含まれていない分です）</div>}
                       {ps.withDeductionGap > 0 && <div>控除：{ps.withDeductionGap}名</div>}
+                      {ps.withDeductionItemsGap > 0 && (
+                        <div>控除合計と内訳の差：{ps.withDeductionItemsGap}名</div>
+                      )}
                       <div className="text-amber-700">
                         支給合計・控除合計・差引支給額は正しい金額で取り込みます。
                         内訳との差は明細の画面にそのまま出します。
