@@ -38,10 +38,14 @@ export function toYen(v: unknown): number | null {
   return Number.isFinite(n) ? Math.round(n) : null;
 }
 
-/** '189:54' を分に直します。読めなければ null */
+/**
+ * '189:54' を分に直します。読めなければ null。
+ * 出力の設定によっては '189:54:00' と秒まで付くことがあるため、
+ * どちらでも読めるようにしています。
+ */
 export function toMinutes(v: unknown): number | null {
   const s = text(v);
-  const m = s.match(/^(\d+):([0-5]\d)$/);
+  const m = s.match(/^(\d+):([0-5]\d)(?::([0-5]\d))?$/);
   if (!m) return null;
   return Number(m[1]) * 60 + Number(m[2]);
 }
@@ -166,7 +170,11 @@ export function planColumns(header: string[]): SheetPlan {
     if (inList(name, INSURANCE_PARTS)) kind = 'insurancePart';
     else if (inList(name, PAY_AFTER_TOTAL)) kind = 'pay';
     else if (inList(name, DEDUCTION_NAMES)) kind = 'deduction';
-    else if (index < payTotalIndex) kind = 'pay';          // 知らない名前は位置で決めます
+    // 「〜手当」は支給として扱います。
+    // 出力項目を足すと、支給合計より後ろに並ぶことがあるためです
+    // （残業手当・深夜労働手当・休日労働手当・特別手当などが該当します）。
+    else if (/手当$/.test(name)) kind = 'pay';
+    else if (index < payTotalIndex) kind = 'pay';          // それ以外は位置で決めます
     else kind = 'deduction';
 
     const minus = inList(name, PAY_MINUS) || inList(name, DEDUCTION_MINUS);
